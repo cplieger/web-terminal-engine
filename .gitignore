@@ -1,0 +1,11 @@
+# Go
+/vendor/
+
+# TypeScript
+web/node_modules/
+web/dist/
+web/.vitest-cache/
+web/coverage/
+
+# OS
+.DS_Store

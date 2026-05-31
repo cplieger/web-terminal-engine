@@ -1,0 +1,36 @@
+# Version-bump policy. Pre-1.0 (alpha): stay within 0.x.
+# feat -> patch in 0.x; breaking -> minor (stays 0.x, no auto 1.0).
+[bump]
+features_always_bump_minor = false
+breaking_always_bump_major = false
+initial_tag = "v0.1.0"
+no_increment_regex = "^chore|^ci|^docs|^style|^test"
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+tag_pattern = "v[0-9].*"
+
+commit_parsers = [
+  { message = "^release:", skip = true },
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^sec", group = "Security" },
+  { message = "^chore\\(deps\\)", group = "Dependencies" },
+  { message = "^chore|^ci|^docs|^style|^refactor|^perf|^test", group = "Changed" },
+  { message = ".*", group = "Changed" },
+]

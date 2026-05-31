@@ -8,8 +8,8 @@ on:
 
 jobs:
   go:
-    uses: cplieger/ci/.github/workflows/go-ci.yaml@v1
+    uses: cplieger/ci/.github/workflows/go-ci.yaml@3015bc1632f52fca3fc2517d82b376f8dbe06a7c # v1
   web:
-    uses: cplieger/ci/.github/workflows/ts-ci.yaml@v1
+    uses: cplieger/ci/.github/workflows/ts-ci.yaml@3015bc1632f52fca3fc2517d82b376f8dbe06a7c # v1
     with:
       working-directory: web

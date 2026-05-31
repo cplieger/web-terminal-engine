@@ -1,5 +1,22 @@
 {
   "name": "@cplieger/vterm",
-  "version": "0.0.0",
-  "exports": "./src/index.ts"
+  "version": "0.1.0",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "publish": {
+    "exclude": [
+      "**/*.test.ts",
+      "**/__test-helpers__",
+      "**/fc-strict-setup.ts",
+      "eslint.config.mjs",
+      "tsconfig.json",
+      "tsconfig.test.json",
+      "tsconfig.tests.json",
+      "vitest.config.ts",
+      "renovate.json",
+      "package-lock.json",
+      ".prettierrc.json"
+    ]
+  }
 }

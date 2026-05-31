@@ -1,6 +1,6 @@
 {
   "name": "@cplieger/vterm",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "typecheck": "tsgo -p tsconfig.json",
@@ -17,5 +17,19 @@
     "typescript": "5.8.3",
     "typescript-eslint": "8.60.0",
     "vitest": "4.1.7"
+  },
+  "description": "Browser terminal renderer for @cplieger/vterm",
+  "license": "GPL-3.0-or-later",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "types": "./src/index.ts",
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cplieger/vterm.git",
+    "directory": "web"
   }
 }

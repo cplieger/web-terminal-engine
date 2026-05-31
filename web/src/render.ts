@@ -177,7 +177,6 @@ function linkifySpans(
 ): (HTMLSpanElement | HTMLAnchorElement)[] {
   const out: (HTMLSpanElement | HTMLAnchorElement)[] = [];
   for (const span of spans) {
-    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- textContent can be null per DOM spec
     const text = span.textContent ?? "";
     URL_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
@@ -313,7 +312,7 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
         if (out.length > 0) {
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- length checked above
           const prev = out[out.length - 1]!;
-          // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition -- textContent can be null per DOM spec
+
           const prevText = prev.textContent ?? "";
           if (prevText.length > 0) {
             // eslint-disable-next-line @typescript-eslint/no-non-null-assertion, @typescript-eslint/no-misused-spread -- terminal text is ASCII/CJK, safe to spread; .at(-1) guaranteed by length check

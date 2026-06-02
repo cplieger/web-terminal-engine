@@ -64,8 +64,9 @@ describe("wire-binary: truncated and oversized frames", () => {
     view.setBigUint64(1, BigInt(42), true); // inputAck = 42
     const msg = decodeWireBinary(buf);
     expect(msg).not.toBeNull();
-    expect(msg!.type).toBe("resumeAck");
-    if (msg!.type === "resumeAck") {
+    if (msg == null) throw new Error("expected non-null msg");
+    expect(msg.type).toBe("resumeAck");
+    if (msg.type === "resumeAck") {
       expect(msg.received).toBe(42);
       expect(msg.serverEpoch).toBeUndefined();
     }

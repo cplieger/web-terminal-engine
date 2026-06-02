@@ -57,27 +57,80 @@ type Cell struct {
 // ParserState holds the VT500-style state machine state used by the
 // screen's byte-at-a-time parser. Embedded in Screen.
 type ParserState struct {
-	pParams      []byte
-	pIntermed    []byte
-	oscBuf       []byte // buffered OSC payload (between ESC ] and BEL/ST)
-	utf8Buf      [4]byte
-	utf8Len      uint8
-	utf8Got      uint8
-	pEscIntermed byte // intermediate byte for ESC sequences (e.g. '(' for SCS)
-	pState       parserState
+	oscBuf  []byte // buffered OSC payload (between ESC ] and BEL/ST)
+	dcsBuf  []byte // buffered DCS data
+	utf8Buf [4]byte
+	// Param accumulation: fixed flat array of numeric values.
+	// Groups (semicolon-separated) contain subparams (colon-separated).
+	pParams   [maxParams]uint16
+	pGroupLen [maxParams]uint8 // group length at each group's start index
+	numParams uint8            // total slots used in pParams
+	numGroups uint8            // number of semicolon-separated groups
+	curParam  uint16           // current param being accumulated
+	paramSeen bool             // whether any digit was seen for curParam
+
+	pIntermed [maxIntermed]byte
+	numInterm uint8
+	utf8Len   uint8
+	utf8Got   uint8
+	pState    parserState
+	dcsFunc   dcsFunction
+	ignoring  bool // set when params overflow
+	// Private marker for CSI (?, >, <, !)
+	privateMarker byte
 }
 
-// parserState enumerates the VT500-style state machine states used by the
-// screen's byte-at-a-time parser.
+// parserState enumerates the VT500-style state machine states.
 type parserState uint8
 
 const (
-	stateGround parserState = iota
-	stateEscape
-	stateEscapeIntermediate
-	stateCsiEntry
-	stateCsiParam
-	stateCsiIntermediate
-	stateOscString
-	stateOscEsc // saw ESC inside OSC, waiting for '\'
+	stGround parserState = iota
+	stEscape
+	stEscapeIntermediate
+	stCsiEntry
+	stCsiParam
+	stCsiIntermediate
+	stCsiIgnore
+	stDcsEntry
+	stDcsParam
+	stDcsIntermediate
+	stDcsPassthrough
+	stDcsIgnore
+	stOscString
+	stSosPmApcString
+	numStates // sentinel = 14
+)
+
+// dcsFunction identifies which DCS handler is active.
+type dcsFunction uint8
+
+const (
+	dcsNone    dcsFunction = iota
+	dcsDecrqss             // DCS $ q ... ST
+	dcsIgnored             // unknown/unhandled DCS
+)
+
+// Buffer size limits.
+const (
+	maxOSCLen   = 4096 // max bytes buffered for an OSC payload
+	maxParams   = 32   // max param slots (params + subparams)
+	maxIntermed = 2    // max intermediate bytes
+	maxDCSLen   = 256  // max DCS data for DECRQSS
+)
+
+// Backward-compatible aliases for tests that reference old constants/names.
+const (
+	maxCSIParams   = maxParams
+	maxCSIIntermed = maxIntermed
+)
+
+// State name aliases for backward compatibility with existing tests.
+const (
+	stateGround             = stGround
+	stateEscape             = stEscape
+	stateEscapeIntermediate = stEscapeIntermediate
+	stateCsiEntry           = stCsiEntry
+	stateCsiParam           = stCsiParam
+	stateCsiIntermediate    = stCsiIntermediate
+	stateOscString          = stOscString
 )

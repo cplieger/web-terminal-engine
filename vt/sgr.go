@@ -7,14 +7,20 @@ import (
 )
 
 //nolint:gocyclo // SGR parameter parsing
-func (s *Screen) applySGR(args string) {
-	if args == "" || args == "0" {
+func (s *Screen) applySGR() {
+	// Handle empty params (SGR 0 = reset)
+	if s.numGroups == 0 || (s.numGroups == 1 && s.numParams == 1 && s.pParams[0] == 0) {
 		s.style = Style{}
 		return
 	}
-	params := parseCSIParams(args)
-	for i := 0; i < len(params); i++ {
-		p := params[i]
+
+	for i := 0; i < s.paramCount(); i++ {
+		g := s.paramGroup(i)
+		if g.Len == 0 {
+			continue
+		}
+		p := int(g.Params[0])
+
 		switch {
 		case p == 0:
 			s.style = Style{}
@@ -29,7 +35,7 @@ func (s *Screen) applySGR(args string) {
 		case p == 5:
 			s.style.Blink = true
 		case p == 6:
-			s.style.Blink = true // rapid blink → same as blink
+			s.style.Blink = true
 		case p == 7:
 			s.style.Inverse = true
 		case p == 8:
@@ -58,13 +64,13 @@ func (s *Screen) applySGR(args string) {
 		case p >= 30 && p <= 37:
 			s.style.FG = Color{Type: 1, Val: uint8(p - 30)}
 		case p == 38:
-			i = parseExtColor(params, i, &s.style.FG)
+			i = s.parseExtColorGroup(i, &s.style.FG)
 		case p == 39:
 			s.style.FG = Color{}
 		case p >= 40 && p <= 47:
 			s.style.BG = Color{Type: 1, Val: uint8(p - 40)}
 		case p == 48:
-			i = parseExtColor(params, i, &s.style.BG)
+			i = s.parseExtColorGroup(i, &s.style.BG)
 		case p == 49:
 			s.style.BG = Color{}
 		case p == 53:
@@ -72,7 +78,7 @@ func (s *Screen) applySGR(args string) {
 		case p == 55:
 			s.style.Overline = false
 		case p == 58:
-			i = parseExtColor(params, i, &s.style.UnderlineColor)
+			i = s.parseExtColorGroup(i, &s.style.UnderlineColor)
 		case p == 59:
 			s.style.UnderlineColor = Color{}
 		case p >= 90 && p <= 97:
@@ -83,32 +89,64 @@ func (s *Screen) applySGR(args string) {
 	}
 }
 
-// parseExtColor parses extended-color SGR forms (38;5;N or 38;2;R;G;B for fg,
-// 48;... for bg). Returns the new param index after consuming.
-func parseExtColor(params []int, i int, c *Color) int {
-	if i+1 >= len(params) {
+// parseExtColorGroup handles extended color (38/48/58) with both forms:
+// - Colon subparam: 38:2:R:G:B or 38:5:N (single group with subparams)
+// - Semicolon legacy: 38;2;R;G;B or 38;5;N (multiple groups)
+// Returns the new group index after consuming.
+func (s *Screen) parseExtColorGroup(i int, c *Color) int {
+	g := s.paramGroup(i)
+
+	// Colon-subparam form: all values in one group
+	if g.Len >= 3 {
+		mode := int(g.Params[1])
+		switch mode {
+		case 5: // 256-color: 38:5:N
+			if g.Len >= 3 {
+				*c = Color{Type: 2, Val: clampByte(int(g.Params[2]))}
+			}
+		case 2: // RGB: 38:2:R:G:B or 38:2:cs:R:G:B
+			if g.Len >= 5 {
+				*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3])), B: clampByte(int(g.Params[4]))}
+			} else if g.Len == 4 {
+				// Some implementations send 38:2:R:G (incomplete) — treat as partial
+				*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3]))}
+			}
+		}
 		return i
 	}
-	switch params[i+1] {
+
+	// Semicolon-legacy form: consume following groups
+	if i+1 >= s.paramCount() {
+		return i
+	}
+	modeGroup := s.paramGroup(i + 1)
+	if modeGroup.Len == 0 {
+		return i + 1
+	}
+	mode := int(modeGroup.Params[0])
+	switch mode {
 	case 5:
-		if i+2 < len(params) {
-			*c = Color{Type: 2, Val: clampByte(params[i+2])}
+		if i+2 < s.paramCount() {
+			vg := s.paramGroup(i + 2)
+			if vg.Len > 0 {
+				*c = Color{Type: 2, Val: clampByte(int(vg.Params[0]))}
+			}
 			return i + 2
 		}
 	case 2:
-		if i+4 < len(params) {
-			*c = Color{Type: 3, R: clampByte(params[i+2]), G: clampByte(params[i+3]), B: clampByte(params[i+4])}
+		if i+4 < s.paramCount() {
+			rg := s.paramGroup(i + 2)
+			gg := s.paramGroup(i + 3)
+			bg := s.paramGroup(i + 4)
+			if rg.Len > 0 && gg.Len > 0 && bg.Len > 0 {
+				*c = Color{Type: 3, R: clampByte(int(rg.Params[0])), G: clampByte(int(gg.Params[0])), B: clampByte(int(bg.Params[0]))}
+			}
 			return i + 4
 		}
 	}
 	return i + 1
 }
 
-// clampByte clamps an int from a parsed SGR parameter to the [0,255] byte
-// range. Per ECMA-48 / ANSI X3.64 the SGR extended-color values (38;5;N
-// and 38;2;R;G;B) MUST be 0-255; a malformed VT stream sending values
-// outside that range is treated as the closest valid value rather than
-// silently wrapping via uint8 truncation. Fixes CodeQL go/incorrect-integer-conversion.
 func clampByte(v int) uint8 {
 	if v < 0 {
 		return 0
@@ -118,91 +156,6 @@ func clampByte(v int) uint8 {
 	}
 	return uint8(v)
 }
-
-// --- CSI parameter parsing helpers ---
-
-// csiArg returns the first CSI parameter, or def if absent.
-// Values are clamped to [0, maxCSIArgValue] to prevent DoS from
-// adversarial streams sending huge loop counts.
-func csiArg(args string, def int) int {
-	clean := strings.TrimLeftFunc(args, func(r rune) bool {
-		return r == '?' || r == '>' || r == '!'
-	})
-	if clean == "" {
-		return def
-	}
-	n, err := strconv.Atoi(strings.Split(clean, ";")[0])
-	if err != nil {
-		return def
-	}
-	if n > maxCSIArgValue {
-		n = maxCSIArgValue
-	}
-	if n < 0 {
-		n = 0
-	}
-	return n
-}
-
-// csiArgs parses all semicolon-separated CSI parameters.
-// Values are clamped to [0, maxCSIArgValue].
-func csiArgs(args string) []int {
-	clean := strings.TrimLeftFunc(args, func(r rune) bool {
-		return r == '?' || r == '>' || r == '!'
-	})
-	if clean == "" {
-		return nil
-	}
-	parts := strings.Split(clean, ";")
-	out := make([]int, 0, len(parts))
-	for _, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			n = 0
-		}
-		if n > maxCSIArgValue {
-			n = maxCSIArgValue
-		}
-		if n < 0 {
-			n = 0
-		}
-		out = append(out, n)
-	}
-	return out
-}
-
-// parseCSIParams is like csiArgs but returns [0] for empty input (SGR default).
-// Values are clamped to [0, maxCSIArgValue].
-func parseCSIParams(args string) []int {
-	clean := strings.TrimLeftFunc(args, func(r rune) bool {
-		return r == '?' || r == '>' || r == '!'
-	})
-	if clean == "" {
-		return []int{0}
-	}
-	parts := strings.Split(clean, ";")
-	out := make([]int, 0, len(parts))
-	for _, p := range parts {
-		n, err := strconv.Atoi(p)
-		if err != nil {
-			n = 0
-		}
-		if n > maxCSIArgValue {
-			n = maxCSIArgValue
-		}
-		if n < 0 {
-			n = 0
-		}
-		out = append(out, n)
-	}
-	return out
-}
-
-// maxCSIArgValue is the maximum value a single CSI parameter can take.
-// Per DEC VT spec, parameters are 16-bit (0-65535). We use this as a
-// sane upper bound to prevent DoS from adversarial streams that send
-// huge values causing O(n) loops (scroll, shift, insert/delete lines).
-const maxCSIArgValue = 65535
 
 // sgrSequence emits an ANSI SGR escape that reproduces the given Style.
 func sgrSequence(st Style) string {
@@ -271,4 +224,50 @@ func appendUnderlineColorParams(params []string, c Color) []string {
 			strconv.Itoa(int(c.R)), strconv.Itoa(int(c.G)), strconv.Itoa(int(c.B)))
 	}
 	return params
+}
+
+// sgrParamsString returns the current SGR state as a parameter string.
+// Used by DECRQSS response.
+func sgrParamsString(st Style) string {
+	if st == (Style{}) {
+		return "0"
+	}
+	var params []string
+	params = append(params, "0")
+	if st.Bold {
+		params = append(params, "1")
+	}
+	if st.Dim {
+		params = append(params, "2")
+	}
+	if st.Italic {
+		params = append(params, "3")
+	}
+	if st.Underline {
+		params = append(params, "4")
+	}
+	if st.DoubleUnderline {
+		params = append(params, "21")
+	}
+	if st.Blink {
+		params = append(params, "5")
+	}
+	if st.Inverse {
+		params = append(params, "7")
+	}
+	if st.Hidden {
+		params = append(params, "8")
+	}
+	if st.Strikethrough {
+		params = append(params, "9")
+	}
+	if st.Overline {
+		params = append(params, "53")
+	}
+	params = appendColorParams(params, st.FG, 30)
+	params = appendColorParams(params, st.BG, 40)
+	if st.UnderlineColor.Type != 0 {
+		params = appendUnderlineColorParams(params, st.UnderlineColor)
+	}
+	return strings.Join(params, ";")
 }

@@ -1,51 +1,11 @@
 package vt
 
-// Buffer size limits to prevent unbounded memory growth from malformed
-// or adversarial input streams missing terminators.
-const (
-	maxOSCLen      = 4096 // max bytes buffered for an OSC payload
-	maxCSIParams   = 256  // max parameter bytes in a CSI sequence
-	maxCSIIntermed = 16   // max intermediate bytes in a CSI sequence
-)
-
-// VT500-style state machine parser. Processes raw PTY bytes one at a time,
-// maintaining state across Write() calls so partial sequences split across
-// reads are handled correctly.
+// VT500-style table-driven state machine parser. Processes raw PTY bytes one
+// at a time via a [14][256]uint16 flat transition table. Maintains state across
+// Write() calls so partial sequences split across reads are handled correctly.
 
 func (s *Screen) feed(b byte) {
-	// CAN/SUB abort any sequence
-	if b == 0x18 || b == 0x1A {
-		s.pState = stateGround
-		s.utf8Len = 0
-		return
-	}
-
-	switch s.pState {
-	case stateGround:
-		s.feedGround(b)
-	case stateEscape:
-		s.feedEscape(b)
-	case stateEscapeIntermediate:
-		s.designateCharset(s.pEscIntermed, b)
-		s.pState = stateGround
-	case stateCsiEntry, stateCsiParam:
-		s.feedCsi(b)
-	case stateCsiIntermediate:
-		s.feedCsiIntermediate(b)
-	case stateOscString:
-		s.feedOsc(b)
-	case stateOscEsc:
-		if b == '\\' {
-			s.dispatchOsc()
-			s.pState = stateGround
-		} else {
-			s.pState = stateEscape
-			s.feedEscape(b)
-		}
-	}
-}
-
-func (s *Screen) feedGround(b byte) {
+	// UTF-8 continuation handling (only in Ground state).
 	if s.utf8Len > 0 {
 		if b&0xC0 == 0x80 {
 			s.utf8Buf[s.utf8Got] = b
@@ -57,14 +17,91 @@ func (s *Screen) feedGround(b byte) {
 			}
 			return
 		}
+		// Invalid continuation — abort UTF-8 sequence, re-process byte
 		s.utf8Len = 0
 	}
 
-	switch {
-	case b == 0x1B:
-		s.pState = stateEscape
-	case b < 0x20:
+	t := stateTable[s.pState][b]
+	act := t.act()
+	next := t.next()
+
+	// CAN (0x18) and SUB (0x1A) abort sequences without firing exit actions.
+	isCancelByte := b == 0x18 || b == 0x1A
+
+	// Exit action of current state (if transitioning), but NOT on CAN/SUB.
+	if next != s.pState && !isCancelByte {
+		if ea := exitAction[s.pState]; ea != actNone {
+			s.doAction(ea, b)
+		}
+	}
+
+	// Transition action.
+	if act != actNone {
+		s.doAction(act, b)
+	}
+
+	// Transition and entry action.
+	if next != s.pState {
+		s.pState = next
+		if ea := entryAction[next]; ea != actNone {
+			s.doAction(ea, b)
+		}
+	}
+}
+
+//nolint:gocyclo // action dispatch is inherently branchy
+func (s *Screen) doAction(act action, b byte) {
+	switch act {
+	case actPrint:
+		s.handlePrint(b)
+	case actExecute:
 		s.execControl(b)
+	case actClear:
+		s.parserClear()
+	case actCollect:
+		if s.numInterm < maxIntermed {
+			s.pIntermed[s.numInterm] = b
+			s.numInterm++
+		}
+	case actParam:
+		s.handleParam(b)
+	case actSubparam:
+		s.handleSubparam()
+	case actMarker:
+		s.privateMarker = b
+	case actEscDispatch:
+		s.dispatchEsc(b)
+	case actCsiDispatch:
+		s.finalizeParams()
+		s.dispatchCSI(b)
+	case actHook:
+		s.finalizeParams()
+		s.dcsHook(b)
+	case actPut:
+		s.dcsPut(b)
+	case actUnhook:
+		s.dcsUnhook()
+	case actOscStart:
+		s.oscBuf = s.oscBuf[:0]
+	case actOscPut:
+		if len(s.oscBuf) < maxOSCLen {
+			s.oscBuf = append(s.oscBuf, b)
+		}
+	case actOscEnd:
+		s.dispatchOsc()
+	case actIgnore:
+		// do nothing
+	}
+}
+
+func (s *Screen) handlePrint(b byte) {
+	switch {
+	case b < 0x80:
+		s.put(s.translateChar(b))
+	case b >= 0x80 && b < 0xC0:
+		// Orphan continuation byte or C1 range (0x80-0x9F) arriving in Ground
+		// when not inside a multi-byte sequence — emit replacement character.
+		s.put(0xFFFD)
 	case b >= 0xC0 && b < 0xE0:
 		s.utf8Buf[0] = b
 		s.utf8Len = 2
@@ -78,89 +115,169 @@ func (s *Screen) feedGround(b byte) {
 		s.utf8Len = 4
 		s.utf8Got = 1
 	default:
-		s.put(s.translateChar(b))
+		s.put(0xFFFD)
 	}
 }
 
-func (s *Screen) feedEscape(b byte) {
-	switch {
-	case b == '[':
-		s.pState = stateCsiEntry
-		s.pParams = s.pParams[:0]
-		s.pIntermed = s.pIntermed[:0]
-	case b == ']' || b == 'P' || b == '^' || b == '_':
-		s.pState = stateOscString
-		s.oscBuf = s.oscBuf[:0]
-	case b == '(' || b == ')' || b == '*' || b == '+' || b == '#':
-		s.pEscIntermed = b
-		s.pState = stateEscapeIntermediate
-	case b == '=' || b == '>' || b == '7' || b == '8':
-		// DECKPAM (ESC =), DECKPNM (ESC >), DECSC (ESC 7), DECRC (ESC 8)
-		// — final bytes below 0x40 that are valid ESC sequence terminators.
-		s.dispatchEsc(b)
-		s.pState = stateGround
-	case b >= 0x40 && b <= 0x7E:
-		s.dispatchEsc(b)
-		s.pState = stateGround
-	case b == 0x1B:
-		// Repeated ESC — stay in escape state
-	default:
-		s.pState = stateGround
+func (s *Screen) handleParam(b byte) {
+	if s.ignoring {
+		return
+	}
+	if b == ';' {
+		// Semicolon: finalize current param, start new group
+		s.pushParam(true)
+	} else {
+		// Digit
+		s.paramSeen = true
+		v := min(uint32(s.curParam)*10+uint32(b-'0'), maxCSIArgValue)
+		s.curParam = uint16(v) //nolint:gosec // v capped at 65535
 	}
 }
 
-func (s *Screen) feedCsi(b byte) {
-	switch {
-	case b == 0x1B:
-		s.pState = stateEscape
-	case b >= 0x30 && b <= 0x3F:
-		// Cap parameter bytes to prevent unbounded memory growth.
-		if len(s.pParams) < maxCSIParams {
-			s.pParams = append(s.pParams, b)
+func (s *Screen) handleSubparam() {
+	if s.ignoring {
+		return
+	}
+	// Colon: finalize current param value as part of same group (subparam)
+	s.pushParam(false)
+}
+
+// pushParam stores curParam in the flat array. newGroup=true means start a new
+// semicolon-separated group after this value.
+func (s *Screen) pushParam(newGroup bool) {
+	if s.numParams >= maxParams {
+		s.ignoring = true
+		return
+	}
+	s.pParams[s.numParams] = s.curParam
+	s.numParams++
+	// Increment the length of the current group
+	if s.numGroups > 0 {
+		gStart := s.groupStartIdx(s.numGroups - 1)
+		s.pGroupLen[gStart]++
+	}
+	s.curParam = 0
+	s.paramSeen = false
+
+	if newGroup {
+		// Start a new group — next pushParam will be into it
+		if s.numGroups < maxParams && s.numParams < maxParams {
+			// The new group starts at numParams
+			s.pGroupLen[s.numParams] = 0
+			s.numGroups++
 		}
-		s.pState = stateCsiParam
-	case b >= 0x20 && b <= 0x2F:
-		if len(s.pIntermed) < maxCSIIntermed {
-			s.pIntermed = append(s.pIntermed, b)
-		}
-		s.pState = stateCsiIntermediate
-	case b >= 0x40 && b <= 0x7E:
-		s.dispatchCSI(b)
-		s.pState = stateGround
 	}
 }
 
-func (s *Screen) feedCsiIntermediate(b byte) {
-	switch {
-	case b == 0x1B:
-		s.pState = stateEscape
-	case b >= 0x20 && b <= 0x2F:
-		if len(s.pIntermed) < maxCSIIntermed {
-			s.pIntermed = append(s.pIntermed, b)
-		}
-	case b >= 0x40 && b <= 0x7E:
-		s.dispatchCSI(b)
-		s.pState = stateGround
-	default:
-		s.pState = stateGround
+// finalizeParams pushes the last accumulated param (if any digits were seen or
+// the param string was non-empty).
+func (s *Screen) finalizeParams() {
+	if s.ignoring {
+		return
+	}
+	// Always push the trailing param (even if 0/default)
+	if s.numParams >= maxParams {
+		return
+	}
+	s.pParams[s.numParams] = s.curParam
+	s.numParams++
+	if s.numGroups > 0 {
+		gStart := s.groupStartIdx(s.numGroups - 1)
+		s.pGroupLen[gStart]++
 	}
 }
 
-func (s *Screen) feedOsc(b byte) {
-	switch b {
-	case 0x07: // BEL terminates OSC
-		s.dispatchOsc()
-		s.pState = stateGround
-	case 0x1B:
-		s.pState = stateOscEsc
-	default:
-		// Cap OSC buffer to prevent unbounded memory growth from a
-		// missing terminator. 4096 bytes is generous for any real OSC
-		// payload (titles, hyperlinks, etc.).
-		if len(s.oscBuf) < maxOSCLen {
-			s.oscBuf = append(s.oscBuf, b)
-		}
+func (s *Screen) parserClear() {
+	s.numParams = 0
+	s.numGroups = 0
+	s.curParam = 0
+	s.paramSeen = false
+	s.numInterm = 0
+	s.ignoring = false
+	s.privateMarker = 0
+	// Initialize first group
+	s.pGroupLen[0] = 0
+	s.numGroups = 1
+}
+
+// groupStartIdx returns the index in pParams where group g starts.
+func (s *Screen) groupStartIdx(g uint8) uint8 {
+	var idx uint8
+	for range g {
+		idx += s.pGroupLen[s.groupStartForGroup(idx)]
 	}
+	return idx
+}
+
+// groupStartForGroup returns the pGroupLen index for group i (which stores its length).
+// The first group's length is at pGroupLen[0], second at pGroupLen[sum of first group's len], etc.
+func (s *Screen) groupStartForGroup(g uint8) uint8 {
+	var idx uint8
+	for range g {
+		idx += s.pGroupLen[idx]
+	}
+	return idx
+}
+
+// ParamGroup represents one semicolon-separated parameter group.
+type ParamGroup struct {
+	Params [8]uint16 // Params[0] = main param; Params[1:Len] = subparams
+	Len    uint8
+}
+
+// paramGroup returns the i-th semicolon-separated group (0-indexed).
+func (s *Screen) paramGroup(i int) ParamGroup {
+	var g ParamGroup
+	if i >= int(s.numGroups) {
+		return g
+	}
+	// Find start index of group i
+	var startIdx uint8
+	for range i {
+		if int(startIdx) >= maxParams {
+			return g
+		}
+		startIdx += s.pGroupLen[startIdx]
+	}
+	if int(startIdx) >= maxParams {
+		return g
+	}
+	length := s.pGroupLen[startIdx]
+	if length == 0 {
+		return g
+	}
+	if length > 8 {
+		length = 8
+	}
+	if int(startIdx)+int(length) > maxParams {
+		length = uint8(maxParams - int(startIdx))
+	}
+	g.Len = length
+	for j := range length {
+		g.Params[j] = s.pParams[startIdx+j]
+	}
+	return g
+}
+
+// paramCount returns the number of semicolon-separated groups.
+func (s *Screen) paramCount() int {
+	return int(s.numGroups)
+}
+
+// paramVal returns the main value of the i-th group, or def if absent/zero.
+func (s *Screen) paramVal(i, def int) int {
+	g := s.paramGroup(i)
+	if g.Len == 0 {
+		return def
+	}
+	v := int(g.Params[0])
+	if v == 0 && def > 0 {
+		return def
+	}
+	if v > maxCSIArgValue {
+		return maxCSIArgValue
+	}
+	return v
 }
 
 func (s *Screen) execControl(b byte) {
@@ -172,7 +289,7 @@ func (s *Screen) execControl(b byte) {
 		if s.curX > 0 {
 			s.curX--
 		}
-	case '\n', 0x0B, 0x0C: // LF, VT, FF — all treated as line feed per xterm spec
+	case '\n', 0x0B, 0x0C: // LF, VT, FF
 		s.pendingWrap = false
 		s.lineDown()
 	case '\r':
@@ -192,35 +309,40 @@ func (s *Screen) execControl(b byte) {
 }
 
 func (s *Screen) dispatchEsc(b byte) {
+	// Handle ESC intermediates (charset designation)
+	if s.numInterm > 0 {
+		s.designateCharset(s.pIntermed[0], b)
+		return
+	}
 	switch b {
 	case '7':
 		s.saveCursor()
 	case '8':
 		s.restoreCursor()
-	case 'H': // HTS — Horizontal Tab Set: set tab stop at current column
+	case 'H': // HTS
 		s.setTabStop(s.curX)
-	case 'D': // IND — Index: move cursor down, scroll if at bottom margin
+	case 'D': // IND
 		s.pendingWrap = false
 		s.lineDown()
-	case 'E': // NEL — Next Line: CR + LF
+	case 'E': // NEL
 		s.pendingWrap = false
 		s.curX = 0
 		s.lineDown()
-	case 'M': // RI — Reverse Index
+	case 'M': // RI
 		if s.curY == s.scrollTop {
 			s.scrollDownOnce()
 		} else if s.curY > 0 {
 			s.curY--
 		}
-	case '=': // DECKPAM — Application Keypad Mode
+	case '=': // DECKPAM
 		s.AppKeypad = true
-	case '>': // DECKPNM — Normal Keypad Mode
+	case '>': // DECKPNM
 		s.AppKeypad = false
-	case 'N': // SS2 — Single Shift G2
+	case 'N': // SS2
 		s.singleShft = 2
-	case 'O': // SS3 — Single Shift G3
+	case 'O': // SS3
 		s.singleShft = 3
-	case 'c': // RIS — Full Reset
+	case 'c': // RIS
 		s.softReset()
 		s.eraseRegion(0, 0, s.Height-1, s.Width-1)
 		s.Drained = nil

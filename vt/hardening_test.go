@@ -27,16 +27,20 @@ func TestOSCBufferBounded(t *testing.T) {
 
 func TestCSIParamsBounded(t *testing.T) {
 	s := New(24, 80)
+	// Feed a CSI with more than maxParams (32) semicolon-separated values
 	s.Write([]byte("\x1b["))
-	chunk := make([]byte, 4096)
-	for i := range chunk {
-		chunk[i] = '0' + byte(i%10)
+	for i := range 40 {
+		if i > 0 {
+			s.Write([]byte(";"))
+		}
+		s.Write([]byte("1"))
 	}
-	for range 4 {
-		s.Write(chunk)
+	// The ignoring flag should be set after overflow
+	if !s.ignoring {
+		t.Errorf("expected ignoring flag set after param count overflow")
 	}
-	if len(s.pParams) > maxCSIParams {
-		t.Errorf("pParams grew to %d bytes, want <= %d", len(s.pParams), maxCSIParams)
+	if s.numParams > maxCSIParams {
+		t.Errorf("numParams grew to %d, want <= %d", s.numParams, maxCSIParams)
 	}
 }
 
@@ -49,8 +53,8 @@ func TestCSIIntermedBounded(t *testing.T) {
 		chunk[i] = 0x20 + byte(i%16)
 	}
 	s.Write(chunk)
-	if len(s.pIntermed) > maxCSIIntermed {
-		t.Errorf("pIntermed grew to %d bytes, want <= %d", len(s.pIntermed), maxCSIIntermed)
+	if s.numInterm > maxCSIIntermed {
+		t.Errorf("numInterm grew to %d, want <= %d", s.numInterm, maxCSIIntermed)
 	}
 }
 
@@ -99,12 +103,19 @@ func TestDeleteCharsLargeN(t *testing.T) {
 }
 
 func TestCSIArgClamped(t *testing.T) {
-	// Verify that csiArg clamps to maxCSIArgValue.
+	// Verify that CSI param values are clamped to maxCSIArgValue.
+	s := New(24, 80)
+	s.Write([]byte("\x1b[999999999A")) // huge cursor up
+	// Should not panic, and cursor should be clamped at row 0
+	row, _ := s.CursorPos()
+	if row != 0 {
+		t.Errorf("cursor row after huge CUU: got %d, want 0", row)
+	}
+	// Test csiArg backward compat helper
 	got := csiArg("999999999", 1)
 	if got != maxCSIArgValue {
 		t.Errorf("csiArg(999999999) = %d, want %d", got, maxCSIArgValue)
 	}
-	// Normal values pass through.
 	got = csiArg("42", 1)
 	if got != 42 {
 		t.Errorf("csiArg(42) = %d, want 42", got)

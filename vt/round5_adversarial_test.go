@@ -237,19 +237,21 @@ func TestOSCWithoutTerminator_LongStream(t *testing.T) {
 }
 
 func TestDCSWithoutTerminator(t *testing.T) {
-	// DCS (ESC P) uses the same OSC buffer/state
+	// DCS (ESC P) now goes through proper DCS states.
+	// Feed DCS with final byte to enter passthrough, then lots of data.
 	s := New(5, 80)
-	s.Write([]byte("\x1bP"))
+	s.Write([]byte("\x1bP$q")) // DECRQSS: intermediate '$', final 'q'
 	// Feed data without ST terminator
 	chunk := make([]byte, 512)
 	for i := range chunk {
-		chunk[i] = byte('0' + i%10)
+		chunk[i] = byte('A' + i%26)
 	}
 	for range 20 {
 		s.Write(chunk)
 	}
-	if len(s.oscBuf) > maxOSCLen {
-		t.Fatalf("DCS buffer grew to %d, want <= %d", len(s.oscBuf), maxOSCLen)
+	// DCS buffer is bounded per-handler (maxDCSLen=256 for DECRQSS)
+	if len(s.dcsBuf) > maxDCSLen {
+		t.Fatalf("DCS buffer grew to %d, want <= %d", len(s.dcsBuf), maxDCSLen)
 	}
 	// Terminate with ST (ESC \)
 	s.Write([]byte("\x1b\\"))

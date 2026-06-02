@@ -1,7 +1,5 @@
 package vt
 
-import "fmt"
-
 // --- Tab stop management ---
 
 // initTabStops lazily initializes the tab stop array with default stops every 8 columns.
@@ -106,22 +104,6 @@ func (s *Screen) restoreCursor() {
 }
 
 // --- DECRQM (Request Mode) → DECRPM (Report Mode) ---
-
-// handleDECRQM responds to a DECRQM request with a DECRPM report.
-// args is the raw CSI parameter string (may start with '?' for DEC modes).
-func (s *Screen) handleDECRQM(args string) {
-	if args != "" && args[0] == '?' {
-		// DEC private mode query
-		mode := csiArg(args, 0)
-		ps := s.decModeStatus(mode)
-		s.Response = fmt.Appendf(s.Response, "\x1b[?%d;%d$y", mode, ps)
-	} else {
-		// ANSI mode query
-		mode := csiArg(args, 0)
-		ps := s.ansiModeStatus(mode)
-		s.Response = fmt.Appendf(s.Response, "\x1b[%d;%d$y", mode, ps)
-	}
-}
 
 // decModeStatus returns the DECRPM Ps value for a DEC private mode.
 // 1=set, 2=reset, 0=not recognized.

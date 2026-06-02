@@ -53,7 +53,12 @@ export interface TitleMessage {
   inputAck?: number;
 }
 
-export type ServerMessage = ScreenMessage | ScrollMessage | ResumeAckMessage | ModesMessage | TitleMessage;
+export type ServerMessage =
+  | ScreenMessage
+  | ScrollMessage
+  | ResumeAckMessage
+  | ModesMessage
+  | TitleMessage;
 
 export type ControlMessage =
   | { type: "resize"; cols: number; rows: number }

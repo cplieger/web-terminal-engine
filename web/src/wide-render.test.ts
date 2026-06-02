@@ -20,11 +20,7 @@ HTMLCanvasElement.prototype.getContext = function fakeGetContext(): unknown {
   return ctx;
 } as typeof HTMLCanvasElement.prototype.getContext;
 
-function makeMsg(
-  rows: WireRun[][],
-  cursor: [number, number],
-  changed?: number[],
-): ScreenMessage {
+function makeMsg(rows: WireRun[][], cursor: [number, number], changed?: number[]): ScreenMessage {
   return {
     type: "screen",
     rows,
@@ -99,9 +95,7 @@ describe("render: wide-char and zero-width handling", () => {
     // Cursor at col 1 which is the start of a wide char "漢"
     // Row: "A漢\uFFFFB      "
     const row: WireRun[] = [{ t: "A漢\uFFFFB" + " ".repeat(6), f: -1, b: -1, a: 0, uc: -1 }];
-    await flush(
-      makeMsg([row], [0, 1], [0]),
-    );
+    await flush(makeMsg([row], [0, 1], [0]));
 
     // The cursor span should exist at the right position
     const rowEl = outputEl.children[0] as HTMLElement;

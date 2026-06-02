@@ -43,12 +43,7 @@ function buttonCode(
 }
 
 /** Encode an SGR mouse sequence. */
-export function encodeSGR(
-  code: number,
-  col: number,
-  row: number,
-  release: boolean,
-): string {
+export function encodeSGR(code: number, col: number, row: number, release: boolean): string {
   const final = release ? "m" : "M";
   return `${ESC}[<${code};${col};${row}${final}`;
 }
@@ -150,9 +145,7 @@ function onMouseMove(e: MouseEvent): void {
   if (!pos) {
     return;
   }
-  const btn = e.buttons
-    ? (e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : e.buttons & 2 ? 2 : 0)
-    : 0;
+  const btn = e.buttons ? (e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : e.buttons & 2 ? 2 : 0) : 0;
   const code = buttonCode(btn, true, e.shiftKey, e.altKey, e.ctrlKey);
   handler.send(encodeSGR(code, pos.col, pos.row, false));
 }

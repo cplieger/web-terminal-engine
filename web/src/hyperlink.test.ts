@@ -81,9 +81,7 @@ describe("OSC 8 hyperlink rendering", () => {
   });
 
   it("does not render <a> for runs without URL", async () => {
-    const runs: WireRun[] = [
-      { t: "plain text", f: -1, b: -1, a: 0, uc: -1 },
-    ];
+    const runs: WireRun[] = [{ t: "plain text", f: -1, b: -1, a: 0, uc: -1 }];
     const msg = frame({ 0: runs }, [0, 10]);
     await flushFrame(msg);
 

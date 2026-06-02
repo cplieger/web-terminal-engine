@@ -74,9 +74,6 @@ describe("OSC 8 hyperlink rendering", () => {
     await flushFrame(msg);
 
     const anchors = output.querySelectorAll("a.term-link");
-    // TEMP DIAG (CI-only failure): show what was actually rendered.
-    console.log("DIAG children=", output.children.length, "anchors=", anchors.length);
-    console.log("DIAG innerHTML=", output.innerHTML.slice(0, 800));
     expect(anchors.length).toBeGreaterThanOrEqual(1);
     const a = anchors[0] as HTMLAnchorElement;
     expect(a.href).toBe("http://example.com/");

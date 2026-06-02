@@ -135,6 +135,13 @@ export function init(opts: {
   output = opts.output;
   termWrap = opts.termWrap;
   onCursorMove = opts.onCursorMove ?? null;
+  // Discard any flush pending from a previous render context: it targets the
+  // old output element, and (with vitest isolate:false) would otherwise leak
+  // across test files and suppress the next scheduleFlush.
+  if (pendingFrame !== undefined) {
+    cancelAnimationFrame(pendingFrame);
+    pendingFrame = undefined;
+  }
   startCursorBlink();
 }
 

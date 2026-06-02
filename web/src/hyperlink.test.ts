@@ -40,9 +40,11 @@ function frame(rowsByIdx: Record<number, WireRun[]>, cursor: [number, number]): 
 
 async function flushFrame(msg: ScreenMessage): Promise<void> {
   render.handleScreen(msg);
-  await new Promise((r) => setTimeout(r, 0));
-  await new Promise((r) => requestAnimationFrame(r));
-  await new Promise((r) => setTimeout(r, 0));
+  // render batches DOM updates via requestAnimationFrame (happy-dom
+  // implements rAF as a ~16ms timer). Wait two frames on a plain timer
+  // instead of racing the rAF-queue ordering, which is runtime/timing
+  // dependent and flaked on CI while passing locally.
+  await new Promise((r) => setTimeout(r, 32));
 }
 
 describe("OSC 8 hyperlink rendering", () => {

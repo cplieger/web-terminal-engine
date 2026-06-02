@@ -22,39 +22,82 @@ import (
 )
 
 // Screen is a minimal VT100 screen buffer with SGR support.
+//
+//nolint:govet // fieldalignment: fields grouped for readability, not optimal packing.
 type Screen struct {
+	// FlushHoldUntil is the deadline until which flush is suppressed
+	// (synchronized output mode / resize redraw window).
 	FlushHoldUntil time.Time
-	Cells          [][]Cell
-	Drained        [][]WireRun
-	Response       []byte
+	// Cells is the 2D grid of character cells [row][col].
+	Cells [][]Cell
+	// Drained holds lines that scrolled off the top since last drain.
+	Drained [][]WireRun
+	// Response holds bytes the terminal needs to send back to the host
+	// (e.g. device-attribute replies).
+	Response []byte
+	// Title is the window/icon title set by OSC 0/1/2.
+	Title     string
+	hyperlink string // current OSC 8 hyperlink URI (empty = no link)
 	ParserState
 	altScreenState
 	CursorState
-	scrollBottom     int
-	Width            int
-	Height           int
-	scrollTop        int
-	lastPrintedRune  rune
+	charsetState
+	scrollBottom int
+	// Width is the number of columns in the screen.
+	Width int
+	// Height is the number of rows in the screen.
+	Height          int
+	scrollTop       int
+	lastPrintedRune rune
+	// MouseMode is the active mouse tracking mode: 0=off, 1000=normal
+	// (press+release), 1002=button-event (drag), 1003=any-event (move).
+	MouseMode        uint16
 	lastPrintedStyle Style
-	OriginMode       bool
-	AutoWrap         bool
-	pendingWrap      bool
-	BracketedPaste   bool
-	AppCursorKeys    bool
-	CursorBlink      bool
-	CursorHidden     bool
-	CursorStyle      uint8
-	BellRing         bool
+	// OriginMode indicates DECOM (origin mode) is active; cursor
+	// addressing is relative to the scroll region.
+	OriginMode bool
+	// AutoWrap indicates auto-wrap mode (DECAWM) is active.
+	AutoWrap    bool
+	pendingWrap bool
+	// BracketedPaste indicates bracketed paste mode (mode 2004) is active.
+	BracketedPaste bool
+	// AppCursorKeys indicates application cursor key mode (DECCKM) is active.
+	AppCursorKeys bool
+	// CursorBlink indicates the cursor should blink.
+	CursorBlink bool
+	// CursorHidden indicates the cursor is invisible (DECTCEM off).
+	CursorHidden bool
+	// CursorStyle is the DECSCUSR cursor shape (0-6).
+	CursorStyle uint8
+	// BellRing is set when BEL was received; cleared after flush.
+	BellRing bool
+	// MouseSGR indicates SGR (1006) encoding is active for mouse reports.
+	MouseSGR bool
+	// FocusReporting indicates mode 1004 (focus in/out reporting) is active.
+	FocusReporting bool
+	// AppKeypad indicates application keypad mode (DECKPAM) is active.
+	// When set, numeric keypad keys send SS3 (ESC O) sequences instead of digits.
+	AppKeypad bool
+	// ReverseVideo indicates DECSCNM (mode 5) is active — default fg/bg are swapped.
+	ReverseVideo bool
+	// tabStops tracks which columns have tab stops set. nil means use default (every 8).
+	tabStops []bool
 }
 
 // CursorState holds cursor position, saved cursor, and current style.
 // Embedded in Screen.
 type CursorState struct {
-	savedX int
-	savedY int
-	curY   int
-	curX   int
-	style  Style
+	savedX           int
+	savedY           int
+	savedStyle       Style
+	savedOrigin      bool
+	savedAutoWrap    bool
+	savedCharsets    [4]charset
+	savedGL          uint8
+	curY             int
+	curX             int
+	style            Style
+	cursorStateSaved bool
 }
 
 // altScreenState holds alt-screen save/restore state. Embedded in Screen.
@@ -65,12 +108,14 @@ type altScreenState struct {
 	savedMainScrollTop    int
 	savedMainScrollBottom int
 	savedMainStyle        Style
-	InAltScreen           bool
+	// InAltScreen indicates the alternate screen buffer is active.
+	InAltScreen bool
 }
 
 // New creates a screen buffer of the given dimensions.
 func New(rows, cols int) *Screen {
 	s := &Screen{Height: rows, Width: cols, Cells: make([][]Cell, rows), scrollTop: 0, scrollBottom: rows - 1, AutoWrap: true, CursorBlink: true}
+	s.singleShft = -1
 	for i := range s.Cells {
 		s.Cells[i] = makeRow(cols, Color{})
 	}
@@ -245,6 +290,13 @@ func (s *Screen) RowString(y int) string {
 // --- Cell-level helpers used across files ---
 
 func (s *Screen) put(r rune) {
+	w := runeWidth(r)
+
+	// Width-0: combining mark — no column consumed.
+	if w == 0 {
+		return
+	}
+
 	// Pending wrap: if previous put landed cursor at width-1 and another
 	// char arrives, wrap to next line first. xterm.js behavior.
 	if s.pendingWrap {
@@ -253,15 +305,41 @@ func (s *Screen) put(r rune) {
 		s.curY++
 		s.scrollIfNeeded()
 	}
+
+	// Width-2: if only 1 cell remains on the line, wrap first (xterm behavior).
+	if w == 2 && s.curX == s.Width-1 {
+		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style}
+		s.curX = 0
+		s.curY++
+		s.scrollIfNeeded()
+	}
+
 	if s.curY < s.Height && s.curX < s.Width {
-		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style}
+		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink}
 	}
 	s.lastPrintedRune = r
 	s.lastPrintedStyle = s.style
-	if s.curX == s.Width-1 {
+
+	if w == 2 {
+		// Place spacer/continuation cell.
+		s.curX++
+		if s.curX < s.Width && s.curY < s.Height {
+			s.Cells[s.curY][s.curX] = Cell{Ch: 0, Style: s.style}
+		}
+	}
+
+	// Clamp curX into [0, Width-1] before the wrap decision. On very
+	// narrow screens (e.g. Width=1) a width-2 char's spacer can push
+	// curX past the last column without triggering pendingWrap, leaving
+	// the cursor out of bounds.
+	switch {
+	case s.curX >= s.Width:
+		s.curX = s.Width - 1
+		s.pendingWrap = true
+	case s.curX == s.Width-1:
 		// Don't advance — set pending wrap for next put.
 		s.pendingWrap = true
-	} else {
+	default:
 		s.curX++
 	}
 }

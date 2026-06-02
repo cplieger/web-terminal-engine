@@ -12,14 +12,23 @@ import (
 // current screen state against the previously sent state. It owns the
 // prev-row comparison data so buildFrame can be expressed as a method
 // on this type rather than reaching into Handler fields.
+//
+//nolint:govet // fieldalignment: string field (prevTitle) adds 8 pointer bytes; fields grouped for readability.
 type FlushFrameBuilder struct {
-	prevRowWires   [][]vt.WireRun
-	prevCurRow     int
-	prevCurCol     int
-	prevBracketed  bool
-	prevAppCursor  bool
-	modesAnnounced bool
-	prevCurValid   bool
+	prevRowWires    [][]vt.WireRun
+	prevTitle       string
+	prevCurRow      int
+	prevCurCol      int
+	prevBracketed   bool
+	prevAppCursor   bool
+	prevMouseSGR    bool
+	prevFocusReport bool
+	prevAppKeypad   bool
+	prevReverseVid  bool
+	prevMouseMode   uint16
+	modesAnnounced  bool
+	titleAnnounced  bool
+	prevCurValid    bool
 }
 
 // Reset clears the previous-row cache, forcing the next frame to
@@ -76,19 +85,12 @@ func (b *FlushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*
 	// unrelated cell content change forces a repaint.
 	changed, cursorMoved := b.trackCursor(changed, len(rows), curRow, curCol)
 
-	if len(changed) == 0 && len(scrollOut) == 0 && b.modesStable(screen) && !cursorMoved {
+	if len(changed) == 0 && len(scrollOut) == 0 && b.modesStable(screen) && !cursorMoved && b.titleStable(screen) {
 		return nil
 	}
 
-	var modesPayload []byte
-	curBracketed := screen.BracketedPaste
-	curAppCursor := screen.AppCursorKeys
-	if !b.modesAnnounced || curBracketed != b.prevBracketed || curAppCursor != b.prevAppCursor {
-		modesPayload = encodeModesMsg(0, curBracketed, curAppCursor)
-		b.prevBracketed = curBracketed
-		b.prevAppCursor = curAppCursor
-		b.modesAnnounced = true
-	}
+	modesPayload := b.buildModesPayload(screen)
+	titlePayload := b.buildTitlePayload(screen)
 
 	return &FlushFrame{
 		clients:      clients,
@@ -102,6 +104,7 @@ func (b *FlushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*
 		cursorHidden: screen.CursorHidden,
 		cursorBlink:  screen.CursorBlink,
 		modesPayload: modesPayload,
+		titlePayload: titlePayload,
 		bell:         bell,
 	}
 }
@@ -111,7 +114,47 @@ func (b *FlushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*
 func (b *FlushFrameBuilder) modesStable(screen *vt.Screen) bool {
 	return b.modesAnnounced &&
 		screen.BracketedPaste == b.prevBracketed &&
-		screen.AppCursorKeys == b.prevAppCursor
+		screen.AppCursorKeys == b.prevAppCursor &&
+		screen.MouseSGR == b.prevMouseSGR &&
+		screen.FocusReporting == b.prevFocusReport &&
+		screen.MouseMode == b.prevMouseMode &&
+		screen.AppKeypad == b.prevAppKeypad &&
+		screen.ReverseVideo == b.prevReverseVid
+}
+
+// buildModesPayload returns an encoded modes frame if any mode changed,
+// or nil if stable.
+func (b *FlushFrameBuilder) buildModesPayload(screen *vt.Screen) []byte {
+	if b.modesStable(screen) {
+		return nil
+	}
+	b.prevBracketed = screen.BracketedPaste
+	b.prevAppCursor = screen.AppCursorKeys
+	b.prevMouseSGR = screen.MouseSGR
+	b.prevFocusReport = screen.FocusReporting
+	b.prevMouseMode = screen.MouseMode
+	b.prevAppKeypad = screen.AppKeypad
+	b.prevReverseVid = screen.ReverseVideo
+	b.modesAnnounced = true
+	return encodeModesMsg(0, b.prevBracketed, b.prevAppCursor, b.prevMouseSGR, b.prevFocusReport, b.prevAppKeypad, b.prevReverseVid, b.prevMouseMode)
+}
+
+// titleStable reports whether the screen's title matches the last
+// announced value.
+func (b *FlushFrameBuilder) titleStable(screen *vt.Screen) bool {
+	return b.titleAnnounced && screen.Title == b.prevTitle
+}
+
+// buildTitlePayload returns an encoded title frame if the title changed,
+// or nil if stable.
+func (b *FlushFrameBuilder) buildTitlePayload(screen *vt.Screen) []byte {
+	curTitle := screen.Title
+	if b.titleAnnounced && curTitle == b.prevTitle {
+		return nil
+	}
+	b.prevTitle = curTitle
+	b.titleAnnounced = true
+	return encodeTitleMsg(0, curTitle)
 }
 
 // trackCursor folds cursor-position changes into changed and updates

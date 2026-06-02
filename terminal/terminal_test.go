@@ -19,7 +19,7 @@ import (
 // installed in the workspace.
 func dialHandler(t *testing.T, cmd []string) (*websocket.Conn, func()) {
 	t.Helper()
-	h := NewHandler(Options{Command: cmd, WorkDir: "/"})
+	h := NewHandler(cmd, WithWorkDir("/"))
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -148,7 +148,7 @@ func TestBadControlMessageIgnored(t *testing.T) {
 // misconfiguration; the first WS must close cleanly with
 // InternalError rather than hang or panic.
 func TestEmptyCommandFails(t *testing.T) {
-	h := NewHandler(Options{Command: nil, WorkDir: "/"})
+	h := NewHandler(nil, WithWorkDir("/"))
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)

@@ -10,6 +10,7 @@
 
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 import * as scroll from "./scroll.js";
+import { isReverseVideo } from "./modes.js";
 
 // --- Width cache (two-tier, xterm.js style) ---
 const WIDTH_FLAT_SIZE = 256;
@@ -134,6 +135,16 @@ export function init(opts: {
   output = opts.output;
   termWrap = opts.termWrap;
   onCursorMove = opts.onCursorMove ?? null;
+  // A fresh output element is empty, so the next frame must be a full repaint
+  // (firstScreen rebuilds allRows/liveCount and wipes the DOM); and any flush
+  // pending from a previous render context targets the old element. Resetting
+  // both is correct on re-init and also prevents render-module state leaking
+  // across test files under vitest isolate:false.
+  firstScreen = true;
+  if (pendingFrame !== undefined) {
+    cancelAnimationFrame(pendingFrame);
+    pendingFrame = undefined;
+  }
   startCursorBlink();
 }
 
@@ -213,12 +224,13 @@ function linkifySpans(
 
 // --- Build row DOM ---
 function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HTMLAnchorElement)[] {
-  const out: HTMLSpanElement[] = [];
+  const out: (HTMLSpanElement | HTMLAnchorElement)[] = [];
   let col = 0;
   for (const run of runs) {
     if (!run.t) {
       continue;
     }
+    const runStartIdx = out.length;
     const attrs = run.a ?? 0;
     const isBold = (attrs & 1) !== 0;
     const isItalic = (attrs & 2) !== 0;
@@ -349,6 +361,20 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
       col++;
     }
     flush();
+    // Wrap spans from this run in an <a> if it has a hyperlink URL.
+    if (run.u) {
+      const a = document.createElement("a");
+      a.href = run.u;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.className = "term-link";
+      // Move spans from this run into the anchor.
+      const runSpans = out.splice(runStartIdx);
+      for (const s of runSpans) {
+        a.appendChild(s);
+      }
+      out.push(a);
+    }
   }
   if (cursorAt >= 0 && col <= cursorAt) {
     while (col < cursorAt) {
@@ -753,3 +779,13 @@ export function setPredictedCursor(row: number, col: number, active: boolean): v
 }
 
 let predCursorEl: HTMLElement | null = null;
+
+/** Apply or remove the reverse-video class on the terminal output.
+ *  When DECSCNM (mode 5) is active, default fg/bg are swapped via CSS. */
+export function updateReverseVideo(): void {
+  if (isReverseVideo()) {
+    termWrap.classList.add("term-reverse-video");
+  } else {
+    termWrap.classList.remove("term-reverse-video");
+  }
+}

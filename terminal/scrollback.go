@@ -20,6 +20,9 @@ func newScrollbackRing(capacity int) *scrollbackRing {
 // Append adds lines to the ring, evicting oldest if at capacity.
 func (r *scrollbackRing) Append(lines [][]vt.WireRun) {
 	n := len(r.buf)
+	if n == 0 {
+		return
+	}
 	for _, line := range lines {
 		idx := (r.start + r.count) % n
 		r.buf[idx] = line
@@ -43,8 +46,6 @@ func (r *scrollbackRing) Lines() [][]vt.WireRun {
 	}
 	return out
 }
-
-
 
 // Clear discards all buffered lines.
 func (r *scrollbackRing) Clear() {

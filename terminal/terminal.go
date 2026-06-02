@@ -71,11 +71,68 @@ const (
 	scrollbackCapacity = 1000
 )
 
-// Options configures the Handler. Command is required and carries
-// the full argv; WorkDir is passed to exec.Cmd.Dir.
-type Options struct {
-	WorkDir string
-	Command []string
+// Option configures optional behavior of the Handler.
+type Option func(*handlerConfig)
+
+// discardHandler is a slog.Handler that discards all log records.
+type discardHandler struct{}
+
+func (discardHandler) Enabled(context.Context, slog.Level) bool  { return false }
+func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
+func (d discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return d }
+func (d discardHandler) WithGroup(string) slog.Handler           { return d }
+
+// handlerConfig holds optional configuration applied via functional options.
+type handlerConfig struct {
+	logger             *slog.Logger
+	acceptOptions      *websocket.AcceptOptions
+	onProcessExit      func(error)
+	workDir            string
+	env                []string
+	scrollbackCapacity int
+}
+
+// WithWorkDir sets the working directory for the spawned process.
+func WithWorkDir(dir string) Option {
+	return func(c *handlerConfig) { c.workDir = dir }
+}
+
+// WithLogger injects a structured logger; nil disables logging.
+func WithLogger(l *slog.Logger) Option {
+	return func(c *handlerConfig) {
+		if l == nil {
+			// A nil *slog.Logger panics on method calls; use a discard handler.
+			l = slog.New(discardHandler{})
+		}
+		c.logger = l
+	}
+}
+
+// WithEnv sets additional environment variables for the spawned process.
+func WithEnv(env []string) Option {
+	return func(c *handlerConfig) { c.env = env }
+}
+
+// WithScrollbackCapacity sets the number of scrollback lines retained
+// for replay to reconnecting clients. Default is 1000. Negative values
+// are treated as 0 (scrollback disabled).
+func WithScrollbackCapacity(n int) Option {
+	return func(c *handlerConfig) {
+		if n < 0 {
+			n = 0
+		}
+		c.scrollbackCapacity = n
+	}
+}
+
+// WithAcceptOptions sets WebSocket accept options (e.g. allowed origins).
+func WithAcceptOptions(o *websocket.AcceptOptions) Option {
+	return func(c *handlerConfig) { c.acceptOptions = o }
+}
+
+// WithOnProcessExit registers a callback invoked when the child process exits.
+func WithOnProcessExit(fn func(error)) Option {
+	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
 
 // sessionState persists across WS reconnects for the same logical
@@ -115,22 +172,35 @@ type Handler struct {
 	builder    *FlushFrameBuilder
 	scrollback *scrollbackRing
 	cancel     context.CancelFunc
-	opts       Options
+	command    []string
 	rawRing    []byte
+	cfg        handlerConfig
 	bootEpoch  int64
 	mu         sync.Mutex
 	started    atomic.Bool
 	resized    bool
 }
 
-// NewHandler returns a terminal handler.
-func NewHandler(opts Options) *Handler {
+// NewHandler returns a terminal handler. command is the argv to spawn
+// (required, must be non-empty). Optional behavior is configured via
+// functional Option values.
+func NewHandler(command []string, opts ...Option) *Handler {
+	cfg := handlerConfig{
+		scrollbackCapacity: scrollbackCapacity,
+		logger:             slog.Default(),
+	}
+	for _, o := range opts {
+		if o != nil {
+			o(&cfg)
+		}
+	}
 	return &Handler{
-		opts:       opts,
+		command:    command,
+		cfg:        cfg,
 		screen:     vt.New(defaultRows, defaultCols),
 		registry:   NewClientRegistry(),
 		builder:    &FlushFrameBuilder{},
-		scrollback: newScrollbackRing(scrollbackCapacity),
+		scrollback: newScrollbackRing(cfg.scrollbackCapacity),
 		bootEpoch:  time.Now().UnixNano(),
 	}
 }
@@ -197,15 +267,19 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	if h.started.Load() {
 		return nil
 	}
-	if len(h.opts.Command) == 0 {
+	if len(h.command) == 0 {
 		return errors.New("terminal: empty command")
 	}
-	cmd := exec.CommandContext(context.Background(), h.opts.Command[0], h.opts.Command[1:]...) // #nosec G204
-	cmd.Dir = h.opts.WorkDir
-	cmd.Env = append(os.Environ(),
+	cmd := exec.CommandContext(context.Background(), h.command[0], h.command[1:]...) // #nosec G204
+	cmd.Dir = h.cfg.workDir
+	env := append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 	)
+	if len(h.cfg.env) > 0 {
+		env = append(env, h.cfg.env...)
+	}
+	cmd.Env = env
 	if cols < 1 {
 		cols = defaultCols
 	}
@@ -222,8 +296,8 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	h.started.Store(true)
 	h.resized = true
 	h.screen.Resize(rows, cols)
-	slog.Info("terminal: process started",
-		"pid", cmd.Process.Pid, "command", h.opts.Command, "cols", cols, "rows", rows)
+	h.cfg.logger.Info("terminal: process started",
+		"pid", cmd.Process.Pid, "command", h.command, "cols", cols, "rows", rows)
 
 	// PTY reader goroutine — feeds VT screen and notifies clients.
 	ctx, cancel := context.WithCancel(context.Background())
@@ -273,6 +347,7 @@ type FlushFrame struct {
 	scrollLines  [][]vt.WireRun
 	changed      []int
 	modesPayload []byte
+	titlePayload []byte
 	curRow       int
 	curCol       int
 	screenHeight int
@@ -313,7 +388,7 @@ func (h *Handler) flushLoop(ctx context.Context) {
 		}
 
 		if len(frame.changed) > 0 || len(frame.scrollLines) > 0 {
-			slog.Info("terminal: flush",
+			h.cfg.logger.Info("terminal: flush",
 				"changed", len(frame.changed),
 				"scroll_lines", len(frame.scrollLines),
 				"clients", len(frame.clients))
@@ -370,9 +445,9 @@ type controlMsg struct {
 // handleWS upgrades to WebSocket, spawns the configured command in a
 // PTY, and bridges bytes both ways until either side closes.
 func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
-	ws, err := websocket.Accept(w, r, &websocket.AcceptOptions{})
+	ws, err := websocket.Accept(w, r, h.cfg.acceptOptions)
 	if err != nil {
-		slog.Warn("terminal: ws accept", "error", err)
+		h.cfg.logger.Warn("terminal: ws accept", "error", err)
 		return
 	}
 	ws.SetReadLimit(wsReadLimit)
@@ -420,12 +495,12 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 		// with ensureStarted's write. cols/rows of 0 select defaults.
 		if !h.started.Load() {
 			if err := h.ensureStarted(0, 0); err != nil {
-				slog.Error("terminal: process start failed", "error", err)
+				h.cfg.logger.Error("terminal: process start failed", "error", err)
 				return
 			}
 		}
 		if _, err := h.ptmx.Write(msg); err != nil {
-			slog.Debug("terminal: pty write", "error", err)
+			h.cfg.logger.Debug("terminal: pty write", "error", err)
 			return
 		}
 		// Increment session bytesReceived for the resume protocol.
@@ -529,7 +604,7 @@ func (h *Handler) handleResize(cols, rows int) {
 	// from the start (avoids initial paint at wrong size).
 	if !h.started.Load() {
 		if err := h.ensureStarted(cols, rows); err != nil {
-			slog.Error("terminal: process start failed", "error", err)
+			h.cfg.logger.Error("terminal: process start failed", "error", err)
 			return
 		}
 	}
@@ -538,7 +613,7 @@ func (h *Handler) handleResize(cols, rows int) {
 	if err := pty.Setsize(h.ptmx, &pty.Winsize{
 		Cols: uint16(cols), Rows: uint16(rows),
 	}); err != nil {
-		slog.Debug("terminal: resize", "error", err)
+		h.cfg.logger.Debug("terminal: resize", "error", err)
 	}
 	h.screen.Resize(rows, cols)
 	h.screen.DrainScrollback() // discard pre-resize drain
@@ -546,7 +621,7 @@ func (h *Handler) handleResize(cols, rows int) {
 	// doesn't see the child process's transient cleared-screen state. Either
 	// the child process's CSI ?2026l or the 1s deadline releases the hold.
 	h.screen.HoldFlush(time.Now().Add(time.Second))
-	slog.Info("terminal: resize received", "rows", rows, "cols", cols)
+	h.cfg.logger.Info("terminal: resize received", "rows", rows, "cols", cols)
 	h.resized = true
 	h.builder.Reset()
 }

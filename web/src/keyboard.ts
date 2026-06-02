@@ -14,7 +14,7 @@
 // vt screen tracks both bracketed paste (?2004) and DECCKM (?1) and
 // emits a modes frame whenever they change.
 
-import { isApplicationCursor, isBracketedPaste } from "./modes.js";
+import { isApplicationCursor, isApplicationKeypad, isBracketedPaste } from "./modes.js";
 
 /** Result of mapping a keyboard event. */
 export type KeyboardResult =
@@ -91,6 +91,29 @@ const ARROW_LETTER: Record<string, string | undefined> = {
   ArrowLeft: "D",
 };
 
+// Application keypad mode (DECKPAM) SS3 mappings. When the server has
+// sent ESC = (DECKPAM), numeric keypad keys send ESC O <letter> instead
+// of their normal character. Mapping from VT100 User Guide Table 3-8
+// (ANSI mode, application keypad). xterm extensions for *, +, / included.
+const KEYPAD_SS3: Record<string, string | undefined> = {
+  "0": "p",
+  "1": "q",
+  "2": "r",
+  "3": "s",
+  "4": "t",
+  "5": "u",
+  "6": "v",
+  "7": "w",
+  "8": "x",
+  "9": "y",
+  ".": "n",
+  "-": "m",
+  "+": "k",
+  "*": "j",
+  "/": "o",
+  Enter: "M",
+};
+
 /**
  * mapKeyboardEvent converts a KeyboardEvent into the terminal action
  * to take. Returns "ignore" when the event is purely a modifier press
@@ -110,6 +133,26 @@ export function mapKeyboardEvent(ev: KeyboardEvent): KeyboardResult {
   // Composition-in-progress: caller ignores keydowns while
   // CompositionHelper.isComposing is true. We don't see that state
   // here. The caller filters at its layer.
+
+  // Application keypad mode (DECKPAM): when active, numpad keys send
+  // SS3 sequences (ESC O <letter>) instead of their normal characters.
+  // We detect numpad keys via ev.code (Numpad0-9, NumpadDecimal,
+  // NumpadSubtract, NumpadAdd, NumpadMultiply, NumpadDivide, NumpadEnter).
+  if (
+    isApplicationKeypad() &&
+    !ev.ctrlKey &&
+    !ev.altKey &&
+    !ev.metaKey &&
+    ev.code.startsWith("Numpad")
+  ) {
+    const ss3Key = numpadCodeToKey(ev.code);
+    if (ss3Key !== undefined) {
+      const ss3Char = KEYPAD_SS3[ss3Key];
+      if (ss3Char !== undefined) {
+        return { kind: "send", bytes: `${ESC}O${ss3Char}` };
+      }
+    }
+  }
 
   // Browser-reserved meta combos (Cmd+R, Cmd+T, Cmd+Q, Cmd+W on Mac;
   // Ctrl+R, Ctrl+T, Ctrl+W with no Shift on others). Let the browser
@@ -270,6 +313,48 @@ function ctrlSymbolByte(ch: string): string | null {
       return "\x7f";
     default:
       return null;
+  }
+}
+
+// -- Application keypad helpers -----------------------------------------------
+
+/** Map a KeyboardEvent.code starting with "Numpad" to the KEYPAD_SS3 lookup key. */
+function numpadCodeToKey(code: string): string | undefined {
+  switch (code) {
+    case "Numpad0":
+      return "0";
+    case "Numpad1":
+      return "1";
+    case "Numpad2":
+      return "2";
+    case "Numpad3":
+      return "3";
+    case "Numpad4":
+      return "4";
+    case "Numpad5":
+      return "5";
+    case "Numpad6":
+      return "6";
+    case "Numpad7":
+      return "7";
+    case "Numpad8":
+      return "8";
+    case "Numpad9":
+      return "9";
+    case "NumpadDecimal":
+      return ".";
+    case "NumpadSubtract":
+      return "-";
+    case "NumpadAdd":
+      return "+";
+    case "NumpadMultiply":
+      return "*";
+    case "NumpadDivide":
+      return "/";
+    case "NumpadEnter":
+      return "Enter";
+    default:
+      return undefined;
   }
 }
 

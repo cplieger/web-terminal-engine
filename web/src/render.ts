@@ -10,6 +10,7 @@
 
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 import * as scroll from "./scroll.js";
+import { isReverseVideo } from "./modes.js";
 
 // --- Width cache (two-tier, xterm.js style) ---
 const WIDTH_FLAT_SIZE = 256;
@@ -177,7 +178,7 @@ function linkifySpans(
 ): (HTMLSpanElement | HTMLAnchorElement)[] {
   const out: (HTMLSpanElement | HTMLAnchorElement)[] = [];
   for (const span of spans) {
-    const text = span.textContent;
+    const text = span.textContent ?? "";
     URL_RE.lastIndex = 0;
     let match: RegExpExecArray | null;
     let last = 0;
@@ -213,12 +214,13 @@ function linkifySpans(
 
 // --- Build row DOM ---
 function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HTMLAnchorElement)[] {
-  const out: HTMLSpanElement[] = [];
+  const out: (HTMLSpanElement | HTMLAnchorElement)[] = [];
   let col = 0;
   for (const run of runs) {
     if (!run.t) {
       continue;
     }
+    const runStartIdx = out.length;
     const attrs = run.a ?? 0;
     const isBold = (attrs & 1) !== 0;
     const isItalic = (attrs & 2) !== 0;
@@ -313,7 +315,7 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
           // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- length checked above
           const prev = out[out.length - 1]!;
 
-          const prevText = prev.textContent;
+          const prevText = prev.textContent ?? "";
           if (prevText.length > 0) {
             // eslint-disable-next-line @typescript-eslint/no-non-null-assertion, @typescript-eslint/no-misused-spread -- terminal text is ASCII/CJK, safe to spread; .at(-1) guaranteed by length check
             const lastChar = [...prevText].at(-1)!;
@@ -349,6 +351,20 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
       col++;
     }
     flush();
+    // Wrap spans from this run in an <a> if it has a hyperlink URL.
+    if (run.u) {
+      const a = document.createElement("a");
+      a.href = run.u;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.className = "term-link";
+      // Move spans from this run into the anchor.
+      const runSpans = out.splice(runStartIdx);
+      for (const s of runSpans) {
+        a.appendChild(s);
+      }
+      out.push(a);
+    }
   }
   if (cursorAt >= 0 && col <= cursorAt) {
     while (col < cursorAt) {
@@ -753,3 +769,13 @@ export function setPredictedCursor(row: number, col: number, active: boolean): v
 }
 
 let predCursorEl: HTMLElement | null = null;
+
+/** Apply or remove the reverse-video class on the terminal output.
+ *  When DECSCNM (mode 5) is active, default fg/bg are swapped via CSS. */
+export function updateReverseVideo(): void {
+  if (isReverseVideo()) {
+    termWrap.classList.add("term-reverse-video");
+  } else {
+    termWrap.classList.remove("term-reverse-video");
+  }
+}

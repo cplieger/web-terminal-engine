@@ -28,8 +28,12 @@ func (s *Screen) applySGR(args string) {
 			s.style.Underline = true
 		case p == 5:
 			s.style.Blink = true
+		case p == 6:
+			s.style.Blink = true // rapid blink → same as blink
 		case p == 7:
 			s.style.Inverse = true
+		case p == 8:
+			s.style.Hidden = true
 		case p == 9:
 			s.style.Strikethrough = true
 		case p == 21:
@@ -118,6 +122,8 @@ func clampByte(v int) uint8 {
 // --- CSI parameter parsing helpers ---
 
 // csiArg returns the first CSI parameter, or def if absent.
+// Values are clamped to [0, maxCSIArgValue] to prevent DoS from
+// adversarial streams sending huge loop counts.
 func csiArg(args string, def int) int {
 	clean := strings.TrimLeftFunc(args, func(r rune) bool {
 		return r == '?' || r == '>' || r == '!'
@@ -129,10 +135,17 @@ func csiArg(args string, def int) int {
 	if err != nil {
 		return def
 	}
+	if n > maxCSIArgValue {
+		n = maxCSIArgValue
+	}
+	if n < 0 {
+		n = 0
+	}
 	return n
 }
 
 // csiArgs parses all semicolon-separated CSI parameters.
+// Values are clamped to [0, maxCSIArgValue].
 func csiArgs(args string) []int {
 	clean := strings.TrimLeftFunc(args, func(r rune) bool {
 		return r == '?' || r == '>' || r == '!'
@@ -147,12 +160,19 @@ func csiArgs(args string) []int {
 		if err != nil {
 			n = 0
 		}
+		if n > maxCSIArgValue {
+			n = maxCSIArgValue
+		}
+		if n < 0 {
+			n = 0
+		}
 		out = append(out, n)
 	}
 	return out
 }
 
 // parseCSIParams is like csiArgs but returns [0] for empty input (SGR default).
+// Values are clamped to [0, maxCSIArgValue].
 func parseCSIParams(args string) []int {
 	clean := strings.TrimLeftFunc(args, func(r rune) bool {
 		return r == '?' || r == '>' || r == '!'
@@ -167,10 +187,22 @@ func parseCSIParams(args string) []int {
 		if err != nil {
 			n = 0
 		}
+		if n > maxCSIArgValue {
+			n = maxCSIArgValue
+		}
+		if n < 0 {
+			n = 0
+		}
 		out = append(out, n)
 	}
 	return out
 }
+
+// maxCSIArgValue is the maximum value a single CSI parameter can take.
+// Per DEC VT spec, parameters are 16-bit (0-65535). We use this as a
+// sane upper bound to prevent DoS from adversarial streams that send
+// huge values causing O(n) loops (scroll, shift, insert/delete lines).
+const maxCSIArgValue = 65535
 
 // sgrSequence emits an ANSI SGR escape that reproduces the given Style.
 func sgrSequence(st Style) string {
@@ -191,14 +223,29 @@ func sgrSequence(st Style) string {
 	if st.Underline {
 		params = append(params, "4")
 	}
+	if st.DoubleUnderline {
+		params = append(params, "21")
+	}
+	if st.Blink {
+		params = append(params, "5")
+	}
 	if st.Inverse {
 		params = append(params, "7")
+	}
+	if st.Hidden {
+		params = append(params, "8")
 	}
 	if st.Strikethrough {
 		params = append(params, "9")
 	}
+	if st.Overline {
+		params = append(params, "53")
+	}
 	params = appendColorParams(params, st.FG, 30)
 	params = appendColorParams(params, st.BG, 40)
+	if st.UnderlineColor.Type != 0 {
+		params = appendUnderlineColorParams(params, st.UnderlineColor)
+	}
 	return fmt.Sprintf("\x1b[%sm", strings.Join(params, ";"))
 }
 
@@ -210,6 +257,17 @@ func appendColorParams(params []string, c Color, base int) []string {
 		params = append(params, strconv.Itoa(base+8), "5", strconv.Itoa(int(c.Val)))
 	case 3:
 		params = append(params, strconv.Itoa(base+8), "2",
+			strconv.Itoa(int(c.R)), strconv.Itoa(int(c.G)), strconv.Itoa(int(c.B)))
+	}
+	return params
+}
+
+func appendUnderlineColorParams(params []string, c Color) []string {
+	switch c.Type {
+	case 2:
+		params = append(params, "58", "5", strconv.Itoa(int(c.Val)))
+	case 3:
+		params = append(params, "58", "2",
 			strconv.Itoa(int(c.R)), strconv.Itoa(int(c.G)), strconv.Itoa(int(c.B)))
 	}
 	return params

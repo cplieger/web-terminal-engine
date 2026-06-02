@@ -8,11 +8,18 @@ import "strings"
 // 16=strikethrough, 32=dim, 64=hidden, 128=blink, 256=overline,
 // 512=double-underline.
 type WireRun struct {
-	T  string `json:"t"`
-	F  int32  `json:"f,omitempty"`
-	B  int32  `json:"b,omitempty"`
-	Uc int32  `json:"uc,omitempty"`
-	A  uint16 `json:"a,omitempty"`
+	// T is the text content of the run.
+	T string `json:"t"`
+	// U is the OSC 8 hyperlink URI (empty means no link).
+	U string `json:"u,omitempty"`
+	// F is the foreground color as 0xRRGGBB, or -1 for default.
+	F int32 `json:"f,omitempty"`
+	// B is the background color as 0xRRGGBB, or -1 for default.
+	B int32 `json:"b,omitempty"`
+	// Uc is the underline color as 0xRRGGBB, or -1 for default.
+	Uc int32 `json:"uc,omitempty"`
+	// A is a bitmask of SGR attributes (bold=1, italic=2, underline=4, etc.).
+	A uint16 `json:"a,omitempty"`
 }
 
 // Default flag for FG/BG meaning "use theme default".
@@ -35,11 +42,13 @@ func cellsToRuns(row []Cell) []WireRun {
 	}
 	var buf strings.Builder
 	prev := row[0].Style
+	prevURL := row[0].Hyperlink
 	for x, cell := range row {
-		if x > 0 && cell.Style != prev {
-			runs = append(runs, makeRun(buf.String(), prev))
+		if x > 0 && (cell.Style != prev || cell.Hyperlink != prevURL) {
+			runs = append(runs, makeRunWithURL(buf.String(), prev, prevURL))
 			buf.Reset()
 			prev = cell.Style
+			prevURL = cell.Hyperlink
 		}
 		ch := cell.Ch
 		if ch == 0 {
@@ -48,17 +57,17 @@ func cellsToRuns(row []Cell) []WireRun {
 		buf.WriteRune(ch)
 	}
 	if buf.Len() > 0 {
-		runs = append(runs, makeRun(buf.String(), prev))
+		runs = append(runs, makeRunWithURL(buf.String(), prev, prevURL))
 	}
 	return runs
 }
 
-func makeRun(text string, st Style) WireRun {
+func makeRunWithURL(text string, st Style, url string) WireRun {
 	fg, bg := st.FG, st.BG
 	if st.Inverse {
 		fg, bg = bg, fg
 	}
-	r := WireRun{T: text}
+	r := WireRun{T: text, U: url}
 	r.F = colorToWire(fg)
 	r.B = colorToWire(bg)
 	r.Uc = colorToWire(st.UnderlineColor)

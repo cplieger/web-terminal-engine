@@ -1,22 +1,34 @@
 # vterm
+
+[![CI](https://github.com/cplieger/vterm/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/vterm/actions/workflows/ci.yaml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/vterm.svg)](https://pkg.go.dev/github.com/cplieger/vterm)
+[![npm](https://img.shields.io/npm/v/@cplieger/vterm)](https://www.npmjs.com/package/@cplieger/vterm)
+[![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).
 
-A standalone library that bridges a PTY to a browser WebSocket. The Go packages provide a VT100/VT500 screen buffer with SGR support and a WebSocket-based terminal session handler with reconnect, scrollback replay, and adaptive ping. The TypeScript package provides the browser-side renderer, keyboard mapper, and binary wire decoder. No app-specific dependencies — only the standard library, `github.com/coder/websocket`, and `github.com/creack/pty`.
+A standalone library that bridges a PTY to a browser WebSocket. The Go packages provide a VT100/VT500 screen buffer with SGR support and a WebSocket-based terminal session handler with reconnect, scrollback replay, and adaptive ping. The TypeScript package provides the browser-side renderer, keyboard mapper, mouse encoder, and binary wire decoder. No app-specific dependencies — only the standard library, `github.com/coder/websocket`, and `github.com/creack/pty`.
 
 ## Install
-<!-- TODO: registry/pull link -->
+
 Go: `go get github.com/cplieger/vterm@latest`  —  TS: `npx jsr add @cplieger/vterm` or `npm i @cplieger/vterm`
 
 ## Usage
+
 ```go
 import (
+    "log/slog"
+    "net/http"
+
     "github.com/cplieger/vterm/terminal"
 )
 
-h := terminal.NewHandler(terminal.Options{
-    Command: []string{"/bin/bash"},
-    WorkDir: "/home/user",
-})
+h := terminal.NewHandler(
+    []string{"/bin/bash"},
+    terminal.WithWorkDir("/home/user"),
+    terminal.WithLogger(slog.Default()),
+)
 mux := http.NewServeMux()
 h.RegisterRoutes(mux)
 // or use h as an http.Handler directly:
@@ -24,10 +36,10 @@ h.RegisterRoutes(mux)
 ```
 
 ```typescript
-import { render, keyboard, decodeWireBinary } from "@cplieger/vterm";
+import { render, keyboard, mouse, decodeWireBinary } from "@cplieger/vterm";
 
 render.init({ output: document.getElementById("term-output")!, termWrap: document.getElementById("term")! });
-// On WebSocket message:
+// On WebSocket binary message:
 const msg = decodeWireBinary(event.data);
 if (msg?.type === "screen") render.handleScreen(msg);
 ```
@@ -36,17 +48,33 @@ if (msg?.type === "screen") render.handleScreen(msg);
 
 ### Go packages
 
-- **`vt`** — VT100/VT500 screen buffer: `New(rows, cols)`, `Write([]byte)`, `Resize(rows, cols)`, `RenderRowWire(y)`, `DrainScrollback()`, cursor/mode state.
-- **`terminal`** — WebSocket session handler: `NewHandler(Options)`, `RegisterRoutes(mux)`, `ServeHTTP(w, r)`, `Shutdown()`. Handles PTY lifecycle, binary wire protocol, reconnect with scrollback replay, adaptive ping.
+- **`vt`** — VT100/VT500 screen buffer: `New(rows, cols)`, `Write([]byte)`, `Resize(rows, cols)`, `RenderRowWire(y)`, `DrainScrollback()`, `CursorPos()`, `HoldFlush()`, `ReleaseFlush()`, `IsFlushHeld()`, `RenderViewport()`, `RowString(y)`. Public fields: `Cells`, `Width`, `Height`, `Title`, `MouseMode`, `InAltScreen`, cursor/mode state.
+- **`terminal`** — WebSocket session handler: `NewHandler(command, ...Option)`, `RegisterRoutes(mux)`, `ServeHTTP(w, r)`, `Shutdown()`. Options: `WithWorkDir`, `WithLogger`, `WithEnv`, `WithScrollbackCapacity`, `WithAcceptOptions`, `WithOnProcessExit`. Handles PTY lifecycle, binary wire protocol, reconnect with scrollback replay, adaptive ping.
 
 ### TypeScript (`web/`)
 
-- **`render`** — DOM renderer: `init()`, `handleScreen()`, `handleScroll()`, `updateFontMetrics()`, `computeSize()`.
+- **`render`** — DOM renderer: `init()`, `handleScreen()`, `handleScroll()`, `updateFontMetrics()`, `computeSize()`, `getCursorPx()`, `setPredictedCursor()`, `resetScreen()`, `resetScrollback()`, `getScrollbackRowCount()`, `updateReverseVideo()`.
 - **`keyboard`** — Key event mapper: `mapKeyboardEvent()`, `bracketTextForPaste()`, `prepareTextForTerminal()`.
-- **`scroll`** — Scroll state tracker: `init()`, `scrollToBottom()`, `isUserScrolledUp()`.
-- **`modes`** — DEC private mode state: `setModes()`, `isBracketedPaste()`, `isApplicationCursor()`.
+- **`mouse`** — Mouse/focus encoder: `init()`, `encodeSGR()`.
+- **`scroll`** — Scroll state tracker: `init()`, `scrollToBottom()`, `suppressScroll()`, `isUserScrolledUp()`, `isInUserScroll()`.
+- **`modes`** — DEC private mode state: `setModes()`, `isBracketedPaste()`, `isApplicationCursor()`, `getMouseMode()`, `isMouseSGR()`, `isFocusReporting()`, `isApplicationKeypad()`, `isReverseVideo()`.
 - **`wire-binary`** — Binary frame decoder: `decodeWireBinary()`.
-- **`types`** — Shared TypeScript interfaces.
+- **`types`** — Shared TypeScript interfaces: `WireRun`, `ScreenMessage`, `ScrollMessage`, `ResumeAckMessage`, `ModesMessage`.
 
 ## License
+
 GPL-3.0 — see [LICENSE](LICENSE).
+
+## Unsupported by Design
+
+The following VT/DEC features are **intentionally not implemented**. Input bytes for these sequences are consumed (not echoed or half-rendered) but produce no effect. This is a deliberate design choice — not a TODO.
+
+| Category | Sequences | Rationale |
+|----------|-----------|-----------|
+| Selective erase | DECSCA, DECSED, DECSEL | Requires per-cell "protected" attribute; no modern CLI tool uses this legacy VT feature. |
+| Double-width/height lines | DECDWL, DECDHL | Requires line-level rendering attribute + renderer changes; purely legacy VT220 feature unused by modern apps. |
+| DCS device control | DECRQSS, XTGETTCAP, tmux passthrough | Requires full DCS parser state + dispatch infrastructure (~150+ LOC). Apps that probe DECRQSS fall back gracefully when no response arrives. |
+| Graphics protocols | Sixel, ReGIS, Kitty image protocol, iTerm inline images | Massive feature (1000+ LOC each); specialized rendering pipeline incompatible with the DOM-based renderer. |
+| NRCS national charsets | All national replacement character sets (only DEC Special Graphics + ASCII are supported) | Legacy internationalization mechanism superseded by UTF-8. No modern app emits these. |
+| Exotic SGR attributes | Fonts 10-20, framed/encircled (51/52/54), superscript/subscript (73-75), ideogram (60-65) | No modern terminal or app uses these attributes; they have no visual representation in standard monospace fonts. |
+| ZWJ emoji grapheme clustering | Zero-width joiner sequences are not clustered into single cells | Requires ICU-level grapheme segmentation (~500+ LOC or a runtime dependency). Individual emoji codepoints render correctly; only multi-codepoint ZWJ sequences (family emoji, skin-tone modifiers) may misalign. |

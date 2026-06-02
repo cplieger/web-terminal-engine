@@ -6,6 +6,7 @@ export interface WireRun {
   b?: number; // -1 = default bg
   uc?: number; // -1 = default underline color
   a?: number; // bit flags: 1=bold, 2=italic, 4=underline, 8=inverse, 16=strike, 32=dim, 64=hidden, 128=blink, 256=overline, 512=double-underline
+  u?: string; // OSC 8 hyperlink URI (empty/absent = no link)
 }
 
 export interface ScreenMessage {
@@ -38,10 +39,21 @@ export interface ModesMessage {
   type: "modes";
   bracketedPaste: boolean;
   applicationCursor: boolean;
+  applicationKeypad: boolean;
+  mouseSGR: boolean;
+  focusReporting: boolean;
+  reverseVideo: boolean;
+  mouseMode: number; // 0=off, 1000=normal, 1002=button-event, 1003=any-event
   inputAck?: number;
 }
 
-export type ServerMessage = ScreenMessage | ScrollMessage | ResumeAckMessage | ModesMessage;
+export interface TitleMessage {
+  type: "title";
+  title: string;
+  inputAck?: number;
+}
+
+export type ServerMessage = ScreenMessage | ScrollMessage | ResumeAckMessage | ModesMessage | TitleMessage;
 
 export type ControlMessage =
   | { type: "resize"; cols: number; rows: number }

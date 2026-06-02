@@ -79,7 +79,7 @@ function buildScreenFrame(opts: {
     for (let j = 0; j < opts.changed[i]!.runs.length; j++) {
       len += 2; // text_len
       len += runBytes[i]![j]!.length;
-      len += 4 + 4 + 2 + 4;
+      len += 4 + 4 + 2 + 4 + 2; // fg + bg + attrs + uc + url_byte_len
     }
   }
 
@@ -132,6 +132,8 @@ function buildScreenFrame(opts: {
       off += 2;
       dv.setInt32(off, run.uc ?? -1, true);
       off += 4;
+      dv.setUint16(off, 0, true);
+      off += 2; // url_byte_len = 0 (no hyperlink)
     }
   }
   return buf;

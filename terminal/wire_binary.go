@@ -61,6 +61,7 @@ const (
 	wireMsgScroll    byte = 1
 	wireMsgResumeAck byte = 2
 	wireMsgModes     byte = 3
+	wireMsgTitle     byte = 4
 
 	// wireAckOffset is the byte offset of the inputAck field in
 	// every server→client frame. Used by withClientAck to patch the
@@ -74,6 +75,10 @@ const (
 	// older clients (unknown bits are ignored).
 	modeFlagBracketedPaste byte = 1 << 0
 	modeFlagAppCursorKeys  byte = 1 << 1
+	modeFlagMouseSGR       byte = 1 << 2
+	modeFlagFocusReporting byte = 1 << 3
+	modeFlagAppKeypad      byte = 1 << 4
+	modeFlagReverseVideo   byte = 1 << 5
 )
 
 // encodeScreenMsg builds a binary screen frame containing only the
@@ -152,8 +157,11 @@ func encodeResumeAck(ack uint64, epochNanos int64) []byte {
 //	[1B] flags
 //	     bit 0: bracketed paste enabled (DEC ?2004h)
 //	     bit 1: application cursor keys (DECCKM, CSI ?1h) enabled
-func encodeModesMsg(ack uint64, bracketedPaste, appCursorKeys bool) []byte {
-	buf := make([]byte, 0, 10)
+//	     bit 2: SGR mouse encoding (DEC ?1006h) enabled
+//	     bit 3: focus reporting (DEC ?1004h) enabled
+//	[2B] mouseMode (uint16): 0=off, 1000=normal, 1002=button-event, 1003=any-event
+func encodeModesMsg(ack uint64, bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo bool, mouseMode uint16) []byte {
+	buf := make([]byte, 0, 12)
 	buf = append(buf, wireMsgModes)
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
 	var flags byte
@@ -163,7 +171,20 @@ func encodeModesMsg(ack uint64, bracketedPaste, appCursorKeys bool) []byte {
 	if appCursorKeys {
 		flags |= modeFlagAppCursorKeys
 	}
+	if mouseSGR {
+		flags |= modeFlagMouseSGR
+	}
+	if focusReporting {
+		flags |= modeFlagFocusReporting
+	}
+	if appKeypad {
+		flags |= modeFlagAppKeypad
+	}
+	if reverseVideo {
+		flags |= modeFlagReverseVideo
+	}
 	buf = append(buf, flags)
+	buf = binary.LittleEndian.AppendUint16(buf, mouseMode)
 	return buf
 }
 
@@ -192,6 +213,8 @@ func appendRowRuns(buf []byte, runs []vt.WireRun) []byte {
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32ToWire(run.B))) // #nosec G115 -- bit-cast
 		buf = binary.LittleEndian.AppendUint16(buf, run.A)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32ToWire(run.Uc))) // #nosec G115 -- bit-cast
+		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(run.U)))
+		buf = append(buf, run.U...)
 	}
 	return buf
 }
@@ -209,3 +232,18 @@ func clampU16(n int) uint16 {
 // int32ToWire returns the wire representation of a WireRun color (int32).
 // Default-color value is -1; we encode as the bit pattern of int32(-1).
 func int32ToWire(v int32) int32 { return v }
+
+// encodeTitleMsg builds a title frame carrying the window title string.
+//
+//	[1B] msg_type = 4 (title)
+//	[8B] inputAck (uint64)
+//	[2B] title_byte_len (uint16)
+//	[NB] title (UTF-8 bytes)
+func encodeTitleMsg(ack uint64, title string) []byte {
+	buf := make([]byte, 0, 11+len(title))
+	buf = append(buf, wireMsgTitle)
+	buf = binary.LittleEndian.AppendUint64(buf, ack)
+	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(title)))
+	buf = append(buf, title...)
+	return buf
+}

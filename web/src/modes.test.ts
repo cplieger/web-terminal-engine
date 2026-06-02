@@ -15,7 +15,7 @@ function ev(init: KeyboardEventInit & { key: string }): KeyboardEvent {
 beforeEach(() => {
   // Reset to the conservative defaults each test (modes module is
   // module-singleton state). Tests opt into different modes as needed.
-  modes.setModes(true /* bracketed */, false /* app cursor */);
+  modes.setModes(true /* bracketed */, false /* app cursor */, false, false, 0);
 });
 
 describe("keyboard: arrow keys honor DECCKM", () => {

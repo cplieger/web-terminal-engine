@@ -46,6 +46,14 @@ func (s *Screen) dispatchCSI(final byte) {
 		return
 	}
 
+	// '$' intermediate — DECRQM (Request Mode).
+	if len(s.pIntermed) > 0 && s.pIntermed[0] == '$' {
+		if final == 'p' {
+			s.handleDECRQM(args)
+		}
+		return
+	}
+
 	switch final {
 	case 'A':
 		s.curY -= csiArg(args, 1)
@@ -157,16 +165,28 @@ func (s *Screen) dispatchCSI(final byte) {
 		s.deleteChars(n)
 	case 'S': // Scroll up n lines (SU)
 		n := csiArg(args, 1)
+		regionH := s.scrollBottom - s.scrollTop + 1
+		if n > regionH {
+			n = regionH
+		}
 		for range n {
 			s.scrollUpOnce()
 		}
 	case 'T': // Scroll down n lines (SD)
 		n := csiArg(args, 1)
+		regionH := s.scrollBottom - s.scrollTop + 1
+		if n > regionH {
+			n = regionH
+		}
 		for range n {
 			s.scrollDownOnce()
 		}
 	case '^': // SD alternate (ECMA-48 erratum, same as T)
 		n := csiArg(args, 1)
+		regionH := s.scrollBottom - s.scrollTop + 1
+		if n > regionH {
+			n = regionH
+		}
 		for range n {
 			s.scrollDownOnce()
 		}
@@ -180,7 +200,7 @@ func (s *Screen) dispatchCSI(final byte) {
 	case 'I': // Cursor forward tab (CHT)
 		n := csiArg(args, 1)
 		for range n {
-			s.curX = (s.curX + 8) &^ 7
+			s.curX = s.nextTabStop(s.curX)
 			if s.curX >= s.Width {
 				s.curX = s.Width - 1
 				break
@@ -189,8 +209,8 @@ func (s *Screen) dispatchCSI(final byte) {
 	case 'Z': // Cursor backward tab (CBT)
 		n := csiArg(args, 1)
 		for range n {
-			s.curX = ((s.curX - 1) &^ 7)
-			if s.curX < 0 {
+			s.curX = s.prevTabStop(s.curX)
+			if s.curX <= 0 {
 				s.curX = 0
 				break
 			}
@@ -239,10 +259,19 @@ func (s *Screen) dispatchCSI(final byte) {
 			// Tertiary DA — respond with unit ID.
 			s.Response = append(s.Response, "\x1bP!|00000000\x1b\\"...)
 		case csiArg(args, 0) == 0:
-			// Primary DA — respond as VT102.
-			s.Response = append(s.Response, "\x1b[?6c"...)
+			// Primary DA — VT220 (62) with ANSI color (22), matching the
+			// Secondary DA identity below. Only capabilities we actually
+			// implement are advertised.
+			s.Response = append(s.Response, "\x1b[?62;22c"...)
 		}
-	case 'g': // Tab clear (TBC) — no-op (we don't track tab stops)
+	case 'g': // Tab clear (TBC)
+		n := csiArg(args, 0)
+		switch n {
+		case 0:
+			s.clearTabStop(s.curX)
+		case 3:
+			s.clearAllTabStops()
+		}
 	case 'r': // Set scroll region (DECSTBM)
 		params := csiArgs(args)
 		top, bottom := 0, s.Height-1
@@ -266,9 +295,9 @@ func (s *Screen) dispatchCSI(final byte) {
 	case 'm':
 		s.applySGR(args)
 	case 's':
-		s.savedY, s.savedX = s.curY, s.curX
+		s.saveCursor()
 	case 'u':
-		s.curY, s.curX = s.savedY, s.savedX
+		s.restoreCursor()
 	case 'h':
 		modes := privateModes(args)
 		if modes[1049] || modes[47] || modes[1047] {
@@ -276,7 +305,7 @@ func (s *Screen) dispatchCSI(final byte) {
 			slog.Info("vt: alt-screen entered")
 		}
 		if modes[1048] {
-			s.savedY, s.savedX = s.curY, s.curX
+			s.saveCursor()
 		}
 		if modes[2026] {
 			// Synchronized output mode: hold flushes for up to 1s while
@@ -296,11 +325,31 @@ func (s *Screen) dispatchCSI(final byte) {
 		if modes[7] {
 			s.AutoWrap = true
 		}
+		if modes[5] {
+			s.ReverseVideo = true
+		}
 		if modes[25] {
 			s.CursorHidden = false
 		}
 		if modes[12] {
 			s.CursorBlink = true
+		}
+		// Mouse tracking modes (mutually exclusive — last one wins).
+		switch {
+		case modes[1003]:
+			s.MouseMode = 1003
+		case modes[1002]:
+			s.MouseMode = 1002
+		case modes[1000]:
+			s.MouseMode = 1000
+		}
+		// SGR mouse encoding (mode 1006).
+		if modes[1006] {
+			s.MouseSGR = true
+		}
+		// Focus reporting (mode 1004).
+		if modes[1004] {
+			s.FocusReporting = true
 		}
 	case 'l':
 		modes := privateModes(args)
@@ -310,8 +359,7 @@ func (s *Screen) dispatchCSI(final byte) {
 			slog.Info("vt: alt-screen exited")
 		}
 		if modes[1048] {
-			s.curY, s.curX = s.savedY, s.savedX
-			s.pendingWrap = false
+			s.restoreCursor()
 		}
 		if modes[2026] {
 			s.ReleaseFlush()
@@ -329,11 +377,32 @@ func (s *Screen) dispatchCSI(final byte) {
 		if modes[7] {
 			s.AutoWrap = false
 		}
+		if modes[5] {
+			s.ReverseVideo = false
+		}
 		if modes[25] {
 			s.CursorHidden = true
 		}
 		if modes[12] {
 			s.CursorBlink = false
+		}
+		// Mouse tracking modes — disable if the current mode is being reset.
+		if modes[1003] && s.MouseMode == 1003 {
+			s.MouseMode = 0
+		}
+		if modes[1002] && s.MouseMode == 1002 {
+			s.MouseMode = 0
+		}
+		if modes[1000] && s.MouseMode == 1000 {
+			s.MouseMode = 0
+		}
+		// SGR mouse encoding (mode 1006).
+		if modes[1006] {
+			s.MouseSGR = false
+		}
+		// Focus reporting (mode 1004).
+		if modes[1004] {
+			s.FocusReporting = false
 		}
 	case 't': // Window manipulation
 		n := csiArg(args, 0)
@@ -341,8 +410,20 @@ func (s *Screen) dispatchCSI(final byte) {
 			s.Response = fmt.Appendf(s.Response, "\x1b[8;%d;%dt", s.Height, s.Width)
 		}
 	case 'n': // Device Status Report
-		if csiArg(args, 0) == 6 {
-			s.Response = fmt.Appendf(s.Response, "\x1b[%d;%dR", s.curY+1, s.curX+1)
+		if args != "" && args[0] == '?' {
+			// DEC private DSR (CSI ? Ps n)
+			n := csiArg(args, 0)
+			if n == 6 { // DECXCPR — Extended Cursor Position Report
+				s.Response = fmt.Appendf(s.Response, "\x1b[?%d;%dR", s.curY+1, s.curX+1)
+			}
+		} else {
+			n := csiArg(args, 0)
+			switch n {
+			case 5: // DSR — Operating Status Report: "OK"
+				s.Response = append(s.Response, "\x1b[0n"...)
+			case 6: // DSR — Cursor Position Report
+				s.Response = fmt.Appendf(s.Response, "\x1b[%d;%dR", s.curY+1, s.curX+1)
+			}
 		}
 	default:
 		if final != 0 {
@@ -386,13 +467,14 @@ func (s *Screen) deleteChars(n int) {
 		return
 	}
 	row := s.Cells[s.curY]
+	if n > s.Width-s.curX {
+		n = s.Width - s.curX
+	}
 	for x := s.curX; x < s.Width-n; x++ {
 		row[x] = row[x+n]
 	}
 	for x := s.Width - n; x < s.Width; x++ {
-		if x >= 0 {
-			row[x] = Cell{Ch: ' '}
-		}
+		row[x] = Cell{Ch: ' '}
 	}
 }
 
@@ -400,6 +482,10 @@ func (s *Screen) deleteChars(n int) {
 func (s *Screen) insertLines(n int) {
 	if s.curY < s.scrollTop || s.curY > s.scrollBottom {
 		return
+	}
+	// Clamp to available lines below cursor within scroll region.
+	if avail := s.scrollBottom - s.curY + 1; n > avail {
+		n = avail
 	}
 	for range n {
 		// Shift rows down within the scroll region.
@@ -414,6 +500,10 @@ func (s *Screen) insertLines(n int) {
 func (s *Screen) deleteLines(n int) {
 	if s.curY < s.scrollTop || s.curY > s.scrollBottom {
 		return
+	}
+	// Clamp to available lines below cursor within scroll region.
+	if avail := s.scrollBottom - s.curY + 1; n > avail {
+		n = avail
 	}
 	for range n {
 		for y := s.curY; y < s.scrollBottom; y++ {
@@ -458,21 +548,36 @@ func (s *Screen) scrollDownOnce() {
 
 // shiftLeft shifts all content in the scroll region left by n columns.
 func (s *Screen) shiftLeft(n int) {
+	if n >= s.Width {
+		// Shifting by more than the width clears the entire region.
+		for y := s.scrollTop; y <= s.scrollBottom; y++ {
+			for x := range s.Width {
+				s.Cells[y][x] = Cell{Ch: ' '}
+			}
+		}
+		return
+	}
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
 		row := s.Cells[y]
 		for x := range s.Width - n {
 			row[x] = row[x+n]
 		}
 		for x := s.Width - n; x < s.Width; x++ {
-			if x >= 0 {
-				row[x] = Cell{Ch: ' '}
-			}
+			row[x] = Cell{Ch: ' '}
 		}
 	}
 }
 
 // shiftRight shifts all content in the scroll region right by n columns.
 func (s *Screen) shiftRight(n int) {
+	if n >= s.Width {
+		for y := s.scrollTop; y <= s.scrollBottom; y++ {
+			for x := range s.Width {
+				s.Cells[y][x] = Cell{Ch: ' '}
+			}
+		}
+		return
+	}
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
 		row := s.Cells[y]
 		for x := s.Width - 1; x >= n; x-- {
@@ -490,11 +595,19 @@ func (s *Screen) softReset() {
 	s.scrollTop = 0
 	s.scrollBottom = s.Height - 1
 	s.savedY, s.savedX = 0, 0
+	s.cursorStateSaved = false
 	s.pendingWrap = false
 	s.CursorHidden = false
 	s.CursorStyle = 0
 	s.BracketedPaste = false
 	s.AppCursorKeys = false
+	s.AppKeypad = false
 	s.OriginMode = false
 	s.AutoWrap = true
+	s.ReverseVideo = false
+	s.MouseMode = 0
+	s.MouseSGR = false
+	s.FocusReporting = false
+	s.tabStops = nil
+	s.resetCharsets()
 }

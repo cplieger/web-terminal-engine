@@ -29,6 +29,7 @@ export interface WireRun {
  * only re-paints those rows.
  */
 export interface ScreenMessage {
+  /** Discriminator — always `"screen"`. */
   type: "screen";
   /** All rows of the visible screen (length = screen height). */
   rows: WireRun[][];
@@ -53,6 +54,7 @@ export interface ScreenMessage {
  * renderer appends these to the scrollback buffer.
  */
 export interface ScrollMessage {
+  /** Discriminator — always `"scroll"`. */
   type: "scroll";
   /** Lines that scrolled out (in order, oldest to newest). */
   lines: WireRun[][];
@@ -66,6 +68,7 @@ export interface ScrollMessage {
  * replay only what was missed.
  */
 export interface ResumeAckMessage {
+  /** Discriminator — always `"resumeAck"`. */
   type: "resumeAck";
   /** Bytes the server received from this session before the resume. */
   received: number;
@@ -81,6 +84,7 @@ export interface ResumeAckMessage {
  * encoding behavior (keyboard, mouse, paste) based on these.
  */
 export interface ModesMessage {
+  /** Discriminator — always `"modes"`. */
   type: "modes";
   /** DEC 2004: paste content is wrapped with ESC[200~ ... ESC[201~. */
   bracketedPaste: boolean;
@@ -105,6 +109,7 @@ export interface ModesMessage {
  * this into `document.title`.
  */
 export interface TitleMessage {
+  /** Discriminator — always `"title"`. */
   type: "title";
   /** New window title text. */
   title: string;

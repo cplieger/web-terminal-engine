@@ -12,7 +12,7 @@ A standalone library that bridges a PTY to a browser WebSocket. The Go packages 
 
 ## Install
 
-Go: `go get github.com/cplieger/vterm@latest`  —  TS: `npx jsr add @cplieger/vterm` or `npm i @cplieger/vterm`
+Go: `go get github.com/cplieger/vterm@latest` — TS: `npx jsr add @cplieger/vterm` or `npm i @cplieger/vterm`
 
 ## Usage
 
@@ -38,7 +38,10 @@ h.RegisterRoutes(mux)
 ```typescript
 import { render, keyboard, mouse, decodeWireBinary } from "@cplieger/vterm";
 
-render.init({ output: document.getElementById("term-output")!, termWrap: document.getElementById("term")! });
+render.init({
+  output: document.getElementById("term-output")!,
+  termWrap: document.getElementById("term")!,
+});
 // On WebSocket binary message:
 const msg = decodeWireBinary(event.data);
 if (msg?.type === "screen") render.handleScreen(msg);
@@ -69,12 +72,12 @@ GPL-3.0 — see [LICENSE](LICENSE).
 
 The following VT/DEC features are **intentionally not implemented**. Input bytes for these sequences are consumed (not echoed or half-rendered) but produce no effect. This is a deliberate design choice — not a TODO.
 
-| Category | Sequences | Rationale |
-|----------|-----------|-----------|
-| Selective erase | DECSCA, DECSED, DECSEL | Requires per-cell "protected" attribute; no modern CLI tool uses this legacy VT feature. |
-| Double-width/height lines | DECDWL, DECDHL | Requires line-level rendering attribute + renderer changes; purely legacy VT220 feature unused by modern apps. |
-| DCS device control | DECRQSS, XTGETTCAP, tmux passthrough | Requires full DCS parser state + dispatch infrastructure (~150+ LOC). Apps that probe DECRQSS fall back gracefully when no response arrives. |
-| Graphics protocols | Sixel, ReGIS, Kitty image protocol, iTerm inline images | Massive feature (1000+ LOC each); specialized rendering pipeline incompatible with the DOM-based renderer. |
-| NRCS national charsets | All national replacement character sets (only DEC Special Graphics + ASCII are supported) | Legacy internationalization mechanism superseded by UTF-8. No modern app emits these. |
-| Exotic SGR attributes | Fonts 10-20, framed/encircled (51/52/54), superscript/subscript (73-75), ideogram (60-65) | No modern terminal or app uses these attributes; they have no visual representation in standard monospace fonts. |
-| ZWJ emoji grapheme clustering | Zero-width joiner sequences are not clustered into single cells | Requires ICU-level grapheme segmentation (~500+ LOC or a runtime dependency). Individual emoji codepoints render correctly; only multi-codepoint ZWJ sequences (family emoji, skin-tone modifiers) may misalign. |
+| Category                      | Sequences                                                                                 | Rationale                                                                                                                                                                                                        |
+| ----------------------------- | ----------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Selective erase               | DECSCA, DECSED, DECSEL                                                                    | Requires per-cell "protected" attribute; no modern CLI tool uses this legacy VT feature.                                                                                                                         |
+| Double-width/height lines     | DECDWL, DECDHL                                                                            | Requires line-level rendering attribute + renderer changes; purely legacy VT220 feature unused by modern apps.                                                                                                   |
+| DCS device control            | DECRQSS, XTGETTCAP, tmux passthrough                                                      | Requires full DCS parser state + dispatch infrastructure (~150+ LOC). Apps that probe DECRQSS fall back gracefully when no response arrives.                                                                     |
+| Graphics protocols            | Sixel, ReGIS, Kitty image protocol, iTerm inline images                                   | Massive feature (1000+ LOC each); specialized rendering pipeline incompatible with the DOM-based renderer.                                                                                                       |
+| NRCS national charsets        | All national replacement character sets (only DEC Special Graphics + ASCII are supported) | Legacy internationalization mechanism superseded by UTF-8. No modern app emits these.                                                                                                                            |
+| Exotic SGR attributes         | Fonts 10-20, framed/encircled (51/52/54), superscript/subscript (73-75), ideogram (60-65) | No modern terminal or app uses these attributes; they have no visual representation in standard monospace fonts.                                                                                                 |
+| ZWJ emoji grapheme clustering | Zero-width joiner sequences are not clustered into single cells                           | Requires ICU-level grapheme segmentation (~500+ LOC or a runtime dependency). Individual emoji codepoints render correctly; only multi-codepoint ZWJ sequences (family emoji, skin-tone modifiers) may misalign. |

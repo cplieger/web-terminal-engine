@@ -37,16 +37,35 @@ ws.addEventListener("message", (ev) => {
   const msg = decodeWireBinary(ev.data);
   if (!msg) return;
   switch (msg.type) {
-    case "screen": render.handleScreen(msg); break;
-    case "scroll": render.handleScroll(msg); break;
-    case "modes":  modes.setModes(msg.bracketedPaste, msg.applicationCursor, msg.mouseSGR, msg.focusReporting, msg.mouseMode, msg.applicationKeypad, msg.reverseVideo); break;
-    case "title":  document.title = msg.title; break;
+    case "screen":
+      render.handleScreen(msg);
+      break;
+    case "scroll":
+      render.handleScroll(msg);
+      break;
+    case "modes":
+      modes.setModes(
+        msg.bracketedPaste,
+        msg.applicationCursor,
+        msg.mouseSGR,
+        msg.focusReporting,
+        msg.mouseMode,
+        msg.applicationKeypad,
+        msg.reverseVideo,
+      );
+      break;
+    case "title":
+      document.title = msg.title;
+      break;
   }
 });
 
 document.addEventListener("keydown", (ev) => {
   const r = keyboard.mapKeyboardEvent(ev);
-  if (r.kind === "send") { ws.send(r.bytes); ev.preventDefault(); }
+  if (r.kind === "send") {
+    ws.send(r.bytes);
+    ev.preventDefault();
+  }
   if (r.kind === "scroll-up" || r.kind === "scroll-down") ev.preventDefault();
 });
 ```

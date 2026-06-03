@@ -51,15 +51,15 @@ if (msg?.type === "screen") render.handleScreen(msg);
 - **`vt`** — VT100/VT500 screen buffer: `New(rows, cols)`, `Write([]byte)`, `Resize(rows, cols)`, `RenderRowWire(y)`, `DrainScrollback()`, `CursorPos()`, `HoldFlush()`, `ReleaseFlush()`, `IsFlushHeld()`, `RenderViewport()`, `RowString(y)`. Public fields: `Cells`, `Width`, `Height`, `Title`, `MouseMode`, `InAltScreen`, cursor/mode state.
 - **`terminal`** — WebSocket session handler: `NewHandler(command, ...Option)`, `RegisterRoutes(mux)`, `ServeHTTP(w, r)`, `Shutdown()`. Options: `WithWorkDir`, `WithLogger`, `WithEnv`, `WithScrollbackCapacity`, `WithAcceptOptions`, `WithOnProcessExit`. Handles PTY lifecycle, binary wire protocol, reconnect with scrollback replay, adaptive ping.
 
-### TypeScript (`web/`)
+### TypeScript (`web/` — published as `@cplieger/vterm` on NPM and JSR)
 
-- **`render`** — DOM renderer: `init()`, `handleScreen()`, `handleScroll()`, `updateFontMetrics()`, `computeSize()`, `getCursorPx()`, `setPredictedCursor()`, `resetScreen()`, `resetScrollback()`, `getScrollbackRowCount()`, `updateReverseVideo()`.
-- **`keyboard`** — Key event mapper: `mapKeyboardEvent()`, `bracketTextForPaste()`, `prepareTextForTerminal()`.
-- **`mouse`** — Mouse/focus encoder: `init()`, `encodeSGR()`.
-- **`scroll`** — Scroll state tracker: `init()`, `scrollToBottom()`, `suppressScroll()`, `isUserScrolledUp()`, `isInUserScroll()`.
-- **`modes`** — DEC private mode state: `setModes()`, `isBracketedPaste()`, `isApplicationCursor()`, `getMouseMode()`, `isMouseSGR()`, `isFocusReporting()`, `isApplicationKeypad()`, `isReverseVideo()`.
-- **`wire-binary`** — Binary frame decoder: `decodeWireBinary()`.
-- **`types`** — Shared TypeScript interfaces: `WireRun`, `ScreenMessage`, `ScrollMessage`, `ResumeAckMessage`, `ModesMessage`.
+- **`render`** — DOM renderer driven by `ScreenMessage` / `ScrollMessage` frames: `init`, `handleScreen`, `handleScroll`, `updateFontMetrics`, `computeSize`, `getCursorPx`, `setPredictedCursor`, `resetScreen`, `resetScrollback`, `getScrollbackRowCount`, `updateReverseVideo`.
+- **`keyboard`** — Translates `KeyboardEvent` to terminal byte sequences: `mapKeyboardEvent`, `bracketTextForPaste`, `prepareTextForTerminal`. Honors `applicationCursor`, `applicationKeypad`, `bracketedPaste`.
+- **`mouse`** — SGR 1006 mouse + focus reporting encoder: `init`, `encodeSGR`, `MouseInputHandler`.
+- **`scroll`** — Auto-follow tracker for the scroll container: `init`, `scrollToBottom`, `suppressScroll`, `isUserScrolledUp`, `isInUserScroll`.
+- **`modes`** — DEC private mode state (synced from server's `ModesMessage`): `setModes`, `isBracketedPaste`, `isApplicationCursor`, `getMouseMode`, `isMouseSGR`, `isFocusReporting`, `isApplicationKeypad`, `isReverseVideo`.
+- **`decodeWireBinary(buf)`** — Top-level decoder for binary WebSocket frames; returns a `ServerMessage` or `null` for invalid/truncated frames.
+- **Wire types** — `WireRun`, `ScreenMessage`, `ScrollMessage`, `ModesMessage`, `TitleMessage`, `ResumeAckMessage`, `ServerMessage`, `ControlMessage` re-exported from the package root.
 
 ## License
 

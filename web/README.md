@@ -5,28 +5,66 @@
 [![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](../LICENSE)
 
-> The browser half of the vterm cross-language terminal library: DOM renderer, keyboard mapper, mouse encoder, and binary wire decoder.
+> Browser virtual terminal renderer for the [`cplieger/vterm`](https://github.com/cplieger/vterm) Go module: DOM-based VT500 screen with OSC 8 hyperlink support, scrollback, keyboard mapper, mouse encoder, and binary wire decoder. Zero runtime dependencies.
 
-Provides a DOM-based terminal renderer with scrollback, an xterm.js-compatible keyboard event mapper, SGR 1006 mouse encoding, and a binary wire protocol decoder matching the Go server's format.
+The browser half of the vterm cross-language terminal library. Pairs with the Go server-side packages (`vt`, `terminal`) over a binary WebSocket protocol; see the [project README](https://github.com/cplieger/vterm#readme) for the full story.
 
 ## Install
 
-`npx jsr add @cplieger/vterm` or `npm i @cplieger/vterm`
+```sh
+npx jsr add @cplieger/vterm   # JSR (preferred)
+npm i @cplieger/vterm          # NPM
+```
 
 ## Usage
 
 ```typescript
 import { render, keyboard, mouse, scroll, modes, decodeWireBinary } from "@cplieger/vterm";
 
-render.init({ output: outputEl, termWrap: wrapEl });
-scroll.init({ scrollEl: wrapEl });
+const wrap = document.getElementById("term") as HTMLElement;
+const out = document.getElementById("term-output") as HTMLElement;
 
-// On WebSocket binary message:
-const msg = decodeWireBinary(event.data);
-if (msg?.type === "screen") render.handleScreen(msg);
-if (msg?.type === "scroll") render.handleScroll(msg);
-if (msg?.type === "modes") modes.setModes(msg.bracketedPaste, msg.applicationCursor);
+render.init({ output: out, termWrap: wrap });
+scroll.init({ scrollEl: wrap });
+mouse.init({
+  send: (data) => ws.send(data),
+  cellSize: () => ({ width: cellW, height: cellH }),
+  termElement: () => wrap,
+});
+
+ws.binaryType = "arraybuffer";
+ws.addEventListener("message", (ev) => {
+  const msg = decodeWireBinary(ev.data);
+  if (!msg) return;
+  switch (msg.type) {
+    case "screen": render.handleScreen(msg); break;
+    case "scroll": render.handleScroll(msg); break;
+    case "modes":  modes.setModes(msg.bracketedPaste, msg.applicationCursor, msg.mouseSGR, msg.focusReporting, msg.mouseMode, msg.applicationKeypad, msg.reverseVideo); break;
+    case "title":  document.title = msg.title; break;
+  }
+});
+
+document.addEventListener("keydown", (ev) => {
+  const r = keyboard.mapKeyboardEvent(ev);
+  if (r.kind === "send") { ws.send(r.bytes); ev.preventDefault(); }
+  if (r.kind === "scroll-up" || r.kind === "scroll-down") ev.preventDefault();
+});
 ```
+
+## API
+
+- **`render`** — DOM renderer driven by `ScreenMessage` / `ScrollMessage` frames. `init`, `handleScreen`, `handleScroll`, `updateFontMetrics`, `computeSize`, `getCursorPx`, `setPredictedCursor`, `resetScreen`, `resetScrollback`, `getScrollbackRowCount`, `updateReverseVideo`.
+- **`keyboard`** — Translates `KeyboardEvent` to terminal byte sequences. `mapKeyboardEvent`, `bracketTextForPaste`, `prepareTextForTerminal`. Honors `applicationCursor`, `applicationKeypad`, `bracketedPaste`.
+- **`mouse`** — SGR 1006 mouse + focus reporting encoder. `init`, `encodeSGR`, `MouseInputHandler`. Auto-gates on `mouseMode > 0`.
+- **`scroll`** — Auto-follow tracker for the scroll container. `init`, `scrollToBottom`, `suppressScroll`, `isUserScrolledUp`, `isInUserScroll`.
+- **`modes`** — DEC private mode state (synced from server's `ModesMessage`). `setModes`, `isBracketedPaste`, `isApplicationCursor`, `getMouseMode`, `isMouseSGR`, `isFocusReporting`, `isApplicationKeypad`, `isReverseVideo`.
+- **`decodeWireBinary(buf)`** — Top-level decoder for the binary WebSocket frames. Returns a `ServerMessage` or `null` for invalid/truncated frames.
+
+Wire types (`WireRun`, `ScreenMessage`, `ScrollMessage`, `ModesMessage`, `TitleMessage`, `ResumeAckMessage`, `ServerMessage`, `ControlMessage`) are re-exported from the package root and match the Go server's wire format byte-for-byte.
+
+## Browser-only
+
+This package depends on `document`, `HTMLElement`, `MessageChannel`, and other DOM APIs, so it only runs in browser-like environments. The companion Go server runs anywhere Go does.
 
 ## License
 

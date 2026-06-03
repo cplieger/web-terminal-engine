@@ -42,7 +42,16 @@ function buttonCode(
   return code;
 }
 
-/** Encode an SGR mouse sequence. */
+/**
+ * Encode a mouse event into an SGR 1006 escape sequence ready to send to the
+ * terminal as input. The returned string starts with ESC[< and ends with `M`
+ * for press/move or `m` for release.
+ *
+ * @param code  Button code returned from `buttonCode` (button + modifier bits).
+ * @param col   1-based column.
+ * @param row   1-based row.
+ * @param release `true` for release events (terminator `m`), `false` otherwise.
+ */
 export function encodeSGR(code: number, col: number, row: number, release: boolean): string {
   const final = release ? "m" : "M";
   return `${ESC}[<${code};${col};${row}${final}`;
@@ -58,15 +67,28 @@ function domButtonToXterm(button: number): number {
   return 0; // fallback
 }
 
+/**
+ * Adapter the consumer wires into `init` so the mouse module can: send encoded
+ * input bytes to the server, query current cell pixel size for hit-testing,
+ * and access the terminal DOM element to attach listeners to.
+ */
 export interface MouseInputHandler {
+  /** Sends raw input bytes (or escape sequences) to the server. */
   send: (data: string) => void;
+  /** Returns the current cell pixel size for hit-testing pointer coordinates. */
   cellSize: () => { width: number; height: number };
+  /** Returns the terminal DOM element to attach mouse listeners to. */
   termElement: () => HTMLElement;
 }
 
 let handler: MouseInputHandler | null = null;
 let lastButton = -1;
 
+/**
+ * Initialize the mouse module by attaching pointer/wheel/focus listeners to
+ * the terminal element. Listeners gate on the active mouse mode + SGR 1006
+ * encoding; they are no-ops when the server hasn't enabled mouse tracking.
+ */
 export function init(h: MouseInputHandler): void {
   handler = h;
   const el = h.termElement();

@@ -83,6 +83,19 @@ function readRowRuns(c: Cursor): WireRun[] {
   return runs;
 }
 
+/**
+ * Decode a binary frame from the server's WebSocket into a `ServerMessage`.
+ * Returns `null` for frames smaller than the minimum header (9 bytes) or for
+ * truncated/invalid frames; the caller should drop such frames silently.
+ *
+ * Frame format mirrors the Go `vt` package's wire encoding:
+ *   - 1 byte type tag
+ *   - 8 bytes inputAck (u64 little-endian)
+ *   - type-specific body (rows of styled runs for screen/scroll, etc.)
+ *
+ * @param buf  Raw binary frame received over WebSocket.
+ * @returns    Decoded message, or `null` if the frame couldn't be parsed.
+ */
 export function decodeWireBinary(buf: ArrayBuffer): ServerMessage | null {
   if (buf.byteLength < 9) {
     return null;

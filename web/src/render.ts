@@ -127,6 +127,15 @@ let defaultSpacing = 0;
 let firstScreen = true;
 let onCursorMove: (() => void) | null = null;
 
+/**
+ * Initialize the renderer by attaching it to a pair of DOM elements: the
+ * scrollable terminal wrapper and the inner output container that receives
+ * row spans. Must be called once before any handleScreen/handleScroll call.
+ *
+ * @param opts.output      Inner element that holds row <span> children.
+ * @param opts.termWrap    Outer scroll container.
+ * @param opts.onCursorMove Optional callback invoked when the cursor moves.
+ */
 export function init(opts: {
   output: HTMLElement;
   termWrap: HTMLElement;
@@ -148,10 +157,18 @@ export function init(opts: {
   startCursorBlink();
 }
 
+/**
+ * Reset internal screen state so the next `handleScreen` call performs a full
+ * repaint instead of a partial diff. Use after disconnect/reconnect.
+ */
 export function resetScreen(): void {
   firstScreen = true;
 }
 
+/**
+ * Clear the scrollback DOM and reset the scrollback row counter to zero.
+ * Use when the user explicitly clears history or on a fresh session.
+ */
 export function resetScrollback(): void {
   const historyCount = allRows.length - liveCount;
   for (let i = 0; i < historyCount; i++) {
@@ -437,6 +454,11 @@ let pendingCursorBlink = true;
 let pendingBell = false;
 let pendingFrame: number | undefined;
 
+/**
+ * Apply a `ScreenMessage` from the server: update only the rows in
+ * `msg.changed`, reposition the cursor, and propagate cursor style/blink/bell.
+ * Coalesces calls within the same animation frame.
+ */
 export function handleScreen(msg: ScreenMessage): void {
   // Merge row data: if a previous frame's rows haven't been flushed yet,
   // overlay the new frame's changed rows onto the existing pending data
@@ -668,6 +690,10 @@ function rowAtViewportTop(): HTMLDivElement | null {
 // These get inserted as frozen history above the live zone.
 const pendingScrollback: WireRun[][] = [];
 
+/**
+ * Apply a `ScrollMessage` from the server: append the lines to the scrollback
+ * region as frozen history above the live screen.
+ */
 export function handleScroll(msg: ScrollMessage): void {
   if (msg.lines.length === 0) {
     return;
@@ -713,6 +739,11 @@ function setCursorBlink(enabled: boolean): void {
 }
 
 // --- Font metrics & sizing ---
+/**
+ * Re-measure the cell width/height from the rendered DOM. Call after any font
+ * or zoom change so subsequent `computeSize()` and `getCursorPx()` use fresh
+ * metrics.
+ */
 export function updateFontMetrics(): void {
   const cs = window.getComputedStyle(termWrap);
   const fontSize = cs.fontSize;
@@ -732,6 +763,11 @@ export function updateFontMetrics(): void {
 const MIN_COLS = 20;
 const MIN_ROWS = 5;
 
+/**
+ * Compute the integer (cols, rows) the terminal element can fit at current
+ * font metrics, clamped to a minimum of 20×5. Used to decide what dimensions
+ * to send to the server in a `resize` control message.
+ */
 export function computeSize(): { cols: number; rows: number } {
   const cs = window.getComputedStyle(termWrap);
   const padX = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
@@ -743,6 +779,11 @@ export function computeSize(): { cols: number; rows: number } {
   return { cols, rows };
 }
 
+/**
+ * Returns the cursor's pixel position relative to the output element, plus
+ * the current cell height, for positioning custom overlays (predicted-cursor,
+ * IME composition, etc.).
+ */
 export function getCursorPx(): { left: number; top: number; cellH: number } {
   const cs = window.getComputedStyle(termWrap);
   const padL = parseFloat(cs.paddingLeft);
@@ -758,6 +799,11 @@ export function getCursorPx(): { left: number; top: number; cellH: number } {
   };
 }
 
+/**
+ * Show or hide a "predicted" cursor overlay at (row, col). Useful for
+ * client-side echo of typed characters before the server acknowledges them,
+ * giving an instant-feedback UX over high-latency connections.
+ */
 export function setPredictedCursor(row: number, col: number, active: boolean): void {
   const el = predCursorEl ?? (predCursorEl = document.getElementById("pred-cursor"));
   if (!el) {

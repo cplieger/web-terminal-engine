@@ -1,5 +1,5 @@
 // @vitest-environment happy-dom
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import * as render from "./render.js";
 import type { ScreenMessage, WireRun } from "./types.js";
@@ -22,12 +22,12 @@ describe("hyperlink safety fuzz: no javascript:/data: hrefs", () => {
         if (allowed) {
           // If allowed, it must start with http:// or https://
           const lower = href.toLowerCase();
-          if (!lower.startsWith("http://") && !lower.startsWith("https://")) return false;
+          if (!lower.startsWith("http://") && !lower.startsWith("https://")) {return false;}
         } else {
           // Dangerous schemes must never pass
           const lower = href.toLowerCase();
-          if (lower.startsWith("javascript:")) return true; // correctly rejected
-          if (lower.startsWith("data:")) return true; // correctly rejected
+          if (lower.startsWith("javascript:")) {return true;} // correctly rejected
+          if (lower.startsWith("data:")) {return true;} // correctly rejected
         }
         return true;
       }),

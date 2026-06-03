@@ -1,0 +1,37 @@
+# Version-bump policy. Stable (1.x+): standard semver.
+# feat -> minor; breaking -> major.
+# Fresh/untagged repos start at v1.0.0 (matches "0.x is the exception" policy).
+[bump]
+features_always_bump_minor = true
+breaking_always_bump_major = true
+initial_tag = "v1.0.0"
+no_increment_regex = "^chore|^ci|^docs|^style|^test"
+
+[changelog]
+header = ""
+body = """
+{% for group, commits in commits | group_by(attribute="group") %}
+### {{ group | upper_first }}
+{% for commit in commits %}
+- {{ commit.message | upper_first }}\
+{% endfor %}
+{% endfor %}
+"""
+trim = true
+
+[git]
+conventional_commits = true
+filter_unconventional = false
+split_commits = false
+protect_breaking_commits = false
+tag_pattern = "v[0-9].*"
+
+commit_parsers = [
+  { message = "^release:", skip = true },
+  { message = "^feat", group = "Added" },
+  { message = "^fix", group = "Fixed" },
+  { message = "^sec", group = "Security" },
+  { message = "^chore\\(deps\\)", group = "Dependencies" },
+  { message = "^chore|^ci|^docs|^style|^refactor|^perf|^test", group = "Changed" },
+  { message = ".*", group = "Changed" },
+]

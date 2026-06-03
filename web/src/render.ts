@@ -362,9 +362,10 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
     }
     flush();
     // Wrap spans from this run in an <a> if it has a hyperlink URL.
-    if (run.u) {
+    const href = run.u && /^https?:\/\//i.test(run.u) ? run.u : null;
+    if (href) {
       const a = document.createElement("a");
-      a.href = run.u;
+      a.href = href;
       a.target = "_blank";
       a.rel = "noopener";
       a.className = "term-link";

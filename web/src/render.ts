@@ -183,6 +183,10 @@ function colorHex(c: number | undefined): string | null {
 // --- URL detection (xterm.js addon-web-links pattern) ---
 const URL_RE = /(https?|HTTPS?):\/\/[^\s"'!*(){}|\\^<>`]*[^\s"':,.!?{}|\\^~[\]`()<>]/g;
 
+function safeHref(url: string): string | null {
+  return /^https?:\/\//i.test(url) ? url : null;
+}
+
 function linkifySpans(
   spans: (HTMLSpanElement | HTMLAnchorElement)[],
 ): (HTMLSpanElement | HTMLAnchorElement)[] {
@@ -201,7 +205,7 @@ function linkifySpans(
         out.push(pre);
       }
       const a = document.createElement("a");
-      a.href = match[0];
+      a.href = safeHref(match[0]) ?? "#";
       a.target = "_blank";
       a.rel = "noopener noreferrer";
       a.className = "term-link";
@@ -362,9 +366,10 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
     }
     flush();
     // Wrap spans from this run in an <a> if it has a hyperlink URL.
-    if (run.u) {
+    const href = run.u ? safeHref(run.u) : null;
+    if (href) {
       const a = document.createElement("a");
-      a.href = run.u;
+      a.href = href;
       a.target = "_blank";
       a.rel = "noopener";
       a.className = "term-link";

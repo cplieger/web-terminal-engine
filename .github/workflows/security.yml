@@ -1,0 +1,20 @@
+name: Security
+
+on:
+  pull_request:
+    paths:
+      - go.mod
+      - go.sum
+      - package.json
+      - package-lock.json
+      - Dockerfile
+      - .github/workflows/security.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  scan:
+    uses: cplieger/ci/.github/workflows/security-scan.yaml@2c6289a7dee062be6411c1cd0d3ab4f784d75f1e # v1

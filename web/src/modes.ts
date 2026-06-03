@@ -23,6 +23,11 @@ let mouseSGR = false;
 let focusReporting = false;
 let reverseVideo = false;
 
+/**
+ * Update the cached mode state. Called by the consumer whenever the server
+ * sends a `ModesMessage`. Pass-through arguments are optional so older
+ * server builds that don't include all fields don't reset them to defaults.
+ */
 export function setModes(
   bracketed: boolean,
   appCursor: boolean,
@@ -51,30 +56,40 @@ export function setModes(
   }
 }
 
+/** True when the server has DEC 2004 (bracketed paste) enabled. */
 export function isBracketedPaste(): boolean {
   return bracketedPaste;
 }
 
+/** True when the server has DECCKM (application cursor keys) enabled. */
 export function isApplicationCursor(): boolean {
   return applicationCursor;
 }
 
+/**
+ * Active mouse tracking mode (xterm DECSET): 0 = off, 1000 = normal,
+ * 1002 = button-event, 1003 = any-event.
+ */
 export function getMouseMode(): number {
   return mouseMode;
 }
 
+/** True when the server has DEC 1006 (SGR mouse encoding) enabled. */
 export function isMouseSGR(): boolean {
   return mouseSGR;
 }
 
+/** True when the server has DEC 1004 (focus event reporting) enabled. */
 export function isFocusReporting(): boolean {
   return focusReporting;
 }
 
+/** True when the server has DECKPAM (application keypad) enabled. */
 export function isApplicationKeypad(): boolean {
   return applicationKeypad;
 }
 
+/** True when the server has DEC 5 (reverse video / DECSCNM) enabled. */
 export function isReverseVideo(): boolean {
   return reverseVideo;
 }

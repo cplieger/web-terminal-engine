@@ -19,6 +19,16 @@ function isAtBottom(): boolean {
   return scrollEl.scrollTop + scrollEl.clientHeight >= scrollEl.scrollHeight - BOTTOM_TOLERANCE_PX;
 }
 
+/**
+ * Initialize the scroll tracker by attaching listeners to the scroll
+ * container. Once initialized, the module observes wheel/touch interaction to
+ * decide whether the user has manually scrolled up (auto-follow disengaged)
+ * or is at the bottom (auto-follow active).
+ *
+ * @param opts.scrollEl            Element whose scroll position is observed.
+ * @param opts.onUserScrollChange  Optional callback fired when auto-follow
+ *                                 toggles (true = scrolled up).
+ */
 export function init(opts: {
   scrollEl: HTMLElement;
   onUserScrollChange?: (scrolledUp: boolean) => void;
@@ -78,15 +88,25 @@ export function scrollToBottom(): void {
   scrollEl.scrollTop = scrollEl.scrollHeight;
 }
 
-/** Suppress user-scroll detection for the next `ms` milliseconds. */
+/**
+ * Suppress user-scroll detection for the next `ms` milliseconds. Useful when
+ * the renderer programmatically adjusts scroll position and doesn't want that
+ * to count as the user scrolling away from the bottom.
+ */
 export function suppressScroll(ms: number): void {
   suppressUntil = Date.now() + ms;
 }
 
+/** Whether the user has scrolled away from the bottom of the buffer. */
 export function isUserScrolledUp(): boolean {
   return userScrolledUp;
 }
 
+/**
+ * Whether the user is actively interacting with the scrollbar/touch right
+ * now (debounced). The renderer uses this to delay screen updates that would
+ * otherwise jump the viewport mid-scroll.
+ */
 export function isInUserScroll(): boolean {
   return Date.now() < userScrollingUntil;
 }

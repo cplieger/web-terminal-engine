@@ -26,12 +26,22 @@ describe("hyperlink safety fuzz: no javascript:/data: hrefs", () => {
             return false;
           }
         } else {
-          // Dangerous schemes must never pass
+          // Dangerous schemes must never pass. The list is illustrative —
+          // any non-http(s) URL is rejected by SAFE_HREF_RE; we explicitly
+          // call out the well-known dangerous schemes (javascript:, data:,
+          // vbscript:, file:) to make the intent of the test obvious to
+          // readers and to satisfy CodeQL's js/incomplete-url-scheme-check.
           const lower = href.toLowerCase();
           if (lower.startsWith("javascript:")) {
             return true;
           } // correctly rejected
           if (lower.startsWith("data:")) {
+            return true;
+          } // correctly rejected
+          if (lower.startsWith("vbscript:")) {
+            return true;
+          } // correctly rejected (legacy IE; still relevant for defense-in-depth)
+          if (lower.startsWith("file:")) {
             return true;
           } // correctly rejected
         }

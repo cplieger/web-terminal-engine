@@ -34,6 +34,9 @@
   },
   "files": [
     "src/",
+    "!src/**/*.test.ts",
+    "!src/**/__test-helpers__",
+    "!src/**/fc-strict-setup.ts",
     "jsr.json"
   ]
 }

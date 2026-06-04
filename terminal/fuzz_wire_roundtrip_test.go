@@ -25,7 +25,7 @@ func FuzzWireRoundTrip(f *testing.F) {
 		// Build rows and changed indices
 		changed := make([]int, nc)
 		rows := make([][]vt.WireRun, h)
-		for i := 0; i < nc; i++ {
+		for i := range nc {
 			idx := i % h
 			changed[i] = idx
 			txt := "A"
@@ -55,7 +55,7 @@ func FuzzWireRoundTrip(f *testing.F) {
 
 		// Walk each changed row and validate row_idx is in bounds
 		off := 19
-		for i := 0; i < int(numCh); i++ {
+		for i := range int(numCh) {
 			if off+2 > len(buf) {
 				t.Fatalf("truncated at row_idx %d", i)
 			}

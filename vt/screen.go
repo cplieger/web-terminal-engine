@@ -167,6 +167,7 @@ func (s *Screen) CursorPos() (row, col int) {
 // possible. When dimensions actually change, cells are cleared so the host application's
 // SIGWINCH redraw starts from a clean slate; on a no-op resize (e.g. client
 // reconnect at the same size), content is preserved.
+//nolint:gocyclo // Resize is a coherent state machine for grow/shrink across both dimensions; splitting hurts readability
 func (s *Screen) Resize(rows, cols int) {
 	if cols < 1 {
 		cols = 1

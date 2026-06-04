@@ -167,6 +167,7 @@ func (s *Screen) CursorPos() (row, col int) {
 // possible. When dimensions actually change, cells are cleared so the host application's
 // SIGWINCH redraw starts from a clean slate; on a no-op resize (e.g. client
 // reconnect at the same size), content is preserved.
+//nolint:gocyclo // Resize is a coherent state machine for grow/shrink across both dimensions; splitting hurts readability
 func (s *Screen) Resize(rows, cols int) {
 	if cols < 1 {
 		cols = 1
@@ -211,6 +212,18 @@ func (s *Screen) Resize(rows, cols int) {
 			copy(s.Cells[i], old)
 		}
 		s.Width = cols
+		// Resize tabStops to match new width. Preserve existing stops
+		// and extend with default every-8 for newly exposed columns.
+		if s.tabStops != nil {
+			newStops := make([]bool, cols)
+			copy(newStops, s.tabStops)
+			for i := len(s.tabStops); i < cols; i++ {
+				if i > 0 && i%8 == 0 {
+					newStops[i] = true
+				}
+			}
+			s.tabStops = newStops
+		}
 	}
 	if s.curY >= s.Height {
 		s.curY = s.Height - 1

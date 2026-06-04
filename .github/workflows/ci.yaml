@@ -11,8 +11,8 @@ permissions:
 
 jobs:
   go:
-    uses: cplieger/ci/.github/workflows/go-ci.yaml@2c6289a7dee062be6411c1cd0d3ab4f784d75f1e # v1
+    uses: cplieger/ci/.github/workflows/go-ci.yaml@17b699a97542f07b55e6b576456044731954c6fd # v1
   web:
-    uses: cplieger/ci/.github/workflows/ts-ci.yaml@2c6289a7dee062be6411c1cd0d3ab4f784d75f1e # v1
+    uses: cplieger/ci/.github/workflows/ts-ci.yaml@17b699a97542f07b55e6b576456044731954c6fd # v1
     with:
       working-directory: web

@@ -70,7 +70,7 @@ func FuzzWireRoundTrip(f *testing.F) {
 			}
 			numRuns := int(binary.LittleEndian.Uint16(buf[off:]))
 			off += 2
-			for r := 0; r < numRuns; r++ {
+			for r := range numRuns {
 				if off+2 > len(buf) {
 					t.Fatalf("truncated at text_len run %d", r)
 				}

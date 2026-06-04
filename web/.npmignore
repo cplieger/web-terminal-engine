@@ -1,9 +1,0 @@
-*.test.ts
-__test-helpers__/
-fc-strict-setup.ts
-eslint.config.mjs
-tsconfig*.json
-vitest.config.ts
-renovate.json
-.prettierrc.json
-.github/

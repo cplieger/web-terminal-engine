@@ -31,5 +31,9 @@
     "type": "git",
     "url": "git+https://github.com/cplieger/vterm.git",
     "directory": "web"
-  }
+  },
+  "files": [
+    "src/",
+    "jsr.json"
+  ]
 }

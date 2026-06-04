@@ -5,18 +5,14 @@
     ".": "./src/index.ts"
   },
   "publish": {
+    "include": [
+      "LICENSE",
+      "README.md",
+      "src/**/*.ts"
+    ],
     "exclude": [
-      "**/*.test.ts",
-      "**/__test-helpers__",
-      "**/fc-strict-setup.ts",
-      "eslint.config.mjs",
-      "tsconfig.json",
-      "tsconfig.test.json",
-      "tsconfig.tests.json",
-      "vitest.config.ts",
-      "renovate.json",
-      "package-lock.json",
-      ".prettierrc.json"
+      "src/**/*.test.ts",
+      "src/**/__test-helpers__/**"
     ]
   }
 }

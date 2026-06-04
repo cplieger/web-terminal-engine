@@ -5,14 +5,7 @@
     ".": "./src/index.ts"
   },
   "publish": {
-    "include": [
-      "LICENSE",
-      "README.md",
-      "src/**/*.ts"
-    ],
-    "exclude": [
-      "src/**/*.test.ts",
-      "src/**/__test-helpers__/**"
-    ]
+    "include": ["LICENSE", "README.md", "src/**/*.ts"],
+    "exclude": ["src/**/*.test.ts", "src/**/__test-helpers__/**"]
   }
 }

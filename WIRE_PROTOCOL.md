@@ -12,38 +12,38 @@ This document specifies the binary WebSocket frame format used between the Go se
 
 ## Frame Header (common to all message types)
 
-| Offset | Size | Field      | Description                                      |
-|--------|------|------------|--------------------------------------------------|
-| 0      | 1    | msg_type   | 0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title |
-| 1      | 8    | inputAck   | uint64 — server-confirmed bytesReceived for session |
+| Offset | Size | Field    | Description                                         |
+| ------ | ---- | -------- | --------------------------------------------------- |
+| 0      | 1    | msg_type | 0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title   |
+| 1      | 8    | inputAck | uint64 — server-confirmed bytesReceived for session |
 
 ## MSG_SCREEN (type 0)
 
 Carries the current terminal viewport (sparse — only changed rows).
 
-| Offset | Size | Field         | Description                              |
-|--------|------|---------------|------------------------------------------|
-| 9      | 2    | cursor_row    | uint16                                   |
-| 11     | 2    | cursor_col    | uint16                                   |
-| 13     | 2    | screen_height | uint16 — full terminal height            |
-| 15     | 2    | num_changed   | uint16 — number of changed rows following|
-| 17     | 1    | cursor_style  | uint8 (DECSCUSR 0-6)                     |
-| 18     | 1    | cursor_flags  | bit 0: hidden, bit 1: bell, bit 2: blink |
+| Offset | Size | Field         | Description                               |
+| ------ | ---- | ------------- | ----------------------------------------- |
+| 9      | 2    | cursor_row    | uint16                                    |
+| 11     | 2    | cursor_col    | uint16                                    |
+| 13     | 2    | screen_height | uint16 — full terminal height             |
+| 15     | 2    | num_changed   | uint16 — number of changed rows following |
+| 17     | 1    | cursor_style  | uint8 (DECSCUSR 0-6)                      |
+| 18     | 1    | cursor_flags  | bit 0: hidden, bit 1: bell, bit 2: blink  |
 
 Followed by `num_changed` changed-row entries:
 
-| Size | Field    | Description          |
-|------|----------|----------------------|
-| 2    | row_idx  | uint16 — row index   |
-| var  | row_data | row payload (below)  |
+| Size | Field    | Description         |
+| ---- | -------- | ------------------- |
+| 2    | row_idx  | uint16 — row index  |
+| var  | row_data | row payload (below) |
 
 ## MSG_SCROLL (type 1)
 
 Carries scrollback lines that fell off the top of the screen.
 
-| Offset | Size | Field     | Description                    |
-|--------|------|-----------|--------------------------------|
-| 9      | 2    | num_lines | uint16 — number of lines       |
+| Offset | Size | Field     | Description              |
+| ------ | ---- | --------- | ------------------------ |
+| 9      | 2    | num_lines | uint16 — number of lines |
 
 Followed by `num_lines` row payloads.
 
@@ -51,10 +51,10 @@ Followed by `num_lines` row payloads.
 
 Sent in response to a client's `resume` control message.
 
-| Offset | Size | Field       | Description                                  |
-|--------|------|-------------|----------------------------------------------|
-| 1      | 8    | inputAck    | uint64 — bytesReceived (in common header)    |
-| 9      | 8    | serverEpoch | uint64 — server boot time (nanoseconds)      |
+| Offset | Size | Field       | Description                               |
+| ------ | ---- | ----------- | ----------------------------------------- |
+| 1      | 8    | inputAck    | uint64 — bytesReceived (in common header) |
+| 9      | 8    | serverEpoch | uint64 — server boot time (nanoseconds)   |
 
 The client compares `serverEpoch` against its last-seen value to detect server restarts.
 
@@ -62,10 +62,10 @@ The client compares `serverEpoch` against its last-seen value to detect server r
 
 Announces DEC private mode state changes.
 
-| Offset | Size | Field     | Description                                                                  |
-|--------|------|-----------|------------------------------------------------------------------------------|
+| Offset | Size | Field     | Description                                                                                                                                                                                    |
+| ------ | ---- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 9      | 1    | flags     | bit 0: bracketed paste (?2004h), bit 1: app cursor (?1h), bit 2: SGR mouse encoding (?1006h), bit 3: focus reporting (?1004h), bit 4: app keypad (DECKPAM), bit 5: reverse video (DECSCNM ?5h) |
-| 10     | 2    | mouseMode | uint16: 0=off, 1000=normal (press+release), 1002=button-event (drag), 1003=any-event (move) |
+| 10     | 2    | mouseMode | uint16: 0=off, 1000=normal (press+release), 1002=button-event (drag), 1003=any-event (move)                                                                                                    |
 
 ### Mouse Tracking (client → server input)
 
@@ -78,6 +78,7 @@ encodes mouse events as SGR 1006 sequences and sends them as terminal input:
 - Modifiers: +4=shift, +8=alt, +16=ctrl, +32=motion
 
 Mode semantics:
+
 - 1000: press + release only (no motion)
 - 1002: press + release + drag (motion while button held)
 - 1003: press + release + all motion (including no-button moves)
@@ -85,6 +86,7 @@ Mode semantics:
 ### Focus Reporting (client → server input)
 
 When focus reporting is active (bit 3 of flags), the client sends:
+
 - Focus in: `ESC[I`
 - Focus out: `ESC[O`
 
@@ -92,6 +94,7 @@ When focus reporting is active (bit 3 of flags), the client sends:
 
 When application keypad mode is active (bit 4 of flags), the client maps
 numeric keypad keys to SS3 sequences (ESC O <letter>) per VT100 Table 3-8:
+
 - Numpad 0-9: `ESC O p` through `ESC O y`
 - Numpad `.`: `ESC O n`
 - Numpad `-`: `ESC O m`
@@ -112,36 +115,36 @@ When inactive, numpad keys send their normal ASCII characters.
 
 Carries the window/icon title set by OSC 0, 1, or 2.
 
-| Offset | Size | Field          | Description                          |
-|--------|------|----------------|--------------------------------------|
-| 9      | 2    | title_byte_len | uint16 — UTF-8 byte length of title  |
-| 11     | var  | title          | UTF-8 bytes                          |
+| Offset | Size | Field          | Description                         |
+| ------ | ---- | -------------- | ----------------------------------- |
+| 9      | 2    | title_byte_len | uint16 — UTF-8 byte length of title |
+| 11     | var  | title          | UTF-8 bytes                         |
 
 ## Row Payload
 
 Used by MSG_SCREEN and MSG_SCROLL:
 
-| Size | Field         | Description                          |
-|------|---------------|--------------------------------------|
-| 2    | num_runs      | uint16 — number of style runs        |
+| Size | Field    | Description                   |
+| ---- | -------- | ----------------------------- |
+| 2    | num_runs | uint16 — number of style runs |
 
 For each run:
 
-| Size | Field         | Description                                    |
-|------|---------------|------------------------------------------------|
-| 2    | text_byte_len | uint16 — UTF-8 byte length of text             |
-| var  | text          | UTF-8 bytes                                    |
-| 4    | fg            | int32 — foreground 0xRRGGBB or -1 for default  |
-| 4    | bg            | int32 — background 0xRRGGBB or -1 for default  |
-| 2    | attrs         | uint16 — attribute bit flags (see below)       |
-| 4    | uc            | int32 — underline color 0xRRGGBB or -1 default |
-| 2    | url_byte_len  | uint16 — UTF-8 byte length of URL (0 = no link)|
-| var  | url           | UTF-8 bytes (OSC 8 hyperlink URI)              |
+| Size | Field         | Description                                     |
+| ---- | ------------- | ----------------------------------------------- |
+| 2    | text_byte_len | uint16 — UTF-8 byte length of text              |
+| var  | text          | UTF-8 bytes                                     |
+| 4    | fg            | int32 — foreground 0xRRGGBB or -1 for default   |
+| 4    | bg            | int32 — background 0xRRGGBB or -1 for default   |
+| 2    | attrs         | uint16 — attribute bit flags (see below)        |
+| 4    | uc            | int32 — underline color 0xRRGGBB or -1 default  |
+| 2    | url_byte_len  | uint16 — UTF-8 byte length of URL (0 = no link) |
+| var  | url           | UTF-8 bytes (OSC 8 hyperlink URI)               |
 
 ## Attribute Flags
 
 | Bit | Attribute        |
-|-----|------------------|
+| --- | ---------------- |
 | 0   | Bold             |
 | 1   | Italic           |
 | 2   | Underline        |

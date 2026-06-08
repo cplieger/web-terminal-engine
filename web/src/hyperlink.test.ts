@@ -91,4 +91,23 @@ describe("OSC 8 hyperlink rendering", () => {
     // linkifySpans may detect URLs in text, but "plain text" has none
     expect(anchors.length).toBe(0);
   });
+
+  it("keeps the OSC 8 href when the visible text is itself a URL fragment", async () => {
+    // First row of a URL that wraps across lines: the visible text is only
+    // a fragment, but the full target is carried in `u`. The regex
+    // autolinker must NOT rebuild the link from the truncated visible text.
+    const full = "http://example.com/very/long/path/that/wraps/here";
+    const runs: WireRun[] = [
+      { t: "http://example.com/very/long/pa", f: -1, b: -1, a: 0, uc: -1, u: full },
+    ];
+    const msg = frame({ 0: runs }, [0, 0]);
+    await flushFrame(msg);
+
+    const anchors = output.querySelectorAll("a.term-link");
+    expect(anchors.length).toBe(1);
+    const a = anchors[0] as HTMLAnchorElement;
+    // Raw attribute is the OSC 8 target, not the truncated visible fragment.
+    expect(a.getAttribute("href")).toBe(full);
+    expect(a.textContent).toBe("http://example.com/very/long/pa");
+  });
 });

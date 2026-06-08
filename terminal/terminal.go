@@ -31,9 +31,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/creack/pty"
-
 	"github.com/cplieger/vterm/vt"
+	"github.com/creack/pty"
 )
 
 const (
@@ -287,7 +286,6 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		rows = defaultRows
 	}
 	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)})
-
 	if err != nil {
 		return err
 	}

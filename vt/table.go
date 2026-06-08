@@ -41,9 +41,11 @@ func (t transition) next() parserState             { return parserState(t & 0xFF
 func mkTStay(act action, s parserState) transition { return mkT(act, s) }
 
 // The tables.
-var stateTable [numStates][256]transition
-var entryAction [numStates]action
-var exitAction [numStates]action
+var (
+	stateTable  [numStates][256]transition
+	entryAction [numStates]action
+	exitAction  [numStates]action
+)
 
 func init() {
 	// Fill with sentinel

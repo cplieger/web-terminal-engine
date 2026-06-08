@@ -5,7 +5,6 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
-
 	"github.com/cplieger/vterm/vt"
 )
 

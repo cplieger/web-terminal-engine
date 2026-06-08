@@ -93,7 +93,7 @@ When focus reporting is active (bit 3 of flags), the client sends:
 ### Application Keypad Mode (client → server input)
 
 When application keypad mode is active (bit 4 of flags), the client maps
-numeric keypad keys to SS3 sequences (ESC O <letter>) per VT100 Table 3-8:
+numeric keypad keys to SS3 sequences (`ESC O <letter>`) per VT100 Table 3-8:
 
 - Numpad 0-9: `ESC O p` through `ESC O y`
 - Numpad `.`: `ESC O n`

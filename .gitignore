@@ -9,3 +9,8 @@ web/coverage/
 
 # OS
 .DS_Store
+
+# Kiro skill artifacts (code-review, refactor, steering-maintenance)
+**/.code-review/
+**/.refactor/
+**/.steering-maintenance/

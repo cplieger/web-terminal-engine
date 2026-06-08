@@ -171,18 +171,11 @@ No version byte is included in the frame header. The Go and TypeScript packages 
 
 ## Unsupported by Design
 
-The following VT/DEC features are intentionally not implemented in the emulator and therefore never appear on the wire. Input bytes for these sequences are consumed but produce no effect:
-
-- **Selective erase:** DECSCA, DECSED, DECSEL
-- **Double-width/height lines:** DECDWL, DECDHL
-- **DCS device control:** DECRQSS, XTGETTCAP, tmux passthrough
-- **Graphics protocols:** Sixel, ReGIS, Kitty image protocol, iTerm inline images
-- **NRCS national charsets:** All national replacement character sets
-- **Exotic SGR:** Fonts 10-20, framed/encircled (51/52/54), superscript/subscript (73-75), ideogram (60-65)
-- **ZWJ emoji grapheme clustering:** Zero-width joiner sequences are not clustered
+Several VT/DEC features are intentionally not implemented in the emulator and therefore never appear on the wire; input bytes for these sequences are consumed but produce no effect. See the [Unsupported by Design](README.md#unsupported-by-design) table in the README for the full list and per-feature rationale.
 
 ## Canonical Implementations
 
 - **Encoder (Go):** `terminal/wire_binary.go`
 - **Decoder (Go):** `vt/wire.go` (WireRun type definitions)
 - **Decoder (TypeScript):** `web/src/wire-binary.ts`
+- **Client → server (TypeScript):** `web/src/connection.ts` (socket lifecycle + resume/inputAck), `web/src/wire.ts` (`0x00`-prefixed control frames), `web/src/wsurl.ts` (WebSocket URL building)

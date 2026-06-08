@@ -62,7 +62,12 @@ if (msg?.type === "screen") render.handleScreen(msg);
 - **`scroll`** — Auto-follow tracker for the scroll container: `init`, `scrollToBottom`, `suppressScroll`, `isUserScrolledUp`, `isInUserScroll`.
 - **`modes`** — DEC private mode state (synced from server's `ModesMessage`): `setModes`, `isBracketedPaste`, `isApplicationCursor`, `getMouseMode`, `isMouseSGR`, `isFocusReporting`, `isApplicationKeypad`, `isReverseVideo`.
 - **`decodeWireBinary(buf)`** — Top-level decoder for binary WebSocket frames; returns a `ServerMessage` or `null` for invalid/truncated frames.
+- **`connection`** — Client → server WebSocket lifecycle: socket ownership, exponential-backoff reconnect, and the resume/inputAck reliability layer (outbox + server-restart detection). `init(callbacks)`, `connect`, `sendBinary`, `sendResize`, `reconnectNow`; `wsPath` callback option defaults to `"/ws"`. Decodes frames and applies `modes.setModes` internally, so consumers only dispatch screen/scroll to `render`. Pairs with the Go `terminal` handler's resume protocol. (`controlFrame` / `wsURL` are also exported for advanced use.)
 - **Wire types** — `WireRun`, `ScreenMessage`, `ScrollMessage`, `ModesMessage`, `TitleMessage`, `ResumeAckMessage`, `ServerMessage`, `ControlMessage` re-exported from the package root.
+
+## Wire Protocol
+
+The Go server and TypeScript client communicate over a binary WebSocket frame format rather than shared code. The full byte-level specification — frame headers, all five message types, row payloads, attribute flags, and client → server input encoding (mouse, focus, application keypad) — lives in [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md). A breaking change to the wire format must land in both the Go encoder/decoder and the TS decoder in a single release.
 
 ## License
 

@@ -4,4 +4,7 @@ export * as keyboard from "./keyboard.js";
 export * as scroll from "./scroll.js";
 export * as modes from "./modes.js";
 export * as mouse from "./mouse.js";
+export * as connection from "./connection.js";
 export { decodeWireBinary } from "./wire-binary.js";
+export { controlFrame, CONTROL_FRAME_PREFIX } from "./wire.js";
+export { wsURL } from "./wsurl.js";

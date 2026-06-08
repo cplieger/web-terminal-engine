@@ -205,6 +205,17 @@ function linkifySpans(
 ): (HTMLSpanElement | HTMLAnchorElement)[] {
   const out: (HTMLSpanElement | HTMLAnchorElement)[] = [];
   for (const span of spans) {
+    // Pass anchors through untouched. A span may already be an <a> from an
+    // OSC 8 hyperlink emitted by the application (see buildRowSpans). The
+    // app-provided href is authoritative and takes precedence over heuristic
+    // autolinking — re-scanning it with URL_RE would rebuild the link from
+    // the *visible* text, which for a URL that wraps across rows is only a
+    // fragment. That truncates the href and defeats the terminal's
+    // clickable-across-line-wraps behavior. Skip; only autolink plain text.
+    if (span.tagName === "A") {
+      out.push(span);
+      continue;
+    }
     const text = span.textContent;
     URL_RE.lastIndex = 0;
     let match: RegExpExecArray | null;

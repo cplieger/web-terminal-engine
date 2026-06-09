@@ -87,16 +87,26 @@ function loadOrCreateSessionId(): string {
   }
 }
 
-function generateSessionId(): string {
+// Exported for unit testing of the RNG fallback. Not part of the
+// stable client API surface; callers use loadOrCreateSessionId.
+export function generateSessionId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  // Fallback for older browsers: pseudo-random hex string.
-  let s = "";
-  for (let i = 0; i < 8; i++) {
-    s += Math.random().toString(16).slice(2, 6);
+  // Fallback when crypto.randomUUID is unavailable. randomUUID requires a
+  // secure context (HTTPS/localhost); getRandomValues does not, so it
+  // covers plain-HTTP origins while still being a CSPRNG. sessionId is a
+  // resume token the server trusts to re-attach a client to its prior
+  // session, so it must not be predictable — Math.random() (a non-crypto
+  // PRNG whose state is recoverable from output) would allow guessing
+  // another client's session. Emit 16 random bytes as hex (128 bits).
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
   }
-  return s;
+  // No Web Crypto at all: refuse rather than mint a guessable token.
+  throw new Error("vterm: no cryptographically secure RNG available for session id");
 }
 
 export interface Callbacks {

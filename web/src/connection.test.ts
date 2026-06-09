@@ -13,7 +13,8 @@
 // auto-detach when the controller is aborted (which the new connect()
 // does before creating the replacement sock).
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
+import { generateSessionId } from "./connection.js";
 
 interface MockWS {
   url: string;
@@ -181,5 +182,71 @@ describe("connection: reconnect race produces no duplicate handler invocations",
     sock1.fireClose();
 
     expect(closeHandler).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe("generateSessionId: session token is cryptographically random", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("delegates to crypto.randomUUID when available", () => {
+    vi.stubGlobal("crypto", {
+      randomUUID: () => "11111111-2222-3333-4444-555555555555",
+      getRandomValues: () => {
+        throw new Error("should not be called when randomUUID exists");
+      },
+    });
+    expect(generateSessionId()).toBe("11111111-2222-3333-4444-555555555555");
+  });
+
+  it("falls back to crypto.getRandomValues (a CSPRNG) when randomUUID is absent", () => {
+    // randomUUID requires a secure context; getRandomValues does not, so
+    // this is the path taken on a plain-HTTP origin.
+    const getRandomValues = vi.fn((arr: Uint8Array) => {
+      for (let i = 0; i < arr.length; i++) {
+        arr[i] = i;
+      }
+      return arr;
+    });
+    vi.stubGlobal("crypto", { getRandomValues });
+
+    const id = generateSessionId();
+
+    expect(getRandomValues).toHaveBeenCalledTimes(1);
+    // 16 bytes -> 32 lowercase hex chars; deterministic given the stub.
+    expect(id).toBe("000102030405060708090a0b0c0d0e0f");
+  });
+
+  it("produces a 128-bit lowercase-hex token via the getRandomValues fallback", () => {
+    // Use the environment's real CSPRNG, asserting only on shape so the
+    // test stays deterministic without pinning the bytes.
+    const realGet = globalThis.crypto.getRandomValues.bind(globalThis.crypto);
+    vi.stubGlobal("crypto", { getRandomValues: realGet });
+
+    const a = generateSessionId();
+    const b = generateSessionId();
+
+    expect(a).toMatch(/^[0-9a-f]{32}$/);
+    expect(b).toMatch(/^[0-9a-f]{32}$/);
+    expect(a).not.toBe(b);
+  });
+
+  it("never falls back to Math.random", () => {
+    const mathRandom = vi.spyOn(Math, "random");
+    vi.stubGlobal("crypto", {
+      getRandomValues: (arr: Uint8Array) => arr,
+    });
+
+    generateSessionId();
+
+    expect(mathRandom).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when no Web Crypto RNG is available (no guessable token)", () => {
+    // crypto present but without either method, e.g. a stripped global.
+    vi.stubGlobal("crypto", {});
+    expect(() => generateSessionId()).toThrow(/secure RNG/);
   });
 });

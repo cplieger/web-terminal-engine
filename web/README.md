@@ -73,7 +73,7 @@ document.addEventListener("keydown", (ev) => {
 ## API
 
 - **`render`** — DOM renderer driven by `ScreenMessage` / `ScrollMessage` frames. `init`, `handleScreen`, `handleScroll`, `updateFontMetrics`, `computeSize`, `getCursorPx`, `setPredictedCursor`, `resetScreen`, `resetScrollback`, `getScrollbackRowCount`, `updateReverseVideo`.
-- **`keyboard`** — Translates `KeyboardEvent` to terminal byte sequences. `mapKeyboardEvent`, `bracketTextForPaste`, `prepareTextForTerminal`. Honors `applicationCursor`, `applicationKeypad`, `bracketedPaste`.
+- **`keyboard`** — Translates `KeyboardEvent` to terminal byte sequences. `mapKeyboardEvent`, `bracketTextForPaste`, `prepareTextForTerminal`, `ctrlByteFor`. Honors `applicationCursor`, `applicationKeypad`, `bracketedPaste`. For touch / mobile UIs, `bindMobileToolbar({toolbar, send, ids?})` wires `pointerdown` handlers for an on-screen Ctrl/arrows/Tab/Enter/Esc toolbar (with sticky-Ctrl semantics and DECCKM-aware arrows), returning a `MobileToolbarController` exposing `applyStickyCtrl`, `setCtrlArmed`, `isCtrlArmed`, and `dispose`.
 - **`mouse`** — SGR 1006 mouse + focus reporting encoder. `init`, `encodeSGR`, `MouseInputHandler`. Auto-gates on `mouseMode > 0`.
 - **`scroll`** — Auto-follow tracker for the scroll container. `init`, `scrollToBottom`, `suppressScroll`, `isUserScrolledUp`, `isInUserScroll`.
 - **`modes`** — DEC private mode state (synced from server's `ModesMessage`). `setModes`, `isBracketedPaste`, `isApplicationCursor`, `getMouseMode`, `isMouseSGR`, `isFocusReporting`, `isApplicationKeypad`, `isReverseVideo`.

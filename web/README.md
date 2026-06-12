@@ -3,7 +3,6 @@
 [![CI](https://github.com/cplieger/vterm/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/vterm/actions/workflows/ci.yaml)
 [![npm](https://img.shields.io/npm/v/@cplieger/vterm)](https://www.npmjs.com/package/@cplieger/vterm)
 [![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
-[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](../LICENSE)
 
 > Browser virtual terminal renderer for the [`cplieger/vterm`](https://github.com/cplieger/vterm) Go module: DOM-based VT500 screen with OSC 8 hyperlink support, scrollback, keyboard mapper, mouse encoder, and binary wire decoder. Zero runtime dependencies.
 

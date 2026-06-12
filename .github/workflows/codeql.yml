@@ -8,10 +8,12 @@ on:
   workflow_dispatch:
 
 permissions:
-  security-events: write
   contents: read
-  actions: read
 
 jobs:
   codeql:
+    permissions:
+      security-events: write
+      contents: read
+      actions: read
     uses: cplieger/ci/.github/workflows/codeql.yaml@1dd6c2f85dcf1db0bd369226df61611f79fb1a2f # v2

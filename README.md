@@ -4,6 +4,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/vterm.svg)](https://pkg.go.dev/github.com/cplieger/vterm)
 [![npm](https://img.shields.io/npm/v/@cplieger/vterm)](https://www.npmjs.com/package/@cplieger/vterm)
 [![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/vterm/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/vterm)
 [![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).

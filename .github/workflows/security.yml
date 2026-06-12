@@ -13,8 +13,10 @@ on:
 
 permissions:
   contents: read
-  security-events: write
 
 jobs:
   scan:
+    permissions:
+      contents: read
+      security-events: write
     uses: cplieger/ci/.github/workflows/security-scan.yaml@1dd6c2f85dcf1db0bd369226df61611f79fb1a2f # v2

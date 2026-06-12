@@ -67,7 +67,7 @@ if (msg?.type === "screen") render.handleScreen(msg);
 
 ## Wire Protocol
 
-The Go server and TypeScript client communicate over a binary WebSocket frame format rather than shared code. The full byte-level specification — frame headers, all five message types, row payloads, attribute flags, and client → server input encoding (mouse, focus, application keypad) — lives in [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md). A breaking change to the wire format must land in both the Go encoder/decoder and the TS decoder in a single release.
+The Go server and TypeScript client communicate over a binary WebSocket frame format rather than shared code. The full byte-level specification — frame headers, all message types, row payloads, attribute flags, and client → server input encoding (mouse, focus, application keypad) — lives in [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md). A breaking change to the wire format must land in both the Go encoder/decoder and the TS decoder in a single release.
 
 ## License
 

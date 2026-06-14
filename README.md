@@ -1,12 +1,13 @@
 # vterm
 
-[![CI](https://github.com/cplieger/vterm/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/vterm/actions/workflows/ci.yaml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/vterm.svg)](https://pkg.go.dev/github.com/cplieger/vterm)
 [![npm](https://img.shields.io/npm/v/@cplieger/vterm)](https://www.npmjs.com/package/@cplieger/vterm)
 [![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/vterm/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/vterm)
-[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/vterm/badges/coverage.json)](https://github.com/cplieger/vterm/actions/workflows/coverage.yml)
+[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/vterm)](https://github.com/cplieger/vterm/blob/main/go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/vterm)](https://goreportcard.com/report/github.com/cplieger/vterm)
+[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/vterm/badges/coverage.json)](https://github.com/cplieger/vterm/actions/workflows/coverage.yml)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13225/badge)](https://www.bestpractices.dev/projects/13225)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/vterm/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/vterm)
 
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).
 

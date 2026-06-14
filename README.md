@@ -5,6 +5,8 @@
 [![npm](https://img.shields.io/npm/v/@cplieger/vterm)](https://www.npmjs.com/package/@cplieger/vterm)
 [![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/vterm/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/vterm)
+[![Coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/vterm/badges/coverage.json)](https://github.com/cplieger/vterm/actions/workflows/coverage.yml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13225/badge)](https://www.bestpractices.dev/projects/13225)
 
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).
 

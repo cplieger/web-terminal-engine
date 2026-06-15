@@ -6,6 +6,7 @@
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/vterm)](https://github.com/cplieger/vterm/blob/main/go.mod)
 [![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/vterm)](https://goreportcard.com/report/github.com/cplieger/vterm)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/vterm/badges/coverage.json)](https://github.com/cplieger/vterm/actions/workflows/coverage.yml)
+[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/vterm/badges/mutation.json)](https://github.com/cplieger/vterm/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13225/badge)](https://www.bestpractices.dev/projects/13225)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/vterm/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/vterm)
 

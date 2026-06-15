@@ -9,14 +9,14 @@
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
-    "@vitest/coverage-v8": "4.1.8",
+    "@vitest/coverage-v8": "4.1.9",
     "eslint": "10.5.0",
     "fast-check": "4.8.0",
     "happy-dom": "20.10.3",
     "prettier": "3.8.4",
     "typescript": "6.0.3",
     "typescript-eslint": "8.61.0",
-    "vitest": "4.1.8"
+    "vitest": "4.1.9"
   },
   "description": "Browser terminal renderer for @cplieger/vterm",
   "license": "GPL-3.0-or-later",

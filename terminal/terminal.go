@@ -50,16 +50,6 @@ const (
 	minResizeCols = 20
 	minResizeRows = 5
 
-	// flushLoop emits in a single binary frame. /chat-load on the
-	// server-side terminal can scroll hundreds of rows in a single
-	// flush window; without a cap the wire frame grew to multi-MB on
-	// slow links and the iPad client choked. Spreading the lines
-	// across successive flushes keeps each frame small and the iPad
-	// renderer paced.
-
-	// flushes. If a flush hold accumulates lines faster than we can
-	// oldest rather than letting the queue grow without bound.
-
 	ctlTypeResize = "resize"
 	ctlTypeResume = "resume"
 

@@ -41,6 +41,8 @@
 //	    [4B] bg            int32   (-1 = default bg)
 //	    [2B] attrs         uint16  (bit flags, see WireRun.A)
 //	    [4B] uc            int32   (-1 = default underline color)
+//	    [2B] url_len       uint16  (UTF-8 byte length of OSC 8 URL; 0 = no link)
+//	    [N B] url          utf-8 bytes (OSC 8 hyperlink URI)
 //
 // Per-client ack patching: encodeScreenMsg / encodeScrollMsg accept a
 // placeholder ack (typically 0) and return a template that flushLoop
@@ -209,10 +211,10 @@ func appendRowRuns(buf []byte, runs []vt.WireRun) []byte {
 		text := run.T
 		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(text)))
 		buf = append(buf, text...)
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32ToWire(run.F))) // #nosec G115 -- bit-cast
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32ToWire(run.B))) // #nosec G115 -- bit-cast
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.F)) // #nosec G115 -- bit-cast
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.B)) // #nosec G115 -- bit-cast
 		buf = binary.LittleEndian.AppendUint16(buf, run.A)
-		buf = binary.LittleEndian.AppendUint32(buf, uint32(int32ToWire(run.Uc))) // #nosec G115 -- bit-cast
+		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.Uc)) // #nosec G115 -- bit-cast
 		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(run.U)))
 		buf = append(buf, run.U...)
 	}
@@ -228,10 +230,6 @@ func clampU16(n int) uint16 {
 	}
 	return uint16(n)
 }
-
-// int32ToWire returns the wire representation of a WireRun color (int32).
-// Default-color value is -1; we encode as the bit pattern of int32(-1).
-func int32ToWire(v int32) int32 { return v }
 
 // encodeTitleMsg builds a title frame carrying the window title string.
 //

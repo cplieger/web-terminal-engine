@@ -109,7 +109,7 @@ func colorToWire(c Color) int32 {
 	case 0:
 		return wireDefaultColor
 	case 1:
-		// Basic 8/16 — match the same palette as html.go's css classes.
+		// Basic 8/16 — resolve the ANSI palette index to 0xRRGGBB.
 		return basic16RGB(c.Val)
 	case 2:
 		return color256RGB(c.Val)

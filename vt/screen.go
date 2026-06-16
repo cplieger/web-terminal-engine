@@ -10,8 +10,7 @@
 //	parse.go   — VT500-style byte-at-a-time state machine
 //	csi.go     — CSI sequence dispatch + cell-level operations
 //	sgr.go     — SGR (color/attribute) parsing + ANSI emission helpers
-//	wire.go    — wire format (style runs) for the JSON protocol
-//	html.go    — legacy HTML row rendering (used by tests)
+//	wire.go    — wire format: per-row style runs (WireRun) for the canvas renderer
 //
 // Derived from github.com/tonistiigi/vt100 (MIT license, Docker BuildKit).
 package vt

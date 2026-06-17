@@ -18,15 +18,12 @@ import "testing"
 //   - csi.go:596:8  CONDITIONALS_BOUNDARY (csiArg n>max -> n>=max): the clamp
 //       value (maxCSIArgValue=65535) equals the boundary; once n reaches
 //       65535 both forms yield 65535 (early clamp vs the trailing return n).
-//   - csi.go:600:7  CONDITIONALS_BOUNDARY (csiArg n<0 -> n<=0): n is built from
-//       decimal digits so it is always >=0; at the only differing point (n==0)
-//       the original returns n(0) and the mutant returns 0 — identical.
-//   - parse.go:249:12 CONDITIONALS_BOUNDARY (paramGroup length>8 -> >=8): the
-//       clamp sets length=8; at length==8 the original already has length==8,
-//       so both leave length==8.
-//   - parse.go:252:31 CONDITIONALS_BOUNDARY (sum>maxParams -> >=): at
-//       sum==maxParams the clamp assigns length=maxParams-startIdx, which is
-//       exactly the current length, so the assignment is a no-op.
+//   - csi.go:600:7, parse.go:249:12, parse.go:252:31: these were round-1
+//       equivalents under the test-only constraint; round 2 (unit vterm-r2)
+//       killed them with production edits — csiArg's dead `if n < 0` guard was
+//       removed (n is built from digits, never negative), and paramGroup's two
+//       length clamps were folded into one `min(length, 8,
+//       uint8(maxParams-int(startIdx)))` — so they no longer exist as mutants.
 //   - parse.go:274:19 CONDITIONALS_BOUNDARY (paramVal def>0 -> def>=0): the
 //       branch only fires when v==0; at def==0 the original returns v(0) and
 //       the mutant returns def(0); def<0 and def>0 agree. Same output always.
@@ -204,11 +201,12 @@ func Test_gk_vterm_u3_FinalizeParamsFreshScreen(t *testing.T) {
 
 // --- parse.go: paramGroup ---
 
-// Kills parse.go:252:18 ARITHMETIC_BASE (int(startIdx)+int(length) ->
-// int(startIdx)-int(length)). With group 1 starting at index 30 and a stored
-// length of 5, the original sum 35 > maxParams(32) clamps length to 2 so the
-// copy loop stays in bounds. The mutant computes 30-5=25, which is not >32, so
-// length stays 5 and the loop reads pParams[32] (out of range) -> panic.
+// Kills the ARITHMETIC_BASE mutant on `maxParams-int(startIdx)` inside
+// paramGroup's `min(length, 8, uint8(maxParams-int(startIdx)))` clamp (round 2
+// folded the two length clamps into this min). With group 1 starting at index
+// 30 and a stored length of 5, the original clamps length to min(5,8,32-30)=2
+// so the copy loop stays in bounds. Mutating `-` to `+` gives min(5,8,32+30)=5,
+// leaving length 5 so the loop reads pParams[32] (out of range) -> panic.
 func Test_gk_vterm_u3_ParamGroupStartIdxOverflowClamp(t *testing.T) {
 	s := New(1, 80)
 	s.numGroups = 2

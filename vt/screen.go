@@ -166,16 +166,9 @@ func (s *Screen) CursorPos() (row, col int) {
 // possible. When dimensions actually change, cells are cleared so the host application's
 // SIGWINCH redraw starts from a clean slate; on a no-op resize (e.g. client
 // reconnect at the same size), content is preserved.
-//
-//nolint:gocyclo // Resize is a coherent state machine for grow/shrink across both dimensions; splitting hurts readability
 func (s *Screen) Resize(rows, cols int) {
-	if cols < 1 {
-		cols = 1
-	}
-	if rows < 1 {
-		rows = 1
-	}
-	dimsChanged := rows != s.Height || cols != s.Width
+	cols = max(cols, 1)
+	rows = max(rows, 1)
 	// When growing height, prepend empty rows at the TOP rather than
 	// appending them at the bottom. xterm/iTerm/Terminal.app all
 	// behave this way: existing content keeps its relative position
@@ -240,7 +233,6 @@ func (s *Screen) Resize(rows, cols int) {
 	// a concern. SIGWINCH will trigger the host application to redraw, which will
 	// overwrite cells in place. Clearing here causes a visible "blank
 	// screen + cursor at top-left" flash on every keyboard transition.
-	_ = dimsChanged
 
 	// Resize the saved main-screen buffer too if we're in alt-screen
 	// mode, so exiting alt-screen restores correctly at the new size.

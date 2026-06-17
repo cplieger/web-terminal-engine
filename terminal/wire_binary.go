@@ -87,6 +87,8 @@ const (
 // rows whose indices appear in `changed`. screenHeight is the full
 // terminal height (rowEls count on the client) — needed because rows
 // is sparse on the wire.
+//
+//nolint:unparam // ack always 0; real per-client value patched in by withClientAck (parity with encodeScrollMsg)
 func encodeScreenMsg(screenHeight, curRow, curCol int, ack uint64, changed []int, rows [][]vt.WireRun, cursorStyle uint8, cursorHidden, cursorBlink, bell bool) []byte {
 	buf := make([]byte, 0, 64)
 	buf = append(buf, wireMsgScreen)

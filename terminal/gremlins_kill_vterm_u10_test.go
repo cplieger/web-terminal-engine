@@ -32,6 +32,7 @@ func gk_vterm_u10_assertBytes(t *testing.T, label string, got, want []byte) {
 //     frame is fully defined.
 //   - Mutant (`<=`): `1 <= 1` is TRUE → appendRowRuns(rows[1]) → rows[1] is out
 //     of range (len 1) → panic.
+//
 // Asserting the exact else-branch frame both pins the value and fails (panics)
 // under the mutant.
 func TestGkVtermU10_EncodeScreenMsg_outOfRangeIdxWritesZeroRuns(t *testing.T) {
@@ -65,6 +66,7 @@ func TestGkVtermU10_EncodeScreenMsg_outOfRangeIdxWritesZeroRuns(t *testing.T) {
 //   - Original (`>=`): `9 >= 9` is TRUE → PutUint64 writes the little-endian ack.
 //   - Boundary mutant (`>`): `9 > 9` is FALSE → no patch → placeholder zeros stay.
 //   - Negation mutant (`<`): `9 < 9` is FALSE → no patch → placeholder zeros stay.
+//
 // Asserting the patched bytes therefore fails under both mutants.
 func TestGkVtermU10_WithClientAck_patchesAtExactMinLength(t *testing.T) {
 	// msg byte + 8-byte placeholder ack == 9 bytes (wireAckOffset+wireAckSize).
@@ -84,6 +86,7 @@ func TestGkVtermU10_WithClientAck_patchesAtExactMinLength(t *testing.T) {
 //   - Original: `8 >= 9` is FALSE → the frame is copied through untouched.
 //   - Mutant: `8 >= -7` is TRUE → PutUint64 on out[1:] (length 7) needs 8 bytes
 //     → index-out-of-range panic.
+//
 // A clean unchanged copy proves the operator is `+` (threshold 9), not `-`.
 func TestGkVtermU10_WithClientAck_shortTemplateLeftUnpatched(t *testing.T) {
 	template := []byte{0xAA, 1, 2, 3, 4, 5, 6, 7} // length 8 (< 9)
@@ -104,6 +107,7 @@ func TestGkVtermU10_WithClientAck_shortTemplateLeftUnpatched(t *testing.T) {
 //   - Original: capacity 11+16==27 (non-negative) → make succeeds, full frame built.
 //   - Mutant: capacity 11-16==-5 (negative) → make([]byte, 0, -5) panics
 //     ("makeslice: cap out of range").
+//
 // Producing the exact frame proves the `+` and that long titles are handled.
 func TestGkVtermU10_EncodeTitleMsg_longTitleBuildsFrame(t *testing.T) {
 	const ack = uint64(0)            // ack value is irrelevant to the capacity arithmetic
@@ -121,18 +125,13 @@ func TestGkVtermU10_EncodeTitleMsg_longTitleBuildsFrame(t *testing.T) {
 	gk_vterm_u10_assertBytes(t, "encodeTitleMsg(16-byte title)", got, want)
 }
 
-// --- wire_binary.go:225:7 and 228:7 — EQUIVALENT (characterization only) -----
-
-// Characterizes clampU16's boundaries. The two surviving CONDITIONALS_BOUNDARY
-// mutants in clampU16 are EQUIVALENT (no input changes the output), so this test
-// is NOT a kill — it pins the boundary values and confirms the equivalence:
-//   - 225:7 `n < 0` → `n <= 0`: the operators differ only at n==0, where the
-//     original falls through to `return uint16(0)` and the mutant takes the
-//     early `return 0`. Both yield 0.
-//   - 228:7 `n > 0xFFFF` → `n >= 0xFFFF`: the operators differ only at n==0xFFFF,
-//     where the original falls through to `return uint16(0xFFFF)` and the mutant
-//     takes the early `return 0xFFFF`. Both yield 65535.
-// Every case below passes identically under original and mutated source.
+// --- wire_binary.go: clampU16 boundary characterization ----------------------
+//
+// Pins clampU16's clamp behavior at the boundaries. Round 2 (unit vterm-r2)
+// rewrote clampU16 as `return uint16(max(0, min(n, 0xFFFF)))`, which deletes the
+// `n < 0` and `n > 0xFFFF` comparisons that were the round-1 boundary mutants
+// (225:7, 228:7). This test now guards the modernized clamp against regression
+// rather than characterizing equivalent mutants.
 func TestGkVtermU10_ClampU16_boundaryValues(t *testing.T) {
 	cases := []struct {
 		in   int

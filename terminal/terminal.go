@@ -107,10 +107,7 @@ func WithEnv(env []string) Option {
 // are treated as 0 (scrollback disabled).
 func WithScrollbackCapacity(n int) Option {
 	return func(c *handlerConfig) {
-		if n < 0 {
-			n = 0
-		}
-		c.scrollbackCapacity = n
+		c.scrollbackCapacity = max(n, 0)
 	}
 }
 
@@ -265,9 +262,7 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
 	)
-	if len(h.cfg.env) > 0 {
-		env = append(env, h.cfg.env...)
-	}
+	env = append(env, h.cfg.env...)
 	cmd.Env = env
 	if cols < 1 {
 		cols = defaultCols

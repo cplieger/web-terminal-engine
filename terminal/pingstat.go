@@ -135,10 +135,7 @@ func (p *pingStat) Record(rtt time.Duration) {
 	} else {
 		// RTTVAR ← (1 - β) · RTTVAR + β · |SRTT - R|
 		// SRTT   ← (1 - α) · SRTT   + α · R
-		dev := p.srtt - rtt
-		if dev < 0 {
-			dev = -dev
-		}
+		dev := (p.srtt - rtt).Abs()
 		p.rttvar = p.rttvar - p.rttvar>>betaShift + dev>>betaShift
 		p.srtt = p.srtt - p.srtt>>alphaShift + rtt>>alphaShift
 	}
@@ -178,11 +175,5 @@ func (p *pingStat) Stats() (srtt, rttvar time.Duration) {
 
 // clampRTO applies the floor and cap.
 func clampRTO(rto time.Duration) time.Duration {
-	if rto < minPongTimeout {
-		return minPongTimeout
-	}
-	if rto > maxPongTimeout {
-		return maxPongTimeout
-	}
-	return rto
+	return min(max(rto, minPongTimeout), maxPongTimeout)
 }

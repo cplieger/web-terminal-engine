@@ -154,27 +154,21 @@ func (s *Screen) dispatchCSI(final byte) {
 	case 'S': // SU
 		n := s.paramVal(0, 1)
 		regionH := s.scrollBottom - s.scrollTop + 1
-		if n > regionH {
-			n = regionH
-		}
+		n = min(n, regionH)
 		for range n {
 			s.scrollUpOnce()
 		}
 	case 'T': // SD
 		n := s.paramVal(0, 1)
 		regionH := s.scrollBottom - s.scrollTop + 1
-		if n > regionH {
-			n = regionH
-		}
+		n = min(n, regionH)
 		for range n {
 			s.scrollDownOnce()
 		}
 	case '^': // SD alternate
 		n := s.paramVal(0, 1)
 		regionH := s.scrollBottom - s.scrollTop + 1
-		if n > regionH {
-			n = regionH
-		}
+		n = min(n, regionH)
 		for range n {
 			s.scrollDownOnce()
 		}
@@ -258,14 +252,8 @@ func (s *Screen) dispatchCSI(final byte) {
 			s.clearAllTabStops()
 		}
 	case 'r': // DECSTBM
-		top := s.paramVal(0, 1) - 1
-		bottom := s.paramVal(1, s.Height) - 1
-		if top < 0 {
-			top = 0
-		}
-		if bottom >= s.Height {
-			bottom = s.Height - 1
-		}
+		top := max(s.paramVal(0, 1)-1, 0)
+		bottom := min(s.paramVal(1, s.Height)-1, s.Height-1)
 		if top < bottom {
 			s.scrollTop = top
 			s.scrollBottom = bottom
@@ -438,9 +426,7 @@ func (s *Screen) deleteChars(n int) {
 		return
 	}
 	row := s.Cells[s.curY]
-	if n > s.Width-s.curX {
-		n = s.Width - s.curX
-	}
+	n = min(n, s.Width-s.curX)
 	for x := s.curX; x < s.Width-n; x++ {
 		row[x] = row[x+n]
 	}
@@ -453,9 +439,8 @@ func (s *Screen) insertLines(n int) {
 	if s.curY < s.scrollTop || s.curY > s.scrollBottom {
 		return
 	}
-	if avail := s.scrollBottom - s.curY + 1; n > avail {
-		n = avail
-	}
+	avail := s.scrollBottom - s.curY + 1
+	n = min(n, avail)
 	for range n {
 		for y := s.scrollBottom; y > s.curY; y-- {
 			s.Cells[y] = s.Cells[y-1]
@@ -468,9 +453,8 @@ func (s *Screen) deleteLines(n int) {
 	if s.curY < s.scrollTop || s.curY > s.scrollBottom {
 		return
 	}
-	if avail := s.scrollBottom - s.curY + 1; n > avail {
-		n = avail
-	}
+	avail := s.scrollBottom - s.curY + 1
+	n = min(n, avail)
 	for range n {
 		for y := s.curY; y < s.scrollBottom; y++ {
 			s.Cells[y] = s.Cells[y+1]
@@ -541,7 +525,7 @@ func (s *Screen) shiftRight(n int) {
 		for x := s.Width - 1; x >= n; x-- {
 			row[x] = row[x-n]
 		}
-		for x := 0; x < n && x < s.Width; x++ {
+		for x := range n {
 			row[x] = Cell{Ch: ' '}
 		}
 	}
@@ -596,9 +580,6 @@ func csiArg(args string, def int) int {
 		if n > maxCSIArgValue {
 			return maxCSIArgValue
 		}
-	}
-	if n < 0 {
-		return 0
 	}
 	return n
 }

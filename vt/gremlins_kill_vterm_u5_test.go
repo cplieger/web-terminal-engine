@@ -161,8 +161,8 @@ func Test_gk_vterm_u5_put_guard_curx(t *testing.T) {
 // path; original skips the spacer write, mutant (<=) panics.
 func Test_gk_vterm_u5_put_spacer_guard_cury(t *testing.T) {
 	s := New(4, 6)
-	s.curY = 4 // == Height
-	s.curX = 2 // not Width-1, so the early width-2 wrap does not fire
+	s.curY = 4                                            // == Height
+	s.curX = 2                                            // not Width-1, so the early width-2 wrap does not fire
 	p := gk_vterm_u5_didPanic(func() { s.put('\u4e16') }) // CJK wide rune, width 2
 	if p {
 		t.Errorf("put(width-2) with curY==Height panicked: spacer curY<Height guard not effective (line 339)")

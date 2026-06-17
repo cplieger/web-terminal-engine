@@ -246,12 +246,7 @@ func (s *Screen) paramGroup(i int) ParamGroup {
 	if length == 0 {
 		return g
 	}
-	if length > 8 {
-		length = 8
-	}
-	if int(startIdx)+int(length) > maxParams {
-		length = uint8(maxParams - int(startIdx))
-	}
+	length = min(length, 8, uint8(maxParams-int(startIdx)))
 	g.Len = length
 	for j := range length {
 		g.Params[j] = s.pParams[startIdx+j]

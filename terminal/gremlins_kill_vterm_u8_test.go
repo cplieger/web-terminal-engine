@@ -192,7 +192,7 @@ func TestGkVtermU8_PingLoop_repeatedFailuresCancel(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer ws.CloseNow() //nolint:errcheck // best-effort cleanup
+		defer ws.CloseNow()
 		// Keep the server side reading so the handshake completes cleanly and
 		// the handler returns once the client connection drops.
 		for {

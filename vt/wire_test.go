@@ -62,20 +62,20 @@ func TestWireRunRGBColor(t *testing.T) {
 func TestWireRunAllAttributes(t *testing.T) {
 	tests := []struct {
 		seq  string
-		bit  uint16
 		name string
+		bit  uint16
 	}{
-		{"\x1b[1m", 1, "bold"},
-		{"\x1b[3m", 2, "italic"},
-		{"\x1b[4m", 4, "underline"},
-		{"\x1b[7m", 8, "inverse"},
-		{"\x1b[9m", 16, "strikethrough"},
-		{"\x1b[2m", 32, "dim"},
-		{"\x1b[8m", 64, "hidden"},
-		{"\x1b[5m", 128, "blink"},
-		{"\x1b[6m", 128, "rapid-blink"},
-		{"\x1b[53m", 256, "overline"},
-		{"\x1b[21m", 512, "double-underline"},
+		{seq: "\x1b[1m", bit: 1, name: "bold"},
+		{seq: "\x1b[3m", bit: 2, name: "italic"},
+		{seq: "\x1b[4m", bit: 4, name: "underline"},
+		{seq: "\x1b[7m", bit: 8, name: "inverse"},
+		{seq: "\x1b[9m", bit: 16, name: "strikethrough"},
+		{seq: "\x1b[2m", bit: 32, name: "dim"},
+		{seq: "\x1b[8m", bit: 64, name: "hidden"},
+		{seq: "\x1b[5m", bit: 128, name: "blink"},
+		{seq: "\x1b[6m", bit: 128, name: "rapid-blink"},
+		{seq: "\x1b[53m", bit: 256, name: "overline"},
+		{seq: "\x1b[21m", bit: 512, name: "double-underline"},
 	}
 	for _, tc := range tests {
 		s := New(1, 5)

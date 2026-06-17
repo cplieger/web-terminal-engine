@@ -11,20 +11,18 @@ import (
 // current screen state against the previously sent state. It owns the
 // prev-row comparison data so buildFrame can be expressed as a method
 // on this type rather than reaching into Handler fields.
-//
-//nolint:govet // fieldalignment: string field (prevTitle) adds 8 pointer bytes; fields grouped for readability.
 type FlushFrameBuilder struct {
-	prevRowWires    [][]vt.WireRun
 	prevTitle       string
+	prevRowWires    [][]vt.WireRun
 	prevCurRow      int
 	prevCurCol      int
-	prevBracketed   bool
-	prevAppCursor   bool
+	prevMouseMode   uint16
 	prevMouseSGR    bool
+	prevAppCursor   bool
 	prevFocusReport bool
 	prevAppKeypad   bool
 	prevReverseVid  bool
-	prevMouseMode   uint16
+	prevBracketed   bool
 	modesAnnounced  bool
 	titleAnnounced  bool
 	prevCurValid    bool

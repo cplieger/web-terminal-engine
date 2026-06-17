@@ -21,66 +21,38 @@ import (
 )
 
 // Screen is a minimal VT100 screen buffer with SGR support.
-//
-//nolint:govet // fieldalignment: fields grouped for readability, not optimal packing.
 type Screen struct {
-	// FlushHoldUntil is the deadline until which flush is suppressed
-	// (synchronized output mode / resize redraw window).
 	FlushHoldUntil time.Time
-	// Cells is the 2D grid of character cells [row][col].
-	Cells [][]Cell
-	// Drained holds lines that scrolled off the top since last drain.
-	Drained [][]WireRun
-	// Response holds bytes the terminal needs to send back to the host
-	// (e.g. device-attribute replies).
-	Response []byte
-	// Title is the window/icon title set by OSC 0/1/2.
-	Title     string
-	hyperlink string // current OSC 8 hyperlink URI (empty = no link)
-	ParserState
+	Title          string
+	hyperlink      string
+	tabStops       []bool
+	Response       []byte
+	Drained        [][]WireRun
+	Cells          [][]Cell
 	altScreenState
+	ParserState
 	CursorState
-	charsetState
-	scrollBottom int
-	// Width is the number of columns in the screen.
-	Width int
-	// Height is the number of rows in the screen.
-	Height          int
-	scrollTop       int
-	lastPrintedRune rune
-	// MouseMode is the active mouse tracking mode: 0=off, 1000=normal
-	// (press+release), 1002=button-event (drag), 1003=any-event (move).
+	scrollBottom     int
+	Width            int
+	Height           int
+	scrollTop        int
+	lastPrintedRune  rune
 	MouseMode        uint16
 	lastPrintedStyle Style
-	// OriginMode indicates DECOM (origin mode) is active; cursor
-	// addressing is relative to the scroll region.
-	OriginMode bool
-	// AutoWrap indicates auto-wrap mode (DECAWM) is active.
-	AutoWrap    bool
-	pendingWrap bool
-	// BracketedPaste indicates bracketed paste mode (mode 2004) is active.
+	charsetState
+	CursorHidden   bool
+	pendingWrap    bool
 	BracketedPaste bool
-	// AppCursorKeys indicates application cursor key mode (DECCKM) is active.
-	AppCursorKeys bool
-	// CursorBlink indicates the cursor should blink.
-	CursorBlink bool
-	// CursorHidden indicates the cursor is invisible (DECTCEM off).
-	CursorHidden bool
-	// CursorStyle is the DECSCUSR cursor shape (0-6).
-	CursorStyle uint8
-	// BellRing is set when BEL was received; cleared after flush.
-	BellRing bool
-	// MouseSGR indicates SGR (1006) encoding is active for mouse reports.
-	MouseSGR bool
-	// FocusReporting indicates mode 1004 (focus in/out reporting) is active.
+	AppCursorKeys  bool
+	CursorBlink    bool
+	AutoWrap       bool
+	CursorStyle    uint8
+	BellRing       bool
+	MouseSGR       bool
 	FocusReporting bool
-	// AppKeypad indicates application keypad mode (DECKPAM) is active.
-	// When set, numeric keypad keys send SS3 (ESC O) sequences instead of digits.
-	AppKeypad bool
-	// ReverseVideo indicates DECSCNM (mode 5) is active — default fg/bg are swapped.
-	ReverseVideo bool
-	// tabStops tracks which columns have tab stops set. nil means use default (every 8).
-	tabStops []bool
+	AppKeypad      bool
+	ReverseVideo   bool
+	OriginMode     bool
 }
 
 // CursorState holds cursor position, saved cursor, and current style.

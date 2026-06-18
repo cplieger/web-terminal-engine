@@ -1,6 +1,5 @@
 # @cplieger/vterm
 
-[![CI](https://github.com/cplieger/vterm/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/vterm/actions/workflows/ci.yaml)
 [![npm](https://img.shields.io/npm/v/@cplieger/vterm)](https://www.npmjs.com/package/@cplieger/vterm)
 [![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
 

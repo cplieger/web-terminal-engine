@@ -132,7 +132,7 @@ type sessionState struct {
 	replayedScrollback bool // true after first resume; prevents re-replay on reconnect
 }
 
-// clientState tracks per-WS-connection state. session is resolved
+// ClientState tracks per-WS-connection state. session is resolved
 // from the sessionId in the resume control message. session is
 // stored as an atomic pointer so flushLoop's snapshot pass can read
 // it without the handler-wide mutex (snapshot copies the pointer
@@ -320,7 +320,7 @@ func (h *Handler) readLoop(ctx context.Context) {
 	}
 }
 
-// flushFrame is the per-flush snapshot built under h.mu and consumed
+// FlushFrame is the per-flush snapshot built under h.mu and consumed
 // outside the lock. Holding the lock during the network write would
 // stall every other goroutine on a slow client; the snapshot pattern
 // keeps the lock window bounded to local memory work.

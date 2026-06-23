@@ -1,4 +1,4 @@
-// OSC (Operating System Command) dispatch.
+// Package vt handles OSC (Operating System Command) dispatch.
 //
 // Supported:
 //   - OSC 0 ; Pt BEL/ST — Set icon name and window title to Pt

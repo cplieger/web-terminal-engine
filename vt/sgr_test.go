@@ -25,3 +25,199 @@ func TestSGRRoundTrip(t *testing.T) {
 		t.Errorf("round-trip mismatch:\n got  %+v\n want %+v", got, want)
 	}
 }
+
+// setParamGroups builds n single-param semicolon groups directly on the parser
+// state (mirrors what "\x1b[v0;v1;...m" produces): numGroups=len(vals), each
+// group length 1 with pParams[i]=vals[i].
+func setParamGroups(s *Screen, vals ...uint16) {
+	s.numGroups = uint8(len(vals))
+	s.numParams = uint8(len(vals))
+	for i, v := range vals {
+		s.pParams[i] = v
+		s.pGroupLen[i] = 1
+	}
+}
+
+// TestSGRSingleNonZeroParamApplies verifies that a single non-zero SGR
+// parameter (CSI 1 m = bold) is applied rather than triggering the empty/zero
+// reset fast path.
+func TestSGRSingleNonZeroParamApplies(t *testing.T) {
+	s := New(2, 10)
+	s.Write([]byte("\x1b[1m")) // SGR 1 = bold
+
+	if !s.style.Bold {
+		t.Errorf("CSI 1 m: style.Bold = false, want true (a single non-zero SGR must apply, not reset)")
+	}
+}
+
+// TestSGREmptyParamResetsStyle verifies that an empty SGR (CSI m) resets the
+// style, matching SGR 0.
+func TestSGREmptyParamResetsStyle(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b[1m")) // bold
+	s.Write([]byte("\x1b[m"))  // empty param = SGR 0 (reset)
+	s.Write([]byte("X"))
+	if s.Cells[0][0].Ch != 'X' {
+		t.Fatal("X not written")
+	}
+	if s.Cells[0][0].Style.Bold {
+		t.Error("empty SGR did not reset bold")
+	}
+}
+
+// TestSGRParamsStringUnderlineColor verifies sgrParamsString emits the 58;...
+// underline-color parameters when an underline color is set, and omits them
+// otherwise.
+func TestSGRParamsStringUnderlineColor(t *testing.T) {
+	if got := sgrParamsString(Style{UnderlineColor: Color{Type: 2, Val: 5}}); got != "0;58;5;5" {
+		t.Errorf("sgrParamsString(underline 256-color 5) = %q, want %q", got, "0;58;5;5")
+	}
+	if got := sgrParamsString(Style{Bold: true}); got != "0;1" {
+		t.Errorf("sgrParamsString(bold only) = %q, want %q", got, "0;1")
+	}
+}
+
+// TestParseExtColorMissingFollowingGroup verifies that SGR 38 with no following
+// mode group leaves the color unset and returns the same index (no advance).
+func TestParseExtColorMissingFollowingGroup(t *testing.T) {
+	s := &Screen{}
+	setParamGroups(s, 38)
+	var c Color
+	if got := s.parseExtColorGroup(0, &c); got != 0 {
+		t.Errorf("parseExtColorGroup(0) with [38]: ret = %d, want 0 (bail, no following group)", got)
+	}
+	if c.Type != 0 {
+		t.Errorf("parseExtColorGroup(0) with [38]: c.Type = %d, want 0 (no color set)", c.Type)
+	}
+}
+
+// TestParseExtColor256MissingValue verifies that SGR 38;5 (256-color) with no
+// value group leaves the color unset and returns i+1.
+func TestParseExtColor256MissingValue(t *testing.T) {
+	s := &Screen{}
+	setParamGroups(s, 38, 5)
+	var c Color
+	if got := s.parseExtColorGroup(0, &c); got != 1 {
+		t.Errorf("parseExtColorGroup(0) with [38,5]: ret = %d, want 1 (missing value group)", got)
+	}
+	if c.Type != 0 {
+		t.Errorf("parseExtColorGroup(0) with [38,5]: c.Type = %d, want 0 (no color set)", c.Type)
+	}
+}
+
+// TestParseExtColorRGBMissingBlue verifies that SGR 38;2;R;G (RGB) with the blue
+// group absent leaves the color unset and returns i+1.
+func TestParseExtColorRGBMissingBlue(t *testing.T) {
+	s := &Screen{}
+	setParamGroups(s, 38, 2, 10, 20)
+	var c Color
+	if got := s.parseExtColorGroup(0, &c); got != 1 {
+		t.Errorf("parseExtColorGroup(0) with [38,2,10,20]: ret = %d, want 1 (incomplete RGB)", got)
+	}
+	if c.Type != 0 {
+		t.Errorf("parseExtColorGroup(0) with [38,2,10,20]: c.Type = %d, want 0 (no color set)", c.Type)
+	}
+}
+
+// TestParseExtColor256EmptyValueGroup verifies that a counted-but-empty value
+// group (Len 0) for SGR 38;5 must not set a color.
+func TestParseExtColor256EmptyValueGroup(t *testing.T) {
+	s := &Screen{}
+	s.numGroups = 3
+	s.numParams = 2
+	s.pGroupLen[0] = 1
+	s.pGroupLen[1] = 1
+	s.pGroupLen[2] = 0 // empty value group
+	s.pParams[0] = 38
+	s.pParams[1] = 5
+	var c Color
+	if got := s.parseExtColorGroup(0, &c); got != 2 {
+		t.Errorf("parseExtColorGroup(0) [38,5,<empty>]: ret = %d, want 2", got)
+	}
+	if c.Type != 0 {
+		t.Errorf("parseExtColorGroup(0) [38,5,<empty>]: c.Type = %d, want 0 (empty value group must not set color)", c.Type)
+	}
+}
+
+// TestParseExtColorRGBEmptyBlueGroup verifies that a counted-but-empty blue
+// group (Len 0) for SGR 38;2;R;G must not set a color.
+func TestParseExtColorRGBEmptyBlueGroup(t *testing.T) {
+	s := &Screen{}
+	s.numGroups = 5
+	s.numParams = 4
+	s.pGroupLen[0] = 1
+	s.pGroupLen[1] = 1
+	s.pGroupLen[2] = 1
+	s.pGroupLen[3] = 1
+	s.pGroupLen[4] = 0 // empty blue group
+	s.pParams[0] = 38
+	s.pParams[1] = 2
+	s.pParams[2] = 10
+	s.pParams[3] = 20
+	var c Color
+	if got := s.parseExtColorGroup(0, &c); got != 4 {
+		t.Errorf("parseExtColorGroup(0) RGB empty-blue: ret = %d, want 4", got)
+	}
+	if c.Type != 0 {
+		t.Errorf("parseExtColorGroup(0) RGB empty-blue: c.Type = %d, want 0 (empty blue group must not set color)", c.Type)
+	}
+}
+
+// TestSGRSubparamColonRGB verifies colon-subparam RGB foreground (38:2:R:G:B).
+func TestSGRSubparamColonRGB(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b[38:2:255:0:128mX"))
+	cell := s.Cells[0][0]
+	if cell.Style.FG.Type != 3 {
+		t.Fatalf("expected RGB color type 3, got %d", cell.Style.FG.Type)
+	}
+	if cell.Style.FG.R != 255 || cell.Style.FG.G != 0 || cell.Style.FG.B != 128 {
+		t.Errorf("RGB: got R=%d G=%d B=%d, want 255,0,128",
+			cell.Style.FG.R, cell.Style.FG.G, cell.Style.FG.B)
+	}
+}
+
+// TestSGRSubparamColon256 verifies colon-subparam 256-color foreground (38:5:N).
+func TestSGRSubparamColon256(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b[38:5:196mX"))
+	cell := s.Cells[0][0]
+	if cell.Style.FG.Type != 2 {
+		t.Fatalf("expected 256-color type 2, got %d", cell.Style.FG.Type)
+	}
+	if cell.Style.FG.Val != 196 {
+		t.Errorf("256-color: got %d, want 196", cell.Style.FG.Val)
+	}
+}
+
+// TestSGRSubparamSemicolonLegacyRGB verifies the legacy semicolon RGB form
+// (38;2;R;G;B).
+func TestSGRSubparamSemicolonLegacyRGB(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b[38;2;144;70;255mX"))
+	cell := s.Cells[0][0]
+	if cell.Style.FG.Type != 3 {
+		t.Fatalf("expected RGB color type 3, got %d", cell.Style.FG.Type)
+	}
+	if cell.Style.FG.R != 144 || cell.Style.FG.G != 70 || cell.Style.FG.B != 255 {
+		t.Errorf("RGB: got R=%d G=%d B=%d, want 144,70,255",
+			cell.Style.FG.R, cell.Style.FG.G, cell.Style.FG.B)
+	}
+}
+
+// TestSGRSubparamMixed verifies a mix of bold, colon-RGB foreground, and
+// semicolon-256 background in one SGR sequence.
+func TestSGRSubparamMixed(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b[1;38:2:10:20:30;48;5;200mX"))
+	cell := s.Cells[0][0]
+	if !cell.Style.Bold {
+		t.Error("expected Bold")
+	}
+	if cell.Style.FG.Type != 3 || cell.Style.FG.R != 10 || cell.Style.FG.G != 20 || cell.Style.FG.B != 30 {
+		t.Errorf("FG RGB: got %+v", cell.Style.FG)
+	}
+	if cell.Style.BG.Type != 2 || cell.Style.BG.Val != 200 {
+		t.Errorf("BG 256: got %+v", cell.Style.BG)
+	}
+}

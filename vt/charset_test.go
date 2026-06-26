@@ -133,3 +133,45 @@ func TestESCHash_Consumed(t *testing.T) {
 		t.Errorf("ESC#8 should not affect charset: expected 'q', got U+%04X", got)
 	}
 }
+
+// TestSingleShiftConsumedResetsSentinel verifies that after a single shift
+// (SS2/ESC N) is consumed by translating one character, singleShft returns to
+// the -1 "no single shift pending" sentinel.
+func TestSingleShiftConsumedResetsSentinel(t *testing.T) {
+	s := New(2, 20)
+	// G2 = DEC Special Graphics, SS2 (ESC N), then print one char.
+	s.Write([]byte("\x1b*0\x1bNq"))
+
+	// SS2 translated 'q' through G2 graphics -> U+2500.
+	if got := s.Cells[0][0].Ch; got != '\u2500' {
+		t.Errorf("SS2 translate('q') = U+%04X, want U+2500", got)
+	}
+	if got := int(s.singleShft); got != -1 {
+		t.Errorf("singleShft after single-shift consumed = %d, want -1", got)
+	}
+}
+
+// TestResetCharsetsRestoresDefaults verifies resetCharsets returns all charset
+// state to its defaults: the single-shift sentinel (-1), GL=G0, and every Gn
+// designated to ASCII.
+func TestResetCharsetsRestoresDefaults(t *testing.T) {
+	s := New(2, 20)
+	// Put charset state into a distinct non-default value first.
+	s.singleShft = 7
+	s.gl = 3
+	s.gsets = [4]charset{charsetGraphic, charsetGraphic, charsetGraphic, charsetGraphic}
+
+	s.resetCharsets()
+
+	if got := int(s.singleShft); got != -1 {
+		t.Errorf("resetCharsets singleShft = %d, want -1", got)
+	}
+	if got := int(s.gl); got != 0 {
+		t.Errorf("resetCharsets gl = %d, want 0", got)
+	}
+	for i, c := range s.gsets {
+		if c != charsetASCII {
+			t.Errorf("resetCharsets gsets[%d] = %d, want charsetASCII(%d)", i, c, charsetASCII)
+		}
+	}
+}

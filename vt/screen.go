@@ -141,19 +141,40 @@ func (s *Screen) CursorPos() (row, col int) {
 func (s *Screen) Resize(rows, cols int) {
 	cols = max(cols, 1)
 	rows = max(rows, 1)
-	// When growing height, prepend empty rows at the TOP rather than
-	// appending them at the bottom. xterm/iTerm/Terminal.app all
-	// behave this way: existing content keeps its relative position
-	// to the cursor (which moves down toward the new bottom), and
-	// fresh empty space appears above (in scrollback territory).
-	//
-	// The previous append-at-bottom behaviour put empty rows BELOW
-	// the cursor, where they remained visible until the host application's
-	// SIGWINCH-driven redraw filled them — a window the user sees as
-	// a "black gap between content and the input bar" on iPhone →
-	// iPad device switches. Combined with the client's trim of
-	// trailing empty rows in render.ts, this makes the gap impossible
-	// regardless of whether the host's repaint happens immediately.
+	s.resizeHeight(rows)
+	s.resizeWidth(cols)
+	if s.curY >= s.Height {
+		s.curY = s.Height - 1
+	}
+	if s.curX >= s.Width {
+		s.curX = s.Width - 1
+	}
+	// Reset scroll region to full screen on resize.
+	s.scrollTop = 0
+	s.scrollBottom = s.Height - 1
+	// Note: we deliberately do NOT clear cells or reset the cursor here.
+	// the host application starts at the correct dimensions (first resize message
+	// triggers ensureStarted) so initial-paint stale content is no longer
+	// a concern. SIGWINCH will trigger the host application to redraw, which will
+	// overwrite cells in place. Clearing here causes a visible "blank
+	// screen + cursor at top-left" flash on every keyboard transition.
+	s.resizeSavedMain(rows, cols)
+}
+
+// resizeHeight adjusts the buffer to the new row count, preserving content.
+// When growing it prepends empty rows at the TOP rather than appending at the
+// bottom. xterm/iTerm/Terminal.app all behave this way: existing content keeps
+// its position relative to the cursor (which moves down toward the new bottom),
+// and fresh empty space appears above (in scrollback territory).
+//
+// The previous append-at-bottom behaviour put empty rows BELOW the cursor,
+// where they remained visible until the host application's SIGWINCH-driven
+// redraw filled them — a window the user sees as a "black gap between content
+// and the input bar" on iPhone → iPad device switches. Combined with the
+// client's trim of trailing empty rows in render.ts, this makes the gap
+// impossible regardless of whether the host's repaint happens immediately.
+// Shrinking drops rows from the bottom.
+func (s *Screen) resizeHeight(rows int) {
 	if rows > s.Height {
 		grow := rows - s.Height
 		newRows := make([][]Cell, grow, grow+s.Height)
@@ -170,60 +191,55 @@ func (s *Screen) Resize(rows, cols int) {
 		s.Cells = s.Cells[:rows]
 		s.Height = rows
 	}
-	if cols != s.Width {
-		for i := range s.Cells {
-			old := s.Cells[i]
-			s.Cells[i] = makeRow(cols, Color{})
-			copy(s.Cells[i], old)
-		}
-		s.Width = cols
-		// Resize tabStops to match new width. Preserve existing stops
-		// and extend with default every-8 for newly exposed columns.
-		if s.tabStops != nil {
-			newStops := make([]bool, cols)
-			copy(newStops, s.tabStops)
-			for i := len(s.tabStops); i < cols; i++ {
-				if i > 0 && i%8 == 0 {
-					newStops[i] = true
-				}
-			}
-			s.tabStops = newStops
-		}
-	}
-	if s.curY >= s.Height {
-		s.curY = s.Height - 1
-	}
-	if s.curX >= s.Width {
-		s.curX = s.Width - 1
-	}
-	// Reset scroll region to full screen on resize.
-	s.scrollTop = 0
-	s.scrollBottom = s.Height - 1
-	// Note: we deliberately do NOT clear cells or reset the cursor here.
-	// the host application starts at the correct dimensions (first resize message
-	// triggers ensureStarted) so initial-paint stale content is no longer
-	// a concern. SIGWINCH will trigger the host application to redraw, which will
-	// overwrite cells in place. Clearing here causes a visible "blank
-	// screen + cursor at top-left" flash on every keyboard transition.
+}
 
-	// Resize the saved main-screen buffer too if we're in alt-screen
-	// mode, so exiting alt-screen restores correctly at the new size.
-	if s.savedMainCells != nil {
-		resized := make([][]Cell, rows)
-		for i := range resized {
-			row := makeRow(cols, Color{})
-			if i < len(s.savedMainCells) {
-				copy(row, s.savedMainCells[i])
-			}
-			resized[i] = row
+// resizeWidth adjusts the buffer to the new column count, preserving each row's
+// content. Tab stops are preserved and extended with the default every-8
+// pattern for newly exposed columns.
+func (s *Screen) resizeWidth(cols int) {
+	if cols == s.Width {
+		return
+	}
+	for i := range s.Cells {
+		old := s.Cells[i]
+		s.Cells[i] = makeRow(cols, Color{})
+		copy(s.Cells[i], old)
+	}
+	s.Width = cols
+	if s.tabStops == nil {
+		return
+	}
+	newStops := make([]bool, cols)
+	copy(newStops, s.tabStops)
+	for i := len(s.tabStops); i < cols; i++ {
+		if i > 0 && i%8 == 0 {
+			newStops[i] = true
 		}
-		s.savedMainCells = resized
-		if s.savedMainCurY >= rows {
-			s.savedMainCurY = rows - 1
+	}
+	s.tabStops = newStops
+}
+
+// resizeSavedMain rebuilds the saved main-screen buffer to the new dimensions
+// while in alt-screen mode, so exiting alt-screen restores correctly at the new
+// size. rows and cols are the already-clamped target dimensions.
+func (s *Screen) resizeSavedMain(rows, cols int) {
+	if s.savedMainCells == nil {
+		return
+	}
+	resized := make([][]Cell, rows)
+	for i := range resized {
+		row := makeRow(cols, Color{})
+		if i < len(s.savedMainCells) {
+			copy(row, s.savedMainCells[i])
 		}
-		if s.savedMainCurX >= cols {
-			s.savedMainCurX = cols - 1
-		}
+		resized[i] = row
+	}
+	s.savedMainCells = resized
+	if s.savedMainCurY >= rows {
+		s.savedMainCurY = rows - 1
+	}
+	if s.savedMainCurX >= cols {
+		s.savedMainCurX = cols - 1
 	}
 }
 

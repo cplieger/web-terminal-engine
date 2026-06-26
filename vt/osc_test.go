@@ -90,3 +90,67 @@ func TestOSCAbortedByCANDoesNotCorrupt(t *testing.T) {
 		t.Fatalf("expected title %q after recovery, got %q", "valid", s.Title)
 	}
 }
+
+// TestOSCTerminatedBy8BitST verifies the 8-bit ST (0x9C) terminates an OSC and
+// the title is set.
+func TestOSCTerminatedBy8BitST(t *testing.T) {
+	s := New(5, 80)
+	s.Write([]byte("\x1b]2;Hello"))
+	s.Write([]byte{0x9C}) // 8-bit ST
+	if s.pState != stGround {
+		t.Errorf("0x9C in OscString: state=%d, want Ground", s.pState)
+	}
+	if s.Title != "Hello" {
+		t.Errorf("OSC title after 0x9C: got %q, want Hello", s.Title)
+	}
+}
+
+// TestOSCAbortedBySUB verifies SUB aborts an OSC without dispatching the title.
+func TestOSCAbortedBySUB(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]2;aborted"))
+	s.Write([]byte{0x1A}) // SUB
+	if s.pState != stGround {
+		t.Fatalf("SUB did not abort OSC: state=%d", s.pState)
+	}
+	if s.Title == "aborted" {
+		t.Fatal("SUB in OSC dispatched title (exit action fired)")
+	}
+}
+
+// TestOSCNoTerminatorThenNewSequence verifies an unterminated OSC is abandoned
+// when a fresh ESC sequence begins, which then takes effect.
+func TestOSCNoTerminatorThenNewSequence(t *testing.T) {
+	s := New(5, 80)
+	s.Write([]byte("\x1b]8;params;http://example.com")) // no terminator
+	s.Write([]byte("\x1b[1;1H"))                        // new sequence starts fresh
+	if row, col := s.CursorPos(); row != 0 || col != 0 {
+		t.Fatalf("expected cursor at 0,0 after OSC abort via ESC, got %d,%d", row, col)
+	}
+}
+
+// TestOSCAllDigitPayloadNoSeparator verifies an all-digit OSC payload with no
+// separator (e.g. "2") is parsed in-bounds, and OSC 2 sets the title to the
+// empty data.
+func TestOSCAllDigitPayloadNoSeparator(t *testing.T) {
+	s := New(1, 10)
+	s.Title = "prev"
+	s.oscBuf = []byte("2") // OSC id 2, all digits, no separator
+	s.dispatchOsc()
+	if s.Title != "" {
+		t.Errorf("dispatchOsc(%q): Title = %q, want \"\" (OSC 2 sets title to empty data)", "2", s.Title)
+	}
+}
+
+// TestOSCUnhandledIdLeavesTitle verifies an unhandled OSC id (9) leaves the
+// title unchanged.
+func TestOSCUnhandledIdLeavesTitle(t *testing.T) {
+	s := New(1, 10)
+	const keep = "keep"
+	s.Title = keep
+	s.oscBuf = []byte("9") // id 9 (unhandled)
+	s.dispatchOsc()
+	if s.Title != keep {
+		t.Errorf("dispatchOsc(%q): Title = %q, want %q (id 9 unhandled, title unchanged)", "9", s.Title, keep)
+	}
+}

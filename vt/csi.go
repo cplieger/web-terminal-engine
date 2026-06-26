@@ -331,12 +331,8 @@ func (s *Screen) setMode(mode int) {
 		s.enterAltScreen()
 	case 1048:
 		s.saveCursor()
-	case 1000:
-		s.MouseMode = 1000
-	case 1002:
-		s.MouseMode = 1002
-	case 1003:
-		s.MouseMode = 1003
+	case 1000, 1002, 1003:
+		s.MouseMode = uint16(mode) // #nosec G115 -- mode is one of 1000/1002/1003, fits uint16
 	case 1004:
 		s.FocusReporting = true
 	case 1006:

@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-//nolint:gocyclo,gocognit // CSI dispatch is inherently complex
+//nolint:gocyclo // wide CSI final-byte dispatch; cognitively flat (each case is a one-line handler call)
 func (s *Screen) dispatchCSI(final byte) {
 	// Any cursor-affecting CSI clears pending wrap.
 	switch final {
@@ -14,252 +14,82 @@ func (s *Screen) dispatchCSI(final byte) {
 		s.pendingWrap = false
 	}
 
-	// SP-prefixed sequences (intermediate byte 0x20).
-	if s.numInterm > 0 && s.pIntermed[0] == ' ' {
-		switch final {
-		case '@': // SL
-			n := s.paramVal(0, 1)
-			s.shiftLeft(n)
-		case 'A': // SR
-			n := s.paramVal(0, 1)
-			s.shiftRight(n)
-		case 'q': // DECSCUSR
-			v := s.paramVal(0, 0)
-			if v <= 6 {
-				s.CursorStyle = uint8(v) // #nosec G115 -- v bounded [0,6]
-				s.CursorBlink = v == 0 || v%2 == 1
-			}
-		default:
-			slog.Info("vt: unhandled CSI SP", "cmd", string(final), "args", s.paramVal(0, 0))
-		}
-		return
-	}
-
-	// '!' intermediate — DECSTR (soft terminal reset).
-	if s.numInterm > 0 && s.pIntermed[0] == '!' {
-		if final == 'p' {
-			s.softReset()
-		}
-		return
-	}
-
-	// '$' intermediate — DECRQM (Request Mode).
-	if s.numInterm > 0 && s.pIntermed[0] == '$' {
-		if final == 'p' {
-			s.handleDECRQM()
-		}
+	// Intermediate-byte sequences (SP, '!', '$') dispatch separately. An
+	// unrecognized intermediate returns false and falls through to the main
+	// final-byte dispatch below, preserving the original behavior.
+	if s.numInterm > 0 && s.dispatchCSIIntermediate(final) {
 		return
 	}
 
 	switch final {
-	case 'A':
-		n := s.paramVal(0, 1)
-		s.curY -= n
-		if s.curY < 0 {
-			s.curY = 0
-		}
-	case 'B':
-		n := s.paramVal(0, 1)
-		s.curY += n
-		if s.curY >= s.Height {
-			s.curY = s.Height - 1
-		}
-	case 'C':
-		n := s.paramVal(0, 1)
-		s.curX += n
-		if s.curX >= s.Width {
-			s.curX = s.Width - 1
-		}
-	case 'D':
-		n := s.paramVal(0, 1)
-		s.curX -= n
-		if s.curX < 0 {
-			s.curX = 0
-		}
-	case 'E':
-		n := s.paramVal(0, 1)
-		s.curY += n
+	case 'A': // CUU — cursor up
+		s.curY -= s.paramVal(0, 1)
+		s.clampCursor()
+	case 'B': // CUD — cursor down
+		s.curY += s.paramVal(0, 1)
+		s.clampCursor()
+	case 'C': // CUF — cursor forward
+		s.curX += s.paramVal(0, 1)
+		s.clampCursor()
+	case 'D': // CUB — cursor back
+		s.curX -= s.paramVal(0, 1)
+		s.clampCursor()
+	case 'E': // CNL — cursor next line
+		s.curY += s.paramVal(0, 1)
 		s.curX = 0
-		if s.curY >= s.Height {
-			s.curY = s.Height - 1
-		}
-	case 'F':
-		n := s.paramVal(0, 1)
-		s.curY -= n
+		s.clampCursor()
+	case 'F': // CPL — cursor previous line
+		s.curY -= s.paramVal(0, 1)
 		s.curX = 0
-		if s.curY < 0 {
-			s.curY = 0
-		}
-	case 'G':
-		n := s.paramVal(0, 1)
-		s.curX = max(n-1, 0)
-		if s.curX >= s.Width {
-			s.curX = s.Width - 1
-		}
-	case 'H', 'f':
-		y := s.paramVal(0, 1) - 1
-		x := s.paramVal(1, 1) - 1
-		y = max(y, 0)
-		x = max(x, 0)
-		if s.OriginMode {
-			y += s.scrollTop
-			if y > s.scrollBottom {
-				y = s.scrollBottom
-			}
-		} else if y >= s.Height {
-			y = s.Height - 1
-		}
-		if x >= s.Width {
-			x = s.Width - 1
-		}
-		s.curY, s.curX = y, x
-	case 'J':
-		d := s.paramVal(0, 0)
-		switch d {
-		case 0:
-			s.eraseRegion(s.curY, s.curX, s.curY, s.Width-1)
-			s.eraseRegion(s.curY+1, 0, s.Height-1, s.Width-1)
-		case 1:
-			s.eraseRegion(0, 0, s.curY-1, s.Width-1)
-			s.eraseRegion(s.curY, 0, s.curY, s.curX)
-		case 2:
-			s.eraseRegion(0, 0, s.Height-1, s.Width-1)
-			s.Drained = nil
-		case 3:
-			s.eraseRegion(0, 0, s.Height-1, s.Width-1)
-			s.Drained = nil
-		}
-	case 'K':
-		d := s.paramVal(0, 0)
-		switch d {
-		case 0:
-			s.eraseRegion(s.curY, s.curX, s.curY, s.Width-1)
-		case 1:
-			s.eraseRegion(s.curY, 0, s.curY, s.curX)
-		case 2:
-			s.eraseRegion(s.curY, 0, s.curY, s.Width-1)
-		}
-	case '@': // ICH
-		n := s.paramVal(0, 1)
-		s.insertChars(n)
-	case 'L': // IL
-		n := s.paramVal(0, 1)
-		s.insertLines(n)
-	case 'M': // DL
-		n := s.paramVal(0, 1)
-		s.deleteLines(n)
-	case 'P': // DCH
-		n := s.paramVal(0, 1)
-		s.deleteChars(n)
-	case 'S': // SU
-		n := s.paramVal(0, 1)
-		regionH := s.scrollBottom - s.scrollTop + 1
-		n = min(n, regionH)
-		for range n {
-			s.scrollUpOnce()
-		}
-	case 'T': // SD
-		n := s.paramVal(0, 1)
-		regionH := s.scrollBottom - s.scrollTop + 1
-		n = min(n, regionH)
-		for range n {
-			s.scrollDownOnce()
-		}
-	case '^': // SD alternate
-		n := s.paramVal(0, 1)
-		regionH := s.scrollBottom - s.scrollTop + 1
-		n = min(n, regionH)
-		for range n {
-			s.scrollDownOnce()
-		}
-	case 'X': // ECH
-		n := s.paramVal(0, 1)
-		end := s.curX + n - 1
-		if end >= s.Width {
-			end = s.Width - 1
-		}
-		s.eraseRegion(s.curY, s.curX, s.curY, end)
-	case 'I': // CHT
-		n := s.paramVal(0, 1)
-		for range n {
-			s.curX = s.nextTabStop(s.curX)
-			if s.curX >= s.Width {
-				s.curX = s.Width - 1
-				break
-			}
-		}
-	case 'Z': // CBT
-		n := s.paramVal(0, 1)
-		for range n {
-			s.curX = s.prevTabStop(s.curX)
-			if s.curX <= 0 {
-				s.curX = 0
-				break
-			}
-		}
-	case '`', 'a': // HPA / HPR
-		n := s.paramVal(0, 1)
-		if final == '`' {
-			s.curX = n - 1
-		} else {
-			s.curX += n
-		}
-		if s.curX < 0 {
-			s.curX = 0
-		}
-		if s.curX >= s.Width {
-			s.curX = s.Width - 1
-		}
-	case 'd': // VPA
-		n := s.paramVal(0, 1)
-		s.curY = max(n-1, 0)
-		if s.curY >= s.Height {
-			s.curY = s.Height - 1
-		}
-	case 'e': // VPR
-		n := s.paramVal(0, 1)
-		s.curY += n
-		if s.curY >= s.Height {
-			s.curY = s.Height - 1
-		}
-	case 'b': // REP
-		n := s.paramVal(0, 1)
-		if s.lastPrintedRune != 0 {
-			saved := s.style
-			s.style = s.lastPrintedStyle
-			for range n {
-				s.put(s.lastPrintedRune)
-			}
-			s.style = saved
-		}
-	case 'c': // Device Attributes
-		switch s.privateMarker {
-		case '>':
-			s.Response = append(s.Response, "\x1b[>1;10;0c"...)
-		case '=':
-			s.Response = append(s.Response, "\x1bP!|00000000\x1b\\"...)
-		default:
-			if s.paramVal(0, 0) == 0 {
-				s.Response = append(s.Response, "\x1b[?62;22c"...)
-			}
-		}
-	case 'g': // TBC
-		n := s.paramVal(0, 0)
-		switch n {
-		case 0:
-			s.clearTabStop(s.curX)
-		case 3:
-			s.clearAllTabStops()
-		}
-	case 'r': // DECSTBM
-		top := max(s.paramVal(0, 1)-1, 0)
-		bottom := min(s.paramVal(1, s.Height)-1, s.Height-1)
-		if top < bottom {
-			s.scrollTop = top
-			s.scrollBottom = bottom
-		}
-		s.curY, s.curX = 0, 0
-	case 'm':
+		s.clampCursor()
+	case 'G': // CHA — cursor horizontal absolute
+		s.curX = s.paramVal(0, 1) - 1
+		s.clampCursor()
+	case 'H', 'f': // CUP / HVP — cursor position
+		s.cursorPosition(s.paramVal(0, 1)-1, s.paramVal(1, 1)-1)
+	case 'J': // ED — erase in display
+		s.eraseInDisplay(s.paramVal(0, 0))
+	case 'K': // EL — erase in line
+		s.eraseInLine(s.paramVal(0, 0))
+	case '@': // ICH — insert characters
+		s.insertChars(s.paramVal(0, 1))
+	case 'L': // IL — insert lines
+		s.insertLines(s.paramVal(0, 1))
+	case 'M': // DL — delete lines
+		s.deleteLines(s.paramVal(0, 1))
+	case 'P': // DCH — delete characters
+		s.deleteChars(s.paramVal(0, 1))
+	case 'S': // SU — scroll up
+		s.scrollUp(s.paramVal(0, 1))
+	case 'T', '^': // SD — scroll down
+		s.scrollDown(s.paramVal(0, 1))
+	case 'X': // ECH — erase characters
+		s.eraseChars(s.paramVal(0, 1))
+	case 'I': // CHT — cursor forward tabulation
+		s.cursorTabForward(s.paramVal(0, 1))
+	case 'Z': // CBT — cursor backward tabulation
+		s.cursorTabBackward(s.paramVal(0, 1))
+	case '`': // HPA — horizontal position absolute
+		s.curX = s.paramVal(0, 1) - 1
+		s.clampCursor()
+	case 'a': // HPR — horizontal position relative
+		s.curX += s.paramVal(0, 1)
+		s.clampCursor()
+	case 'd': // VPA — vertical position absolute
+		s.curY = s.paramVal(0, 1) - 1
+		s.clampCursor()
+	case 'e': // VPR — vertical position relative
+		s.curY += s.paramVal(0, 1)
+		s.clampCursor()
+	case 'b': // REP — repeat last printed character
+		s.repeatLastChar(s.paramVal(0, 1))
+	case 'c': // DA — device attributes
+		s.deviceAttributes()
+	case 'g': // TBC — tab clear
+		s.tabClear(s.paramVal(0, 0))
+	case 'r': // DECSTBM — set scroll region
+		s.setScrollRegion()
+	case 'm': // SGR — select graphic rendition
 		s.applySGR()
 	case 's':
 		s.saveCursor()
@@ -269,30 +99,238 @@ func (s *Screen) dispatchCSI(final byte) {
 		s.applyModes(true)
 	case 'l':
 		s.applyModes(false)
-	case 't': // Window manipulation
-		n := s.paramVal(0, 0)
-		if n == 18 {
-			s.Response = fmt.Appendf(s.Response, "\x1b[8;%d;%dt", s.Height, s.Width)
-		}
-	case 'n': // DSR
-		if s.privateMarker == '?' {
-			n := s.paramVal(0, 0)
-			if n == 6 {
-				s.Response = fmt.Appendf(s.Response, "\x1b[?%d;%dR", s.curY+1, s.curX+1)
-			}
-		} else {
-			n := s.paramVal(0, 0)
-			switch n {
-			case 5:
-				s.Response = append(s.Response, "\x1b[0n"...)
-			case 6:
-				s.Response = fmt.Appendf(s.Response, "\x1b[%d;%dR", s.curY+1, s.curX+1)
-			}
-		}
+	case 't': // window manipulation
+		s.windowManipulation()
+	case 'n': // DSR — device status report
+		s.deviceStatusReport()
 	default:
 		if final != 0 {
 			slog.Info("vt: unhandled CSI", "cmd", string(final), "marker", s.privateMarker)
 		}
+	}
+}
+
+// clampCursor confines the cursor to the screen bounds. The cursor-movement
+// handlers move the cursor freely and then call this; clamping the axis that
+// did not move is a no-op, so one helper serves every movement command.
+func (s *Screen) clampCursor() {
+	s.curX = min(max(s.curX, 0), s.Width-1)
+	s.curY = min(max(s.curY, 0), s.Height-1)
+}
+
+// cursorPosition implements CUP/HVP. The coordinates are 0-based (the caller
+// converts from the 1-based CSI parameters). In origin mode the row is
+// relative to the scroll region and clamped to its bottom.
+func (s *Screen) cursorPosition(y, x int) {
+	y = max(y, 0)
+	x = max(x, 0)
+	if s.OriginMode {
+		y += s.scrollTop
+		if y > s.scrollBottom {
+			y = s.scrollBottom
+		}
+	} else if y >= s.Height {
+		y = s.Height - 1
+	}
+	if x >= s.Width {
+		x = s.Width - 1
+	}
+	s.curY, s.curX = y, x
+}
+
+// dispatchCSIIntermediate handles CSI sequences carrying an intermediate byte
+// (SP, '!', or '$'). It returns true when it consumed the sequence; an
+// unrecognized intermediate returns false so the caller falls through to the
+// main final-byte dispatch. Called only when s.numInterm > 0.
+func (s *Screen) dispatchCSIIntermediate(final byte) bool {
+	switch s.pIntermed[0] {
+	case ' ': // SP-prefixed
+		s.dispatchCSISpace(final)
+		return true
+	case '!': // DECSTR — soft terminal reset
+		if final == 'p' {
+			s.softReset()
+		}
+		return true
+	case '$': // DECRQM — request mode
+		if final == 'p' {
+			s.handleDECRQM()
+		}
+		return true
+	}
+	return false
+}
+
+// dispatchCSISpace handles the SP-intermediate CSI sequences (SL, SR,
+// DECSCUSR).
+func (s *Screen) dispatchCSISpace(final byte) {
+	switch final {
+	case '@': // SL — shift left
+		s.shiftLeft(s.paramVal(0, 1))
+	case 'A': // SR — shift right
+		s.shiftRight(s.paramVal(0, 1))
+	case 'q': // DECSCUSR — set cursor style
+		v := s.paramVal(0, 0)
+		if v <= 6 {
+			s.CursorStyle = uint8(v) // #nosec G115 -- v bounded [0,6]
+			s.CursorBlink = v == 0 || v%2 == 1
+		}
+	default:
+		slog.Info("vt: unhandled CSI SP", "cmd", string(final), "args", s.paramVal(0, 0))
+	}
+}
+
+// eraseInDisplay implements ED (CSI J).
+func (s *Screen) eraseInDisplay(mode int) {
+	switch mode {
+	case 0:
+		s.eraseRegion(s.curY, s.curX, s.curY, s.Width-1)
+		s.eraseRegion(s.curY+1, 0, s.Height-1, s.Width-1)
+	case 1:
+		s.eraseRegion(0, 0, s.curY-1, s.Width-1)
+		s.eraseRegion(s.curY, 0, s.curY, s.curX)
+	case 2, 3:
+		s.eraseRegion(0, 0, s.Height-1, s.Width-1)
+		s.Drained = nil
+	}
+}
+
+// eraseInLine implements EL (CSI K).
+func (s *Screen) eraseInLine(mode int) {
+	switch mode {
+	case 0:
+		s.eraseRegion(s.curY, s.curX, s.curY, s.Width-1)
+	case 1:
+		s.eraseRegion(s.curY, 0, s.curY, s.curX)
+	case 2:
+		s.eraseRegion(s.curY, 0, s.curY, s.Width-1)
+	}
+}
+
+// eraseChars implements ECH (CSI X): erase n cells from the cursor rightward,
+// clamped to the row end.
+func (s *Screen) eraseChars(n int) {
+	end := s.curX + n - 1
+	if end >= s.Width {
+		end = s.Width - 1
+	}
+	s.eraseRegion(s.curY, s.curX, s.curY, end)
+}
+
+// scrollUp implements SU (CSI S): scroll the region up n lines (clamped to the
+// region height).
+func (s *Screen) scrollUp(n int) {
+	n = min(n, s.scrollBottom-s.scrollTop+1)
+	for range n {
+		s.scrollUpOnce()
+	}
+}
+
+// scrollDown implements SD (CSI T / CSI ^): scroll the region down n lines.
+func (s *Screen) scrollDown(n int) {
+	n = min(n, s.scrollBottom-s.scrollTop+1)
+	for range n {
+		s.scrollDownOnce()
+	}
+}
+
+// cursorTabForward implements CHT (CSI I): advance the cursor n tab stops,
+// stopping at the right margin.
+func (s *Screen) cursorTabForward(n int) {
+	for range n {
+		s.curX = s.nextTabStop(s.curX)
+		if s.curX >= s.Width {
+			s.curX = s.Width - 1
+			break
+		}
+	}
+}
+
+// cursorTabBackward implements CBT (CSI Z): move the cursor back n tab stops,
+// stopping at column 0.
+func (s *Screen) cursorTabBackward(n int) {
+	for range n {
+		s.curX = s.prevTabStop(s.curX)
+		if s.curX <= 0 {
+			s.curX = 0
+			break
+		}
+	}
+}
+
+// repeatLastChar implements REP (CSI b): reprint the last printed rune n times
+// using the style it was printed with.
+func (s *Screen) repeatLastChar(n int) {
+	if s.lastPrintedRune == 0 {
+		return
+	}
+	saved := s.style
+	s.style = s.lastPrintedStyle
+	for range n {
+		s.put(s.lastPrintedRune)
+	}
+	s.style = saved
+}
+
+// deviceAttributes implements DA (CSI c) for the primary, secondary ('>') and
+// tertiary ('=') variants.
+func (s *Screen) deviceAttributes() {
+	switch s.privateMarker {
+	case '>':
+		s.Response = append(s.Response, "\x1b[>1;10;0c"...)
+	case '=':
+		s.Response = append(s.Response, "\x1bP!|00000000\x1b\\"...)
+	default:
+		if s.paramVal(0, 0) == 0 {
+			s.Response = append(s.Response, "\x1b[?62;22c"...)
+		}
+	}
+}
+
+// tabClear implements TBC (CSI g): clear the stop at the cursor (Ps=0) or all
+// stops (Ps=3).
+func (s *Screen) tabClear(mode int) {
+	switch mode {
+	case 0:
+		s.clearTabStop(s.curX)
+	case 3:
+		s.clearAllTabStops()
+	}
+}
+
+// setScrollRegion implements DECSTBM (CSI r) and homes the cursor.
+func (s *Screen) setScrollRegion() {
+	top := max(s.paramVal(0, 1)-1, 0)
+	bottom := min(s.paramVal(1, s.Height)-1, s.Height-1)
+	if top < bottom {
+		s.scrollTop = top
+		s.scrollBottom = bottom
+	}
+	s.curY, s.curX = 0, 0
+}
+
+// windowManipulation answers the subset of CSI t we support: report the text
+// area size in characters (Ps=18).
+func (s *Screen) windowManipulation() {
+	if s.paramVal(0, 0) == 18 {
+		s.Response = fmt.Appendf(s.Response, "\x1b[8;%d;%dt", s.Height, s.Width)
+	}
+}
+
+// deviceStatusReport implements DSR (CSI n / CSI ? n): cursor-position report
+// (Ps=6) and, for the ANSI form, terminal-status report (Ps=5).
+func (s *Screen) deviceStatusReport() {
+	if s.privateMarker == '?' {
+		if s.paramVal(0, 0) == 6 {
+			s.Response = fmt.Appendf(s.Response, "\x1b[?%d;%dR", s.curY+1, s.curX+1)
+		}
+		return
+	}
+	switch s.paramVal(0, 0) {
+	case 5:
+		s.Response = append(s.Response, "\x1b[0n"...)
+	case 6:
+		s.Response = fmt.Appendf(s.Response, "\x1b[%d;%dR", s.curY+1, s.curX+1)
 	}
 }
 

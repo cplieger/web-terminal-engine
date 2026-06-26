@@ -22,56 +22,86 @@ const wsPingInterval = 2 * time.Second
 // false-disconnects on transient spikes or waits too long when the
 // peer truly drops.
 func pingLoop(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn) {
-	stat := newPingStat()
 	t := time.NewTicker(wsPingInterval)
 	defer t.Stop()
-	consecFails := 0
+	p := &pinger{ws: ws, stat: newPingStat()}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			timeout, capped := stat.Timeout()
-			if capped {
-				srtt, rttvar := stat.Stats()
-				slog.Warn("terminal: ws ping timeout at cap",
-					"timeout", timeout, "cap", maxPongTimeout,
-					"srtt", srtt, "rttvar", rttvar,
-					"consec_fails", consecFails)
+			if p.tick(ctx, cancel) {
+				return
 			}
-			pingCtx, pingCancel := context.WithTimeout(ctx, timeout)
-			start := time.Now()
-			err := ws.Ping(pingCtx)
-			pingCancel()
-			rtt := time.Since(start)
-			if err != nil {
-				if errors.Is(err, context.Canceled) {
-					return
-				}
-				newRTO := stat.Backoff()
-				consecFails++
-				if consecFails >= maxConsecutiveFailures {
-					srtt, rttvar := stat.Stats()
-					slog.Error("terminal: ws ping failed; closing connection",
-						"error", err,
-						"timeout", timeout,
-						"observed_rtt", rtt,
-						"consec_fails", consecFails,
-						"srtt", srtt, "rttvar", rttvar)
-					cancel()
-					return
-				}
-				slog.Warn("terminal: ws ping miss; backoff",
-					"error", err,
-					"timeout", timeout,
-					"observed_rtt", rtt,
-					"new_rto", newRTO,
-					"consec_fails", consecFails,
-					"max_fails", maxConsecutiveFailures)
-				continue
-			}
-			consecFails = 0
-			stat.Record(rtt)
 		}
 	}
+}
+
+// pinger carries the per-connection accounting the ping select-loop
+// mutates across ticks (the adaptive RTO model and the consecutive-
+// failure counter). Extracting it lets each tick's work live in a
+// method, keeping pingLoop's select body small.
+type pinger struct {
+	ws          *websocket.Conn
+	stat        *pingStat
+	consecFails int
+}
+
+// tick performs one ping/pong attempt: it sends a ping with the model's
+// current adaptive timeout and feeds the result back into the model.
+// Returns true when the loop should stop (the connection was declared
+// dead — cancel() already called — or the context was canceled during
+// the ping).
+func (p *pinger) tick(ctx context.Context, cancel context.CancelFunc) (stop bool) {
+	timeout, capped := p.stat.Timeout()
+	if capped {
+		srtt, rttvar := p.stat.Stats()
+		slog.Warn("terminal: ws ping timeout at cap",
+			"timeout", timeout, "cap", maxPongTimeout,
+			"srtt", srtt, "rttvar", rttvar,
+			"consec_fails", p.consecFails)
+	}
+	pingCtx, pingCancel := context.WithTimeout(ctx, timeout)
+	start := time.Now()
+	err := p.ws.Ping(pingCtx)
+	pingCancel()
+	rtt := time.Since(start)
+	if err != nil {
+		return p.handlePingFailure(err, timeout, rtt, cancel)
+	}
+	p.consecFails = 0
+	p.stat.Record(rtt)
+	return false
+}
+
+// handlePingFailure applies the Karn/Jacobson backoff rule to a failed
+// ping and decides whether the connection is dead. A context-canceled
+// error means the loop is shutting down (stop without backoff). After
+// maxConsecutiveFailures backoffs in a row it calls cancel() and stops;
+// otherwise it backs off and continues.
+func (p *pinger) handlePingFailure(err error, timeout, rtt time.Duration, cancel context.CancelFunc) (stop bool) {
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	newRTO := p.stat.Backoff()
+	p.consecFails++
+	if p.consecFails >= maxConsecutiveFailures {
+		srtt, rttvar := p.stat.Stats()
+		slog.Error("terminal: ws ping failed; closing connection",
+			"error", err,
+			"timeout", timeout,
+			"observed_rtt", rtt,
+			"consec_fails", p.consecFails,
+			"srtt", srtt, "rttvar", rttvar)
+		cancel()
+		return true
+	}
+	slog.Warn("terminal: ws ping miss; backoff",
+		"error", err,
+		"timeout", timeout,
+		"observed_rtt", rtt,
+		"new_rto", newRTO,
+		"consec_fails", p.consecFails,
+		"max_fails", maxConsecutiveFailures)
+	return false
 }

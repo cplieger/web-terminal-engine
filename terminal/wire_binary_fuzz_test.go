@@ -7,9 +7,12 @@ import (
 	"github.com/cplieger/vterm/vt"
 )
 
-// FuzzWireRoundTrip generates random screen states and encodes them via
-// encodeScreenMsg, then validates structural integrity of the output bytes.
-func FuzzWireRoundTrip(f *testing.F) {
+// FuzzEncodeScreenMsg_structuralIntegrity generates random screen states,
+// encodes them via encodeScreenMsg, and walks the output bytes to confirm the
+// frame is self-consistent: the header counts match, every changed row index
+// is in bounds, and the payload consumes exactly the encoded length with no
+// trailing bytes.
+func FuzzEncodeScreenMsg_structuralIntegrity(f *testing.F) {
 	f.Add(uint8(3), uint8(4), uint8(1), uint8(0), []byte("hi"))
 	f.Add(uint8(1), uint8(1), uint8(0), uint8(0), []byte(""))
 	f.Add(uint8(10), uint8(20), uint8(5), uint8(3), []byte("abc"))

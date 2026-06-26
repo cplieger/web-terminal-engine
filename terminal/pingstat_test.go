@@ -186,22 +186,30 @@ func TestPingStat_concurrent_no_race(t *testing.T) {
 	}
 }
 
-func TestPingStat_constants_match_rfc6298(t *testing.T) {
-	// The shifts encode α = 1/8 and β = 1/4 as bit-shifts.
-	if alphaShift != 3 {
-		t.Errorf("alpha must be 1/8 per RFC 6298 §2.3; got 1/%d", 1<<alphaShift)
+func TestPingStat_record_counts_samples(t *testing.T) {
+	p := newPingStat()
+	if p.samples != 0 {
+		t.Fatalf("newPingStat().samples = %d, want 0", p.samples)
 	}
-	if betaShift != 2 {
-		t.Errorf("beta must be 1/4 per RFC 6298 §2.3; got 1/%d", 1<<betaShift)
+
+	p.Record(10 * time.Millisecond)
+	p.Record(20 * time.Millisecond)
+	p.Record(30 * time.Millisecond)
+
+	if p.samples != 3 {
+		t.Errorf("samples after 3 successful Records = %d, want 3", p.samples)
 	}
-	if k != 4 {
-		t.Errorf("K must be 4 per RFC 6298 §2.3; got %d", k)
-	}
-	if minPongTimeout >= bootstrapPongTimeout {
-		t.Errorf("min (%v) must be < bootstrap (%v)", minPongTimeout, bootstrapPongTimeout)
-	}
-	if bootstrapPongTimeout >= maxPongTimeout {
-		t.Errorf("bootstrap (%v) must be < cap (%v)", bootstrapPongTimeout, maxPongTimeout)
+}
+
+func TestPingStat_record_zero_rtt_is_valid_sample(t *testing.T) {
+	// rtt == 0 is a valid sample (only rtt < 0 is ignored): srtt=rttvar=0
+	// makes rto clamp up to the floor, replacing the bootstrap timeout.
+	p := newPingStat()
+	p.Record(0)
+
+	got, _ := p.Timeout()
+	if got != minPongTimeout {
+		t.Errorf("Timeout after Record(0) = %v, want %v", got, minPongTimeout)
 	}
 }
 

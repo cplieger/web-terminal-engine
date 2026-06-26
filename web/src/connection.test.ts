@@ -14,7 +14,8 @@
 // does before creating the replacement sock).
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { generateSessionId } from "./connection.js";
+import { connect, generateSessionId, init, reconnectNow } from "./connection.js";
+import type { ServerMessage } from "./types.js";
 
 interface MockWS {
   url: string;
@@ -105,83 +106,79 @@ function makeMockWebSocket(): typeof WebSocket {
   return ctor;
 }
 
-describe("connection: reconnect race produces no duplicate handler invocations", () => {
+describe("connection: a socket superseded by a reconnect delivers no duplicate messages", () => {
+  // Drives the REAL connection module (init + connect + reconnectNow) with
+  // a fake global WebSocket, asserting the observable contract: once a
+  // socket is superseded, frames still arriving on it never reach the
+  // onMessage callback. This is the duplicate-output-on-iPad-wake bug —
+  // the fix is the AbortController-per-socket whose signal detaches every
+  // listener when the replacement socket is created.
+  let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
+
   beforeEach(() => {
-    // Clear globals between tests
     allMockWebSockets.length = 0;
+    vi.useFakeTimers(); // neutralize the 10s connect-timeout / reconnect backoff
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    onMessage = vi.fn<(msg: ServerMessage) => void>();
+    init({
+      onMessage,
+      onOpen: () => {},
+      onClose: () => {},
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
   });
 
-  it("aborting a connecting sock detaches its message listener (orphan can't fire)", async () => {
-    // Simulate the reconnect-race directly without involving connection.ts:
-    // the test verifies the AbortController + addEventListener signal
-    // pattern that the connection module relies on.
-    const sock1 = new (makeMockWebSocket())("ws://x") as unknown as MockWS;
-
-    const ctrl1 = new AbortController();
-    const handler1 = vi.fn();
-    sock1.addEventListener("message", handler1, { signal: ctrl1.signal });
-
-    // Sanity: handler fires before abort.
-    sock1.fireMessage("hello");
-    expect(handler1).toHaveBeenCalledTimes(1);
-
-    // Abort the controller — listener should auto-detach.
-    ctrl1.abort();
-
-    // After abort: subsequent messages must NOT fire the handler.
-    sock1.fireMessage("after-abort");
-    expect(handler1).toHaveBeenCalledTimes(1);
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
   });
 
-  it("two rapid-fire reconnect calls leave only one active sock with a live listener", async () => {
-    // Mock WebSocket constructor that adds to allMockWebSockets.
-    const MockCtor = makeMockWebSocket();
+  function titleFrame(title: string): string {
+    return JSON.stringify({ type: "title", title });
+  }
 
-    // First "connect": create sock, attach listener with abort signal.
-    const ctrl1 = new AbortController();
-    const sock1 = new MockCtor("ws://x") as unknown as MockWS;
-    const handler1 = vi.fn();
-    sock1.addEventListener("message", handler1, { signal: ctrl1.signal });
+  it("reconnecting while still connecting orphans the first socket so its late frames are ignored", () => {
+    connect();
+    const first = allMockWebSockets[0]!;
 
-    // Simulate "second reconnectNow fired before sock1 opened":
-    // - abort ctrl1 (replicates the new code path)
-    // - create sock2 with its own controller
-    ctrl1.abort();
-    sock1.close();
+    // iPad wake fires visibilitychange + pageshow almost together; the
+    // second reconnect supersedes `first` before it ever opened.
+    reconnectNow();
+    const second = allMockWebSockets[1]!;
+    expect(second).toBeDefined();
+    expect(second).not.toBe(first);
 
-    const ctrl2 = new AbortController();
-    const sock2 = new MockCtor("ws://x") as unknown as MockWS;
-    const handler2 = vi.fn();
-    sock2.addEventListener("message", handler2, { signal: ctrl2.signal });
+    // A frame the server already had in flight is delivered to the
+    // orphaned socket after it was superseded — it must NOT propagate.
+    first.fireOpen();
+    first.fireMessage(titleFrame("ghost"));
+    expect(onMessage).not.toHaveBeenCalled();
 
-    // Both sockets receive messages (simulating the in-flight frames
-    // sock1 might still be delivered before its close handshake
-    // completes).
-    sock1.fireMessage("frame-A");
-    sock2.fireMessage("frame-A");
-    sock1.fireMessage("frame-B");
-    sock2.fireMessage("frame-B");
-
-    // CRITICAL ASSERTION: the orphaned sock1 must NOT fire its handler
-    // for any message after its controller was aborted.
-    expect(handler1).toHaveBeenCalledTimes(0);
-    expect(handler2).toHaveBeenCalledTimes(2);
+    // The live socket delivers normally.
+    second.fireOpen();
+    second.fireMessage(titleFrame("live"));
+    expect(onMessage).toHaveBeenCalledTimes(1);
   });
 
-  it("close listener on superseded sock does not run scheduleReconnect", async () => {
-    // When sock1 is aborted then closed, its 'close' listener must not
-    // fire (it would otherwise call scheduleReconnect and create yet
-    // another sock, snowballing the leak).
-    const MockCtor = makeMockWebSocket();
-    const sock1 = new MockCtor("ws://x") as unknown as MockWS;
-    const ctrl1 = new AbortController();
-    const closeHandler = vi.fn();
-    sock1.addEventListener("close", closeHandler, { signal: ctrl1.signal });
+  it("a frame in flight on the previous socket is not double-delivered after a fresh connect", () => {
+    connect();
+    const first = allMockWebSockets[0]!;
+    first.fireOpen();
+    first.fireMessage(titleFrame("one"));
+    expect(onMessage).toHaveBeenCalledTimes(1);
 
-    ctrl1.abort();
-    sock1.fireClose();
+    // A new connect() while connected supersedes `first` (its double-call
+    // guard aborts the existing socket before creating the replacement).
+    connect();
+    const second = allMockWebSockets[1]!;
+    expect(second).not.toBe(first);
 
-    expect(closeHandler).toHaveBeenCalledTimes(0);
+    first.fireMessage(titleFrame("dup"));
+    expect(onMessage).toHaveBeenCalledTimes(1); // orphan can't re-deliver
+
+    second.fireOpen();
+    second.fireMessage(titleFrame("two"));
+    expect(onMessage).toHaveBeenCalledTimes(2);
   });
 });
 

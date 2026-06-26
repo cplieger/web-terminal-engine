@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { encodeSGR } from "./mouse.js";
+import { encodeSGR, init as initMouse, type MouseInputHandler } from "./mouse.js";
 import * as modes from "./modes.js";
 
 beforeEach(() => {
@@ -42,13 +42,83 @@ describe("mouse: SGR encoding", () => {
   });
 });
 
-describe("mouse: focus events", () => {
-  it("focus in sequence", () => {
-    // Focus in: ESC[I
-    expect("\x1b[I").toBe("\x1b[I");
+describe("mouse: focus reporting (DEC 1004)", () => {
+  function setup(): { term: HTMLDivElement; sent: string[] } {
+    const term = document.createElement("div");
+    const sent: string[] = [];
+    const handler: MouseInputHandler = {
+      send: (data) => sent.push(data),
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => term,
+    };
+    initMouse(handler);
+    return { term, sent };
+  }
+
+  it("sends ESC[I on focus in when focus reporting is enabled", () => {
+    modes.setModes(true, false, true, true, 1003); // focus reporting on
+    const { term, sent } = setup();
+    term.dispatchEvent(new Event("focusin"));
+    expect(sent).toEqual(["\x1b[I"]);
   });
-  it("focus out sequence", () => {
-    // Focus out: ESC[O
-    expect("\x1b[O").toBe("\x1b[O");
+
+  it("sends ESC[O on focus out when focus reporting is enabled", () => {
+    modes.setModes(true, false, true, true, 1003);
+    const { term, sent } = setup();
+    term.dispatchEvent(new Event("focusout"));
+    expect(sent).toEqual(["\x1b[O"]);
+  });
+
+  it("sends nothing on focus changes when focus reporting is disabled", () => {
+    modes.setModes(true, false, true, false, 1003); // focus reporting off
+    const { term, sent } = setup();
+    term.dispatchEvent(new Event("focusin"));
+    term.dispatchEvent(new Event("focusout"));
+    expect(sent).toEqual([]);
+  });
+});
+
+describe("mouse: pointer events emit SGR input", () => {
+  // cellSize 8x16; happy-dom does no layout so getBoundingClientRect is
+  // all-zero, making cell math deterministic: col = floor(clientX/8)+1,
+  // row = floor(clientY/16)+1. clientX=16,clientY=32 -> col 3, row 3.
+  function setup(): { term: HTMLDivElement; sent: string[] } {
+    const term = document.createElement("div");
+    const sent: string[] = [];
+    const handler: MouseInputHandler = {
+      send: (data) => sent.push(data),
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => term,
+    };
+    initMouse(handler);
+    return { term, sent };
+  }
+
+  it("emits an SGR press sequence on mousedown when tracking is active", () => {
+    modes.setModes(true, false, true, true, 1003); // SGR on, mouse mode 1003
+    const { term, sent } = setup();
+    term.dispatchEvent(new MouseEvent("mousedown", { clientX: 16, clientY: 32, button: 0 }));
+    expect(sent).toEqual(["\x1b[<0;3;3M"]);
+  });
+
+  it("emits an SGR release sequence on mouseup", () => {
+    modes.setModes(true, false, true, true, 1003);
+    const { term, sent } = setup();
+    term.dispatchEvent(new MouseEvent("mouseup", { clientX: 16, clientY: 32, button: 0 }));
+    expect(sent).toEqual(["\x1b[<0;3;3m"]);
+  });
+
+  it("ignores pointer events when mouse tracking is off", () => {
+    modes.setModes(true, false, true, true, 0); // mouseMode 0 = tracking off
+    const { term, sent } = setup();
+    term.dispatchEvent(new MouseEvent("mousedown", { clientX: 16, clientY: 32, button: 0 }));
+    expect(sent).toEqual([]);
+  });
+
+  it("ignores pointer events when SGR encoding is off", () => {
+    modes.setModes(true, false, false, true, 1003); // mouseSGR off
+    const { term, sent } = setup();
+    term.dispatchEvent(new MouseEvent("mousedown", { clientX: 16, clientY: 32, button: 0 }));
+    expect(sent).toEqual([]);
   });
 });

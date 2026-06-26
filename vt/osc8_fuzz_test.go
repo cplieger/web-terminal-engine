@@ -6,8 +6,8 @@ import (
 )
 
 // FuzzOSC8 writes OSC 8 sequences with randomized URIs to a Screen.
-// Invariant: never panics; if a hyperlink is stored, it is a prefix of
-// the input URI (control chars like ST/BEL may truncate it early).
+// Invariant: never panics; if a hyperlink is stored, it is a prefix of the
+// input URI (control chars like ST/BEL may truncate it early).
 func FuzzOSC8(f *testing.F) {
 	f.Add([]byte("http://example.com"))
 	f.Add([]byte("javascript:alert(1)"))
@@ -23,13 +23,13 @@ func FuzzOSC8(f *testing.F) {
 		seq = append(seq, '\x07')
 		s.Write(seq)
 		s.Write([]byte("X"))
-		// Close hyperlink
+		// Close hyperlink.
 		s.Write([]byte("\x1b]8;;\x07"))
 
 		got := s.Cells[0][0].Hyperlink
-		// The hyperlink must be empty or a prefix of the input URI string.
-		// Control characters (BEL, ST=\x9c, ESC) inside the URI terminate
-		// the OSC sequence early, so truncation is valid behavior.
+		// The hyperlink must be empty or a prefix of the input URI string:
+		// control characters (BEL, ST, ESC) inside the URI terminate the OSC
+		// sequence early, so truncation is valid.
 		if got != "" && !strings.HasPrefix(string(uri), got) {
 			t.Fatalf("hyperlink = %q is not a prefix of input %q", got, string(uri))
 		}

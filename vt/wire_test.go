@@ -1,6 +1,9 @@
 package vt
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // TestWireRunEncoding locks the WIRE_PROTOCOL.md v1 contract by asserting
 // that WireRun field values and attribute bit positions match the spec.
@@ -88,5 +91,52 @@ func TestWireRunAllAttributes(t *testing.T) {
 		if runs[0].A&tc.bit == 0 {
 			t.Errorf("%s: bit %d not set in A=%d", tc.name, tc.bit, runs[0].A)
 		}
+	}
+}
+
+// TestRenderRowWireRejectsOutOfRangeRow verifies the row-bounds guard:
+// a row index equal to Height returns nil, while the last valid row is non-nil.
+func TestRenderRowWireRejectsOutOfRangeRow(t *testing.T) {
+	s := New(3, 8) // valid rows 0..2
+	if got := s.RenderRowWire(s.Height); got != nil {
+		t.Errorf("RenderRowWire(Height=%d) = %v, want nil", s.Height, got)
+	}
+	if got := s.RenderRowWire(s.Height - 1); got == nil {
+		t.Errorf("RenderRowWire(Height-1=%d) = nil, want non-nil", s.Height-1)
+	}
+}
+
+// TestBasic16RGBPaletteBounds verifies the 16-entry palette lookup: in-range
+// indices map to their colors, and an out-of-range index returns the gray
+// fallback rather than panicking.
+func TestBasic16RGBPaletteBounds(t *testing.T) {
+	if got := basic16RGB(0); got != 0x000000 {
+		t.Errorf("basic16RGB(0) = 0x%06x, want 0x000000", got)
+	}
+	if got := basic16RGB(15); got != 0xffffff {
+		t.Errorf("basic16RGB(15) = 0x%06x, want 0xffffff", got)
+	}
+	if got := basic16RGB(16); got != 0xaaaaaa {
+		t.Errorf("basic16RGB(16) = 0x%06x, want 0xaaaaaa (out-of-range fallback)", got)
+	}
+}
+
+// TestRenderRowWireWidePlaceholder verifies a wide character is followed by a
+// U+FFFF spacer placeholder in the wire text, and the total rune count of the
+// row equals the screen width.
+func TestRenderRowWireWidePlaceholder(t *testing.T) {
+	s := New(3, 10)
+	s.Write([]byte("A漢B"))
+	runs := s.RenderRowWire(0)
+	var text strings.Builder
+	for _, run := range runs {
+		text.WriteString(run.T)
+	}
+	got := text.String()
+	if !strings.Contains(got, "A漢\uFFFFB") {
+		t.Errorf("wire row = %q, want it to contain %q", got, "A漢\uFFFFB")
+	}
+	if len([]rune(got)) != 10 {
+		t.Errorf("wire row rune count = %d, want 10", len([]rune(got)))
 	}
 }

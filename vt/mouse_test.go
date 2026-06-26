@@ -41,3 +41,65 @@ func TestMouseModeTracking(t *testing.T) {
 		})
 	}
 }
+
+// TestMouseCoordsAtBoundary verifies enabling SGR mouse mode and reporting a
+// boundary cursor position keeps the cursor in bounds and the modes set.
+func TestMouseCoordsAtBoundary(t *testing.T) {
+	s := New(5, 5)
+	s.Write([]byte("\x1b[?1000h\x1b[?1006h"))
+	if s.MouseMode != 1000 {
+		t.Fatalf("expected mouse mode 1000, got %d", s.MouseMode)
+	}
+	if !s.MouseSGR {
+		t.Fatal("expected SGR mouse encoding")
+	}
+	s.Write([]byte("\x1b[5;5R")) // CPR at boundary (1-indexed)
+	row, col := s.CursorPos()
+	if col < 0 || col >= s.Width {
+		t.Fatalf("cursor col %d out of bounds", col)
+	}
+	if row < 0 || row >= s.Height {
+		t.Fatalf("cursor row %d out of bounds", row)
+	}
+}
+
+// TestMouseModeBoundaryResize verifies mouse mode survives a resize to the
+// minimum dimensions and the cursor stays in bounds.
+func TestMouseModeBoundaryResize(t *testing.T) {
+	s := New(10, 80)
+	s.Write([]byte("\x1b[?1003h\x1b[?1006h"))
+	s.Write([]byte("漢字テスト"))
+	s.Resize(1, 1)
+	if s.MouseMode != 1003 {
+		t.Fatalf("mouse mode lost on resize: %d", s.MouseMode)
+	}
+	row, col := s.CursorPos()
+	if col < 0 || col >= s.Width {
+		t.Fatalf("cursor col %d out of bounds after resize with mouse mode", col)
+	}
+	if row < 0 || row >= s.Height {
+		t.Fatalf("cursor row %d out of bounds", row)
+	}
+}
+
+// TestMouseCoords223Boundary verifies cursor positioning works past the X10
+// 223-column encoding limit on a wide screen and SGR mode can be enabled.
+func TestMouseCoords223Boundary(t *testing.T) {
+	s := New(5, 250)
+	s.Write([]byte("\x1b[?1000h")) // enable mouse
+	if s.MouseMode != 1000 {
+		t.Fatalf("expected mouse mode 1000")
+	}
+	s.Write([]byte("\x1b[1;224H")) // col 224 (0-indexed 223)
+	if row, col := s.CursorPos(); col != 223 || row != 0 {
+		t.Fatalf("expected (0,223), got (%d,%d)", row, col)
+	}
+	s.Write([]byte("\x1b[1;250H"))
+	if _, col := s.CursorPos(); col != 249 {
+		t.Fatalf("expected col 249, got %d", col)
+	}
+	s.Write([]byte("\x1b[?1006h")) // SGR mouse handles coords > 223
+	if !s.MouseSGR {
+		t.Fatal("expected SGR mode")
+	}
+}

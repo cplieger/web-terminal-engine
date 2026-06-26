@@ -95,27 +95,36 @@ func (s *Screen) applySGR() {
 // Returns the new group index after consuming.
 func (s *Screen) parseExtColorGroup(i int, c *Color) int {
 	g := s.paramGroup(i)
-
-	// Colon-subparam form: all values in one group
 	if g.Len >= 3 {
-		mode := int(g.Params[1])
-		switch mode {
-		case 5: // 256-color: 38:5:N
-			if g.Len >= 3 {
-				*c = Color{Type: 2, Val: clampByte(int(g.Params[2]))}
-			}
-		case 2: // RGB: 38:2:R:G:B or 38:2:cs:R:G:B
-			if g.Len >= 5 {
-				*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3])), B: clampByte(int(g.Params[4]))}
-			} else if g.Len == 4 {
-				// Some implementations send 38:2:R:G (incomplete) — treat as partial
-				*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3]))}
-			}
-		}
+		// Colon-subparam form: all values live in one group.
+		parseExtColorColon(g, c)
 		return i
 	}
+	// Semicolon-legacy form: consume following groups.
+	return s.parseExtColorLegacy(i, c)
+}
 
-	// Semicolon-legacy form: consume following groups
+// parseExtColorColon decodes the colon-subparam extended-color form
+// (38:5:N or 38:2:R:G:B), where the mode and components share one parameter
+// group. The caller guarantees g.Len >= 3.
+func parseExtColorColon(g ParamGroup, c *Color) {
+	switch int(g.Params[1]) {
+	case 5: // 256-color: 38:5:N
+		*c = Color{Type: 2, Val: clampByte(int(g.Params[2]))}
+	case 2: // RGB: 38:2:R:G:B or 38:2:cs:R:G:B
+		if g.Len >= 5 {
+			*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3])), B: clampByte(int(g.Params[4]))}
+		} else if g.Len == 4 {
+			// Some implementations send 38:2:R:G (incomplete) — treat as partial.
+			*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3]))}
+		}
+	}
+}
+
+// parseExtColorLegacy decodes the semicolon-legacy extended-color form
+// (38;5;N or 38;2;R;G;B), where the mode and components are separate groups
+// following group i. Returns the new group index after consuming.
+func (s *Screen) parseExtColorLegacy(i int, c *Color) int {
 	if i+1 >= s.paramCount() {
 		return i
 	}
@@ -123,8 +132,7 @@ func (s *Screen) parseExtColorGroup(i int, c *Color) int {
 	if modeGroup.Len == 0 {
 		return i + 1
 	}
-	mode := int(modeGroup.Params[0])
-	switch mode {
+	switch int(modeGroup.Params[0]) {
 	case 5:
 		if i+2 < s.paramCount() {
 			vg := s.paramGroup(i + 2)

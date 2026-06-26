@@ -1,0 +1,580 @@
+package vt
+
+import (
+	"bytes"
+	"log/slog"
+	"strings"
+	"testing"
+)
+
+// --- Intermediate-byte guard routing ---
+
+// TestCSIBangGuardRequiresInterm verifies the DECSTR ('!' intermediate) branch
+// only fires when an intermediate byte is actually present: a stale '!' left in
+// the buffer with numInterm==0 must not trigger a soft reset.
+func TestCSIBangGuardRequiresInterm(t *testing.T) {
+	s := New(10, 10)
+	s.Write([]byte("\x1b[!p"))   // DECSTR: leaves pIntermed[0]=='!', numInterm==1
+	s.Write([]byte("\x1b[3;5r")) // DECSTBM: scrollTop=2, scrollBottom=4, numInterm back to 0
+	if s.scrollTop != 2 {
+		t.Fatalf("precondition: scrollTop = %d, want 2 after CSI 3;5 r", s.scrollTop)
+	}
+	s.Write([]byte("\x1b[p")) // CSI p with numInterm==0: 'p' unhandled, scroll region intact
+	if s.scrollTop != 2 {
+		t.Errorf("scrollTop after CSI p with numInterm==0 = %d, want 2 (DECSTR must require an intermediate)", s.scrollTop)
+	}
+}
+
+// TestCSISpaceGuardRequiresInterm verifies the SP-intermediate branch only fires
+// with an intermediate present: a stale ' ' with numInterm==0 must run the
+// main-switch 'A' (cursor up), not the SP-branch 'A' (SR).
+func TestCSISpaceGuardRequiresInterm(t *testing.T) {
+	s := New(10, 10)
+	s.Write([]byte("\x1b[6;1H")) // cursor to row 5
+	s.Write([]byte("\x1b[ q"))   // DECSCUSR: leaves pIntermed[0]==' ', numInterm==1
+	s.Write([]byte("\x1b[2A"))   // CSI 2 A with numInterm==0 -> cursor up
+	if row, _ := s.CursorPos(); row != 3 {
+		t.Errorf("curY after CSI 2 A with numInterm==0 = %d, want 3 (SP branch must require an intermediate)", row)
+	}
+}
+
+// TestCSIDollarGuardRequiresInterm verifies the '$' (DECRQM) branch only fires
+// with an intermediate present: a stale '$' with numInterm==0 must not emit a
+// DECRQM reply.
+func TestCSIDollarGuardRequiresInterm(t *testing.T) {
+	s := New(10, 10)
+	s.Write([]byte("\x1b[$p")) // DECRQM: leaves pIntermed[0]=='$', numInterm==1
+	s.Response = nil
+	s.Write([]byte("\x1b[6p")) // CSI 6 p with numInterm==0: 'p' unhandled, no reply
+	if len(s.Response) != 0 {
+		t.Errorf("len(Response) after CSI 6 p with numInterm==0 = %d, want 0 (DECRQM must require an intermediate)", len(s.Response))
+	}
+}
+
+// --- DECSCUSR cursor style / blink ---
+
+// TestDECSCUSRCursorBlink verifies DECSCUSR sets both the cursor style and the
+// blink flag: even styles are steady, 0 and odd styles blink.
+func TestDECSCUSRCursorBlink(t *testing.T) {
+	cases := []struct {
+		seq       string
+		v         int
+		wantStyle uint8
+		wantBlink bool
+	}{
+		{"\x1b[0 q", 0, 0, true},
+		{"\x1b[1 q", 1, 1, true},
+		{"\x1b[2 q", 2, 2, false},
+		{"\x1b[3 q", 3, 3, true},
+		{"\x1b[4 q", 4, 4, false},
+		{"\x1b[5 q", 5, 5, true},
+		{"\x1b[6 q", 6, 6, false},
+	}
+	for _, tc := range cases {
+		s := New(2, 5)
+		// Force the opposite prior state so a passing assertion proves a write.
+		s.CursorBlink = !tc.wantBlink
+		s.CursorStyle = 99
+		s.Write([]byte(tc.seq))
+		if s.CursorBlink != tc.wantBlink {
+			t.Errorf("CursorBlink after %q (v=%d) = %v, want %v", tc.seq, tc.v, s.CursorBlink, tc.wantBlink)
+		}
+		if s.CursorStyle != tc.wantStyle {
+			t.Errorf("CursorStyle after %q (v=%d) = %d, want %d", tc.seq, tc.v, s.CursorStyle, tc.wantStyle)
+		}
+	}
+}
+
+// --- Cursor movement and clamping ---
+
+// TestCursorMovementBasic verifies CUP positions the cursor (1-indexed -> 0-indexed)
+// and CUU/CUD move it by one row.
+func TestCursorMovementBasic(t *testing.T) {
+	s := New(10, 20)
+	s.Write([]byte("\x1b[5;10H"))
+	if row, col := s.CursorPos(); row != 4 || col != 9 {
+		t.Errorf("CUP 5;10 = %d,%d, want 4,9", row, col)
+	}
+	s.Write([]byte("\x1b[A")) // up
+	if row, _ := s.CursorPos(); row != 3 {
+		t.Errorf("CUU: row=%d, want 3", row)
+	}
+	s.Write([]byte("\x1b[B")) // down
+	if row, _ := s.CursorPos(); row != 4 {
+		t.Errorf("CUD: row=%d, want 4", row)
+	}
+}
+
+// TestCUDClampsAtHeight verifies cursor-down clamps at the bottom row.
+func TestCUDClampsAtHeight(t *testing.T) {
+	s := New(5, 10)
+	s.Write([]byte("\x1b[5B")) // down 5 from row 0 reaches Height(5)
+	if row, _ := s.CursorPos(); row != 4 {
+		t.Errorf("curY after CSI 5 B = %d, want 4 (clamped to Height-1)", row)
+	}
+}
+
+// TestCHAClampsAtWidth verifies CHA (cursor horizontal absolute) clamps at the
+// last column.
+func TestCHAClampsAtWidth(t *testing.T) {
+	s := New(5, 10)
+	s.Write([]byte("\x1b[11G")) // CHA col 11 -> curX = 10 == Width
+	if _, col := s.CursorPos(); col != 9 {
+		t.Errorf("curX after CSI 11 G = %d, want 9 (clamped to Width-1)", col)
+	}
+}
+
+// TestCUPClampsRowAtHeight verifies CUP clamps the row at Height-1.
+func TestCUPClampsRowAtHeight(t *testing.T) {
+	s := New(5, 10)
+	s.Write([]byte("\x1b[6H")) // row 6 -> y = 5 == Height (origin mode off)
+	if row, _ := s.CursorPos(); row != 4 {
+		t.Errorf("curY after CSI 6 H = %d, want 4", row)
+	}
+}
+
+// TestCUPClampsColAtWidth verifies CUP clamps the column at Width-1.
+func TestCUPClampsColAtWidth(t *testing.T) {
+	s := New(5, 10)
+	s.Write([]byte("\x1b[1;11H")) // row 1, col 11 -> x = 10 == Width
+	row, col := s.CursorPos()
+	if row != 0 {
+		t.Errorf("curY after CSI 1;11 H = %d, want 0", row)
+	}
+	if col != 9 {
+		t.Errorf("curX after CSI 1;11 H = %d, want 9", col)
+	}
+}
+
+// TestOriginModeRelativeCUP verifies that with origin mode on, CUP is relative
+// to the scroll-region top.
+func TestOriginModeRelativeCUP(t *testing.T) {
+	s := New(10, 10)
+	s.Write([]byte("\x1b[3;8r")) // scroll region rows 3-8
+	s.Write([]byte("\x1b[?6h"))  // origin mode on
+	s.Write([]byte("\x1b[1;1H")) // relative to region top
+	if row, col := s.CursorPos(); row != 2 || col != 0 {
+		t.Errorf("origin-mode CUP 1;1 = %d,%d, want 2,0", row, col)
+	}
+}
+
+// --- Scroll region ---
+
+// TestSetScrollRegion verifies DECSTBM sets the scroll region (1-indexed input
+// to 0-indexed bounds).
+func TestSetScrollRegion(t *testing.T) {
+	s := New(10, 20)
+	s.Write([]byte("\x1b[3;8r"))
+	if s.scrollTop != 2 || s.scrollBottom != 7 {
+		t.Errorf("scroll region top=%d bot=%d, want 2,7", s.scrollTop, s.scrollBottom)
+	}
+}
+
+// TestDECSTBMBottomClamp verifies the scroll-region bottom clamps to Height-1.
+func TestDECSTBMBottomClamp(t *testing.T) {
+	s := New(10, 20)              // Height=10
+	s.Write([]byte("\x1b[1;11r")) // bottom=11-1=10 (==Height), must clamp to 9
+	if s.scrollBottom != 9 {
+		t.Errorf("DECSTBM bottom=Height: scrollBottom = %d, want 9", s.scrollBottom)
+	}
+}
+
+// TestDECSTBMTopEqualsBottom verifies a degenerate region (top==bottom) is
+// rejected, leaving the region unchanged.
+func TestDECSTBMTopEqualsBottom(t *testing.T) {
+	s := New(10, 20)
+	s.Write([]byte("\x1b[5;5r")) // top=4, bottom=4: region must stay 0..9
+	if s.scrollTop != 0 || s.scrollBottom != 9 {
+		t.Errorf("DECSTBM top==bottom: scrollTop,scrollBottom = %d,%d, want 0,9", s.scrollTop, s.scrollBottom)
+	}
+}
+
+// TestScrollUpRegionHeightCap verifies SU drains at most region-height lines on
+// a full-screen region.
+func TestScrollUpRegionHeightCap(t *testing.T) {
+	s := New(4, 5) // full-screen region: regionH=4
+	s.Write([]byte("\x1b[4S"))
+	if len(s.Drained) != 4 {
+		t.Errorf("len(Drained) after CSI 4 S = %d, want 4", len(s.Drained))
+	}
+}
+
+// TestScrollUpShiftsContent verifies SU shifts content up by one line.
+func TestScrollUpShiftsContent(t *testing.T) {
+	s := New(3, 5)
+	s.Write([]byte("Line1\r\nLine2\r\nLine3"))
+	s.Write([]byte("\x1b[1S"))
+	if got := s.RowString(0); got != "Line2" {
+		t.Errorf("after SU: row0=%q, want Line2", got)
+	}
+}
+
+// TestScrollDownNoCapBelowRegion verifies SD by less than the region height
+// performs a partial scroll rather than blanking the whole region.
+func TestScrollDownNoCapBelowRegion(t *testing.T) {
+	s := New(4, 5)
+	s.Write([]byte("\x1b[1;1HAAAA"))
+	s.Write([]byte("\x1b[2;1HBBBB"))
+	s.Write([]byte("\x1b[3;1HCCCC"))
+	s.Write([]byte("\x1b[4;1HDDDD"))
+	s.Write([]byte("\x1b[1T")) // SD 1
+	if got := s.RowString(1); got != "AAAA" {
+		t.Errorf("RowString(1) after CSI 1 T = %q, want %q", got, "AAAA")
+	}
+}
+
+// TestDeepScrollRegionOps verifies large scroll/insert/delete counts in a
+// single-line scroll region keep the cursor in bounds.
+func TestDeepScrollRegionOps(t *testing.T) {
+	s := New(5, 10)
+	s.Write([]byte("\x1b[3;3r")) // single-line region
+	s.Write([]byte("\x1b[100S"))
+	s.Write([]byte("\x1b[100T"))
+	s.Write([]byte("\x1b[100L"))
+	s.Write([]byte("\x1b[100M"))
+	row, col := s.CursorPos()
+	if col < 0 || col >= s.Width {
+		t.Fatalf("col %d out of bounds", col)
+	}
+	if row < 0 || row >= s.Height {
+		t.Fatalf("row %d out of bounds", row)
+	}
+}
+
+// --- Erase ---
+
+// TestEraseDisplayAll verifies ED 2 (CSI 2J) clears the whole screen.
+func TestEraseDisplayAll(t *testing.T) {
+	s := New(5, 10)
+	s.Write([]byte("AAAAAAAAAA"))
+	s.Write([]byte("\x1b[1;1H"))
+	s.Write([]byte("\x1b[2J"))
+	for x := range s.Width {
+		if s.Cells[0][x].Ch != ' ' {
+			t.Fatalf("ED 2J: cell[0][%d]=%q, want space", x, s.Cells[0][x].Ch)
+		}
+	}
+}
+
+// --- Insert / delete chars and lines ---
+
+// TestInsertCharsShifts verifies ICH inserts blanks at the cursor and shifts
+// existing content right.
+func TestInsertCharsShifts(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("ABCDE"))
+	s.Write([]byte("\x1b[1;2H")) // cursor at col 1
+	s.Write([]byte("\x1b[2@"))   // insert 2 chars
+	if s.Cells[0][1].Ch != ' ' || s.Cells[0][2].Ch != ' ' {
+		t.Error("ICH did not insert spaces")
+	}
+	if s.Cells[0][3].Ch != 'B' {
+		t.Errorf("ICH shifted wrong: got %q, want B", s.Cells[0][3].Ch)
+	}
+}
+
+// TestInsertCharsAtLastCol verifies inserting more chars than fit at the last
+// column keeps the cursor in bounds.
+func TestInsertCharsAtLastCol(t *testing.T) {
+	s := New(3, 5)
+	s.Write([]byte("ABCDE"))
+	s.Write([]byte("\x1b[4G"))  // col 3
+	s.Write([]byte("\x1b[10@")) // insert more than available
+	row, col := s.CursorPos()
+	if col < 0 || col >= s.Width {
+		t.Fatalf("col %d out of bounds", col)
+	}
+	if row < 0 || row >= s.Height {
+		t.Fatalf("row %d out of bounds", row)
+	}
+}
+
+// TestInsertCharsGuardAtHeight verifies insertChars early-returns when curY is
+// out of range rather than indexing out of bounds.
+func TestInsertCharsGuardAtHeight(t *testing.T) {
+	s := New(5, 5)
+	s.curY = s.Height // out of range
+	if didPanic(func() { s.insertChars(1) }) {
+		t.Errorf("insertChars with curY==Height panicked; the guard must early-return")
+	}
+}
+
+// TestDeleteCharsGuardAtHeight verifies deleteChars early-returns when curY is
+// out of range.
+func TestDeleteCharsGuardAtHeight(t *testing.T) {
+	s := New(5, 5)
+	s.curY = s.Height
+	if didPanic(func() { s.deleteChars(1) }) {
+		t.Errorf("deleteChars with curY==Height panicked; the guard must early-return")
+	}
+}
+
+// TestDeleteCharsClampToWidth verifies the delete count clamps to Width-curX so
+// columns left of the cursor survive and the loop stays in bounds.
+func TestDeleteCharsClampToWidth(t *testing.T) {
+	s := New(5, 10)
+	s.curY = 0
+	s.curX = 2
+	for x, r := range "ABCDEFGHIJ" {
+		s.Cells[0][x] = Cell{Ch: r}
+	}
+	if didPanic(func() { s.deleteChars(10) }) {
+		t.Fatalf("deleteChars(10) panicked; clamp must be Width-curX")
+	}
+	if s.Cells[0][0].Ch != 'A' {
+		t.Errorf("deleteChars(10) at curX=2: Cells[0][0].Ch = %q, want 'A' (cols left of cursor preserved)", s.Cells[0][0].Ch)
+	}
+	if s.Cells[0][1].Ch != 'B' {
+		t.Errorf("deleteChars(10) at curX=2: Cells[0][1].Ch = %q, want 'B'", s.Cells[0][1].Ch)
+	}
+	if s.Cells[0][2].Ch != ' ' {
+		t.Errorf("deleteChars(10) at curX=2: Cells[0][2].Ch = %q, want ' ' (erased region starts at cursor)", s.Cells[0][2].Ch)
+	}
+}
+
+// TestInsertLinesGuardAtScrollBottom verifies insertLines proceeds when curY
+// equals scrollBottom (blanking that row).
+func TestInsertLinesGuardAtScrollBottom(t *testing.T) {
+	s := New(5, 5)
+	s.scrollTop = 0
+	s.scrollBottom = 4
+	s.curY = s.scrollBottom
+	s.Cells[4][0] = Cell{Ch: 'Z'}
+	s.insertLines(1)
+	if s.Cells[4][0].Ch != ' ' {
+		t.Errorf("insertLines at curY==scrollBottom: Cells[4][0].Ch = %q, want ' '", s.Cells[4][0].Ch)
+	}
+}
+
+// TestInsertLinesClampToAvail verifies insertLines(1) shifts exactly one row
+// down rather than clamping up to the available region height.
+func TestInsertLinesClampToAvail(t *testing.T) {
+	s := New(5, 5)
+	s.scrollTop = 0
+	s.scrollBottom = 4
+	s.curY = 1
+	s.Cells[1][0] = Cell{Ch: '1'}
+	s.Cells[2][0] = Cell{Ch: '2'}
+	s.Cells[3][0] = Cell{Ch: '3'}
+	s.Cells[4][0] = Cell{Ch: '4'}
+	s.insertLines(1)
+	if s.Cells[2][0].Ch != '1' {
+		t.Errorf("insertLines(1) at curY=1: Cells[2][0].Ch = %q, want '1'", s.Cells[2][0].Ch)
+	}
+	if s.Cells[4][0].Ch != '3' {
+		t.Errorf("insertLines(1) at curY=1: Cells[4][0].Ch = %q, want '3'", s.Cells[4][0].Ch)
+	}
+}
+
+// TestDeleteLinesGuardAtScrollBottom verifies deleteLines proceeds when curY
+// equals scrollBottom.
+func TestDeleteLinesGuardAtScrollBottom(t *testing.T) {
+	s := New(5, 5)
+	s.scrollTop = 0
+	s.scrollBottom = 4
+	s.curY = s.scrollBottom
+	s.Cells[4][0] = Cell{Ch: 'Z'}
+	s.deleteLines(1)
+	if s.Cells[4][0].Ch != ' ' {
+		t.Errorf("deleteLines at curY==scrollBottom: Cells[4][0].Ch = %q, want ' '", s.Cells[4][0].Ch)
+	}
+}
+
+// TestDeleteLinesAvailClamp verifies the available-line count is region-bottom
+// minus curY plus one, so deleting that many clears the region.
+func TestDeleteLinesAvailClamp(t *testing.T) {
+	s := New(5, 5)
+	s.scrollTop = 0
+	s.scrollBottom = 4
+	s.curY = 1
+	s.Cells[1][0] = Cell{Ch: '1'}
+	s.Cells[2][0] = Cell{Ch: '2'}
+	s.Cells[3][0] = Cell{Ch: '3'}
+	s.Cells[4][0] = Cell{Ch: '4'}
+	s.deleteLines(4)
+	if s.Cells[1][0].Ch != ' ' {
+		t.Errorf("deleteLines(4) at curY=1: Cells[1][0].Ch = %q, want ' '", s.Cells[1][0].Ch)
+	}
+	if s.Cells[2][0].Ch != ' ' {
+		t.Errorf("deleteLines(4) at curY=1: Cells[2][0].Ch = %q, want ' '", s.Cells[2][0].Ch)
+	}
+}
+
+// TestDeleteLinesClampToAvail verifies deleteLines(1) shifts exactly one row up.
+func TestDeleteLinesClampToAvail(t *testing.T) {
+	s := New(5, 5)
+	s.scrollTop = 0
+	s.scrollBottom = 4
+	s.curY = 1
+	s.Cells[1][0] = Cell{Ch: '1'}
+	s.Cells[2][0] = Cell{Ch: '2'}
+	s.Cells[3][0] = Cell{Ch: '3'}
+	s.Cells[4][0] = Cell{Ch: '4'}
+	s.deleteLines(1)
+	if s.Cells[1][0].Ch != '2' {
+		t.Errorf("deleteLines(1) at curY=1: Cells[1][0].Ch = %q, want '2'", s.Cells[1][0].Ch)
+	}
+	if s.Cells[3][0].Ch != '4' {
+		t.Errorf("deleteLines(1) at curY=1: Cells[3][0].Ch = %q, want '4'", s.Cells[3][0].Ch)
+	}
+}
+
+// TestLineDownClampsCurY verifies lineDown clamps curY to Height-1 when the
+// cursor sits below the scroll region.
+func TestLineDownClampsCurY(t *testing.T) {
+	s := New(5, 5)
+	s.scrollBottom = 2
+	s.curY = s.Height - 1 // below the region -> increments to Height
+	s.lineDown()
+	if s.curY != s.Height-1 {
+		t.Errorf("lineDown from curY=Height-1: curY = %d, want %d", s.curY, s.Height-1)
+	}
+}
+
+// --- REP ---
+
+// TestREPRepeatsLastRune verifies REP (CSI b) repeats the last printed rune.
+func TestREPRepeatsLastRune(t *testing.T) {
+	s := New(5, 5)
+	s.lastPrintedRune = 'X'
+	s.dispatchCSI('b') // REP, default count 1
+	if s.Cells[0][0].Ch != 'X' {
+		t.Errorf("REP with lastPrintedRune='X': Cells[0][0].Ch = %q, want 'X'", s.Cells[0][0].Ch)
+	}
+}
+
+// --- SL / SR (shift left/right) ---
+
+// TestShiftRightShiftsContent verifies SR by less than the width shifts content
+// right rather than clearing the whole region.
+func TestShiftRightShiftsContent(t *testing.T) {
+	s := New(1, 5)
+	s.Write([]byte("X")) // Cells[0][0] = 'X'
+	s.shiftRight(1)
+	if s.Cells[0][1].Ch != 'X' {
+		t.Errorf("shiftRight(1): Cells[0][1].Ch = %q, want 'X' (content shifted right)", s.Cells[0][1].Ch)
+	}
+}
+
+// TestShiftRightClearsVacatedColumns verifies SR blanks the columns it vacates.
+func TestShiftRightClearsVacatedColumns(t *testing.T) {
+	s := New(1, 5)
+	for x := range 5 {
+		s.Cells[0][x] = Cell{Ch: rune('A' + x)}
+	}
+	s.shiftRight(2) // cols 2,3,4 = A,B,C; cols 0,1 cleared
+	if s.Cells[0][0].Ch != ' ' {
+		t.Errorf("shiftRight(2): Cells[0][0].Ch = %q, want ' '", s.Cells[0][0].Ch)
+	}
+	if s.Cells[0][1].Ch != ' ' {
+		t.Errorf("shiftRight(2): Cells[0][1].Ch = %q, want ' '", s.Cells[0][1].Ch)
+	}
+	if s.Cells[0][2].Ch != 'A' {
+		t.Errorf("shiftRight(2): Cells[0][2].Ch = %q, want 'A'", s.Cells[0][2].Ch)
+	}
+}
+
+// TestShiftLeftClearsLastRow verifies a full-width shift-left clears every row
+// in the scroll region, including the last.
+func TestShiftLeftClearsLastRow(t *testing.T) {
+	s := New(3, 4) // scrollBottom=2 (last row)
+	s.Cells[2][0] = Cell{Ch: 'Z'}
+	s.shiftLeft(s.Width) // full-clear branch
+	if s.Cells[2][0].Ch != ' ' {
+		t.Errorf("shiftLeft(Width): Cells[scrollBottom][0].Ch = %q, want ' '", s.Cells[2][0].Ch)
+	}
+}
+
+// TestShiftRightClearsLastRow verifies a full-width shift-right clears the last
+// row of the scroll region.
+func TestShiftRightClearsLastRow(t *testing.T) {
+	s := New(3, 4)
+	s.Cells[2][0] = Cell{Ch: 'Z'}
+	s.shiftRight(s.Width)
+	if s.Cells[2][0].Ch != ' ' {
+		t.Errorf("shiftRight(Width): Cells[scrollBottom][0].Ch = %q, want ' '", s.Cells[2][0].Ch)
+	}
+}
+
+// --- softReset ---
+
+// TestSoftResetScrollBottom verifies softReset restores the scroll-region bottom
+// to Height-1.
+func TestSoftResetScrollBottom(t *testing.T) {
+	s := New(10, 20)
+	s.scrollBottom = 3
+	s.softReset()
+	if s.scrollBottom != s.Height-1 {
+		t.Errorf("softReset(): scrollBottom = %d, want %d", s.scrollBottom, s.Height-1)
+	}
+}
+
+// --- csiArg helper ---
+
+// TestCSIArgStripsMarker verifies csiArg strips a leading private marker before
+// parsing the numeric argument.
+func TestCSIArgStripsMarker(t *testing.T) {
+	if got := csiArg("?5", 0); got != 5 {
+		t.Errorf("csiArg(%q, 0) = %d, want 5", "?5", got)
+	}
+}
+
+// TestCSIArgParsesZero verifies csiArg accepts '0' as a valid digit.
+func TestCSIArgParsesZero(t *testing.T) {
+	if got := csiArg("0", 5); got != 0 {
+		t.Errorf("csiArg(%q, 5) = %d, want 0", "0", got)
+	}
+}
+
+// --- Device status / attributes ---
+
+// TestDeviceAttributesPrimary verifies the primary Device Attributes reply.
+func TestDeviceAttributesPrimary(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b[c"))
+	if got := string(s.Response); got != "\x1b[?62;22c" {
+		t.Errorf("DA1 = %q, want %q", got, "\x1b[?62;22c")
+	}
+}
+
+// TestDSRCursorPosition verifies DSR 6 (CPR) reports the cursor position.
+func TestDSRCursorPosition(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b[5;10H"))
+	s.Write([]byte("\x1b[6n"))
+	if got := string(s.Response); got != "\x1b[5;10R" {
+		t.Errorf("DSR CPR = %q, want %q", got, "\x1b[5;10R")
+	}
+}
+
+// TestCSIPrivateMarkerRouting verifies the private marker routes CSI dispatch:
+// '?' enables a private mode (hide cursor) and '>' selects the secondary DA.
+func TestCSIPrivateMarkerRouting(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b[?25l")) // hide cursor
+	if !s.CursorHidden {
+		t.Error("CSI ?25l should hide cursor")
+	}
+	s.Write([]byte("\x1b[>c")) // secondary DA
+	if got := string(s.Response); got != "\x1b[>1;10;0c" {
+		t.Errorf("secondary DA = %q, want %q", got, "\x1b[>1;10;0c")
+	}
+}
+
+// --- Unhandled CSI logging ---
+
+// TestUnhandledCSILogs verifies an unhandled CSI final byte emits the
+// "unhandled CSI" log line.
+func TestUnhandledCSILogs(t *testing.T) {
+	old := slog.Default()
+	defer slog.SetDefault(old)
+
+	var buf bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+
+	s := New(5, 5)
+	s.dispatchCSI('W') // 'W' is unhandled -> default branch
+	if !strings.Contains(buf.String(), "unhandled CSI") {
+		t.Errorf("dispatchCSI('W') log = %q, want it to contain \"unhandled CSI\"", buf.String())
+	}
+}

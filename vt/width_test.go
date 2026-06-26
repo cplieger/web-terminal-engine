@@ -19,6 +19,12 @@ func TestRuneWidth(t *testing.T) {
 		{"CJK Ext B", 0x20000, 2},
 		{"Latin space", ' ', 1},
 		{"IDEOGRAPHIC HALF FILL SPACE", '\u303F', 1},
+		// C1 zero-width band [0x7F,0xA0): DEL and the interior are width 0,
+		// the byte just below (0x7E) and NBSP (0xA0, the first byte above) are 1.
+		{"DEL is zero-width", 0x7F, 0},
+		{"just below DEL stays width 1", 0x7E, 1},
+		{"C1 band interior", 0x9F, 0},
+		{"NBSP is width 1", 0xA0, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -26,6 +32,18 @@ func TestRuneWidth(t *testing.T) {
 				t.Errorf("runeWidth(%U) = %d, want %d", tt.r, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestInTableEndpointsMatch checks that inTable includes both endpoints of a
+// range: the lower bound of the first combining range (U+0300) and the upper
+// bound of the last (U+E01EF) must both report as members.
+func TestInTableEndpointsMatch(t *testing.T) {
+	if !inTable(0x0300, combining) {
+		t.Errorf("inTable(0x0300, combining) = false, want true (lower endpoint of first range)")
+	}
+	if !inTable(0xE01EF, combining) {
+		t.Errorf("inTable(0xE01EF, combining) = false, want true (upper endpoint of last range)")
 	}
 }
 

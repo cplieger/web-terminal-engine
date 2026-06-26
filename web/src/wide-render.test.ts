@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 //
-// Round 4 adversarial: exercises the renderer with wide-char (CJK/emoji)
-// and zero-width (combining mark placeholder \uFFFF) rows to ensure the
-// DOM spans are built correctly without errors.
+// Exercises the renderer with wide-char (CJK/emoji) and zero-width
+// (combining-mark + \uFFFF wide-char continuation placeholder) rows,
+// asserting the rendered row text is correct and that the placeholder
+// never leaks into visible output.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import * as render from "./render.js";

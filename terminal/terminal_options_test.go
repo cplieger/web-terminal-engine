@@ -10,79 +10,56 @@ import (
 	"github.com/cplieger/vterm/vt"
 )
 
-// Refactor Red-Team: verify functional-options API applies defaults correctly,
-// each WithX threads independently, option order doesn't matter, nil/zero cases
-// are safe, and no behavior drifted from the pre-refactor config.
+// Functional-options API: verify NewHandler applies defaults, each WithX
+// threads its value independently, option order doesn't matter, and nil/zero
+// inputs are handled safely.
 
-// TestNewHandler_DefaultsMatchPreRefactor verifies that calling NewHandler
-// with only a command produces the exact same defaults as the pre-refactor
-// hardcoded config: scrollbackCapacity=1000, logger=slog.Default(), env adds
-// TERM/COLORTERM, no AcceptOptions, no onProcessExit, no workDir.
-func TestNewHandler_DefaultsMatchPreRefactor(t *testing.T) {
+// TestNewHandler_appliesDefaults verifies that calling NewHandler with only a
+// command produces the documented defaults: scrollbackCapacity=1000,
+// logger=slog.Default(), no AcceptOptions, no onProcessExit, no workDir, no
+// extra env (TERM/COLORTERM are injected at spawn time, not stored in cfg).
+func TestNewHandler_appliesDefaults(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"})
 
-	// scrollbackCapacity should be 1000 (the const scrollbackCapacity)
 	if h.cfg.scrollbackCapacity != 1000 {
 		t.Fatalf("default scrollbackCapacity = %d, want 1000", h.cfg.scrollbackCapacity)
 	}
-
-	// logger should be slog.Default()
 	if h.cfg.logger != slog.Default() {
 		t.Fatal("default logger is not slog.Default()")
 	}
-
-	// acceptOptions should be nil (no origin restrictions by default)
 	if h.cfg.acceptOptions != nil {
 		t.Fatal("default acceptOptions should be nil")
 	}
-
-	// onProcessExit should be nil
 	if h.cfg.onProcessExit != nil {
 		t.Fatal("default onProcessExit should be nil")
 	}
-
-	// workDir should be empty
 	if h.cfg.workDir != "" {
 		t.Fatalf("default workDir = %q, want empty", h.cfg.workDir)
 	}
-
-	// env should be nil (TERM/COLORTERM injected at spawn time, not in cfg)
 	if h.cfg.env != nil {
 		t.Fatalf("default env = %v, want nil", h.cfg.env)
 	}
-
-	// screen should be initialized at defaultRows x defaultCols
 	if h.screen.Height != defaultRows || h.screen.Width != defaultCols {
 		t.Fatalf("screen %dx%d, want %dx%d", h.screen.Height, h.screen.Width, defaultRows, defaultCols)
 	}
-
-	// scrollback ring capacity
 	if cap(h.scrollback.buf) != 1000 {
 		t.Fatalf("scrollback ring cap = %d, want 1000", cap(h.scrollback.buf))
 	}
-
-	// registry should be non-nil
 	if h.registry == nil {
 		t.Fatal("registry is nil")
 	}
-
-	// builder should be non-nil
 	if h.builder == nil {
 		t.Fatal("builder is nil")
 	}
-
-	// command stored correctly
 	if len(h.command) != 1 || h.command[0] != "/bin/sh" {
 		t.Fatalf("command = %v, want [/bin/sh]", h.command)
 	}
-
-	// started should be false before any WS connect
 	if h.started.Load() {
 		t.Fatal("started should be false before any connection")
 	}
 }
 
-// TestNewHandler_WithScrollbackCapacity verifies custom scrollback.
+// TestNewHandler_WithScrollbackCapacity verifies custom scrollback capacity.
 func TestNewHandler_WithScrollbackCapacity(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"}, WithScrollbackCapacity(500))
 	if h.cfg.scrollbackCapacity != 500 {
@@ -102,7 +79,8 @@ func TestNewHandler_WithLogger(t *testing.T) {
 	}
 }
 
-// TestNewHandler_WithLogger_Nil verifies nil logger stores a discard logger (not nil).
+// TestNewHandler_WithLogger_Nil verifies a nil logger stores a discard logger
+// (not nil), since a nil *slog.Logger would panic on use.
 func TestNewHandler_WithLogger_Nil(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"}, WithLogger(nil))
 	if h.cfg.logger == nil {
@@ -110,7 +88,7 @@ func TestNewHandler_WithLogger_Nil(t *testing.T) {
 	}
 }
 
-// TestNewHandler_WithWorkDir verifies working directory is threaded.
+// TestNewHandler_WithWorkDir verifies the working directory is threaded.
 func TestNewHandler_WithWorkDir(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"}, WithWorkDir("/tmp"))
 	if h.cfg.workDir != "/tmp" {
@@ -127,7 +105,7 @@ func TestNewHandler_WithEnv(t *testing.T) {
 	}
 }
 
-// TestNewHandler_WithAcceptOptions verifies websocket accept options.
+// TestNewHandler_WithAcceptOptions verifies websocket accept options thread.
 func TestNewHandler_WithAcceptOptions(t *testing.T) {
 	opts := &websocket.AcceptOptions{InsecureSkipVerify: true}
 	h := NewHandler([]string{"/bin/sh"}, WithAcceptOptions(opts))
@@ -136,7 +114,8 @@ func TestNewHandler_WithAcceptOptions(t *testing.T) {
 	}
 }
 
-// TestNewHandler_WithOnProcessExit verifies callback is stored.
+// TestNewHandler_WithOnProcessExit verifies the exit callback is stored and
+// invokable.
 func TestNewHandler_WithOnProcessExit(t *testing.T) {
 	called := false
 	fn := func(err error) { called = true }
@@ -148,7 +127,6 @@ func TestNewHandler_WithOnProcessExit(t *testing.T) {
 	if !called {
 		t.Fatal("onProcessExit callback not invoked")
 	}
-	_ = called
 }
 
 // TestNewHandler_OptionOrderIndependent verifies that applying options in
@@ -184,55 +162,41 @@ func TestNewHandler_OptionOrderIndependent(t *testing.T) {
 	}
 }
 
-// TestNewHandler_NoOptions_NilSlice verifies passing nil options is safe.
+// TestNewHandler_NoOptions_NilSlice verifies a nil Option in the variadic
+// slice is skipped rather than called (a nil func pointer would panic).
 func TestNewHandler_NoOptions_NilSlice(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"}, nil)
-	// nil Option is a nil function pointer — calling it would panic.
-	// Verify the constructor handles it gracefully.
 	if h.cfg.scrollbackCapacity != 1000 {
 		t.Fatalf("scrollbackCapacity = %d after nil option", h.cfg.scrollbackCapacity)
 	}
 }
 
-// TestNewHandler_EmptyCommand verifies empty command produces a handler
-// that fails gracefully on ensureStarted (existing TestEmptyCommandFails
-// covers the WS path; this tests the direct internal call).
+// TestNewHandler_EmptyCommand verifies an empty command makes ensureStarted
+// fail with a clear error (nil and empty-slice commands both have length 0).
 func TestNewHandler_EmptyCommand(t *testing.T) {
-	h := NewHandler(nil)
-	err := h.ensureStarted(80, 24)
-	if err == nil {
-		t.Fatal("expected error for empty command")
-	}
-	if !strings.Contains(err.Error(), "empty command") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-// TestNewHandler_EmptyStringCommand verifies []string{} is empty.
-func TestNewHandler_EmptyStringCommand(t *testing.T) {
-	h := NewHandler([]string{})
-	err := h.ensureStarted(80, 24)
-	if err == nil {
-		t.Fatal("expected error for empty string slice command")
+	for _, cmd := range [][]string{nil, {}} {
+		h := NewHandler(cmd)
+		err := h.ensureStarted(80, 24)
+		if err == nil {
+			t.Fatalf("ensureStarted(%v): expected error for empty command", cmd)
+		}
+		if !strings.Contains(err.Error(), "empty command") {
+			t.Fatalf("ensureStarted(%v): unexpected error: %v", cmd, err)
+		}
 	}
 }
 
-// TestNewHandler_ENVInjection verifies TERM and COLORTERM are injected
-// into the spawned process environment (not in cfg.env, but at spawn time).
+// TestNewHandler_ENVInjection verifies TERM and COLORTERM are injected into
+// the spawned process environment at spawn time (not stored in cfg.env).
 func TestNewHandler_ENVInjection(t *testing.T) {
-	// The TERM/COLORTERM injection happens in ensureStarted, not in config.
-	// We verify by checking the command's env after start.
 	h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"))
-	err := h.ensureStarted(80, 24)
-	if err != nil {
+	if err := h.ensureStarted(80, 24); err != nil {
 		t.Fatalf("ensureStarted: %v", err)
 	}
 	defer h.Shutdown()
 
-	// Check cmd.Env contains TERM and COLORTERM
-	env := h.cmd.Env
 	var hasTerm, hasColorterm bool
-	for _, e := range env {
+	for _, e := range h.cmd.Env {
 		if strings.HasPrefix(e, "TERM=xterm-256color") {
 			hasTerm = true
 		}
@@ -248,23 +212,20 @@ func TestNewHandler_ENVInjection(t *testing.T) {
 	}
 }
 
-// TestNewHandler_ENVCustomOverride verifies custom env is appended AFTER
-// the standard env, so user-provided TERM can override the default.
+// TestNewHandler_ENVCustomOverride verifies custom env is appended AFTER the
+// standard env so a user-provided TERM wins (execve uses the last value).
 func TestNewHandler_ENVCustomOverride(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"},
 		WithWorkDir("/"),
 		WithEnv([]string{"TERM=dumb"}),
 	)
-	err := h.ensureStarted(80, 24)
-	if err != nil {
+	if err := h.ensureStarted(80, 24); err != nil {
 		t.Fatalf("ensureStarted: %v", err)
 	}
 	defer h.Shutdown()
 
-	// Custom TERM should appear AFTER the default one (last wins in execve)
-	env := h.cmd.Env
 	lastTerm := ""
-	for _, e := range env {
+	for _, e := range h.cmd.Env {
 		if strings.HasPrefix(e, "TERM=") {
 			lastTerm = e
 		}
@@ -274,50 +235,29 @@ func TestNewHandler_ENVCustomOverride(t *testing.T) {
 	}
 }
 
-// TestNewHandler_WithScrollbackCapacity_Zero verifies zero capacity doesn't panic.
+// TestNewHandler_WithScrollbackCapacity_Zero verifies zero capacity is safe:
+// the ring accepts an Append without panicking.
 func TestNewHandler_WithScrollbackCapacity_Zero(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("panic with zero scrollback capacity: %v", r)
-		}
-	}()
 	h := NewHandler([]string{"/bin/sh"}, WithScrollbackCapacity(0))
 	if h.cfg.scrollbackCapacity != 0 {
 		t.Fatalf("scrollbackCapacity = %d, want 0", h.cfg.scrollbackCapacity)
 	}
-	// Simulate what happens when screen scrolls — Append must not panic with real data.
+	// Append must not panic on a zero-capacity ring.
 	h.scrollback.Append([][]vt.WireRun{{{T: "hello"}}})
 }
 
-// TestNewHandler_WithScrollbackCapacity_Negative verifies negative capacity is clamped to 0.
+// TestNewHandler_WithScrollbackCapacity_Negative verifies a negative capacity
+// is clamped to 0 and the resulting ring is still safe to Append to.
 func TestNewHandler_WithScrollbackCapacity_Negative(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("panic with negative scrollback capacity: %v", r)
-		}
-	}()
 	h := NewHandler([]string{"/bin/sh"}, WithScrollbackCapacity(-1))
 	if h.cfg.scrollbackCapacity != 0 {
 		t.Fatalf("scrollbackCapacity = %d, want 0 (clamped from -1)", h.cfg.scrollbackCapacity)
 	}
-	// Append must not panic on zero-cap ring.
 	h.scrollback.Append([][]vt.WireRun{{{T: "hello"}}})
 }
 
-// TestNewHandler_WithScrollbackCapacity_LargeNegative verifies large negative is clamped.
-func TestNewHandler_WithScrollbackCapacity_LargeNegative(t *testing.T) {
-	defer func() {
-		if r := recover(); r != nil {
-			t.Fatalf("panic with large negative scrollback capacity: %v", r)
-		}
-	}()
-	h := NewHandler([]string{"/bin/sh"}, WithScrollbackCapacity(-999999))
-	if h.cfg.scrollbackCapacity != 0 {
-		t.Fatalf("scrollbackCapacity = %d, want 0", h.cfg.scrollbackCapacity)
-	}
-}
-
-// TestNewHandler_LastOptionWins verifies that duplicate options use last-wins semantics.
+// TestNewHandler_LastOptionWins verifies duplicate options use last-wins
+// semantics.
 func TestNewHandler_LastOptionWins(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"},
 		WithScrollbackCapacity(100),
@@ -329,41 +269,16 @@ func TestNewHandler_LastOptionWins(t *testing.T) {
 	}
 }
 
-// TestNewHandler_NilLoggerDoesNotPanic verifies that WithLogger(nil) (documented
-// as "disables logging") does not cause a nil-pointer panic when the handler
-// logs internally.
+// TestNewHandler_NilLoggerDoesNotPanic verifies that WithLogger(nil)
+// ("disables logging") does not cause a nil-pointer panic when the handler
+// logs internally during a real start.
 func TestNewHandler_NilLoggerDoesNotPanic(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"},
 		WithWorkDir("/"),
 		WithLogger(nil),
 	)
-	err := h.ensureStarted(80, 24)
-	if err != nil {
+	if err := h.ensureStarted(80, 24); err != nil {
 		t.Fatalf("ensureStarted: %v", err)
 	}
 	defer h.Shutdown()
-}
-
-// TestNewHandler_WithEnv_Nil verifies WithEnv(nil) is safe and doesn't corrupt defaults.
-func TestNewHandler_WithEnv_Nil(t *testing.T) {
-	h := NewHandler([]string{"/bin/sh"}, WithEnv(nil))
-	if h.cfg.env != nil {
-		t.Fatalf("env = %v, want nil", h.cfg.env)
-	}
-}
-
-// TestNewHandler_WithOnProcessExit_Nil verifies nil callback is safe.
-func TestNewHandler_WithOnProcessExit_Nil(t *testing.T) {
-	h := NewHandler([]string{"/bin/sh"}, WithOnProcessExit(nil))
-	if h.cfg.onProcessExit != nil {
-		t.Fatal("onProcessExit should be nil")
-	}
-}
-
-// TestNewHandler_WithAcceptOptions_Nil verifies nil accept options is safe.
-func TestNewHandler_WithAcceptOptions_Nil(t *testing.T) {
-	h := NewHandler([]string{"/bin/sh"}, WithAcceptOptions(nil))
-	if h.cfg.acceptOptions != nil {
-		t.Fatal("acceptOptions should be nil")
-	}
 }

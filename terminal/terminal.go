@@ -365,44 +365,47 @@ func (h *Handler) flushLoop(ctx context.Context) {
 		case <-ticker.C:
 		}
 
-		frame := h.buildFrame()
-		if frame == nil {
-			continue
+		if frame := h.buildFrame(); frame != nil {
+			h.dispatchFrame(frame)
 		}
+	}
+}
 
-		if len(frame.changed) > 0 || len(frame.scrollLines) > 0 {
-			h.cfg.logger.Info("terminal: flush",
-				"changed", len(frame.changed),
-				"scroll_lines", len(frame.scrollLines),
-				"clients", len(frame.clients))
-		}
+// dispatchFrame encodes a frame's payloads once and fans them out to
+// every connected client as binary WebSocket frames. It is called from
+// flushLoop with h.mu NOT held — a slow client only blocks itself, not
+// readLoop / handleControl / new handleWS connections. Extracted from
+// flushLoop so that select-loop stays small and readable.
+func (h *Handler) dispatchFrame(frame *FlushFrame) {
+	if len(frame.changed) > 0 || len(frame.scrollLines) > 0 {
+		h.cfg.logger.Info("terminal: flush",
+			"changed", len(frame.changed),
+			"scroll_lines", len(frame.scrollLines),
+			"clients", len(frame.clients))
+	}
 
-		// Pre-encode payloads once; identical bytes for every client.
-		var screenPayload, scrollPayload []byte
-		if len(frame.changed) > 0 {
-			screenPayload = encodeScreenMsg(frame.screenHeight, frame.curRow, frame.curCol,
-				0, frame.changed, frame.rows, frame.cursorStyle, frame.cursorHidden, frame.cursorBlink, frame.bell)
-		}
-		if len(frame.scrollLines) > 0 {
-			scrollPayload = encodeScrollMsg(0, frame.scrollLines)
-		}
+	// Pre-encode payloads once; identical bytes for every client.
+	var screenPayload, scrollPayload []byte
+	if len(frame.changed) > 0 {
+		screenPayload = encodeScreenMsg(frame.screenHeight, frame.curRow, frame.curCol,
+			0, frame.changed, frame.rows, frame.cursorStyle, frame.cursorHidden, frame.cursorBlink, frame.bell)
+	}
+	if len(frame.scrollLines) > 0 {
+		scrollPayload = encodeScrollMsg(0, frame.scrollLines)
+	}
 
-		// Send to all connected clients as binary frames. The lock is
-		// NOT held here — a slow client only blocks itself, not other
-		// clients or readLoop / handleControl / new handleWS.
-		writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		for ws, ack := range frame.clients {
-			if frame.modesPayload != nil {
-				ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.modesPayload, ack)) //nolint:errcheck // best-effort
-			}
-			if screenPayload != nil {
-				ws.Write(writeCtx, websocket.MessageBinary, withClientAck(screenPayload, ack)) //nolint:errcheck // best-effort
-			}
-			if scrollPayload != nil {
-				ws.Write(writeCtx, websocket.MessageBinary, withClientAck(scrollPayload, ack)) //nolint:errcheck // best-effort
-			}
+	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for ws, ack := range frame.clients {
+		if frame.modesPayload != nil {
+			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.modesPayload, ack)) //nolint:errcheck // best-effort
 		}
-		cancel()
+		if screenPayload != nil {
+			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(screenPayload, ack)) //nolint:errcheck // best-effort
+		}
+		if scrollPayload != nil {
+			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(scrollPayload, ack)) //nolint:errcheck // best-effort
+		}
 	}
 }
 

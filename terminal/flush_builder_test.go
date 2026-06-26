@@ -117,3 +117,62 @@ func TestBuild_CursorBetweenRowsTouchesBothRows(t *testing.T) {
 		t.Fatalf("changed missing current cursor row %d: got %v", curRow, frame.changed)
 	}
 }
+
+// TestBuild_scrollbackProducesScrollLines verifies that when scrollback has
+// drained from the screen and we are not in alt-screen, Build surfaces those
+// lines as the frame's scrollLines.
+func TestBuild_scrollbackProducesScrollLines(t *testing.T) {
+	screen := vt.New(3, 20) // tiny screen so writing many lines scrolls
+	for range 15 {
+		if _, err := screen.Write([]byte("scrollback line\r\n")); err != nil {
+			t.Fatalf("screen write: %v", err)
+		}
+	}
+
+	b := &FlushFrameBuilder{}
+	frame := b.Build(screen, true, noClients)
+	if frame == nil {
+		t.Fatalf("Build returned nil; expected a full-repaint baseline frame")
+	}
+	if len(frame.scrollLines) == 0 {
+		t.Errorf("Build: scrollLines empty; want non-empty (scrollback drained, not alt-screen)")
+	}
+}
+
+// TestBuildTitlePayload_changeDetection verifies buildTitlePayload emits a
+// frame on first announce and whenever the title changes, and suppresses
+// (returns nil) when the title is unchanged.
+func TestBuildTitlePayload_changeDetection(t *testing.T) {
+	screen := vt.New(5, 20)
+	b := &FlushFrameBuilder{}
+
+	screen.Title = "first"
+	// First call: not yet announced -> must emit a payload.
+	if got := b.buildTitlePayload(screen); len(got) == 0 {
+		t.Fatalf("first buildTitlePayload = empty, want a title frame")
+	}
+	// Same title, now announced -> suppressed (nil).
+	if got := b.buildTitlePayload(screen); len(got) != 0 {
+		t.Errorf("unchanged-title buildTitlePayload = %d bytes, want 0 (suppress when title unchanged)", len(got))
+	}
+	// Changed title -> emit again.
+	screen.Title = "second"
+	if got := b.buildTitlePayload(screen); len(got) == 0 {
+		t.Errorf("changed-title buildTitlePayload = empty, want a title frame")
+	}
+}
+
+// TestAppendRowIfMissing_rowCountBoundary verifies the [0, rowCount) range
+// guard: an index equal to rowCount is rejected (out of range) while the last
+// in-range index (rowCount-1) is appended.
+func TestAppendRowIfMissing_rowCountBoundary(t *testing.T) {
+	// y == rowCount is out of [0, rowCount): must NOT be appended.
+	if got := appendRowIfMissing(nil, 5, 5); len(got) != 0 {
+		t.Errorf("appendRowIfMissing(nil, 5, 5) = %v, want empty (y==rowCount is out of range)", got)
+	}
+	// y == rowCount-1 is in range: must be appended.
+	got := appendRowIfMissing(nil, 4, 5)
+	if len(got) != 1 || got[0] != 4 {
+		t.Errorf("appendRowIfMissing(nil, 4, 5) = %v, want [4]", got)
+	}
+}

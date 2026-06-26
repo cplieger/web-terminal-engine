@@ -400,6 +400,9 @@ func (h *Handler) dispatchFrame(frame *FlushFrame) {
 		if frame.modesPayload != nil {
 			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.modesPayload, ack)) //nolint:errcheck // best-effort
 		}
+		if frame.titlePayload != nil {
+			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.titlePayload, ack)) //nolint:errcheck // best-effort
+		}
 		if screenPayload != nil {
 			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(screenPayload, ack)) //nolint:errcheck // best-effort
 		}

@@ -122,8 +122,12 @@ describe("connection: a socket superseded by a reconnect delivers no duplicate m
     onMessage = vi.fn<(msg: ServerMessage) => void>();
     init({
       onMessage,
-      onOpen: () => {},
-      onClose: () => {},
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose: () => {
+        /* no-op */
+      },
       computeSize: () => ({ cols: 80, rows: 24 }),
     });
   });

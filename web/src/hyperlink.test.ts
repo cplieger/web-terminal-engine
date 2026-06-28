@@ -29,6 +29,7 @@ function frame(rowsByIdx: Record<number, WireRun[]>, cursor: [number, number]): 
   }
   return {
     type: "screen",
+    base: 0,
     rows,
     cursor,
     changed,

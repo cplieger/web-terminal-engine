@@ -45,6 +45,7 @@ describe("hyperlink safety fuzz: no javascript:/data: hrefs", () => {
     const runs: WireRun[] = uris.map((u) => ({ t: "x", f: -1, b: -1, a: 0, uc: -1, u }));
     const msg: ScreenMessage = {
       type: "screen",
+      base: 0,
       rows: [runs, [], [], [], []],
       cursor: [0, 0],
       changed: [0],
@@ -90,6 +91,7 @@ describe("hyperlink safety fuzz: no javascript:/data: hrefs", () => {
       const runs: WireRun[] = [{ t: "x", f: -1, b: -1, a: 0, uc: -1, u: uri }];
       const msg: ScreenMessage = {
         type: "screen",
+        base: 0,
         rows: [runs, [], [], [], []],
         cursor: [0, 0],
         changed: [0],

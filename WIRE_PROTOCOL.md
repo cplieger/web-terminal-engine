@@ -1,6 +1,12 @@
-# Wire Protocol v1
+# Wire Protocol v2
 
 This document specifies the binary WebSocket frame format used between the Go server (`terminal/wire_binary.go`) and the browser client (`web/src/wire-binary.ts`). The Go and TypeScript packages are versioned in lockstep; this wire protocol version is the compatibility contract between them.
+
+## Absolute line indexing (v2)
+
+Every line the server produces is assigned a monotonic **absolute index** (0, 1, 2, … growing for the life of the session). The screen's top row has absolute index `base`; window row `y` is absolute `base + y`. When the screen scrolls, a line keeps its absolute index (it only moves to a lower window row), so the client stores every line in one buffer keyed by absolute index. Applying a line is therefore idempotent: re-delivering a line the client already holds overwrites the same slot and never duplicates. Resume aligns by absolute index rather than a fragile count, which also makes an eviction gap detectable. See `docs/REBUILD.md` section 6.
+
+The screen frame carries `base`; the scroll frame carries `first_index`; the resumeAck carries `committed` and `oldest_index`. The client's resume control message carries `haveThrough` (the highest absolute index it holds).
 
 ## Transport
 
@@ -21,42 +27,46 @@ This document specifies the binary WebSocket frame format used between the Go se
 
 Carries the current terminal viewport (sparse — only changed rows).
 
-| Offset | Size | Field         | Description                               |
-| ------ | ---- | ------------- | ----------------------------------------- |
-| 9      | 2    | cursor_row    | uint16                                    |
-| 11     | 2    | cursor_col    | uint16                                    |
-| 13     | 2    | screen_height | uint16 — full terminal height             |
-| 15     | 2    | num_changed   | uint16 — number of changed rows following |
-| 17     | 1    | cursor_style  | uint8 (DECSCUSR 0-6)                      |
-| 18     | 1    | cursor_flags  | bit 0: hidden, bit 1: bell, bit 2: blink  |
+| Offset | Size | Field         | Description                                    |
+| ------ | ---- | ------------- | ---------------------------------------------- |
+| 9      | 8    | base          | uint64 — absolute index of the top screen row  |
+| 17     | 2    | cursor_row    | uint16                                         |
+| 19     | 2    | cursor_col    | uint16                                         |
+| 21     | 2    | screen_height | uint16 — full terminal height                  |
+| 23     | 2    | num_changed   | uint16 — number of changed rows following      |
+| 25     | 1    | cursor_style  | uint8 (DECSCUSR 0-6)                           |
+| 26     | 1    | cursor_flags  | bit 0: hidden, bit 1: bell, bit 2: blink, bit 3: alt-screen active |
 
 Followed by `num_changed` changed-row entries:
 
-| Size | Field    | Description         |
-| ---- | -------- | ------------------- |
-| 2    | row_idx  | uint16 — row index  |
-| var  | row_data | row payload (below) |
+| Size | Field    | Description                                         |
+| ---- | -------- | --------------------------------------------------- |
+| 2    | row_idx  | uint16 — window row index `y` (absolute = base + y) |
+| var  | row_data | row payload (below)                                 |
 
 ## MSG_SCROLL (type 1)
 
-Carries scrollback lines that fell off the top of the screen.
+Carries committed history lines, addressed by absolute index. Used both for lines that scrolled off the live window and for resume replay.
 
-| Offset | Size | Field     | Description              |
-| ------ | ---- | --------- | ------------------------ |
-| 9      | 2    | num_lines | uint16 — number of lines |
+| Offset | Size | Field       | Description                                |
+| ------ | ---- | ----------- | ------------------------------------------ |
+| 9      | 8    | first_index | uint64 — absolute index of the first line  |
+| 17     | 2    | num_lines   | uint16 — number of lines                   |
 
-Followed by `num_lines` row payloads.
+Followed by `num_lines` row payloads; line `i` has absolute index `first_index + i`.
 
 ## MSG_RESUME_ACK (type 2)
 
 Sent in response to a client's `resume` control message.
 
-| Offset | Size | Field       | Description                               |
-| ------ | ---- | ----------- | ----------------------------------------- |
-| 1      | 8    | inputAck    | uint64 — bytesReceived (in common header) |
-| 9      | 8    | serverEpoch | uint64 — server boot time (nanoseconds)   |
+| Offset | Size | Field        | Description                                          |
+| ------ | ---- | ------------ | ---------------------------------------------------- |
+| 1      | 8    | inputAck     | uint64 — bytesReceived (in common header)            |
+| 9      | 8    | serverEpoch  | uint64 — server boot time (nanoseconds)              |
+| 17     | 8    | committed    | uint64 — absolute index one past the newest line     |
+| 25     | 8    | oldest_index | uint64 — absolute index of the oldest retained line  |
 
-The client compares `serverEpoch` against its last-seen value to detect server restarts.
+The client compares `serverEpoch` against its last-seen value to detect server restarts. It compares `oldest_index` against its highest-held index + 1: if `oldest_index` is greater, the history between them was evicted while the client was away, and the client shows a "history trimmed" marker rather than stitching misaligned lines.
 
 ## MSG_MODES (type 3)
 
@@ -162,8 +172,10 @@ JSON prefixed with `0x00`:
 
 ```json
 {"type":"resize","cols":120,"rows":30}
-{"type":"resume","sessionId":"...","sentBytes":1234,"scrollbackHave":50}
+{"type":"resume","sessionId":"...","sentBytes":1234,"haveThrough":1233}
 ```
+
+`haveThrough` is the highest absolute line index the client already holds (`-1` if it holds nothing and wants the full retained history). The server replays lines with absolute index greater than `haveThrough`, clamped into the retained range, and reports any eviction gap via the resumeAck's `oldest_index`.
 
 ## Versioning
 

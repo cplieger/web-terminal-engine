@@ -325,19 +325,22 @@ func (h *Handler) readLoop(ctx context.Context) {
 // stall every other goroutine on a slow client; the snapshot pattern
 // keeps the lock window bounded to local memory work.
 type FlushFrame struct {
-	clients      map[*websocket.Conn]uint64
-	rows         [][]vt.WireRun
-	scrollLines  [][]vt.WireRun
-	changed      []int
-	modesPayload []byte
-	titlePayload []byte
-	curRow       int
-	curCol       int
-	screenHeight int
-	cursorStyle  uint8
-	cursorHidden bool
-	cursorBlink  bool
-	bell         bool
+	clients        map[*websocket.Conn]uint64
+	rows           [][]vt.WireRun
+	scrollLines    [][]vt.WireRun
+	changed        []int
+	modesPayload   []byte
+	titlePayload   []byte
+	base           uint64 // absolute index of the top screen row (changed[y] -> base+y)
+	scrollFirstIdx uint64 // absolute index of scrollLines[0]
+	curRow         int
+	curCol         int
+	screenHeight   int
+	cursorStyle    uint8
+	cursorHidden   bool
+	cursorBlink    bool
+	altActive      bool
+	bell           bool
 }
 
 // buildFrame computes the next outbound frame under h.mu. Returns nil
@@ -346,7 +349,8 @@ type FlushFrame struct {
 func (h *Handler) buildFrame() *FlushFrame {
 	h.mu.Lock()
 	clients := h.registry.Snapshot()
-	frame := h.builder.Build(h.screen, h.resized, clients)
+	committedBefore := h.scrollback.Committed()
+	frame := h.builder.Build(h.screen, h.resized, clients, committedBefore)
 	if frame != nil && len(frame.scrollLines) > 0 {
 		h.scrollback.Append(frame.scrollLines)
 	}
@@ -387,11 +391,11 @@ func (h *Handler) dispatchFrame(frame *FlushFrame) {
 	// Pre-encode payloads once; identical bytes for every client.
 	var screenPayload, scrollPayload []byte
 	if len(frame.changed) > 0 {
-		screenPayload = encodeScreenMsg(frame.screenHeight, frame.curRow, frame.curCol,
-			0, frame.changed, frame.rows, frame.cursorStyle, frame.cursorHidden, frame.cursorBlink, frame.bell)
+		screenPayload = encodeScreenMsg(frame.base, frame.screenHeight, frame.curRow, frame.curCol,
+			0, frame.changed, frame.rows, frame.cursorStyle, frame.cursorHidden, frame.cursorBlink, frame.bell, frame.altActive)
 	}
 	if len(frame.scrollLines) > 0 {
-		scrollPayload = encodeScrollMsg(0, frame.scrollLines)
+		scrollPayload = encodeScrollMsg(0, frame.scrollFirstIdx, frame.scrollLines)
 	}
 
 	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -416,16 +420,15 @@ type controlMsg struct {
 	SentBytes uint64 `json:"sentBytes,omitempty"`
 	Cols      int    `json:"cols,omitempty"`
 	Rows      int    `json:"rows,omitempty"`
-	// ScrollbackHave is the number of scrollback rows the client
-	// already has in DOM. Sent in resume control messages so the
-	// server can replay only rows the client is missing — handles
-	// iOS Safari DOM eviction (where sessionStorage preserves the
-	// sessionId but the page reloads with empty DOM) without
-	// duplicating scrollback when the DOM survived (e.g. brief WS
-	// drop during the same page lifetime). Zero means "send me the
-	// full scrollback". Negative or oversize values are treated as
-	// zero by the server's clamp in handleResume.
-	ScrollbackHave int `json:"scrollbackHave,omitempty"`
+	// HaveThrough is the highest absolute line index the client already
+	// holds in its store. Sent in resume control messages so the server
+	// replays exactly the lines the client is missing (indices greater
+	// than HaveThrough), aligned by absolute identity rather than by a
+	// fragile count. -1 means the client holds nothing (cold load / DOM
+	// eviction) and wants the full retained history. The server clamps
+	// the replay start into the retained range and reports any eviction
+	// gap via the resumeAck bounds.
+	HaveThrough int64 `json:"haveThrough"`
 }
 
 // handleWS upgrades to WebSocket, spawns the configured command in a
@@ -503,7 +506,7 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *ClientState, payload 
 		return
 	}
 	if c.Type == ctlTypeResume && c.SessionID != "" {
-		h.handleResume(ws, state, c.SessionID, c.ScrollbackHave)
+		h.handleResume(ws, state, c.SessionID, c.HaveThrough)
 		return
 	}
 	if c.Type == ctlTypeResize {
@@ -513,59 +516,56 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *ClientState, payload 
 
 // handleResume looks up or creates the session for sessionID, attaches
 // it to state, replies with a resumeAck carrying the server's current
-// bytesReceived count, and opportunistically GCs idle sessions.
+// bytesReceived count plus the absolute-index bounds of retained
+// history, replays the lines the client is missing (by absolute index),
+// and forces a full repaint of the current window on the next flush.
 //
-// scrollbackHave is the number of scrollback rows the client says it
-// already has in DOM (zero on cold load / iOS DOM eviction). The
-// server replays rows[scrollbackHave:end] so the client gets the
-// missing tail without duplicating rows it still has.
-func (h *Handler) handleResume(ws *websocket.Conn, state *ClientState, sessionID string, scrollbackHave int) {
-	ack, needsReplay := h.registry.ResolveSession(state, sessionID)
-	// Force a full repaint on the next flush so the resuming client
-	// sees the current screen state rather than diffing against a
-	// `prevRowWires` it never saw (the prior client may have received
-	// frames after this one disconnected, or the screen may have
-	// updated while there were no clients connected at all).
+// haveThrough is the highest absolute line index the client already
+// holds (-1 = none). The server replays lines with index > haveThrough,
+// clamped into the retained range; the resumeAck's oldestIndex lets the
+// client detect an eviction gap when its haveThrough is older than what
+// the ring still holds.
+func (h *Handler) handleResume(ws *websocket.Conn, state *ClientState, sessionID string, haveThrough int64) {
+	ack, _ := h.registry.ResolveSession(state, sessionID)
+
 	h.mu.Lock()
+	// Force a full repaint on the next flush so the resuming client sees
+	// the current window rebuilt from scratch rather than diffed against
+	// a previous-window cache it never received.
 	h.builder.Reset()
-	// Discard any scrollback that accumulated while the client was
-	// disconnected — it's already stored in the ring buffer and will
-	// be replayed below. Sending it via the normal flush path would
-	// duplicate lines the replay already delivered.
-	h.screen.DrainScrollback()
-	// Replay scrollback the client doesn't have. needsReplay is true
-	// on the first resume per sessionState; we additionally honour the
-	// client-reported scrollbackHave so iOS Safari's "evict the page,
-	// reload, sessionId still present" cycle gets a fresh replay
-	// instead of the previous "we already replayed once for this
-	// session, never again" short-circuit which left the user staring
-	// at only the current screen with the start of long responses
-	// scrolled past where the DOM ends.
-	var scrollLines [][]vt.WireRun
-	all := h.scrollback.Lines()
-	if needsReplay || scrollbackHave < len(all) {
-		// Clamp scrollbackHave into [0, len(all)] in case of bogus
-		// or stale client values.
-		start := min(max(scrollbackHave, 0), len(all))
-		scrollLines = all[start:]
+	// Commit any pending drain to history at its absolute index before
+	// computing the replay, so lines that scrolled while the client was
+	// away are retained (the old code discarded them here).
+	drained := h.screen.DrainScrollback()
+	if !h.screen.InAltScreen && len(drained) > 0 {
+		h.scrollback.Append(drained)
 	}
+	committed := h.scrollback.Committed()
+	oldest := h.scrollback.OldestIndex()
+	var from uint64
+	if haveThrough >= 0 {
+		from = uint64(haveThrough) + 1
+	}
+	firstAbs, replay := h.scrollback.LinesFrom(from)
 	h.mu.Unlock()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Send resumeAck first so the client can trim its outbox.
-	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch)) //nolint:errcheck // best-effort
+	// resumeAck first so the client can trim its outbox and learn the
+	// history bounds (for gap detection) before the replay lands.
+	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest)) //nolint:errcheck // best-effort
 
-	// Replay the scrollback ring so the client has full history even
-	// after a page refresh. Send in chunks to keep individual frames
-	// small on slow links.
+	// Replay missing history in chunks, each tagged with its absolute
+	// first index so the client applies lines at the right indices.
 	const replayChunk = 50
-	for i := 0; i < len(scrollLines); i += replayChunk {
-		end := min(i+replayChunk, len(scrollLines))
-		payload := encodeScrollMsg(ack, scrollLines[i:end])
+	for i := 0; i < len(replay); i += replayChunk {
+		end := min(i+replayChunk, len(replay))
+		payload := encodeScrollMsg(ack, firstAbs+uint64(i), replay[i:end])
 		ws.Write(ctx, websocket.MessageBinary, payload) //nolint:errcheck // best-effort
 	}
+	// The current window is delivered by the next flush (builder.Reset
+	// above guarantees a full window frame within one tick).
 }
 
 // handleResize floors the requested dimensions to a sane minimum and

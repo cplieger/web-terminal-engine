@@ -33,10 +33,23 @@ export interface ScreenMessage {
   type: "screen";
   /** All rows of the visible screen (length = screen height). */
   rows: WireRun[][];
-  /** Cursor position as [row, col], zero-indexed. */
+  /**
+   * Absolute line index of the top screen row (row 0). A changed row at
+   * window index `y` has absolute index `base + y`. The client stores
+   * every line by absolute index, so applying a row is idempotent and
+   * never duplicates (see docs/REBUILD.md section 6).
+   */
+  base: number;
+  /** Cursor position as [row, col], zero-indexed within the window. */
   cursor: [number, number];
   /** Indices into `rows` that changed; an empty array means cursor-only update. */
   changed: number[];
+  /**
+   * True while the alternate screen is active. Alt-screen content is
+   * ephemeral (no history accrual): the client renders it as an overlay
+   * and restores the main buffer on exit. `base` is frozen while alt.
+   */
+  altActive?: boolean;
   /** DECSCUSR cursor style (0-6); 0 = default block. */
   cursorStyle?: number;
   /** True if the cursor is currently hidden (DECTCEM off). */
@@ -50,22 +63,24 @@ export interface ScreenMessage {
 }
 
 /**
- * A batch of lines that scrolled off the top of the visible screen. The
- * renderer appends these to the scrollback buffer.
+ * A batch of committed history lines, addressed by absolute index. Used both
+ * for lines that scrolled off the live window and for resume replay.
  */
 export interface ScrollMessage {
   /** Discriminator — always `"scroll"`. */
   type: "scroll";
-  /** Lines that scrolled out (in order, oldest to newest). */
+  /** Absolute line index of `lines[0]`; line `i` has index `firstIndex + i`. */
+  firstIndex: number;
+  /** Lines in order (oldest to newest), applied by absolute index. */
   lines: WireRun[][];
   /** Server-confirmed bytesReceived for the input ACK protocol. */
   inputAck?: number;
 }
 
 /**
- * Server acknowledgement of a client `resume` control message; tells the
- * client how many input bytes the server already saw so the client can
- * replay only what was missed.
+ * Server acknowledgement of a client `resume` control message. Carries the
+ * input-ack count (to trim the outbox) plus the absolute-index bounds of
+ * retained history (to detect an eviction gap on resume).
  */
 export interface ResumeAckMessage {
   /** Discriminator — always `"resumeAck"`. */
@@ -77,6 +92,14 @@ export interface ResumeAckMessage {
    * with pre-CONN-01 server builds (which omit it).
    */
   serverEpoch?: number;
+  /** Absolute index of the next line to commit (one past the newest retained). */
+  committed?: number;
+  /**
+   * Absolute index of the oldest retained line. If this exceeds the client's
+   * highest-held index + 1, history between them was evicted: the client
+   * shows a "history trimmed" marker rather than misaligning.
+   */
+  oldestIndex?: number;
 }
 
 /**
@@ -131,4 +154,4 @@ export type ServerMessage =
  */
 export type ControlMessage =
   | { type: "resize"; cols: number; rows: number }
-  | { type: "resume"; sessionId: string; sentBytes: number; scrollbackHave: number };
+  | { type: "resume"; sessionId: string; sentBytes: number; haveThrough: number };

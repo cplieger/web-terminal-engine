@@ -34,6 +34,7 @@ HTMLCanvasElement.prototype.getContext = function fakeGetContext(): unknown {
 //
 //   [1B] msg_type = 0
 //   [8B] inputAck (uint64 LE)
+//   [8B] base (uint64 LE) — absolute index of row 0 (wire v2)
 //   [2B] cursor_row (uint16 LE)
 //   [2B] cursor_col (uint16 LE)
 //   [2B] screen_height (uint16 LE)
@@ -72,7 +73,7 @@ function buildScreenFrame(opts: {
   const enc = new TextEncoder();
   // Pre-encode all run text bytes so we know total length.
   const runBytes = opts.changed.map((r) => r.runs.map((run) => enc.encode(run.text)));
-  let len = 1 + 8 + 2 + 2 + 2 + 2 + 1 + 1;
+  let len = 1 + 8 + 8 + 2 + 2 + 2 + 2 + 1 + 1; // +8 for base (wire v2)
   for (let i = 0; i < opts.changed.length; i++) {
     len += 2; // idx
     len += 2; // num_runs
@@ -91,6 +92,8 @@ function buildScreenFrame(opts: {
   off += 1; // msg_type = screen
   dv.setBigUint64(off, 0n, true);
   off += 8; // ack
+  dv.setBigUint64(off, 0n, true);
+  off += 8; // base (absolute index of row 0)
   dv.setUint16(off, opts.cursorRow, true);
   off += 2;
   dv.setUint16(off, opts.cursorCol, true);

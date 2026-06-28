@@ -120,25 +120,37 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
   const inputAck = c.u64();
 
   if (msgType === MSG_RESUME_ACK) {
-    // Optional 8-byte server epoch tail: present when the server includes
-    // its boot timestamp so the client can detect restarts. Older servers
-    // may omit it, so we check byteLength before reading. On mismatch
-    // the client resets its resume state rather than silently losing input.
+    // Optional tails, length-gated for back-compat with older servers:
+    //   >= 17 bytes: + serverEpoch (restart detection)
+    //   >= 33 bytes: + committed + oldestIndex (resume gap detection)
     let serverEpoch: number | undefined;
+    let committed: number | undefined;
+    let oldestIndex: number | undefined;
     if (buf.byteLength >= 17) {
       serverEpoch = c.u64();
     }
-    const msg: ResumeAckMessage =
-      serverEpoch !== undefined
-        ? { type: "resumeAck", received: inputAck, serverEpoch }
-        : { type: "resumeAck", received: inputAck };
+    if (buf.byteLength >= 33) {
+      committed = c.u64();
+      oldestIndex = c.u64();
+    }
+    const msg: ResumeAckMessage = { type: "resumeAck", received: inputAck };
+    if (serverEpoch !== undefined) {
+      msg.serverEpoch = serverEpoch;
+    }
+    if (committed !== undefined) {
+      msg.committed = committed;
+    }
+    if (oldestIndex !== undefined) {
+      msg.oldestIndex = oldestIndex;
+    }
     return msg;
   }
   if (msgType === MSG_SCREEN) {
     // Sparse row array: the frame carries only changed rows (indexed by
     // row_idx). The client allocates a full screenHeight-sized array but
-    // only the indices listed in `changed` are populated. Unchanged rows
-    // retain their previous DOM state — this keeps frame size O(changed).
+    // only the indices listed in `changed` are populated. Absolute index
+    // of a changed row `y` is `base + y`.
+    const base = c.u64();
     const cursorRow = c.u16();
     const cursorCol = c.u16();
     const screenHeight = c.u16();
@@ -148,6 +160,7 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     const cursorHidden = (cursorFlags & 1) !== 0;
     const bell = (cursorFlags & 2) !== 0;
     const cursorBlink = (cursorFlags & 4) !== 0;
+    const altActive = (cursorFlags & 8) !== 0;
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- pre-allocated array filled below
     const rows: WireRun[][] = new Array(screenHeight);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- pre-allocated array filled below
@@ -160,8 +173,10 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     const msg: ScreenMessage = {
       type: "screen",
       rows,
+      base,
       cursor: [cursorRow, cursorCol],
       changed,
+      altActive,
       cursorStyle,
       cursorHidden,
       cursorBlink,
@@ -171,13 +186,14 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     return msg;
   }
   if (msgType === MSG_SCROLL) {
+    const firstIndex = c.u64();
     const numLines = c.u16();
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- pre-allocated array filled below
     const lines: WireRun[][] = new Array(numLines);
     for (let i = 0; i < numLines; i++) {
       lines[i] = readRowRuns(c);
     }
-    const msg: ScrollMessage = { type: "scroll", lines, inputAck };
+    const msg: ScrollMessage = { type: "scroll", firstIndex, lines, inputAck };
     return msg;
   }
   if (msgType === MSG_MODES) {

@@ -38,26 +38,29 @@ func FuzzEncodeScreenMsg_structuralIntegrity(f *testing.F) {
 			rows[idx] = []vt.WireRun{{T: txt, F: -1, B: -1, A: 0, Uc: -1}}
 		}
 
-		buf := encodeScreenMsg(h, 0, 0, 0, changed, rows, curStyle, false, false, false)
+		buf := encodeScreenMsg(0, h, 0, 0, 0, changed, rows, curStyle, false, false, false, false)
 
-		// Structural validation
-		if len(buf) < 19 {
+		// Structural validation. Header is now:
+		//   [0] type, [1:9] ack, [9:17] base, [17:19] curRow,
+		//   [19:21] curCol, [21:23] screenHeight, [23:25] numChanged,
+		//   [25] cursorStyle, [26] cursorFlags, [27:] changed rows.
+		if len(buf) < 27 {
 			t.Fatalf("encoded too short: %d bytes", len(buf))
 		}
 		if buf[0] != wireMsgScreen {
 			t.Fatalf("msg type = %d, want %d", buf[0], wireMsgScreen)
 		}
-		screenH := binary.LittleEndian.Uint16(buf[13:15])
+		screenH := binary.LittleEndian.Uint16(buf[21:23])
 		if int(screenH) != h {
 			t.Fatalf("screenHeight = %d, want %d", screenH, h)
 		}
-		numCh := binary.LittleEndian.Uint16(buf[15:17])
+		numCh := binary.LittleEndian.Uint16(buf[23:25])
 		if int(numCh) != nc {
 			t.Fatalf("numChanged = %d, want %d", numCh, nc)
 		}
 
 		// Walk each changed row and validate row_idx is in bounds
-		off := 19
+		off := 27
 		for i := range int(numCh) {
 			if off+2 > len(buf) {
 				t.Fatalf("truncated at row_idx %d", i)

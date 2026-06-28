@@ -8,12 +8,19 @@ import (
 )
 
 // FlushFrameBuilder computes outbound flush frames by diffing the
-// current screen state against the previously sent state. It owns the
-// prev-row comparison data so buildFrame can be expressed as a method
-// on this type rather than reaching into Handler fields.
+// current screen state against the previously sent state.
+//
+// The diff is keyed by ABSOLUTE LINE INDEX, not by screen row. When the
+// screen scrolls up by K lines, a given line of content keeps its
+// absolute index (it just moves from window row y+K to window row y), so
+// comparing by absolute index means a pure scroll re-sends nothing: only
+// genuinely new or rewritten lines go on the wire. This is what lets the
+// client store every line idempotently by absolute index and never see a
+// duplicate (see docs/REBUILD.md section 6).
 type FlushFrameBuilder struct {
 	prevTitle       string
-	prevRowWires    [][]vt.WireRun
+	prevRowWires    [][]vt.WireRun // last-sent window content; prevRowWires[i] is absolute index prevBase+i
+	prevBase        uint64         // absolute index of prevRowWires[0]
 	prevCurRow      int
 	prevCurCol      int
 	prevMouseMode   uint16
@@ -23,21 +30,27 @@ type FlushFrameBuilder struct {
 	prevAppKeypad   bool
 	prevReverseVid  bool
 	prevBracketed   bool
+	prevAlt         bool
 	modesAnnounced  bool
 	titleAnnounced  bool
 	prevCurValid    bool
+	prevAltValid    bool
 }
 
-// Reset clears the previous-row cache, forcing the next frame to
-// treat all rows as changed (used after resize or new client connect).
+// Reset clears the previous-window cache, forcing the next frame to
+// treat every window row as changed. Used after a resize, a new client
+// connect, a resume, or an alt-screen transition.
 func (b *FlushFrameBuilder) Reset() {
 	b.prevRowWires = nil
+	b.prevBase = 0
 	b.prevCurValid = false
 }
 
 // Build computes the next outbound frame from the current screen state
-// and client snapshot. Returns nil if there is nothing to send.
-func (b *FlushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*websocket.Conn]uint64) *FlushFrame {
+// and client snapshot. committedBefore is the absolute index of the top
+// screen row before this frame's drain is committed to history. Returns
+// nil if there is nothing to send.
+func (b *FlushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*websocket.Conn]uint64, committedBefore uint64) *FlushFrame {
 	if !resized {
 		screen.DrainScrollback()
 		return nil
@@ -46,11 +59,23 @@ func (b *FlushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*
 		return nil
 	}
 
+	// An alt-screen transition (enter or exit) reshapes the whole
+	// viewport; force a full window repaint so the client rebuilds it.
+	if !b.prevAltValid || screen.InAltScreen != b.prevAlt {
+		b.Reset()
+		b.prevAlt = screen.InAltScreen
+		b.prevAltValid = true
+	}
+
 	drained := screen.DrainScrollback()
 	var scrollOut [][]vt.WireRun
 	if !screen.InAltScreen && len(drained) > 0 {
 		scrollOut = drained
 	}
+	// In the alt screen the window is ephemeral and accrues no history,
+	// so the absolute base stays frozen at committedBefore. On the main
+	// screen the base advances past the lines just committed.
+	base := committedBefore + uint64(len(scrollOut))
 
 	rows := make([][]vt.WireRun, screen.Height)
 	for y := range screen.Height {
@@ -61,49 +86,56 @@ func (b *FlushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*
 	bell := screen.BellRing
 	screen.BellRing = false
 
-	var changed []int
-	for y, row := range rows {
-		if y >= len(b.prevRowWires) || !runsEqual(b.prevRowWires[y], row) {
-			changed = append(changed, y)
-		}
-	}
-	b.prevRowWires = rows
+	changed := b.diffWindow(rows, base)
 
-	// Cursor-only moves (e.g. typing a space onto an existing space cell,
-	// or left/right arrow which only emit cursor-position CSI without
-	// changing any cell content) leave `changed` empty but still need a
-	// frame so the client can repaint the cursor at its new position.
-	//
-	// The inline cursor span lives inside its row's run payload, so the
-	// row(s) the cursor occupies (old and new) must appear in `changed`
-	// for the client to rebuild the span at the new column. Without
-	// this, flushLoop sees `len(changed) == 0` and skips encoding the
-	// screen frame entirely — the cursor visually "sticks" until an
-	// unrelated cell content change forces a repaint.
+	// Cursor-only moves (arrow keys, typing over an identical cell)
+	// leave `changed` empty but still need the affected rows re-sent so
+	// the inline cursor span moves. trackCursor folds those rows in.
 	changed, cursorMoved := b.trackCursor(changed, len(rows), curRow, curCol)
 
 	if len(changed) == 0 && len(scrollOut) == 0 && b.modesStable(screen) && !cursorMoved && b.titleStable(screen) {
 		return nil
 	}
 
-	modesPayload := b.buildModesPayload(screen)
-	titlePayload := b.buildTitlePayload(screen)
-
 	return &FlushFrame{
-		clients:      clients,
-		rows:         rows,
-		scrollLines:  scrollOut,
-		changed:      changed,
-		curRow:       curRow,
-		curCol:       curCol,
-		screenHeight: screen.Height,
-		cursorStyle:  screen.CursorStyle,
-		cursorHidden: screen.CursorHidden,
-		cursorBlink:  screen.CursorBlink,
-		modesPayload: modesPayload,
-		titlePayload: titlePayload,
-		bell:         bell,
+		clients:        clients,
+		rows:           rows,
+		scrollLines:    scrollOut,
+		scrollFirstIdx: committedBefore,
+		base:           base,
+		changed:        changed,
+		curRow:         curRow,
+		curCol:         curCol,
+		screenHeight:   screen.Height,
+		altActive:      screen.InAltScreen,
+		cursorStyle:    screen.CursorStyle,
+		cursorHidden:   screen.CursorHidden,
+		cursorBlink:    screen.CursorBlink,
+		modesPayload:   b.buildModesPayload(screen),
+		titlePayload:   b.buildTitlePayload(screen),
+		bell:           bell,
 	}
+}
+
+// diffWindow returns the window-relative indices whose content at their
+// absolute index differs from what was last sent. It updates the
+// previous-window cache to the new window.
+func (b *FlushFrameBuilder) diffWindow(rows [][]vt.WireRun, base uint64) []int {
+	var changed []int
+	prevLen := uint64(len(b.prevRowWires))
+	for y, row := range rows {
+		abs := base + uint64(y)
+		var prev []vt.WireRun
+		if prevLen > 0 && abs >= b.prevBase && abs < b.prevBase+prevLen {
+			prev = b.prevRowWires[abs-b.prevBase]
+		}
+		if prev == nil || !runsEqual(prev, row) {
+			changed = append(changed, y)
+		}
+	}
+	b.prevRowWires = rows
+	b.prevBase = base
+	return changed
 }
 
 // modesStable reports whether the screen's DEC private mode state
@@ -154,11 +186,9 @@ func (b *FlushFrameBuilder) buildTitlePayload(screen *vt.Screen) []byte {
 	return encodeTitleMsg(0, curTitle)
 }
 
-// trackCursor folds cursor-position changes into changed and updates
-// the cached previous-position fields. Returns the (possibly amended)
+// trackCursor folds cursor-position changes into changed and updates the
+// cached previous-position fields. Returns the (possibly amended)
 // changed slice and whether the cursor moved versus the prior frame.
-// Splitting this out keeps Build's cyclomatic complexity below the
-// project's gocyclo threshold.
 func (b *FlushFrameBuilder) trackCursor(changed []int, rowCount, curRow, curCol int) ([]int, bool) {
 	cursorMoved := !b.prevCurValid || curRow != b.prevCurRow || curCol != b.prevCurCol
 	if cursorMoved && b.prevCurValid {
@@ -172,8 +202,7 @@ func (b *FlushFrameBuilder) trackCursor(changed []int, rowCount, curRow, curCol 
 }
 
 // appendRowIfMissing returns changed with y appended iff y is in
-// [0, rowCount) and not already present. Used to fold cursor-row
-// updates into the change list without disturbing existing entries.
+// [0, rowCount) and not already present.
 func appendRowIfMissing(changed []int, y, rowCount int) []int {
 	if y < 0 || y >= rowCount {
 		return changed

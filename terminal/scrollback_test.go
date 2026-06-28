@@ -74,3 +74,104 @@ func TestScrollbackRing_WrapAround(t *testing.T) {
 		}
 	}
 }
+
+// TestScrollbackRing_AbsoluteIndices verifies the absolute-index accounting
+// that the resume protocol depends on: Committed advances monotonically,
+// OldestIndex tracks eviction, and indices never repeat.
+func TestScrollbackRing_AbsoluteIndices(t *testing.T) {
+	r := newScrollbackRing(5)
+	if r.Committed() != 0 || r.OldestIndex() != 0 {
+		t.Fatalf("fresh ring: committed=%d oldest=%d, want 0/0", r.Committed(), r.OldestIndex())
+	}
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")})
+	if r.Committed() != 3 {
+		t.Fatalf("after 3 appends: committed=%d, want 3", r.Committed())
+	}
+	if r.OldestIndex() != 0 {
+		t.Fatalf("no eviction yet: oldest=%d, want 0", r.OldestIndex())
+	}
+	// Overflow capacity: committed keeps growing, oldest advances.
+	r.Append([][]vt.WireRun{makeLine("d"), makeLine("e"), makeLine("f"), makeLine("g")})
+	if r.Committed() != 7 {
+		t.Fatalf("after 7 appends: committed=%d, want 7", r.Committed())
+	}
+	if r.OldestIndex() != 2 {
+		t.Fatalf("after evicting 2: oldest=%d, want 2 (committed 7 - count 5)", r.OldestIndex())
+	}
+}
+
+// TestScrollbackRing_LinesFrom verifies index-aligned replay: LinesFrom returns
+// the retained tail at and after a given absolute index, with the true first
+// index so the caller can detect an eviction gap.
+func TestScrollbackRing_LinesFrom(t *testing.T) {
+	r := newScrollbackRing(5)
+	r.Append([][]vt.WireRun{makeLine("0"), makeLine("1"), makeLine("2"), makeLine("3"), makeLine("4")})
+
+	// Exact alignment: ask from index 2, get [2,3,4] starting at 2.
+	first, lines := r.LinesFrom(2)
+	if first != 2 || len(lines) != 3 || lines[0][0].T != "2" || lines[2][0].T != "4" {
+		t.Fatalf("LinesFrom(2) = first %d lines %v, want first 2 [2 3 4]", first, lineTexts(lines))
+	}
+	// At committed: nothing to replay.
+	if first, lines := r.LinesFrom(5); first != 5 || lines != nil {
+		t.Fatalf("LinesFrom(5) = first %d lines %v, want first 5 nil", first, lineTexts(lines))
+	}
+
+	// Force eviction: indices 0..1 drop out (cap 5, now 8 committed).
+	r.Append([][]vt.WireRun{makeLine("5"), makeLine("6"), makeLine("7")})
+	if r.OldestIndex() != 3 {
+		t.Fatalf("oldest=%d, want 3", r.OldestIndex())
+	}
+	// Request from an evicted index 0: clamp up to oldest (3) and signal
+	// the gap by returning first > requested.
+	first, lines = r.LinesFrom(0)
+	if first != 3 {
+		t.Fatalf("LinesFrom(0) after eviction: first=%d, want 3 (gap signal)", first)
+	}
+	if len(lines) != 5 || lines[0][0].T != "3" || lines[4][0].T != "7" {
+		t.Fatalf("LinesFrom(0) lines = %v, want [3 4 5 6 7]", lineTexts(lines))
+	}
+}
+
+// TestScrollbackRing_ClearPreservesCommitted verifies Clear drops retained
+// lines but keeps the committed counter, so absolute indices never repeat
+// within a session even after a clear.
+func TestScrollbackRing_ClearPreservesCommitted(t *testing.T) {
+	r := newScrollbackRing(5)
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b")})
+	r.Clear()
+	if r.Committed() != 2 {
+		t.Fatalf("after clear: committed=%d, want 2 (preserved)", r.Committed())
+	}
+	r.Append([][]vt.WireRun{makeLine("c")})
+	if r.Committed() != 3 {
+		t.Fatalf("append after clear: committed=%d, want 3 (index 2 not reused)", r.Committed())
+	}
+}
+
+// TestScrollbackRing_ZeroCapacityAdvancesCommitted verifies a disabled
+// scrollback still advances the absolute base so the live window's base stays
+// correct; nothing is retained for replay.
+func TestScrollbackRing_ZeroCapacityAdvancesCommitted(t *testing.T) {
+	r := newScrollbackRing(0)
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")})
+	if r.Committed() != 3 {
+		t.Fatalf("zero-cap committed=%d, want 3", r.Committed())
+	}
+	if r.Len() != 0 {
+		t.Fatalf("zero-cap retains %d lines, want 0", r.Len())
+	}
+	if _, lines := r.LinesFrom(0); lines != nil {
+		t.Fatalf("zero-cap LinesFrom(0) = %v, want nil", lineTexts(lines))
+	}
+}
+
+func lineTexts(lines [][]vt.WireRun) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		if len(l) > 0 {
+			out[i] = l[0].T
+		}
+	}
+	return out
+}

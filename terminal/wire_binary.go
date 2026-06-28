@@ -89,15 +89,16 @@ const (
 // is sparse on the wire.
 //
 //nolint:unparam // ack always 0; real per-client value patched in by withClientAck (parity with encodeScrollMsg)
-func encodeScreenMsg(screenHeight, curRow, curCol int, ack uint64, changed []int, rows [][]vt.WireRun, cursorStyle uint8, cursorHidden, cursorBlink, bell bool) []byte {
+func encodeScreenMsg(base uint64, screenHeight, curRow, curCol int, ack uint64, changed []int, rows [][]vt.WireRun, cursorStyle uint8, cursorHidden, cursorBlink, bell, altActive bool) []byte {
 	buf := make([]byte, 0, 64)
 	buf = append(buf, wireMsgScreen)
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
+	buf = binary.LittleEndian.AppendUint64(buf, base)
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(curRow))
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(curCol))
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(screenHeight))
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(changed)))
-	// Cursor metadata: style (0-6) and flags (bit 0 = hidden, bit 1 = bell).
+	// Cursor metadata: style (0-6) and flags.
 	buf = append(buf, cursorStyle)
 	var cursorFlags byte
 	if cursorHidden {
@@ -108,6 +109,9 @@ func encodeScreenMsg(screenHeight, curRow, curCol int, ack uint64, changed []int
 	}
 	if cursorBlink {
 		cursorFlags |= 4
+	}
+	if altActive {
+		cursorFlags |= 8
 	}
 	buf = append(buf, cursorFlags)
 	for _, idx := range changed {
@@ -121,15 +125,16 @@ func encodeScreenMsg(screenHeight, curRow, curCol int, ack uint64, changed []int
 	return buf
 }
 
-// encodeScrollMsg builds a binary scroll frame containing the given
-// drained scrollback lines. flushLoop emits scroll frames alongside
-// screen frames so iOS clients (no physical Ctrl+T) can swipe through
-// recent terminal history. Per-flush line count is capped by the
-// caller to keep frames small on slow links.
-func encodeScrollMsg(ack uint64, lines [][]vt.WireRun) []byte {
+// encodeScrollMsg builds a binary scroll frame carrying committed
+// history lines. firstIndex is the absolute index of lines[0]; the
+// client applies each line at firstIndex+i into its absolute-indexed
+// store (idempotent, so re-delivery never duplicates). Used both for
+// live committed lines and for resume replay.
+func encodeScrollMsg(ack, firstIndex uint64, lines [][]vt.WireRun) []byte {
 	buf := make([]byte, 0, 64)
 	buf = append(buf, wireMsgScroll)
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
+	buf = binary.LittleEndian.AppendUint64(buf, firstIndex)
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(lines)))
 	for _, line := range lines {
 		buf = appendRowRuns(buf, line)
@@ -138,16 +143,19 @@ func encodeScrollMsg(ack uint64, lines [][]vt.WireRun) []byte {
 }
 
 // encodeResumeAck builds a resumeAck frame carrying the server's current
-// per-session bytesReceived count and the server boot epoch. The client
-// uses the epoch to detect server restarts: when the epoch changes, any
-// bytesAcked the client had on the previous boot's session is stale,
-// so the client resets bytesSent/bytesAcked and the user sees a
-// `[server restarted]` banner instead of silent input loss.
-func encodeResumeAck(ack uint64, epochNanos int64) []byte {
-	buf := make([]byte, 0, 17)
+// per-session bytesReceived count, the server boot epoch, and the
+// absolute-index bounds of retained history. committed is the absolute
+// index of the next line to commit (one past the newest); oldestIndex
+// is the absolute index of the oldest retained line. The client uses
+// epoch to detect a server restart and (oldestIndex, committed) to
+// detect a history-eviction gap on resume.
+func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64) []byte {
+	buf := make([]byte, 0, 33)
 	buf = append(buf, wireMsgResumeAck)
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
 	buf = binary.LittleEndian.AppendUint64(buf, uint64(epochNanos)) // #nosec G115 -- epochNanos is always positive
+	buf = binary.LittleEndian.AppendUint64(buf, committed)
+	buf = binary.LittleEndian.AppendUint64(buf, oldestIndex)
 	return buf
 }
 

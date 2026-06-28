@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/coder/websocket"
@@ -35,7 +36,7 @@ func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 	b := &FlushFrameBuilder{}
 
 	// First frame: full repaint baseline.
-	frame := b.Build(screen, true, noClients)
+	frame := b.Build(screen, true, noClients, 0)
 	if frame == nil {
 		t.Fatalf("first Build returned nil; expected full repaint")
 	}
@@ -48,7 +49,7 @@ func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 	}
 
 	// Second frame with no input: nothing to send.
-	if frame := b.Build(screen, true, noClients); frame != nil {
+	if frame := b.Build(screen, true, noClients, 0); frame != nil {
 		t.Fatalf("idle Build returned non-nil frame: changed=%v", frame.changed)
 	}
 
@@ -62,7 +63,7 @@ func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 		t.Fatalf("CSI D did not move cursor: still at row=%d col=%d", curRow, curCol)
 	}
 
-	frame = b.Build(screen, true, noClients)
+	frame = b.Build(screen, true, noClients, 0)
 	if frame == nil {
 		t.Fatalf("post-cursor-move Build returned nil; expected a frame so the client can repaint")
 	}
@@ -89,7 +90,7 @@ func TestBuild_CursorBetweenRowsTouchesBothRows(t *testing.T) {
 		t.Fatalf("screen write: %v", err)
 	}
 	b := &FlushFrameBuilder{}
-	if frame := b.Build(screen, true, noClients); frame == nil {
+	if frame := b.Build(screen, true, noClients, 0); frame == nil {
 		t.Fatal("baseline Build returned nil")
 	}
 	prevRow, _ := screen.CursorPos()
@@ -106,7 +107,7 @@ func TestBuild_CursorBetweenRowsTouchesBothRows(t *testing.T) {
 		t.Fatalf("post-CUP cursor row = %d, want 7", curRow)
 	}
 
-	frame := b.Build(screen, true, noClients)
+	frame := b.Build(screen, true, noClients, 0)
 	if frame == nil {
 		t.Fatal("inter-row cursor move Build returned nil")
 	}
@@ -130,7 +131,7 @@ func TestBuild_scrollbackProducesScrollLines(t *testing.T) {
 	}
 
 	b := &FlushFrameBuilder{}
-	frame := b.Build(screen, true, noClients)
+	frame := b.Build(screen, true, noClients, 0)
 	if frame == nil {
 		t.Fatalf("Build returned nil; expected a full-repaint baseline frame")
 	}
@@ -175,4 +176,91 @@ func TestAppendRowIfMissing_rowCountBoundary(t *testing.T) {
 	if len(got) != 1 || got[0] != 4 {
 		t.Errorf("appendRowIfMissing(nil, 4, 5) = %v, want [4]", got)
 	}
+}
+
+// TestBuild_AbsoluteIndexIntegrity drives a scrolling sequence through the
+// builder + ring exactly as buildFrame does (Build, then Append the scroll
+// lines), while a simulated client applies every server write into a map keyed
+// by absolute index. It then asserts the client's reconstructed buffer is
+// gap-free and correctly ordered: line N always lands at absolute index N,
+// with no duplicates and no holes. This is the property that makes resume
+// dedup/gap-free (docs/REBUILD.md section 6.1).
+func TestBuild_AbsoluteIndexIntegrity(t *testing.T) {
+	screen := vt.New(3, 20) // tiny screen so each printed line soon scrolls
+	ring := newScrollbackRing(1000)
+	b := &FlushFrameBuilder{}
+	client := map[uint64][]vt.WireRun{}
+
+	apply := func() {
+		committedBefore := ring.Committed()
+		frame := b.Build(screen, true, noClients, committedBefore)
+		if frame == nil {
+			return
+		}
+		// Client applies committed history at firstIdx+i ...
+		for i, line := range frame.scrollLines {
+			client[frame.scrollFirstIdx+uint64(i)] = line
+		}
+		// ... and changed window rows at base+y. Idempotent by abs index.
+		for _, y := range frame.changed {
+			if y >= 0 && y < len(frame.rows) {
+				client[frame.base+uint64(y)] = frame.rows[y]
+			}
+		}
+		if len(frame.scrollLines) > 0 {
+			ring.Append(frame.scrollLines)
+		}
+	}
+
+	const n = 10
+	for i := range n {
+		line := []byte{'l', 'i', 'n', 'e', byte('0' + i/10), byte('0' + i%10), '\r', '\n'}
+		if _, err := screen.Write(line); err != nil {
+			t.Fatalf("write line %d: %v", i, err)
+		}
+		apply() // simulate a flush after each write
+	}
+	apply() // final settle
+
+	if len(client) == 0 {
+		t.Fatal("client received no lines")
+	}
+	// Keys must be contiguous from 0 (no gaps, no negative).
+	var maxAbs uint64
+	for k := range client {
+		if k > maxAbs {
+			maxAbs = k
+		}
+	}
+	for k := uint64(0); k <= maxAbs; k++ {
+		if _, ok := client[k]; !ok {
+			t.Fatalf("gap in client buffer at absolute index %d (max %d)", k, maxAbs)
+		}
+	}
+	// Each printed line N must appear at absolute index N exactly.
+	for i := range n {
+		want := string([]byte{'l', 'i', 'n', 'e', byte('0' + i/10), byte('0' + i%10)})
+		got := runText(client[uint64(i)])
+		if got != want {
+			t.Errorf("absolute index %d = %q, want %q", i, got, want)
+		}
+	}
+}
+
+// runText joins the text of a row's runs, trimming the trailing blanks the
+// renderer pads rows with.
+func runText(runs []vt.WireRun) string {
+	var b strings.Builder
+	for _, r := range runs {
+		b.WriteString(r.T)
+	}
+	return trimTrailingSpaces(b.String())
+}
+
+func trimTrailingSpaces(s string) string {
+	end := len(s)
+	for end > 0 && s[end-1] == ' ' {
+		end--
+	}
+	return s[:end]
 }

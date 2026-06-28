@@ -24,7 +24,6 @@
 import { wsURL } from "./wsurl.js";
 import { controlFrame } from "./wire.js";
 import { decodeWireBinary } from "./wire-binary.js";
-import * as render from "./render.js";
 import * as modes from "./modes.js";
 import type { ControlMessage, ServerMessage } from "./types.js";
 import { INITIAL_DELAY_MS, nextBackoffDelay } from "./reconnect.js";
@@ -328,13 +327,14 @@ export function connect(): void {
           type: "resume",
           sessionId,
           sentBytes: bytesSent,
-          // iOS Safari can preserve sessionStorage (so sessionId
-          // survives) while evicting the page entirely; on reload
-          // the DOM has zero scrollback rows and we want a full
-          // replay. A WS drop that doesn't lose the page keeps the
-          // count and avoids duplicating scrollback rows the client
-          // still has.
-          scrollbackHave: render.getScrollbackRowCount(),
+          // haveThrough is the highest absolute line index the client
+          // already holds; the server replays everything after it. The
+          // store-backed value is wired in brick 6 (connection state
+          // machine). Until then we send -1 (full retained replay),
+          // which is correct and safe because applying a line by
+          // absolute index is idempotent — re-delivering lines the
+          // client already has never duplicates.
+          haveThrough: -1,
         }),
       );
     },

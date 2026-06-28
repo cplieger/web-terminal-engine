@@ -23,7 +23,7 @@ func assertWireBytes(t *testing.T, label string, got, want []byte) {
 func TestEncodeScreenMsg_zeroRowIndexEncodesRunPayload(t *testing.T) {
 	run := vt.WireRun{T: "runtext", F: -1, B: -1, Uc: -1}
 	rows := [][]vt.WireRun{{run}}
-	buf := encodeScreenMsg(3, 0, 0, 0, []int{0}, rows, 0, false, false, false)
+	buf := encodeScreenMsg(0, 3, 0, 0, 0, []int{0}, rows, 0, false, false, false, false)
 
 	if !bytes.Contains(buf, []byte("runtext")) {
 		t.Errorf("encodeScreenMsg(changed=[0]): row-0 run text missing; index 0 must be in range so rows[0] is appended")
@@ -37,11 +37,12 @@ func TestEncodeScreenMsg_outOfRangeIdxWritesZeroRuns(t *testing.T) {
 	rows := [][]vt.WireRun{{}} // len 1; only index 0 is valid
 	changed := []int{1}        // idx == len(rows): out of range by exactly one
 
-	got := encodeScreenMsg(1, 0, 0, 0, changed, rows, 0, false, false, false)
+	got := encodeScreenMsg(0, 1, 0, 0, 0, changed, rows, 0, false, false, false, false)
 
 	want := []byte{
 		0x00,                   // wireMsgScreen
 		0, 0, 0, 0, 0, 0, 0, 0, // ack = 0
+		0, 0, 0, 0, 0, 0, 0, 0, // base = 0
 		0x00, 0x00, // curRow = 0
 		0x00, 0x00, // curCol = 0
 		0x01, 0x00, // screenHeight = 1

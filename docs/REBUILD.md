@@ -605,6 +605,29 @@ Append-only. Each entry: date, decision, why, and what it rules out.
 - 2026-06-29 Synchronized output (DEC 2026) is an enhancement, not a brick-1 blocker. Why: its
   absence causes possible flicker, not corruption (unknown private modes are consumed
   harmlessly); correctness comes first. Revisit after the seven bugs are closed.
+- 2026-06-29 (brick 1) Wire v2 keeps TWO server frame shapes (screen window + scroll history),
+  both now carrying absolute indices (`base` on screen, `first_index` on scroll), funnelling
+  into ONE client store. Why: lower churn on the proven flush-diff than collapsing to a single
+  `setLine` message, and it achieves the same goal that matters (the client has one
+  absolute-indexed buffer, no live/history branch). The wire framing is an encoding detail;
+  the client data model is what was unified. Rules out: a second message type; it does NOT
+  reintroduce the client-side split.
+- 2026-06-29 (brick 1) Index width is uint64. Why: never wraps in practice, simplest to reason
+  about; +8 bytes per frame is negligible at 50ms flush cadence. Rules out the session-relative
+  uint32 + wrap-handling alternative.
+- 2026-06-29 (brick 1) The scroll (history) frame is still sent to live clients, not only on
+  resume. Why: a fast burst can scroll more lines than the window holds between two 50ms
+  flushes, so those lines never appear as window rows and must be delivered as committed
+  history. Re-delivering a line that WAS a window row is harmless because applying by absolute
+  index is idempotent.
+- 2026-06-29 (brick 1) Resume now COMMITS any pending drain to history at its absolute index
+  instead of discarding it (v1 discarded on resume and on resize). Why: a scrolled-off line is
+  history and must be retained for index-aligned replay; discarding it created the gaps that
+  fed bug 2.
+- 2026-06-29 (brick 1) Client resume `haveThrough` is temporarily hard-coded to -1 (full
+  retained replay) until brick 6 wires the store-backed value. Why: safe and correct now
+  (idempotent apply means full replay never duplicates), keeps the TS compiling before the
+  client store (brick 2) exists.
 
 ## 10. Progress log
 
@@ -616,6 +639,29 @@ bottom.
   written (this document). No production code changed yet. Next action: brick 1 (line model +
   wire v2), starting with empirical Ink-fidelity capture of real kiro-cli frames to ground the
   setLine/screen/altLine split, then the Go `vt.Screen` absolute-index surface.
+- 2026-06-29 BRICK 1 COMPLETE (branch `rebuild/terminal-viewer` in vterm). Wire v2 landed on
+  both halves; the Go suite and the TS suite are both green.
+  - Go: `scrollbackRing` is now absolute-index-aware (`Committed`/`OldestIndex`/`LinesFrom`,
+    committed monotonic across eviction). `FlushFrameBuilder` diffs the window by ABSOLUTE
+    INDEX (a pure scroll re-sends nothing) and carries `base` + `scrollFirstIdx` + `altActive`;
+    forces a full repaint on alt-screen transitions. `terminal.go` tracks committed via the
+    ring, resume replays by index with an eviction-gap signal and commits pending drain instead
+    of discarding it. Encoders updated (`base` on screen, `first_index` on scroll,
+    `committed`+`oldest_index` on resumeAck, alt-screen cursor-flag bit 3).
+  - TS: decoder reads the new fields; `types.ts` updated; `ControlMessage.resume` uses
+    `haveThrough` (sender temporarily sends -1, see decisions). `connection.ts` no longer
+    imports `render`.
+  - Tests added: ring absolute-index + eviction-gap + zero-capacity (Go); builder
+    absolute-index integrity (simulated client reconstructs a gap-free, correctly-ordered
+    buffer — the dup/gap-prevention proof, Go); wire-v2 field decode + back-compat tail (TS,
+    `wire-v2.test.ts`). `WIRE_PROTOCOL.md` bumped to v2 with an absolute-indexing section.
+  - Verification: `golangci-lint` 0 issues, `go test ./...` green; `eslint`/`prettier` clean,
+    `vitest` 128/128 green. Not yet built into a running container (live integration verified
+    at brick 3+ once the renderer consumes the new fields). NOT YET COMMITTED at time of this
+    note; commit follows immediately.
+  - Next: brick 2 (client absolute-index line store, pure + unit-tested), then brick 3
+    (renderer consuming base/firstIndex + fixed-height window), at which point the live
+    container loop + Ink-fidelity capture become worthwhile.
 
 ## 11. Open questions and risks
 

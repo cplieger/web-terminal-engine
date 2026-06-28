@@ -289,38 +289,40 @@ The boundary is the VT scroll operation, and the server owns it. We keep the use
 (live region takes any change, history is cheap and stable) while removing the dual-model
 reconciliation that caused the bugs.
 
-### 5.3 Ink redraw fidelity: the trip-up risk to verify
+### 5.3 Ink redraw fidelity: empirically verified low-risk
 
 The danger the user flagged: kiro-cli/Ink has "many quirks around reloading content." If the
 VT emulator mishandles a sequence Ink emits, the server's screen buffer diverges from what
 Ink intended, and the wire then faithfully transmits a wrong screen. No viewer-layer redesign
-can fix a wrong buffer. So the rebuild must verify Ink-redraw fidelity empirically, not by
-trusting the emulator.
+can fix a wrong buffer. So this was verified empirically: capture the real PTY byte stream from
+a live kiro-cli session on the dev container (the `/debug/raw` ring) and tally the ANSI control
+sequences it actually uses (capture 2026-06-29; method in section 12). What kiro-cli's Ink TUI
+emits, and the verdict for each:
 
-Known specifics to check against real kiro-cli output (captured via the live harness, section
-12), not by code reading alone:
+- Synchronized output / DEC mode 2026 is used heavily (≈15 `?2026h`/`?2026l` pairs in seconds).
+  It IS handled: `vt/csi.go` maps `?2026h` to `HoldFlush(now+1s)` and `?2026l` to
+  `ReleaseFlush()`, so the flush builder skips partial frames during a synchronized update and
+  sends the complete frame on release. No tearing. (An earlier draft of this section claimed
+  2026 was unhandled; that came from a flaky search tool and is wrong. It is handled, and it
+  composes with absolute indexing: lines that drain during the hold commit at their absolute
+  indices on the next post-release build.)
+- Scroll regions (DECSTBM `r`) and insert/delete-line (IL/DL `L`/`M`): the capture shows ZERO
+  of these. Ink positions with cursor-relative moves plus erase, never a scroll region, so the
+  concern is empirically moot for kiro-cli.
+- Cursor-relative moves CUU (`A`), CUD (`B`), column-absolute CHA (`G`), CUP (`H`); erase-line
+  EL (`K`, the workhorse, ≈67/sample); erase-display ED (`J`, a couple of full clears at
+  startup); SGR (`m`, ≈625). All handled by `vt/csi.go`. The distinct CSI final bytes seen were
+  exactly `m K l G h A B J H` — all standard, all handled.
+- Cursor hide/show (DECTCEM `?25l`/`?25h`, ≈19 hides): Ink hides the cursor while painting. The
+  wire carries a cursor-hidden flag; honored.
+- NOT used by normal kiro-cli chat: the alternate screen (`?1049` = 0). So the ephemeral
+  alt-grid path is rarely exercised in practice, but it must stay correct for a sub-tool that
+  switches (an editor, a pager).
 
-- Synchronized output / DEC mode 2026 ("atomic frame"). Grep of the Go tree finds no handling
-  of 2026. If Ink (or its ansi-escapes dependency) wraps a frame in `?2026h ... ?2026l`, the
-  emulator currently treats the private mode as unknown and consumes it harmlessly (per the
-  unsupported-by-design contract), so there is no corruption, but there is no frame batching
-  either, which can show a half-drawn frame (tearing/flicker). This is an enhancement
-  opportunity (batch a frame on the wire between BSU/ESU), not a correctness blocker.
-- Scroll regions (DECSTBM, CSI r) and insert/delete-line (IL/DL). Grep finds no `DECSTBM` by
-  name. Verify whether Ink uses a scroll region; if it does and the emulator ignores it,
-  redraws will corrupt. Most Ink output uses absolute cursor moves plus erase, not scroll
-  regions, so this is likely fine, but it must be confirmed live.
-- Erase-in-display (ED 0/1/2) and erase-in-line (EL 0/1/2): the core of Ink's "clear the
-  dynamic region" step. These must be exactly right. The user says the core terminal is good,
-  so these probably are, but the live capture will confirm by diffing the rendered buffer
-  against an expected frame.
-- Cursor hide/show (DECTCEM ?25l/?25h) around redraws: Ink hides the cursor while painting.
-  The wire already carries a cursor-hidden flag; honor it to avoid cursor flicker.
-
-The verification method is empirical: drive a real kiro-cli session through scenarios (a
-spinner, a collapsing menu, a full-screen repaint, a wrapped long line, a `/rewind` picker)
-and assert the server screen buffer and the client DOM match the intended frame, with no
-duplicate `data-abs` and stable `scrollHeight` during in-place redraws.
+Verdict: the VT core handles every sequence kiro-cli's Ink emits; "the core works and is good"
+holds under measurement. The one residual is the alt-screen path (chat never triggers it);
+brick 1's ephemeral-grid model covers it, and it gets a live check with a real editor session
+during brick 3.
 
 ### 5.4 Engineering constraints
 
@@ -602,9 +604,11 @@ Append-only. Each entry: date, decision, why, and what it rules out.
 - 2026-06-29 Breaking wire v2, rebuild in vterm, update both vibecli and vibekit. Why: user
   waived blast radius ("GitHub is our backup"); forking would reintroduce drift. Rules out: a
   vibecli-local fork of the engine, backward-compat shims.
-- 2026-06-29 Synchronized output (DEC 2026) is an enhancement, not a brick-1 blocker. Why: its
-  absence causes possible flicker, not corruption (unknown private modes are consumed
-  harmlessly); correctness comes first. Revisit after the seven bugs are closed.
+- 2026-06-29 (corrected after empirical capture) Synchronized output (DEC 2026) is already
+  handled by the VT core (`vt/csi.go`: `?2026h`→HoldFlush, `?2026l`→ReleaseFlush), so frames
+  are batched and there is no tearing. An earlier entry here called it an unhandled
+  enhancement; that was based on a flaky search tool and is withdrawn. No work needed; it
+  composes correctly with absolute indexing.
 - 2026-06-29 (brick 1) Wire v2 keeps TWO server frame shapes (screen window + scroll history),
   both now carrying absolute indices (`base` on screen, `first_index` on scroll), funnelling
   into ONE client store. Why: lower churn on the proven flush-diff than collapsing to a single
@@ -684,6 +688,14 @@ bottom.
     apply drainChanges() with dirty-row updates. This is where the live container loop +
     Ink-fidelity capture (tasks 2/3) become worthwhile, so establish them at the start of
     brick 3.
+- 2026-06-29 Ink-fidelity capture done (real kiro-cli on `vibecli-dev` via `/debug/raw`).
+  Result: the VT core handles every sequence kiro-cli's Ink emits, so the highest-risk item
+  (a wrong server buffer defeating a correct viewer) is retired. Sequences seen: heavy
+  synchronized-output 2026 (handled via HoldFlush/ReleaseFlush), EL/CHA/CUU/CUD/CUP/ED/SGR/
+  DECTCEM (all handled); ZERO scroll regions, IL/DL, or alt-screen in normal chat. Corrected
+  section 5.3 and the 2026 decision (an earlier "unhandled" note was a flaky-tool artifact).
+  Residual: the alt-screen ephemeral path is untested live (chat never triggers it); check it
+  with a real editor session during brick 3.
 
 ## 11. Open questions and risks
 

@@ -663,6 +663,28 @@ bottom.
     (renderer consuming base/firstIndex + fixed-height window), at which point the live
     container loop + Ink-fidelity capture become worthwhile.
 
+- 2026-06-29 BRICK 2 COMPLETE. New `web/src/store.ts`: `LineStore`, a pure
+  (no-DOM) absolute-index model. One `Map<abs, runs>` capped at MAX_LINES (5000,
+  injectable for tests), a window descriptor (base/height/cursor), an ephemeral alt grid,
+  and oldest/highest/everEvictedThrough bounds. `applyScreen`/`applyScroll` funnel both wire
+  shapes into one idempotent `applyLine` enforcing the section-8.1 guards (valid index,
+  stale-drop below everEvictedThrough, idempotent skip-if-equal, cap eviction from the oldest
+  end); alt frames route to the ephemeral grid and never touch the abs store. `forEachLine`
+  iterates oldest..highest skipping holes (the renderer derives a trimmed-history gap from a
+  jump in abs). `highestIndex()` is the resume `haveThrough`; `drainChanges()` hands the
+  renderer dirty/evicted sets + window/alt/reset flags; `reset()` (server restart) clears all
+  and re-allows index 0. `web/src/store.test.ts`: 10 tests — window/scroll apply, idempotent
+  no-dup re-delivery, in-place update, cap eviction + stale-drop, hole-skipping, empty
+  highestIndex, reset, alt routing + scroll-drop-during-alt, invalid-index reject.
+  - Verification: tsgo prod + test typecheck clean, eslint + prettier clean, vitest 138/138
+    (added store.test.ts + wire-v2.test.ts; fixed `base` field in 4 pre-existing render test
+    helpers since ScreenMessage.base is now required). Pure logic, no container needed.
+  - Next: brick 3 (renderer): rewrite render.ts to own a LineStore, consume base/firstIndex,
+    render data-abs rows with a fixed-height window block (never trim trailing blanks), and
+    apply drainChanges() with dirty-row updates. This is where the live container loop +
+    Ink-fidelity capture (tasks 2/3) become worthwhile, so establish them at the start of
+    brick 3.
+
 ## 11. Open questions and risks
 
 - Ink redraw fidelity (section 5.3). Verify scroll-region and erase-display handling against

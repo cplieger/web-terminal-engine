@@ -24,6 +24,7 @@ HTMLCanvasElement.prototype.getContext = function fakeGetContext(): unknown {
 function makeMsg(rows: WireRun[][], cursor: [number, number], changed?: number[]): ScreenMessage {
   return {
     type: "screen",
+    base: 0,
     rows,
     cursor,
     changed: changed ?? rows.map((_, i) => i),
@@ -120,6 +121,7 @@ describe("render: wide-char and zero-width handling", () => {
     const row: WireRun[] = [{ t: "A漢\uFFFFB" + " ".repeat(6), f: -1, b: -1, a: 0, uc: -1 }];
     const msg: ScreenMessage = {
       type: "screen",
+      base: 0,
       rows: [row],
       cursor: [0, 1],
       changed: [0],

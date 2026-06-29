@@ -115,6 +115,11 @@ const store = new LineStore();
 // elements, kept in ascending data-abs order.
 const rowEls = new Map<number, HTMLDivElement>();
 
+// The "earlier output trimmed" marker (a non-data-abs first child of output,
+// shown when the store reports history older than it holds was trimmed). Kept
+// as a module ref so it is reused rather than recreated each flush.
+let trimMarkerEl: HTMLDivElement | null = null;
+
 // Cursor state, refreshed from the store window on each flush. Kept as module
 // vars because buildRowSpans/cursorClassName read them.
 let cursorAbs = -1; // absolute index of the row the cursor is on
@@ -195,6 +200,18 @@ export function resetScrollback(): void {
  */
 export function getHighestIndex(): number {
   return store.highestIndex();
+}
+
+/**
+ * Record the server's retained-history bounds from a resumeAck (committed =
+ * one past the newest retained, oldest = oldest retained absolute index). The
+ * store uses these to tell a genuine history trim (the server evicted lines
+ * the client was missing) from a still-loading state, which drives the
+ * "earlier output trimmed" marker. Resync guard 8.2.2.
+ */
+export function noteResumeBounds(committed: number, oldest: number): void {
+  store.noteResumeBounds(committed, oldest);
+  scheduleFlush();
 }
 
 // --- Color helpers ---
@@ -478,6 +495,7 @@ function flushRenderInner(): void {
   if (ch.fullReset) {
     output.replaceChildren();
     rowEls.clear();
+    trimMarkerEl = null;
     cursorAbs = -1;
   } else {
     for (const abs of ch.evictedLines) {
@@ -512,6 +530,7 @@ function flushRenderInner(): void {
     altRendered = false;
     output.replaceChildren();
     rowEls.clear();
+    trimMarkerEl = null;
     store.forEachLine((abs) => ch.dirtyLines.push(abs));
   }
 
@@ -527,8 +546,34 @@ function flushRenderInner(): void {
     upsertRow(abs);
   }
 
+  updateTrimMarker();
+
   if (onCursorMove) {
     onCursorMove();
+  }
+}
+
+// updateTrimMarker shows or hides the "earlier output trimmed" marker as the
+// first child of output, driven by the store. It appears when history older
+// than the store holds was trimmed — either the client evicted its oldest
+// lines at the cap, or the server reported (via resumeAck bounds) that it no
+// longer retains history the client was missing on resume. The marker carries
+// no data-abs, so insertRowInOrder (which compares numeric data-abs) never
+// places a row before it; it stays pinned at the top.
+function updateTrimMarker(): void {
+  if (store.hasTrimmedHistory()) {
+    if (trimMarkerEl === null) {
+      trimMarkerEl = document.createElement("div");
+      trimMarkerEl.className = "term-trim-marker";
+      trimMarkerEl.setAttribute("role", "status");
+      trimMarkerEl.setAttribute("aria-label", "earlier output trimmed");
+      trimMarkerEl.textContent = "earlier output trimmed";
+    }
+    if (trimMarkerEl.parentElement !== output || output.firstChild !== trimMarkerEl) {
+      output.insertBefore(trimMarkerEl, output.firstChild);
+    }
+  } else if (trimMarkerEl !== null && trimMarkerEl.parentElement === output) {
+    trimMarkerEl.remove();
   }
 }
 

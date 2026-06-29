@@ -139,4 +139,27 @@ describe("render (store-backed, brick 3)", () => {
     await tick();
     expect(absList(outputEl)).toEqual([0]);
   });
+
+  it("shows an 'earlier output trimmed' marker when history is gone, then removes it (guard 8.2.2)", async () => {
+    // Resume where the server only retains from index 100: it replays from
+    // there, so the client legitimately can't show 0..99.
+    render.handleScroll(scrollMsg(100, ["h100", "h101"]));
+    render.handleScreen(screenMsg(102, [row("w0")], [0]));
+    render.noteResumeBounds(110, 100);
+    await tick();
+
+    const first = outputEl.firstElementChild as HTMLElement;
+    expect(first.classList.contains("term-trim-marker")).toBe(true);
+    // The marker carries no data-abs and the real rows follow it in order.
+    const rowAbs = Array.from(outputEl.children)
+      .filter((c) => (c as HTMLElement).dataset["abs"] !== undefined)
+      .map((c) => Number((c as HTMLElement).dataset["abs"]));
+    expect(rowAbs).toEqual([100, 101, 102]);
+
+    // A later resume where the server still has everything clears the marker.
+    render.noteResumeBounds(110, 0);
+    await tick();
+    expect(outputEl.querySelector(".term-trim-marker")).toBeNull();
+    expect(absList(outputEl)).toEqual([100, 101, 102]);
+  });
 });

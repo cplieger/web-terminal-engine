@@ -694,6 +694,34 @@ Append-only. Each entry: date, decision, why, and what it rules out.
   clamp left/top by offsetWidth/Height against innerWidth/Height with an 8px margin, all in one
   synchronous task so there is no flash). Why: bug 1d's off-screen callout. Verified live: a
   menu opened hard against the bottom-right corner lands fully inside the viewport.
+- 2026-06-29 (brick 7) Wired the §8.2.2 resume eviction-gap affordance end to end (it was
+  half-built — the store had `hasTrimmedHistory`/`noteResumeBounds` but nothing called them).
+  connection.ts gains an `onResumeBounds(committed, oldest)` callback fired from the resumeAck
+  branch; the consumer forwards it to `render.noteResumeBounds` → `store.noteResumeBounds`. The
+  renderer shows a quiet "earlier output trimmed" marker — a non-data-abs first child of
+  #term-output, so `insertRowInOrder` (which compares numeric data-abs) never places a row
+  before it — when `store.hasTrimmedHistory()` (the client evicted its oldest lines at the
+  5000-line cap, or the server's resumeAck reported it no longer retains history the client was
+  missing). Why: completes the fifth of the user's "checks on reconnect"; a genuine,
+  unrecoverable history trim becomes a visible affordance rather than a silent content
+  discontinuity. Rules out: silently stitching across a gap.
+- 2026-06-29 (brick 7) Guard audit conclusion: the §8.1 apply-line guards live in the store
+  (brick 2 — valid index, stale-drop below everEvictedThrough, idempotent skip-if-equal,
+  cap-evict) and the §8.2 resync guards are now all wired (epoch → onServerRestart; outbox/ack
+  → applyAck clamp; window/cursor/modes → resume replay; index-alignment/trim → 8.2.2). No dead
+  heuristics remained to remove — bricks 3/4 already deleted the live-zone trim, the per-frame
+  caret hack, `suppressScroll`, and `isInUserScroll`.
+- 2026-06-29 (brick 7) vibekit reconciled on its own `rebuild/terminal-viewer` branch: shell.ts
+  wires `getHaveThrough` + `onResumeBounds` (resume-by-index parity for the shell), and
+  `.shell-terminal` re-enables `overflow-anchor: auto` (was none, a stale live-zone-model
+  setting). Verified by building vibekit against the LOCAL vterm working tree (a temporary
+  go.work + a node_modules TS overlay): `go build ./...` and both tsgo passes (prod + tests)
+  clean; node_modules then restored to the published package. vibekit uses only APIs that
+  survived the rebuild; the removed `getScrollbackRowCount`/`suppressScroll`/`isInUserScroll`
+  were never used by the shell (vibekit's own `scroll.ts` is a separate chat-scroll module).
+  vibekit's shell input model (a focusable div + a helper textarea) never had vibecli's
+  contenteditable overload, so brick 5's element split did not apply there. Rules out: a
+  vibecli-style contenteditable rework of the vibekit shell.
 
 ## 10. Progress log
 
@@ -905,6 +933,48 @@ bottom.
   - Next: brick 7 (guard hardening §8 + vibekit reconcile). Brick 5's touch behaviors await the
     user's iPhone for final sign-off.
 
+- 2026-06-29 BRICK 7 COMPLETE (guard hardening §8 + vibekit reconcile). All seven bricks are
+  now laid; the rebuild is structurally complete.
+  - §8.2.2 resume eviction-gap affordance wired end to end (it was half-built — the store had
+    `hasTrimmedHistory`/`noteResumeBounds` but nothing called them). connection.ts gains an
+    `onResumeBounds(committed, oldest)` callback fired from the resumeAck branch; vibecli
+    `app.ts` and vibekit `shell.ts` forward it to `render.noteResumeBounds` → store. render.ts
+    shows a quiet "earlier output trimmed" marker as a non-data-abs first child of #term-output
+    when `store.hasTrimmedHistory()` (client hit the 5000-line cap, or the server reported it
+    evicted history the client was missing on resume). CSS: vibecli `02-app.css` +
+    vibekit `21-shell-panel.css`.
+  - Guard audit: §8.1 apply-line guards confirmed in the store (brick 2); §8.2 resync guards now
+    all wired (epoch, outbox/ack clamp, window/cursor/modes via replay, and now the 8.2.2 trim).
+    No dead heuristics left to delete (bricks 3/4 already removed the live-zone trim, the
+    per-frame caret hack, `suppressScroll`, `isInUserScroll`).
+  - vibekit reconciled on its own `rebuild/terminal-viewer` branch (commit ee68fd3 + the
+    onResumeBounds/CSS follow-up): shell.ts wires `getHaveThrough` + `onResumeBounds`;
+    `.shell-terminal` overflow-anchor none→auto. VERIFIED by building vibekit against the LOCAL
+    vterm working tree (temporary go.work + node_modules TS overlay): `go build ./...` clean,
+    tsgo prod + tests clean. node_modules restored to the published package afterward; like
+    vibecli's branch it references unpublished vterm APIs, so it is staged for the lockstep
+    vterm publish (not green against the pinned v1.1.8 by design).
+  - Tests: vterm +4 — store (client-evict trim; server-gap trim via noteResumeBounds;
+    invalid-bounds ignored) and render (marker appears as first child with rows ordered after,
+    then clears). Full vterm gate green: `go test -race` + golangci-lint 0; tsgo prod+test,
+    eslint, prettier, vitest 159.
+  - Live re-verify after brick 7 (no regression): cdp-bug2 PASS (backfill contiguous, 0 dup,
+    and no spurious marker — contiguous from abs 0), cdp-bug5 PASS (8/8 structural).
+  - OBSERVATION (not one of the seven bugs; see §11): a synthetic 1500-line instant burst (an
+    emit-burst fixture, larger than the 1000-line server ring) overwhelmed the SHARED CDP
+    sidecar browser's rendering and crashed its debug endpoint (recovered by restarting the
+    chromium container). The server delivered correctly and a fresh client gets the ring via
+    resume replay; the issue was the constrained desktop test browser rendering ~1426 new DOM
+    rows in a single rAF. kiro-cli's Ink output is incremental, not a 1500-line instant dump,
+    so this is outside the rebuild's bug set — but a `cat bigfile` burst is worth a future look
+    (chunked rendering / a cap on rows built per frame). The trim marker's live trigger needs
+    server eviction (a heavy burst), which is exactly what destabilized the sidecar, so the
+    marker is proven by unit tests end to end instead of live.
+  - State: bricks 1-7 done. Remaining is not code — it is the §11 device-validation checklist
+    on a real iPhone (touch select/scroll/keyboard for bugs 1/6/7, on-device bug-2/3/4
+    confirmation, IME), then the coordinated vterm publish + consumer dep-bumps (vibecli and
+    vibekit both have `rebuild/terminal-viewer` branches staged against the unpublished vterm).
+
 ## 11. Open questions and risks
 
 - Ink redraw fidelity (section 5.3). Verify scroll-region and erase-display handling against
@@ -920,6 +990,15 @@ bottom.
 - Predictive echo (`predict.ts`) and the local typing buffer interaction with the new input
   element: keep predictive echo, re-point it at the textarea-driven input. Verify it does not
   fight the server cursor under the new screen model.
+- Large instant bursts (`cat bigfile`): a 1500-line instant burst (a synthetic stress fixture,
+  larger than the 1000-line server ring) overwhelmed the shared desktop CDP sidecar's rendering
+  during brick 7 (it built ~1426 new DOM rows in one rAF and crashed the browser's debug port).
+  The wire side is fine — the server commits and delivers correctly, and a client connecting
+  after the burst gets the ring via resume replay — so this is a client-render throughput
+  concern, not a protocol bug, and it is outside the seven reported bugs (kiro-cli's Ink output
+  is incremental, never a 1500-line instant dump). Worth a future look if `cat bigfile` matters:
+  cap rows built per rAF (render a budget per frame, continue next frame) or coalesce a very
+  large dirty set. Not pursued now to avoid destabilizing the shared sidecar.
 
 ### Device-validation checklist (real iPhone, after brick 5)
 

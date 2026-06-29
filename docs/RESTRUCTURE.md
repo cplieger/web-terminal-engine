@@ -116,3 +116,112 @@ The rebuild itself (bricks 1-7 + the budgeted-render burst fix) is untouched —
 behavior, same tests. This restructure only moves files, renames the module/package, extracts
 the UI, and adds the server/container. The device-validation checklist (REBUILD.md §11) is
 still the gate before relying on it on a real iPhone.
+
+## 7. CI/tooling is centrally synced — author only the repo-specific files
+
+The two new repos (`web-terminal-ui`, `web-terminal-server`) must NOT hand-author
+their CI workflows, lint/format configs, license, or repo-hygiene files. Those are
+owned by `cplieger/ci` and pushed in automatically by its `sync.yaml` once the repo
+exists on GitHub. `scripts/classify-repos.sh` auto-discovers every non-archived
+`cplieger/*` repo (`gh repo list`), regenerates `.github/sync.yml`, and
+`repo-file-sync-action` opens an auto-merging `chore(sync):` PR. No manual
+`sync.yml` edit is needed — creating the GitHub repo is the only trigger (and that
+is the user-gated step). Verified against `reactive`/`actions` (the pure-TS library
+template) and the authoritative `ci/.github/sync.yml`.
+
+**Synced in (DO NOT author):**
+
+- Workflows: `.github/workflows/{ci.yaml,codeql.yml,coverage.yml,release.yaml,scorecard.yml,security.yml}`
+- TS lint/format (TS repos): `eslint.config.base.mjs`, `.prettierrc.json`, `.stylelintrc.json`, `.htmlvalidate.json`
+- Go tooling (Go repos): `.golangci.yaml`, `.gremlins.yaml`
+- Hygiene/release: `.editorconfig`, `.gitattributes`, `LICENSE`, `renovate.json`, `cliff.toml`
+
+**Authored per-repo (the only files we write):**
+
+- TS (`web-terminal-ui`, mirror `reactive`/`actions`): `src/**`, `package.json`, `jsr.json`,
+  `tsconfig.json`, `tsconfig.tests.json`, `vitest.config.ts`, `eslint.config.mjs`
+  (thin — imports the synced `./eslint.config.base.mjs` per the `actions` pattern),
+  `.gitignore`, `README.md`, repo-specific `CONTRIBUTING.md`.
+- Go (`web-terminal-server`): `go.mod`/`go.sum`, `main.go` (+ support), `Dockerfile`,
+  `.gitignore`, `README.md`, `CONTRIBUTING.md`.
+
+**Bootstrap consequence:** until the GitHub repo is created and the first sync lands,
+the synced files are absent locally. Local verification therefore relies on the
+authored set only — `tsgo` (typecheck) + `vitest` (tests) for TS, `go build`/`go test`
+for Go. `eslint`/`prettier` gate post-sync in CI (the base config arrives via sync);
+a local lint run can borrow `ci/configs/eslint.config.base.mjs` without committing it.
+
+## 8. Status — local execution complete (NOT pushed)
+
+The §5 sequencing is done locally. Everything is committed on branches; nothing
+is pushed (push + GitHub repo creation are user-gated, below).
+
+| Repo | Location | Branch | Head | What landed |
+|---|---|---|---|---|
+| engine | dir still `vterm` | `rebuild/terminal-viewer` | `440ef26` | module/pkg rename → web-terminal (`83212a2`); wire `protocolVersion` + golden fixtures (`440ef26`) |
+| web-terminal-ui | new local repo | `main` | `32c8be8` | extracted reference UI + `mount()`; tsgo + vitest 17/17 + full lint battery green |
+| web-terminal-server | new local repo | `main` | `1c42fd1` | thin generic Go server; full dev-build pipeline green; localhost-default + optional auth |
+| vibecli | existing | `rebuild/terminal-viewer` | `bb92804` | client slimmed to `mount()`; UI modules + css moved out; dev-build green |
+| vibekit | existing | `rebuild/terminal-viewer` | `e76f130` | shell repointed to the renamed engine; `go build` + tsgo green |
+
+Local builds resolve the unpublished engine via a **gitignored** `go.work`
+(`use .` + `replace github.com/cplieger/web-terminal => ../vterm`) and a
+node_modules overlay of the engine/UI TS. Both are dev-only and never committed
+— a plain `go.work use ../vterm` is NOT enough (Go still tries to fetch the
+pinned version's go.mod from the proxy; the `replace` reads `../vterm/go.mod`
+directly). go.mod/package.json pin a placeholder `v0.1.0`/`0.1.0` until publish.
+
+## 9. Remaining steps — user-gated (and gated on the REBUILD.md §11 iPhone validation)
+
+**Do not proceed past the device-validation gate.** REBUILD.md §11 (touch
+select/copy/paste, sleep/wake backfill, scroll-stick, IME, no duplicate appends)
+must pass on a real iPhone first — publishing is what makes the rename
+irreversible (released module/package versions can't be unpublished).
+
+Then, in dependency order:
+
+1. **Create the two new GitHub repos** (needs `PUBLISH_PAT`): `gh repo create
+   cplieger/web-terminal-ui` + `cplieger/web-terminal-server` (public, GPL-3.0),
+   push their `main`. Creating the repo is the ONLY trigger needed for
+   `cplieger/ci`'s `classify-repos.sh` to discover them and sync in the
+   CI/lint/license files (§7) — confirm the `chore(sync)` PRs land + merge before
+   trusting CI.
+
+2. **Rename the engine repo + local dir** `vterm` → `web-terminal`: `gh repo
+   rename` (GitHub keeps redirects), then rename the local checkout. Update the
+   dev-only paths that hardcode `../vterm`: each consumer's gitignored `go.work`
+   `replace … => ../vterm`, and the `ENGINE_DIR`/`UI_DIR` defaults in
+   `web-terminal-server/scripts/dev-build.sh`, `web-terminal-ui/scripts/verify.sh`,
+   and `vibecli/scripts/dev-build.sh`. (The Go module path and npm name are
+   ALREADY `web-terminal`; only the directory + GitHub repo name lag.)
+
+3. **First lockstep publish, in order** (the engine has no unpublished deps;
+   everything else depends on it):
+   - **a. Engine** — merge `rebuild/terminal-viewer`; the hybrid release pipeline
+     tags the Go module (`vX.Y.Z`) and publishes the `web/` subpackage to npm +
+     JSR as `@cplieger/web-terminal`.
+   - **b. web-terminal-ui** — publish npm + JSR `@cplieger/web-terminal-ui` (its
+     peer `@cplieger/web-terminal` must be live first).
+   - **c. Consumers** (`web-terminal-server`, `vibecli`, `vibekit`) — replace the
+     placeholder `v0.1.0`/`0.1.0` pins with the real published versions, run
+     `npm install` to **regenerate each `package-lock.json`** (vibecli + vibekit
+     locks still reference `@cplieger/vterm`; this is unfixable until the package
+     is published with a real integrity hash), bump the Dockerfile
+     `ARG …_VERSION` pins, and confirm CI is green. Then `web-terminal-server`'s
+     image builds → `ghcr.io/cplieger/web-terminal`.
+   - **d.** Drop the dev-only `go.work` reliance once the real versions resolve
+     from the module proxy.
+
+### Deferred / follow-ups (not blocking)
+
+- **`.kiro` steering docs** still describe `@cplieger/vterm` (`vterm.md`,
+  `vibecli.md`, `vibekit*.md`, `shared-libraries.md`): rename the `#vterm` doc to
+  `#web-terminal`, fix package names + the "where it's used" inventory, and add
+  `web-terminal-ui` / `web-terminal-server` entries. Update in the `.kiro` repo at
+  publish.
+- **web-terminal-server** has no Go tests (thin glue) → 0% coverage, OpenSSF
+  `test` criterion unmet. Add a small `main_test.go` (env parsing,
+  `isLoopbackHost`, the basic-auth middleware) when convenient.
+- **vibecli static-src** is now glue-only (a single `mount()` call); its
+  remaining TS lint deps (`stylelint`, `html-validate`) may be trimmable once the
+  lint surface is confirmed post-sync.

@@ -797,7 +797,7 @@ bottom.
   with a real editor session during brick 3.
 - 2026-06-29 LIVE VERIFY LOOP ESTABLISHED + BRICK 1 VERIFIED LIVE against real kiro-cli.
   Loop (vibecli `scripts/`, committed on vibecli branch `rebuild/terminal-viewer`):
-  `dev-build.sh` builds vibecli against the local `../vterm` (go.work + overlaid TS + cached
+  `dev-build.sh` builds vibecli against the local `../web-terminal-engine` (go.work + overlaid TS + cached
   Monaspace font) into `vibecli-dev-bin`; `dev-deploy.sh` swaps it into the `vibecli-dev`
   container (`docker cp` + restart, no image rebuild, no CI); `cdp-verify.cjs` drives the
   Chromium sidecar and dumps a DOM/scroll snapshot. Result: the v2 binary renders the real
@@ -1091,8 +1091,8 @@ keyboard (bug 7).
 The loop is implemented as three scripts on the vibecli `rebuild/terminal-viewer` branch and
 was used to validate brick 1 against real kiro-cli:
 
-1. `vibecli/scripts/dev-build.sh` — builds vibecli against the local `../vterm` working tree.
-   Writes a `go.work` (`use .` + `use ../vterm`), overlays `vterm/web/src/*.ts` onto
+1. `vibecli/scripts/dev-build.sh` — builds vibecli against the local `../web-terminal-engine` working tree.
+   Writes a `go.work` (`use .` + `use ../web-terminal-engine`), overlays `web-terminal-engine/web/src/*.ts` onto
    `static-src/node_modules/@cplieger/web-terminal-engine/src`, runs the two tsgo passes (app + lib), fetches
    the Monaspace Nerd Font (cached in `~/.cache/vibecli-fonts`), concatenates the CSS, and
    `go build`s `vibecli-dev-bin` (CGO off; Constellation's linux/amd64 matches the container).

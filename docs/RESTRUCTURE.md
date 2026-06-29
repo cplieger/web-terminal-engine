@@ -98,8 +98,8 @@ Reference UI `@cplieger/web-terminal-ui`:
   deps `@cplieger/web-terminal-engine` + `@cplieger/web-terminal-ui`. `routes.go` unchanged
   (`terminal.NewHandler(..., WithScrollbackCapacity(5000))`). `app.ts` shrinks to: import
   `web-terminal-ui` `mount()` + kiro-cli-specific config. `index.html`/CSS come from the UI pkg.
-- **vibekit**: bump `go.mod` + `package.json` from `vterm`/`@cplieger/web-terminal-engine` to
-  `web-terminal`/`@cplieger/web-terminal-engine`. `shell.ts` import path changes only (it uses the
+- **vibekit**: bump `go.mod` + `package.json` from `@cplieger/vterm` to
+  `@cplieger/web-terminal-engine`. `shell.ts` import path changes only (it uses the
   engine directly; brick-7 already added getHaveThrough/onResumeBounds).
 
 ## 5. Sequencing (pre-publish, all cheap)
@@ -166,18 +166,19 @@ is pushed (push + GitHub repo creation are user-gated, below).
 
 | Repo | Location | Branch | Head | What landed |
 |---|---|---|---|---|
-| engine | dir still `vterm` | `rebuild/terminal-viewer` | `440ef26` | module/pkg rename → web-terminal-engine (`83212a2`); wire `protocolVersion` + golden fixtures (`440ef26`) |
+| engine | dir `web-terminal-engine` | `rebuild/terminal-viewer` | `440ef26` | module/pkg rename → web-terminal-engine (`83212a2`); wire `protocolVersion` + golden fixtures (`440ef26`) |
 | web-terminal-ui | new local repo | `main` | `32c8be8` | extracted reference UI + `mount()`; tsgo + vitest 17/17 + full lint battery green |
 | web-terminal-server | new local repo | `main` | `1c42fd1` | thin generic Go server; full dev-build pipeline green; localhost-default + optional auth |
 | vibecli | existing | `rebuild/terminal-viewer` | `bb92804` | client slimmed to `mount()`; UI modules + css moved out; dev-build green |
 | vibekit | existing | `rebuild/terminal-viewer` | `e76f130` | shell repointed to the renamed engine; `go build` + tsgo green |
 
 Local builds resolve the unpublished engine via a **gitignored** `go.work`
-(`use .` + `replace github.com/cplieger/web-terminal-engine => ../vterm`) and a
-node_modules overlay of the engine/UI TS. Both are dev-only and never committed
-— a plain `go.work use ../vterm` is NOT enough (Go still tries to fetch the
-pinned version's go.mod from the proxy; the `replace` reads `../vterm/go.mod`
-directly). go.mod/package.json pin a placeholder `v0.1.0`/`0.1.0` until publish.
+(`use .` + `replace github.com/cplieger/web-terminal-engine => ../web-terminal-engine`)
+and a node_modules overlay of the engine/UI TS. Both are dev-only and never
+committed — a plain `go.work use ../web-terminal-engine` is NOT enough (Go still
+tries to fetch the pinned version's go.mod from the proxy; the `replace` reads
+`../web-terminal-engine/go.mod` directly). go.mod/package.json pin a placeholder
+`v0.1.0`/`0.1.0` until publish.
 
 ## 9. Remaining steps — user-gated (and gated on the REBUILD.md §11 iPhone validation)
 
@@ -195,13 +196,15 @@ Then, in dependency order:
    CI/lint/license files (§7) — confirm the `chore(sync)` PRs land + merge before
    trusting CI.
 
-2. **Rename the engine repo + local dir** `vterm` → `web-terminal-engine`: `gh repo
-   rename` (GitHub keeps redirects), then rename the local checkout. Update the
-   dev-only paths that hardcode `../vterm`: each consumer's gitignored `go.work`
-   `replace … => ../vterm`, and the `ENGINE_DIR`/`UI_DIR` defaults in
+2. **Rename the engine GitHub repo** `vterm` → `web-terminal-engine`: `gh repo
+   rename` (GitHub keeps redirects). The local checkout has ALREADY been renamed
+   to `web-terminal-engine`, and the dev-only paths that hardcoded `../vterm`
+   (each consumer's gitignored `go.work` `replace … => ../web-terminal-engine`,
+   and the `ENGINE_DIR`/`UI_DIR` defaults in
    `web-terminal-server/scripts/dev-build.sh`, `web-terminal-ui/scripts/verify.sh`,
-   and `vibecli/scripts/dev-build.sh`. (The Go module path and npm name are
-   ALREADY `web-terminal-engine`; only the directory + GitHub repo name lag.)
+   and `vibecli/scripts/dev-build.sh`) now all point at `../web-terminal-engine`.
+   (The Go module path and npm name were ALREADY `web-terminal-engine`; only the
+   GitHub repo name still lags.)
 
 3. **First lockstep publish, in order** (the engine has no unpublished deps;
    everything else depends on it):

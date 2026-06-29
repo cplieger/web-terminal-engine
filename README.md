@@ -77,6 +77,21 @@ The Go server and TypeScript client communicate over a binary WebSocket frame fo
 
 GPL-3.0 — see [LICENSE](LICENSE).
 
+## Related projects
+
+The web-terminal family builds on this engine:
+
+- [`@cplieger/web-terminal-ui`](https://github.com/cplieger/web-terminal-ui) — the
+  reference touch-first browser UI for the TypeScript renderer.
+- [`web-terminal-server`](https://github.com/cplieger/web-terminal-server) — a
+  ready-to-run container that bridges a PTY command to the browser over HTTP +
+  WebSocket.
+
+Apps built on the engine:
+
+- [`vibekit`](https://github.com/cplieger/vibekit)
+- [`vibecli`](https://github.com/cplieger/vibecli)
+
 ## Unsupported by Design
 
 The following VT/DEC features are **intentionally not implemented**. Input bytes for these sequences are consumed (not echoed or half-rendered) but produce no effect. This is a deliberate design choice — not a TODO.

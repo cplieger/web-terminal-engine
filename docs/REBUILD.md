@@ -665,6 +665,35 @@ Append-only. Each entry: date, decision, why, and what it rules out.
   visibilitychange + pageshow. Why: a cheap, immediate trigger for a network handoff/restore
   (cellular↔wifi, tunnel reconnect); reconnectNow tears down any zombie and resume-by-index
   backfills what was missed.
+- 2026-06-29 (brick 5) Brick 5 is a vibecli-only change (static/index.html + static-src/css +
+  static-src/app.ts); vterm is untouched. Why: the contenteditable overload lived entirely in
+  vibecli's DOM/CSS/input wiring — vterm's renderer (after brick 3) carries zero
+  contenteditable/focus/selection assumptions (grep-confirmed). vibekit has its own input
+  wiring, reconciled in brick 7. Rules out: a shared-library change for the element split.
+- 2026-06-29 (brick 5) The `<textarea>` (#term-input) already existed (it was the iOS-keyboard
+  element); brick 5 makes it the SOLE focus + keyboard + buffer + IME target and demotes
+  #term-output to display-only (removed contenteditable, `-webkit-user-modify`, caret-color;
+  kept user-select:text). focusTerminal() and the mouse-click path now focus the textarea; the
+  output's per-element keydown and its entire beforeinput handler were deleted (typed text and
+  paste now flow through the textarea's existing input/paste/composition listeners —
+  composition.ts already brackets native paste). Why: the four-jobs-on-one-element overload is
+  the shared cause of bugs 1/6/7; a humble textarea preserves the two properties the user named
+  (keyboard summon; local buffer, via predict.ts + the outbox) without doing display or
+  selection. Desktop typing now uses the same textarea input path iOS always used (verified
+  live). Rules out: Shape 2 (a contenteditable input line) unless device IME testing forces it.
+- 2026-06-29 (brick 5) The mouse-click focus path bails when a selection exists, so a
+  drag-select is not collapsed by the focus grab. Why: with the textarea (not the element the
+  selection lives in) as the focus target, unconditionally focusing on click would clobber a
+  selection the user just made to copy. The touch pointerup path already had this guard.
+- 2026-06-29 (brick 5) Re-enabled native `overflow-anchor: auto` on #term (was none). Why:
+  §6.4 — the browser holds the read position on an insert-above for free. Safe because the
+  absolute-index model only ever appends at the tail, so anchoring rarely engages and cannot
+  fight the single scroll owner (the manual offsetTop math, Cause A, is already gone). Rules
+  out: manual anchor compensation.
+- 2026-06-29 (brick 5) showCtxMenu clamps within the viewport (add `.visible` to measure, then
+  clamp left/top by offsetWidth/Height against innerWidth/Height with an 8px margin, all in one
+  synchronous task so there is no flash). Why: bug 1d's off-screen callout. Verified live: a
+  menu opened hard against the bottom-right corner lands fully inside the viewport.
 
 ## 10. Progress log
 
@@ -837,6 +866,45 @@ bottom.
     (1–4, 6) are done. Then brick 7 (guard hardening §8 + vibekit reconcile, including any
     rename of reconnectNow→ensureFresh).
 
+- 2026-06-29 BRICK 5 COMPLETE (input / keyboard / selection separation; bugs 1, 6, 7) +
+  structurally VERIFIED LIVE. vibecli-only (vterm untouched — its renderer carries no
+  contenteditable/focus assumptions). The `<textarea>` already existed for the iOS keyboard;
+  the change makes it the SINGLE focus/keyboard/buffer/IME target and demotes #term-output to
+  display-only:
+  - `static/index.html`: #term-output lost `contenteditable` + the editable-only attrs
+    (autocapitalize/autocomplete/autocorrect/spellcheck/aria-readonly/tabindex); it is now a
+    plain role=log display surface.
+  - `static-src/css/02-app.css`: .term-output dropped caret-color:transparent and
+    `-webkit-user-modify` (editable-only), kept user-select:text + position:relative; .term
+    re-enabled `overflow-anchor: auto` (was none).
+  - `static-src/app.ts`: focusTerminal() focuses the textarea (was the output); deleted the
+    output's keydown listener and its entire beforeinput handler (typed text/paste now flow
+    through the textarea's existing input/paste/composition listeners — composition.ts already
+    brackets native paste); the mouse-click path focuses the textarea but bails when a
+    selection exists (so a drag-select is not collapsed); showCtxMenu clamps within the
+    viewport.
+  - Why this kills the bugs: the editable element is no longer the scroll content, so the first
+    touch-drag scrolls instead of placing a caret (bug 6), and #term is the full-viewport tap
+    surface so a tap on a sparse screen still summons the keyboard (bug 7); #term-output is not
+    re-rendered as editable and the per-frame caret hack is already gone (brick 3), so a
+    selection survives a redraw (bug 1); the menu is clamped (bug 1d).
+  - LIVE VERIFY (new `scripts/cdp-bug5.cjs`) against BOTH the :9850 emitter and real kiro-cli
+    (:9849): 8/8 PASS — #term-output isContentEditable=false; document.activeElement is the
+    textarea (not the output); #term overflow-anchor=auto; #term-output user-select=text; a
+    context menu opened hard against the bottom-right corner lands fully inside the viewport;
+    and a 220-char selection over a committed row survived 4s of streaming frames unchanged
+    (bug 1 core). No console errors against the real TUI with the new DOM. Desktop typing
+    confirmed live (throwaway probe): with the textarea focused, an inserted marker
+    round-tripped through kiro-cli and rendered back in the DOM.
+  - DEVICE-ONLY residuals (the desktop sidecar cannot reproduce iOS WebKit; see §11): the first
+    touch-drag actually scrolling (bug 6), a tap actually summoning the iOS keyboard (bug 7),
+    the native long-press selection callout, and whether a 1-line textarea suffices for IME
+    (Shape 2 fallback). CDP synthetic touch could not confirm tap→focus (it does not emit
+    pointerType=touch reliably), but the wiring is unchanged from the pre-existing touch path
+    and the focus model is structurally proven.
+  - Next: brick 7 (guard hardening §8 + vibekit reconcile). Brick 5's touch behaviors await the
+    user's iPhone for final sign-off.
+
 ## 11. Open questions and risks
 
 - Ink redraw fidelity (section 5.3). Verify scroll-region and erase-display handling against
@@ -852,6 +920,23 @@ bottom.
 - Predictive echo (`predict.ts`) and the local typing buffer interaction with the new input
   element: keep predictive echo, re-point it at the textarea-driven input. Verify it does not
   fight the server cursor under the new screen model.
+
+### Device-validation checklist (real iPhone, after brick 5)
+
+Everything CDP-observable for bricks 1–6 is verified (see the progress log). These remain
+because desktop Chromium cannot reproduce iOS WebKit; they are the morning hands-on pass on a
+real device against the `vibecli-dev` build:
+
+- Bug 1: long-press a streaming region and a static region; selection holds, the callout/our
+  menu appears on-screen, Copy works. Paste via the iOS callout inserts (bracketed).
+- Bug 6: the FIRST touch-drag after load scrolls (no need to tap/select first).
+- Bug 7: a tap anywhere — including a near-empty first screen — summons the keyboard.
+- Bugs 3/4 on-device: streaming does not jump; scrolled-up reading holds while new text
+  arrives; jump-to-bottom re-follows.
+- Bug 2 on-device: lock the phone mid-stream, unlock, confirm the gap backfills with no
+  refresh and no duplicates.
+- IME (§6.3 open question): compose CJK/dictation; confirm the candidate popup tracks the
+  cursor with the 1-line textarea, else adopt Shape 2.
 
 ## 12. Experiment harness
 

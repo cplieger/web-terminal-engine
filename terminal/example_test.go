@@ -4,7 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
-	"github.com/cplieger/vterm/terminal"
+	"github.com/cplieger/web-terminal/terminal"
 )
 
 func Example() {

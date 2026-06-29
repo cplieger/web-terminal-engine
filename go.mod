@@ -1,4 +1,4 @@
-module github.com/cplieger/vterm
+module github.com/cplieger/web-terminal
 
 go 1.26.4
 

@@ -154,4 +154,5 @@ export type ServerMessage =
  */
 export type ControlMessage =
   | { type: "resize"; cols: number; rows: number }
-  | { type: "resume"; sessionId: string; sentBytes: number; haveThrough: number };
+  | { type: "resume"; sessionId: string; sentBytes: number; haveThrough: number }
+  | { type: "ping" };

@@ -64,6 +64,7 @@ const (
 	wireMsgResumeAck byte = 2
 	wireMsgModes     byte = 3
 	wireMsgTitle     byte = 4
+	wireMsgPong      byte = 5
 
 	// wireAckOffset is the byte offset of the inputAck field in
 	// every server→client frame. Used by withClientAck to patch the
@@ -213,6 +214,21 @@ func withClientAck(template []byte, ack uint64) []byte {
 		binary.LittleEndian.PutUint64(out[wireAckOffset:], ack)
 	}
 	return out
+}
+
+// encodePongMsg builds a liveness pong frame: just the type tag and the
+// fixed-width ack header every server→client frame carries (zero here —
+// the pong carries no input-ack; its only purpose is to prove the socket
+// is alive to the client's staleness probe). The client treats the mere
+// arrival of any frame as liveness, so the body is intentionally empty.
+//
+//	[1B] msg_type = 5 (pong)
+//	[8B] inputAck (uint64, always 0)
+func encodePongMsg() []byte {
+	buf := make([]byte, 0, 9)
+	buf = append(buf, wireMsgPong)
+	buf = binary.LittleEndian.AppendUint64(buf, 0)
+	return buf
 }
 
 func appendRowRuns(buf []byte, runs []vt.WireRun) []byte {

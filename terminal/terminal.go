@@ -52,6 +52,7 @@ const (
 
 	ctlTypeResize = "resize"
 	ctlTypeResume = "resume"
+	ctlTypePing   = "ping"
 
 	// scrollbackCapacity is the number of scrollback lines the server
 	// retains for replay to new/reconnecting clients. Matches the
@@ -511,7 +512,22 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *ClientState, payload 
 	}
 	if c.Type == ctlTypeResize {
 		h.handleResize(c.Cols, c.Rows)
+		return
 	}
+	if c.Type == ctlTypePing {
+		h.handlePing(ws)
+	}
+}
+
+// handlePing answers a client liveness probe with a pong. The client
+// sends a ping only after a stretch of inbound silence to tell apart an
+// idle-but-healthy socket from one iOS froze during sleep; the pong (or
+// any other frame) clears its probe. Best-effort: a write failure means
+// the socket is already gone, which the client's probe timeout will catch.
+func (h *Handler) handlePing(ws *websocket.Conn) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ws.Write(ctx, websocket.MessageBinary, encodePongMsg()) //nolint:errcheck // best-effort liveness reply
 }
 
 // handleResume looks up or creates the session for sessionID, attaches

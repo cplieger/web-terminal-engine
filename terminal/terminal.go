@@ -31,7 +31,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal/vt"
+	"github.com/cplieger/web-terminal-engine/vt"
 	"github.com/creack/pty"
 )
 

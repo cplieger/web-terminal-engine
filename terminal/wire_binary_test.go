@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/cplieger/web-terminal/vt"
+	"github.com/cplieger/web-terminal-engine/vt"
 )
 
 // assertWireBytes compares a produced wire frame against a hand-laid expected

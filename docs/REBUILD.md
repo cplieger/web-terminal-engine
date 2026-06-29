@@ -999,9 +999,9 @@ bottom.
 
 - 2026-06-29 RESTRUCTURE EXECUTED LOCALLY (web-terminal reorg, Option A; full detail +
   remaining steps in RESTRUCTURE.md §8/§9). The engine module/package are renamed to
-  web-terminal, a `protocolVersion` + golden-fixture wire guard is added, the reference UI is
+  web-terminal-engine, a `protocolVersion` + golden-fixture wire guard is added, the reference UI is
   extracted to a new `web-terminal-ui` repo (`mount()` API), a generic `web-terminal-server`
-  repo is added (→ `ghcr.io/cplieger/web-terminal`), and vibecli + vibekit are repointed off
+  repo is added (→ `ghcr.io/cplieger/web-terminal-server`), and vibecli + vibekit are repointed off
   `@cplieger/vterm`. All five repos are committed on branches and verified locally (go
   build/vet, tsgo typecheck, vitest, dev-build pipelines green); the new repos author only
   repo-specific files — CI/lint/license come from `cplieger/ci` sync. NOTHING is pushed. The
@@ -1093,7 +1093,7 @@ was used to validate brick 1 against real kiro-cli:
 
 1. `vibecli/scripts/dev-build.sh` — builds vibecli against the local `../vterm` working tree.
    Writes a `go.work` (`use .` + `use ../vterm`), overlays `vterm/web/src/*.ts` onto
-   `static-src/node_modules/@cplieger/web-terminal/src`, runs the two tsgo passes (app + lib), fetches
+   `static-src/node_modules/@cplieger/web-terminal-engine/src`, runs the two tsgo passes (app + lib), fetches
    the Monaspace Nerd Font (cached in `~/.cache/vibecli-fonts`), concatenates the CSS, and
    `go build`s `vibecli-dev-bin` (CGO off; Constellation's linux/amd64 matches the container).
 2. `vibecli/scripts/dev-deploy.sh` — `scp` the binary to Borgcube, `sudo docker cp` it to

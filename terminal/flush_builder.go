@@ -4,7 +4,7 @@ import (
 	"slices"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal/vt"
+	"github.com/cplieger/web-terminal-engine/vt"
 )
 
 // FlushFrameBuilder computes outbound flush frames by diffing the

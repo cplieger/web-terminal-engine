@@ -1,6 +1,6 @@
-# Contributing to web-terminal
+# Contributing to web-terminal-engine
 
-web-terminal is a cross-language terminal library: a Go VT100/VT500 emulator plus
+web-terminal-engine is a cross-language terminal library: a Go VT100/VT500 emulator plus
 WebSocket session handler, and a browser-side TypeScript renderer. The two
 halves never share code — they communicate over a versioned binary wire
 protocol. That split is the one thing to internalize before changing
@@ -17,7 +17,7 @@ Three packages, two languages, one wire contract:
   (`github.com/creack/pty`) to a browser over `github.com/coder/websocket`,
   driving a `vt` screen and adding reconnect, scrollback replay, adaptive
   ping, and the resume/inputAck reliability layer.
-- **`web/`** (TypeScript, published as `@cplieger/web-terminal`) — the browser
+- **`web/`** (TypeScript, published as `@cplieger/web-terminal-engine`) — the browser
   renderer (`render`), keyboard mapper (`keyboard`), mouse/focus encoder
   (`mouse`), DEC-mode state (`modes`), scroll tracker (`scroll`), socket
   lifecycle (`connection`), and the binary frame decoder
@@ -112,8 +112,8 @@ both if you changed the wire format.
 ## Publishing model
 
 Releases are automated (`.github/workflows/release.yaml`). The Go module
-ships as `github.com/cplieger/web-terminal`; the TS package ships to both npm and
-JSR as `@cplieger/web-terminal` from `web/`. Both are versioned in lockstep — the
+ships as `github.com/cplieger/web-terminal-engine`; the TS package ships to both npm and
+JSR as `@cplieger/web-terminal-engine` from `web/`. Both are versioned in lockstep — the
 wire protocol depends on it. You don't publish manually.
 
 ## Commits and PRs

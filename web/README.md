@@ -1,23 +1,30 @@
-# @cplieger/web-terminal
+# @cplieger/web-terminal-engine
 
-[![npm](https://img.shields.io/npm/v/@cplieger/web-terminal)](https://www.npmjs.com/package/@cplieger/web-terminal)
-[![JSR](https://jsr.io/badges/@cplieger/web-terminal)](https://jsr.io/@cplieger/web-terminal)
+[![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-engine)](https://www.npmjs.com/package/@cplieger/web-terminal-engine)
+[![JSR](https://jsr.io/badges/@cplieger/web-terminal-engine)](https://jsr.io/@cplieger/web-terminal-engine)
 
-> Browser virtual terminal renderer for the [`cplieger/web-terminal`](https://github.com/cplieger/web-terminal) Go module: DOM-based VT500 screen with OSC 8 hyperlink support, scrollback, keyboard mapper, mouse encoder, and binary wire decoder. Zero runtime dependencies.
+> Browser virtual terminal renderer for the [`cplieger/web-terminal-engine`](https://github.com/cplieger/web-terminal-engine) Go module: DOM-based VT500 screen with OSC 8 hyperlink support, scrollback, keyboard mapper, mouse encoder, and binary wire decoder. Zero runtime dependencies.
 
-The browser half of the web-terminal cross-language terminal library. Pairs with the Go server-side packages (`vt`, `terminal`) over a binary WebSocket protocol; see the [project README](https://github.com/cplieger/web-terminal#readme) for the full story.
+The browser half of the web-terminal-engine cross-language terminal library. Pairs with the Go server-side packages (`vt`, `terminal`) over a binary WebSocket protocol; see the [project README](https://github.com/cplieger/web-terminal-engine#readme) for the full story.
 
 ## Install
 
 ```sh
-npx jsr add @cplieger/web-terminal   # JSR (preferred)
-npm i @cplieger/web-terminal          # NPM
+npx jsr add @cplieger/web-terminal-engine   # JSR (preferred)
+npm i @cplieger/web-terminal-engine          # NPM
 ```
 
 ## Usage
 
 ```typescript
-import { render, keyboard, mouse, scroll, modes, decodeWireBinary } from "@cplieger/web-terminal";
+import {
+  render,
+  keyboard,
+  mouse,
+  scroll,
+  modes,
+  decodeWireBinary,
+} from "@cplieger/web-terminal-engine";
 
 const wrap = document.getElementById("term") as HTMLElement;
 const out = document.getElementById("term-output") as HTMLElement;

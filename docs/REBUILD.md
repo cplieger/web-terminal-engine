@@ -997,6 +997,18 @@ bottom.
   2.5s sample), contiguous, dup-free, no console errors. This was the one substantive gap left
   after brick 7; the rebuild now handles the realistic chat-restore burst.
 
+- 2026-06-29 RESTRUCTURE EXECUTED LOCALLY (web-terminal reorg, Option A; full detail +
+  remaining steps in RESTRUCTURE.md §8/§9). The engine module/package are renamed to
+  web-terminal, a `protocolVersion` + golden-fixture wire guard is added, the reference UI is
+  extracted to a new `web-terminal-ui` repo (`mount()` API), a generic `web-terminal-server`
+  repo is added (→ `ghcr.io/cplieger/web-terminal`), and vibecli + vibekit are repointed off
+  `@cplieger/vterm`. All five repos are committed on branches and verified locally (go
+  build/vet, tsgo typecheck, vitest, dev-build pipelines green); the new repos author only
+  repo-specific files — CI/lint/license come from `cplieger/ci` sync. NOTHING is pushed. The
+  rename is irreversible once published, so the remaining work (GitHub repo create/rename,
+  lockstep publish, package-lock regen) stays user-gated AND behind the §11 iPhone
+  device-validation below.
+
 ## 11. Open questions and risks
 
 - Ink redraw fidelity (section 5.3). Verify scroll-region and erase-display handling against

@@ -6,7 +6,8 @@
 // position on every scroll event — there is no debounce window, no suppress
 // timer, and no programmatic-vs-user flag. That heuristic soup (a 100px
 // tolerance, a 150ms debounce, a 60-second touch window) was the source of the
-// view-jumping and scroll-interruption bugs (docs/REBUILD.md Cause A/E).
+// view-jumping and scroll-interruption bugs (the legacy heuristic-soup
+// failure mode; see the #web-terminal-engine steering doc, "Design rationale").
 //
 // The renderer calls stickToBottom() once after each flush: if following, pin
 // to the new bottom; if holding, do nothing and let native scroll anchoring

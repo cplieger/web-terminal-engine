@@ -12,8 +12,9 @@ import "github.com/cplieger/web-terminal-engine/vt"
 // older lines are evicted, but their indices are never reused. The
 // absolute index of the current top screen row equals Committed().
 //
-// Absolute indexing is the backbone of the rebuild (see docs/REBUILD.md
-// section 6.1). It makes resume alignment exact (the client asks for
+// Absolute indexing is the backbone of the engine (see the
+// #web-terminal-engine steering doc, "Design rationale"). It makes resume
+// alignment exact (the client asks for
 // "everything after index H") and makes duplicate delivery structurally
 // impossible (writing the same index twice overwrites the same row),
 // replacing the old count-based scheme whose two independently-capped

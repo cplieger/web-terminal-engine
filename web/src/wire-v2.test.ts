@@ -2,7 +2,7 @@
 // protocol (base on screen, firstIndex on scroll, committed/oldestIndex
 // on resumeAck, altActive cursor-flag bit). These lock the byte layout
 // that pairs with the Go encoder in terminal/wire_binary.go. See
-// docs/REBUILD.md section 6.6 and WIRE_PROTOCOL.md v2.
+// WIRE_PROTOCOL.md v2 (and the #web-terminal-engine steering doc, "Design rationale").
 
 import { describe, it, expect } from "vitest";
 import { decodeWireBinary } from "./wire-binary.js";

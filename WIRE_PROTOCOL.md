@@ -4,7 +4,7 @@ This document specifies the binary WebSocket frame format used between the Go se
 
 ## Absolute line indexing (v2)
 
-Every line the server produces is assigned a monotonic **absolute index** (0, 1, 2, … growing for the life of the session). The screen's top row has absolute index `base`; window row `y` is absolute `base + y`. When the screen scrolls, a line keeps its absolute index (it only moves to a lower window row), so the client stores every line in one buffer keyed by absolute index. Applying a line is therefore idempotent: re-delivering a line the client already holds overwrites the same slot and never duplicates. Resume aligns by absolute index rather than a fragile count, which also makes an eviction gap detectable. See `docs/REBUILD.md` section 6.
+Every line the server produces is assigned a monotonic **absolute index** (0, 1, 2, … growing for the life of the session). The screen's top row has absolute index `base`; window row `y` is absolute `base + y`. When the screen scrolls, a line keeps its absolute index (it only moves to a lower window row), so the client stores every line in one buffer keyed by absolute index. Applying a line is therefore idempotent: re-delivering a line the client already holds overwrites the same slot and never duplicates. Resume aligns by absolute index rather than a fragile count, which also makes an eviction gap detectable.
 
 The screen frame carries `base`; the scroll frame carries `first_index`; the resumeAck carries `committed` and `oldest_index`. The client's resume control message carries `haveThrough` (the highest absolute index it holds).
 
@@ -35,7 +35,7 @@ Carries the current terminal viewport (sparse — only changed rows).
 | 21     | 2    | screen_height | uint16 — full terminal height                  |
 | 23     | 2    | num_changed   | uint16 — number of changed rows following      |
 | 25     | 1    | cursor_style  | uint8 (DECSCUSR 0-6)                           |
-| 26     | 1    | cursor_flags  | bit 0: hidden, bit 1: bell, bit 2: blink, bit 3: alt-screen active |
+| 26     | 1    | cursor_flags  | bits: 0 hidden, 1 bell, 2 blink, 3 alt-screen  |
 
 Followed by `num_changed` changed-row entries:
 

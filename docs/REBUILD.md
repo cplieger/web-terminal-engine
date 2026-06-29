@@ -696,6 +696,22 @@ bottom.
   section 5.3 and the 2026 decision (an earlier "unhandled" note was a flaky-tool artifact).
   Residual: the alt-screen ephemeral path is untested live (chat never triggers it); check it
   with a real editor session during brick 3.
+- 2026-06-29 LIVE VERIFY LOOP ESTABLISHED + BRICK 1 VERIFIED LIVE against real kiro-cli.
+  Loop (vibecli `scripts/`, committed on vibecli branch `rebuild/terminal-viewer`):
+  `dev-build.sh` builds vibecli against the local `../vterm` (go.work + overlaid TS + cached
+  Monaspace font) into `vibecli-dev-bin`; `dev-deploy.sh` swaps it into the `vibecli-dev`
+  container (`docker cp` + restart, no image rebuild, no CI); `cdp-verify.cjs` drives the
+  Chromium sidecar and dumps a DOM/scroll snapshot. Result: the v2 binary renders the real
+  kiro-cli welcome TUI correctly — 31 rows, banner + status line (`claude-opus-4.8 · Max`) +
+  input prompt, ZERO console errors, `maxConsecutiveDup=1` (no duplicate rows), loading
+  overlay cleared. Brick 1's wire v2 is validated end-to-end with real kiro-cli, not just unit
+  tests. Two harness learnings (also in section 12): (1) a CDP-opened sidecar tab is HIDDEN, so
+  Chromium pauses requestAnimationFrame and the rAF-batched renderer paints nothing — must call
+  `Page.bringToFront` + `Emulation.setFocusEmulationEnabled{enabled:true}` or the DOM stays
+  empty while the server flushes correctly; (2) the dev build needs the Monaspace font present
+  or `document.fonts.load` never resolves and the client never sends the kiro-cli-starting
+  resize. Also fixed: the first vibecli dev-loop commit landed on `main` by mistake and was
+  moved to the `rebuild/terminal-viewer` branch (main reset to origin/main; nothing lost).
 
 ## 11. Open questions and risks
 
@@ -744,3 +760,36 @@ in-place redraw (bug 3), no upward yank while Holding (bug 4), no duplicate `dat
 forced reconnect (bug 5), content present after a simulated sleep/wake (bug 2), selection
 surviving a stream (bug 1), first touch-drag scrolling (bug 6), tap-anywhere summoning the
 keyboard (bug 7).
+
+### Proven loop (established brick 1, 2026-06-29)
+
+The loop is implemented as three scripts on the vibecli `rebuild/terminal-viewer` branch and
+was used to validate brick 1 against real kiro-cli:
+
+1. `vibecli/scripts/dev-build.sh` — builds vibecli against the local `../vterm` working tree.
+   Writes a `go.work` (`use .` + `use ../vterm`), overlays `vterm/web/src/*.ts` onto
+   `static-src/node_modules/@cplieger/vterm/src`, runs the two tsgo passes (app + lib), fetches
+   the Monaspace Nerd Font (cached in `~/.cache/vibecli-fonts`), concatenates the CSS, and
+   `go build`s `vibecli-dev-bin` (CGO off; Constellation's linux/amd64 matches the container).
+2. `vibecli/scripts/dev-deploy.sh` — `scp` the binary to Borgcube, `sudo docker cp` it to
+   `vibecli-dev:/app/vibecli`, `sudo docker restart vibecli-dev`, poll `/api/health`. No image
+   rebuild, no GitHub Actions. Prod `vibecli` (9848) is untouched; `vibecli-dev` is 9849.
+3. `vibecli/scripts/cdp-verify.cjs` — opens vibecli-dev in the sidecar, captures console
+   errors/exceptions, waits for kiro-cli to render, dumps a DOM/scroll snapshot
+   (`rowCount`, `nonEmptyLines`, `maxConsecutiveDup`, scroll metrics, first/last lines).
+
+Two non-obvious requirements, both learned the hard way during brick 1:
+
+- A CDP-opened sidecar tab is a BACKGROUND tab, and Chromium pauses `requestAnimationFrame`
+  for hidden tabs. The renderer batches via rAF, so the DOM stays empty even though the server
+  is flushing frames correctly and there are no JS errors. Force the page active with
+  `Page.bringToFront` + `Emulation.setFocusEmulationEnabled({enabled:true})`. The probe
+  reports `visibilityState`/`hasFocus`/`rafFired` so this failure mode is obvious next time.
+- The dev build must include the Monaspace font. The client gates its first kiro-cli-starting
+  `resize` on `document.fonts.load('14px "MonaspiceNe NFM"')` resolving; with the font absent
+  that never resolves, no resize is sent, and kiro-cli never starts (blank terminal).
+
+`/debug/raw` (raw PTY ring) and `/debug/screen` (server screen dump) on the vibecli port are
+invaluable for separating server-side from client-side issues: during brick 1, `/debug/screen`
+showed the welcome banner present server-side while the browser showed nothing, which isolated
+the problem to the client (the rAF/visibility issue above), not the wire.

@@ -23,7 +23,7 @@
 
 import { wsURL } from "./wsurl.js";
 import { controlFrame } from "./wire.js";
-import { decodeWireBinary } from "./wire-binary.js";
+import { decodeWireBinary, WIRE_PROTOCOL_VERSION } from "./wire-binary.js";
 import * as modes from "./modes.js";
 import type { ControlMessage, ServerMessage } from "./types.js";
 import { INITIAL_DELAY_MS, nextBackoffDelay } from "./reconnect.js";
@@ -428,6 +428,10 @@ export function connect(): void {
           // idempotent. Falls back to -1 (full retained replay) if the
           // consumer wired no getHaveThrough.
           haveThrough: cb?.getHaveThrough?.() ?? -1,
+          // Lets the server detect a client built against a different wire
+          // revision (e.g. a stale cached bundle) and warn rather than
+          // silently mis-decode.
+          protocolVersion: WIRE_PROTOCOL_VERSION,
         }),
       );
 

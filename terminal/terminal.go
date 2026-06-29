@@ -430,6 +430,12 @@ type controlMsg struct {
 	// the replay start into the retained range and reports any eviction
 	// gap via the resumeAck bounds.
 	HaveThrough int64 `json:"haveThrough"`
+	// ProtocolVersion is the client's wire-protocol revision (resume only).
+	// 0 = unset (an older client that predates the field). A non-zero value
+	// differing from wireProtocolVersion means the client was built against a
+	// different protocol revision; handleControl logs a warning so the skew
+	// is visible rather than surfacing as a silent mis-decode.
+	ProtocolVersion int `json:"protocolVersion,omitempty"`
 }
 
 // handleWS upgrades to WebSocket, spawns the configured command in a
@@ -507,6 +513,11 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *ClientState, payload 
 		return
 	}
 	if c.Type == ctlTypeResume && c.SessionID != "" {
+		if c.ProtocolVersion != 0 && c.ProtocolVersion != wireProtocolVersion {
+			h.cfg.logger.Warn("terminal: client wire-protocol version mismatch",
+				"client", c.ProtocolVersion, "server", wireProtocolVersion,
+				"hint", "client may be running a stale bundle; a hard refresh should fix it")
+		}
 		h.handleResume(ws, state, c.SessionID, c.HaveThrough)
 		return
 	}

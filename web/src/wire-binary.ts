@@ -20,6 +20,15 @@ const MSG_RESUME_ACK = 2;
 const MSG_MODES = 3;
 const MSG_TITLE = 4;
 const MSG_PONG = 5;
+
+/**
+ * Wire protocol version. Sent by the client in the `resume` control message so
+ * the server can detect a client built against a different protocol revision
+ * (e.g. a stale cached bundle after a breaking change) and warn rather than
+ * silently mis-decode. Bump on any breaking change to the binary frame layout
+ * or control-message shape. Mirrors `wireProtocolVersion` in wire_binary.go.
+ */
+export const WIRE_PROTOCOL_VERSION = 2;
 const MODE_FLAG_BRACKETED_PASTE = 1;
 const MODE_FLAG_APP_CURSOR_KEYS = 2;
 const MODE_FLAG_MOUSE_SGR = 4;

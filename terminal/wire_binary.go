@@ -66,6 +66,14 @@ const (
 	wireMsgTitle     byte = 4
 	wireMsgPong      byte = 5
 
+	// wireProtocolVersion is the binary-protocol revision. The client sends
+	// it in the resume control message; handleControl warns when it differs
+	// from a connecting client so a stale cached bundle after a breaking
+	// change surfaces in the logs rather than mis-decoding silently. Bump on
+	// any breaking change to a frame layout or control-message shape. Mirrors
+	// WIRE_PROTOCOL_VERSION in web/src/wire-binary.ts.
+	wireProtocolVersion = 2
+
 	// wireAckOffset is the byte offset of the inputAck field in
 	// every server→client frame. Used by withClientAck to patch the
 	// per-client ack into a pre-encoded template.

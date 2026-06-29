@@ -185,4 +185,32 @@ describe("LineStore", () => {
     s.applyScroll({ type: "scroll", firstIndex: -5, lines: [row("neg")] });
     expect(s.highestIndex()).toBe(-1); // -5 rejected
   });
+
+  it("reports trimmed history from a client-side eviction (resync guard 8.2.2)", () => {
+    const s = new LineStore(3); // tiny cap to force eviction
+    s.applyScroll(scrollMsg(0, ["a", "b", "c", "d", "e"])); // evicts 0,1
+    expect(s.oldestIndex()).toBeGreaterThan(0);
+    expect(s.hasTrimmedHistory()).toBe(true);
+  });
+
+  it("reports trimmed history when the server retains less than the client asks for", () => {
+    const s = new LineStore();
+    // Fresh client; nothing evicted locally.
+    expect(s.hasTrimmedHistory()).toBe(false);
+    // Resume: the server's oldest retained line is 100 and it replays from there.
+    s.noteResumeBounds(150, 100);
+    s.applyScroll(scrollMsg(100, ["x", "y"]));
+    // The client cannot show lines 0..99 — they were trimmed server-side.
+    expect(s.hasTrimmedHistory()).toBe(true);
+    // A later resume where the server still has everything clears the flag.
+    s.noteResumeBounds(150, 0);
+    expect(s.hasTrimmedHistory()).toBe(false);
+  });
+
+  it("ignores invalid resume bounds", () => {
+    const s = new LineStore();
+    s.noteResumeBounds(10, -1); // negative oldest ignored
+    s.applyScroll(scrollMsg(5, ["a"]));
+    expect(s.hasTrimmedHistory()).toBe(false);
+  });
 });

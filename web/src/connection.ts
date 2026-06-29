@@ -154,6 +154,12 @@ export interface Callbacks {
    *  replays only the lines missed (e.g. printed while the device slept).
    *  When absent, the client requests a full retained replay (-1). */
   getHaveThrough?(): number;
+  /** Fired on resume with the server's retained-history bounds: `committed`
+   *  is one past the newest retained line, `oldest` the oldest retained
+   *  absolute index. The consumer forwards these to the renderer/store so it
+   *  can tell a genuine history trim (the server evicted lines the client was
+   *  missing) from a still-loading state. Resync guard 8.2.2. */
+  onResumeBounds?(committed: number, oldest: number): void;
   /** Optional WebSocket endpoint path (default "/ws"). vibekit serves
    *  the shell at "/api/shell/ws"; vibecli at "/ws". */
   wsPath?: string;
@@ -489,6 +495,13 @@ export function connect(): void {
           cb?.onServerRestart?.();
         }
         lastServerEpoch = epoch;
+      }
+      // Resync guard 8.2.2: hand the server's retained-history bounds to the
+      // consumer so it can surface a trim marker when history the client was
+      // missing is gone for good. (If the session-forgotten path below resets
+      // state, a fresh server's oldest=0 simply reads as "no trim".)
+      if (typeof msg.committed === "number" && typeof msg.oldestIndex === "number") {
+        cb?.onResumeBounds?.(msg.committed, msg.oldestIndex);
       }
       // Server-doesn't-recognize-this-session safeguard: if the server
       // returns received=0 but the client already had bytesAcked > 0,

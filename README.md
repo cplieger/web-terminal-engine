@@ -1,14 +1,14 @@
-# vterm
+# web-terminal
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/vterm.svg)](https://pkg.go.dev/github.com/cplieger/vterm)
-[![npm](https://img.shields.io/npm/v/@cplieger/vterm)](https://www.npmjs.com/package/@cplieger/vterm)
-[![JSR](https://jsr.io/badges/@cplieger/vterm)](https://jsr.io/@cplieger/vterm)
-[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/vterm)](https://github.com/cplieger/vterm/blob/main/go.mod)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/vterm)](https://goreportcard.com/report/github.com/cplieger/vterm)
-[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/vterm/badges/coverage.json)](https://github.com/cplieger/vterm/actions/workflows/coverage.yml)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/vterm/badges/mutation.json)](https://github.com/cplieger/vterm/issues?q=label%3Agremlins-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal)
+[![npm](https://img.shields.io/npm/v/@cplieger/web-terminal)](https://www.npmjs.com/package/@cplieger/web-terminal)
+[![JSR](https://jsr.io/badges/@cplieger/web-terminal)](https://jsr.io/@cplieger/web-terminal)
+[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/web-terminal)](https://github.com/cplieger/web-terminal/blob/main/go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/web-terminal)](https://goreportcard.com/report/github.com/cplieger/web-terminal)
+[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal/badges/coverage.json)](https://github.com/cplieger/web-terminal/actions/workflows/coverage.yml)
+[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal/badges/mutation.json)](https://github.com/cplieger/web-terminal/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13225/badge)](https://www.bestpractices.dev/projects/13225)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/vterm/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/vterm)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/web-terminal/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/web-terminal)
 
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).
 
@@ -16,7 +16,7 @@ A standalone library that bridges a PTY to a browser WebSocket. The Go packages 
 
 ## Install
 
-Go: `go get github.com/cplieger/vterm@latest` — TS: `npx jsr add @cplieger/vterm` or `npm i @cplieger/vterm`
+Go: `go get github.com/cplieger/web-terminal@latest` — TS: `npx jsr add @cplieger/web-terminal` or `npm i @cplieger/web-terminal`
 
 ## Usage
 
@@ -25,7 +25,7 @@ import (
     "log/slog"
     "net/http"
 
-    "github.com/cplieger/vterm/terminal"
+    "github.com/cplieger/web-terminal/terminal"
 )
 
 h := terminal.NewHandler(
@@ -40,7 +40,7 @@ h.RegisterRoutes(mux)
 ```
 
 ```typescript
-import { render, keyboard, mouse, decodeWireBinary } from "@cplieger/vterm";
+import { render, keyboard, mouse, decodeWireBinary } from "@cplieger/web-terminal";
 
 render.init({
   output: document.getElementById("term-output")!,
@@ -58,7 +58,7 @@ if (msg?.type === "screen") render.handleScreen(msg);
 - **`vt`** — VT100/VT500 screen buffer: `New(rows, cols)`, `Write([]byte)`, `Resize(rows, cols)`, `RenderRowWire(y)`, `DrainScrollback()`, `CursorPos()`, `HoldFlush()`, `ReleaseFlush()`, `IsFlushHeld()`, `RenderViewport()`, `RowString(y)`. Public fields: `Cells`, `Width`, `Height`, `Title`, `MouseMode`, `InAltScreen`, cursor/mode state.
 - **`terminal`** — WebSocket session handler: `NewHandler(command, ...Option)`, `RegisterRoutes(mux)`, `ServeHTTP(w, r)`, `Shutdown()`. Options: `WithWorkDir`, `WithLogger`, `WithEnv`, `WithScrollbackCapacity`, `WithAcceptOptions`, `WithOnProcessExit`. Handles PTY lifecycle, binary wire protocol, reconnect with scrollback replay, adaptive ping.
 
-### TypeScript (`web/` — published as `@cplieger/vterm` on NPM and JSR)
+### TypeScript (`web/` — published as `@cplieger/web-terminal` on NPM and JSR)
 
 - **`render`** — DOM renderer driven by `ScreenMessage` / `ScrollMessage` frames: `init`, `handleScreen`, `handleScroll`, `updateFontMetrics`, `computeSize`, `getCursorPx`, `setPredictedCursor`, `resetScreen`, `resetScrollback`, `getScrollbackRowCount`, `updateReverseVideo`.
 - **`keyboard`** — Translates `KeyboardEvent` to terminal byte sequences: `mapKeyboardEvent`, `bracketTextForPaste`, `prepareTextForTerminal`. Honors `applicationCursor`, `applicationKeypad`, `bracketedPaste`.

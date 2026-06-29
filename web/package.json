@@ -1,5 +1,5 @@
 {
-  "name": "@cplieger/vterm",
+  "name": "@cplieger/web-terminal",
   "version": "0.1.0",
   "type": "module",
   "scripts": {

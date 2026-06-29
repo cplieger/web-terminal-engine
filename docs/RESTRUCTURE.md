@@ -90,7 +90,7 @@ Reference UI `@cplieger/web-terminal-ui`:
   deps `@cplieger/web-terminal` + `@cplieger/web-terminal-ui`. `routes.go` unchanged
   (`terminal.NewHandler(..., WithScrollbackCapacity(5000))`). `app.ts` shrinks to: import
   `web-terminal-ui` `mount()` + kiro-cli-specific config. `index.html`/CSS come from the UI pkg.
-- **vibekit**: bump `go.mod` + `package.json` from `vterm`/`@cplieger/vterm` to
+- **vibekit**: bump `go.mod` + `package.json` from `vterm`/`@cplieger/web-terminal` to
   `web-terminal`/`@cplieger/web-terminal`. `shell.ts` import path changes only (it uses the
   engine directly; brick-7 already added getHaveThrough/onResumeBounds).
 

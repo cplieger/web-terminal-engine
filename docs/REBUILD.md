@@ -1081,7 +1081,7 @@ was used to validate brick 1 against real kiro-cli:
 
 1. `vibecli/scripts/dev-build.sh` — builds vibecli against the local `../vterm` working tree.
    Writes a `go.work` (`use .` + `use ../vterm`), overlays `vterm/web/src/*.ts` onto
-   `static-src/node_modules/@cplieger/vterm/src`, runs the two tsgo passes (app + lib), fetches
+   `static-src/node_modules/@cplieger/web-terminal/src`, runs the two tsgo passes (app + lib), fetches
    the Monaspace Nerd Font (cached in `~/.cache/vibecli-fonts`), concatenates the CSS, and
    `go build`s `vibecli-dev-bin` (CGO off; Constellation's linux/amd64 matches the container).
 2. `vibecli/scripts/dev-deploy.sh` — `scp` the binary to Borgcube, `sudo docker cp` it to

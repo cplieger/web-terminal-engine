@@ -1,14 +1,22 @@
-// Render layer: single-container model.
+// Render layer: store-backed, absolute-index DOM rows.
 //
-// One flat list of term-row divs inside #term-output. The last N rows
-// are the "live zone" (overwritten by screen frames). Everything above
-// is frozen history — either from scroll messages (lines that fell off
-// the server's VT screen) or from snapshots of live content before it
-// was overwritten. Users scroll up through this history naturally.
+// The renderer owns a LineStore (the authoritative client model) and reflects
+// it to the DOM. Every terminal line is a `div.term-row` carrying a `data-abs`
+// attribute equal to its absolute index; the rows sit in one natively-scrolled
+// container in absolute order. There is no separate "live zone" and
+// "scrollback": the live window is simply the last `height` absolute indices,
+// and a line that scrolls into history just stops being updated. This is what
+// removes the live/history reconciliation that caused the duplicate-rows and
+// view-jumping bugs (see docs/REBUILD.md sections 2 and 6).
 //
-// Cap: MAX_HISTORY rows of frozen history. Oldest get evicted.
+// Decode frames feed the store (handleScreen/handleScroll); a single
+// requestAnimationFrame flush drains the store's change set and applies it:
+// evicted indices drop their row, dirty indices build/update their row in
+// place. The window block always has `height` rows, so scrollHeight only grows
+// when real history commits — never oscillating mid-redraw.
 
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
+import { LineStore } from "./store.js";
 import * as scroll from "./scroll.js";
 import { isReverseVideo } from "./modes.js";
 
@@ -102,10 +110,14 @@ function measureCellWidth(): number {
 let output: HTMLElement;
 let termWrap: HTMLElement;
 
-const MAX_HISTORY = 1000;
-let allRows: HTMLDivElement[] = [];
-let liveCount = 0;
-let cursorRow = 0;
+const store = new LineStore();
+// abs index -> its row element. The DOM children of `output` are these
+// elements, kept in ascending data-abs order.
+const rowEls = new Map<number, HTMLDivElement>();
+
+// Cursor state, refreshed from the store window on each flush. Kept as module
+// vars because buildRowSpans/cursorClassName read them.
+let cursorAbs = -1; // absolute index of the row the cursor is on
 let cursorCol = 0;
 let cursorHidden = false;
 let cursorStyleVal = 0; // 0-6: DECSCUSR
@@ -124,15 +136,15 @@ function cursorClassName(): string {
 let cellWidth = 8;
 let cellHeight = 17;
 let defaultSpacing = 0;
-let firstScreen = true;
 let onCursorMove: (() => void) | null = null;
+let pendingFrame: number | undefined;
 
 /**
  * Initialize the renderer by attaching it to a pair of DOM elements: the
  * scrollable terminal wrapper and the inner output container that receives
- * row spans. Must be called once before any handleScreen/handleScroll call.
+ * row elements. Must be called once before any handleScreen/handleScroll call.
  *
- * @param opts.output      Inner element that holds row <span> children.
+ * @param opts.output      Inner element that holds row children.
  * @param opts.termWrap    Outer scroll container.
  * @param opts.onCursorMove Optional callback invoked when the cursor moves.
  */
@@ -144,12 +156,12 @@ export function init(opts: {
   output = opts.output;
   termWrap = opts.termWrap;
   onCursorMove = opts.onCursorMove ?? null;
-  // A fresh output element is empty, so the next frame must be a full repaint
-  // (firstScreen rebuilds allRows/liveCount and wipes the DOM); and any flush
-  // pending from a previous render context targets the old element. Resetting
-  // both is correct on re-init and also prevents render-module state leaking
-  // across test files under vitest isolate:false.
-  firstScreen = true;
+  // Fresh attach: drop any prior model + DOM so re-init (and vitest's
+  // non-isolated module reuse) starts clean.
+  store.reset();
+  rowEls.clear();
+  output.replaceChildren();
+  cursorAbs = -1;
   if (pendingFrame !== undefined) {
     cancelAnimationFrame(pendingFrame);
     pendingFrame = undefined;
@@ -158,35 +170,31 @@ export function init(opts: {
 }
 
 /**
- * Reset internal screen state so the next `handleScreen` call performs a full
- * repaint instead of a partial diff. Use after disconnect/reconnect.
+ * Reset internal screen state so the next frame performs a full repaint.
+ * With the store model this is a full reset (used on server restart): the
+ * store clears and the next flush wipes and rebuilds the DOM.
  */
 export function resetScreen(): void {
-  firstScreen = true;
+  store.reset();
+  scheduleFlush();
 }
 
 /**
- * Clear the scrollback DOM and reset the scrollback row counter to zero.
- * Use when the user explicitly clears history or on a fresh session.
+ * Clear all rows (history + window). Used on server restart alongside
+ * resetScreen; both reset the store, so this is equivalent.
  */
 export function resetScrollback(): void {
-  const historyCount = allRows.length - liveCount;
-  for (let i = 0; i < historyCount; i++) {
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index within bounds
-    allRows[i]!.remove();
-  }
-  allRows = allRows.slice(historyCount);
+  store.reset();
+  scheduleFlush();
 }
 
-/** Number of frozen history (scrollback) rows currently in the DOM —
- *  excludes the live screen zone. Sent on the resume control message
- *  so the server replays only the rows the client doesn't have. iOS
- *  Safari can preserve sessionStorage (and therefore the sessionId)
- *  while evicting the page entirely; on reload the scrollback count
- *  is zero and we want a full replay. A WS drop within the same page
- *  lifetime keeps the count and avoids duplicate scrollback rows. */
-export function getScrollbackRowCount(): number {
-  return allRows.length - liveCount;
+/**
+ * Highest absolute line index the client holds, or -1 if empty. This is the
+ * resume `haveThrough` value (it replaces the old DOM-row count). Exposed so
+ * the connection layer can request only the lines the client is missing.
+ */
+export function getHighestIndex(): number {
+  return store.highestIndex();
 }
 
 // --- Color helpers ---
@@ -425,76 +433,24 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
   return linkifySpans(out);
 }
 
-// --- Live zone management ---
-function ensureLiveZone(count: number): void {
-  while (liveCount < count) {
-    const div = document.createElement("div");
-    div.className = "term-row";
-    output.appendChild(div);
-    allRows.push(div);
-    liveCount++;
-  }
-  while (liveCount > count) {
-    const el = allRows.pop();
-    if (el) {
-      el.remove();
-    }
-    liveCount--;
-  }
-}
-
-function trimHistory(): void {
-  const historyCount = allRows.length - liveCount;
-  if (historyCount > MAX_HISTORY) {
-    const excess = historyCount - MAX_HISTORY;
-    for (let i = 0; i < excess; i++) {
-      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index within bounds
-      allRows[i]!.remove();
-    }
-    allRows = allRows.slice(excess);
-  }
-}
-
-// --- Screen frame handling ---
-let pendingRows: WireRun[][] | null = null;
-let pendingCursor: [number, number] | null = null;
-let pendingChanged = new Set<number>();
-let pendingCursorHidden = false;
-let pendingCursorStyle = 0;
-let pendingCursorBlink = true;
-let pendingBell = false;
-let pendingFrame: number | undefined;
+// --- Frame handling: feed the store, then flush to DOM ---
 
 /**
- * Apply a `ScreenMessage` from the server: update only the rows in
- * `msg.changed`, reposition the cursor, and propagate cursor style/blink/bell.
- * Coalesces calls within the same animation frame.
+ * Apply a `ScreenMessage`: update the store's window + changed rows, then
+ * schedule a render flush. The store handles merging changed rows by absolute
+ * index, so no client-side frame coalescing is needed.
  */
 export function handleScreen(msg: ScreenMessage): void {
-  // Merge row data: if a previous frame's rows haven't been flushed yet,
-  // overlay the new frame's changed rows onto the existing pending data
-  // so rows from the earlier frame aren't lost when their indices aren't
-  // in the newer frame's changed set.
-  if (pendingRows !== null && pendingRows.length === msg.rows.length) {
-    for (const idx of msg.changed) {
-      const row = msg.rows[idx];
-      if (row !== undefined) {
-        pendingRows[idx] = row;
-      }
-    }
-  } else {
-    pendingRows = msg.rows;
-  }
-  pendingCursor = msg.cursor;
-  pendingCursorHidden = msg.cursorHidden ?? false;
-  pendingCursorStyle = msg.cursorStyle ?? 0;
-  pendingCursorBlink = msg.cursorBlink ?? true;
-  if (msg.bell) {
-    pendingBell = true;
-  }
-  for (const idx of msg.changed) {
-    pendingChanged.add(idx);
-  }
+  store.applyScreen(msg);
+  scheduleFlush();
+}
+
+/**
+ * Apply a `ScrollMessage`: commit history lines into the store by absolute
+ * index, then schedule a render flush.
+ */
+export function handleScroll(msg: ScrollMessage): void {
+  store.applyScroll(msg);
   scheduleFlush();
 }
 
@@ -502,215 +458,156 @@ function scheduleFlush(): void {
   if (pendingFrame !== undefined) {
     return;
   }
-  pendingFrame = requestAnimationFrame(flushAll);
+  pendingFrame = requestAnimationFrame(flushRender);
 }
 
-function flushAll(): void {
+function flushRender(): void {
   pendingFrame = undefined;
-
-  // Process scroll lines FIRST (insert above live zone) so the live
-  // zone indices remain stable for the screen update that follows.
-  // Doing both in one rAF eliminates the visual duplication that
-  // occurred when scroll insertions and screen rewrites painted in
-  // separate frames.
-  // Skip if firstScreen is still true — the first screen frame will
-  // wipe the DOM via innerHTML="", so any scroll lines inserted now
-  // would be lost. They'll arrive again via scrollback replay.
-  if (pendingScrollback.length > 0 && !firstScreen) {
-    const batch = pendingScrollback.splice(0);
-    const liveStart = allRows.length - liveCount;
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- liveStart < length guarantees element exists
-    const refNode = liveStart < allRows.length ? allRows[liveStart]! : null;
-
-    // Scroll anchoring for a scrolled-up reader: pin the row at the
-    // viewport top to its on-screen position across the trim + insert
-    // below, so history added below the viewport (the reconnect /
-    // multi-device replay) doesn't move what they're reading. The
-    // formula self-corrects whether the anchor is frozen history (which
-    // doesn't move) or a live row pushed down by the insert. If the
-    // anchor row is trimmed away entirely, their place is gone — fall
-    // back to the bottom. When following (not scrolled up), the
-    // stickToBottomIfFollowing() at the end of flushAll handles it.
-    const anchor = scroll.isUserScrolledUp() ? rowAtViewportTop() : null;
-    const anchorOffset = anchor ? anchor.offsetTop - termWrap.scrollTop : 0;
-
-    // Trim history BEFORE inserting to avoid double-counting heights;
-    // the anchor restore below absorbs any shift the trim causes.
-    trimHistory();
-
-    for (const line of batch) {
-      const div = document.createElement("div");
-      div.className = "term-row";
-      div.replaceChildren(...buildRowSpans(line, -1));
-      output.insertBefore(div, refNode);
-      allRows.splice(allRows.length - liveCount, 0, div);
-    }
-
-    if (anchor) {
-      if (anchor.isConnected) {
-        termWrap.scrollTop = anchor.offsetTop - anchorOffset;
-      } else {
-        scroll.scrollToBottom();
-      }
-    }
+  try {
+    flushRenderInner();
+  } catch (err) {
+    console.error("vterm: render error", err);
   }
-
-  if (pendingRows !== null && pendingCursor !== null) {
-    const rows = pendingRows;
-    const cursor = pendingCursor;
-    const changed = pendingChanged;
-    const hidden = pendingCursorHidden;
-    const style = pendingCursorStyle;
-    const blink = pendingCursorBlink;
-    const bell = pendingBell;
-    pendingRows = null;
-    pendingCursor = null;
-    pendingChanged = new Set();
-    pendingBell = false;
-
-    try {
-      flushScreenInner(rows, cursor, changed, hidden, style, bell, blink);
-    } catch (err) {
-      console.error("vterm: render error", err);
-    }
-  }
-
-  // Single auto-follow invariant. After any DOM change this frame
-  // (scrollback insertion and/or a screen repaint), re-pin to the
-  // bottom if the user is following. A scrollback-only flush — the
-  // history replay on reload/reconnect, which is large when another
-  // device was active in the background — previously left the viewport
-  // parked in replayed history because only screen frames re-pinned.
+  // Single auto-follow invariant, applied after every DOM mutation.
   stickToBottomIfFollowing();
 }
 
-function flushScreenInner(
-  rows: WireRun[][],
-  cursor: [number, number],
-  changed: Set<number>,
-  msg_cursorHidden: boolean,
-  msg_cursorStyle: number,
-  bell: boolean,
-  msg_cursorBlink: boolean,
-): void {
-  if (firstScreen) {
-    output.innerHTML = "";
-    allRows = [];
-    liveCount = 0;
-    firstScreen = false;
-  }
-  // Trim trailing empty rows from the DOM live zone. The screen buffer
-  // is always pty-height tall, but the host application's TUI typically draws
-  // content + a bottom status row and leaves the rows in between (and
-  // any rows below content when content reflowed shorter after a
-  // resize) as default empty cells. Those rows render as a visible
-  // "black gap" between content and the bottom-of-viewport status —
-  // most reliably reproduced by switching device (iPhone → iPad), where
-  // the host's SIGWINCH-driven repaint may not touch every row of the new
-  // larger screen until the user sends fresh input.
-  //
-  // Visible row count = max(cursor row + 1, last non-empty row + 1).
-  // Always include the cursor row so we never trim it. New content
-  // arriving for a previously-trimmed row index just grows the live
-  // zone again on the next frame.
-  let lastNonEmpty = -1;
-  for (let i = rows.length - 1; i >= 0; i--) {
-    const row = rows[i];
-    if (row !== undefined && row.length > 0 && row.some((r) => r.t !== "" && r.t.trim() !== "")) {
-      lastNonEmpty = i;
-      break;
+function flushRenderInner(): void {
+  const ch = store.drainChanges();
+
+  if (ch.fullReset) {
+    output.replaceChildren();
+    rowEls.clear();
+    cursorAbs = -1;
+  } else {
+    for (const abs of ch.evictedLines) {
+      const el = rowEls.get(abs);
+      if (el) {
+        el.remove();
+      }
+      rowEls.delete(abs);
     }
   }
-  const visibleEnd = Math.max(cursor[0] + 1, lastNonEmpty + 1, 1);
-  ensureLiveZone(visibleEnd);
 
-  const newCursorRow = cursor[0];
-  const newCursorCol = cursor[1];
+  // Refresh cursor state from the window.
+  const win = store.getWindow();
+  const newCursorAbs = win.base + win.cursorRow;
+  const prevCursorAbs = cursorAbs;
+  cursorAbs = newCursorAbs;
+  cursorCol = win.cursorCol;
+  cursorHidden = win.cursorHidden;
+  cursorStyleVal = win.cursorStyle;
+  setCursorBlink(win.cursorBlink);
 
-  if (newCursorRow !== cursorRow) {
-    changed.add(cursorRow);
-    changed.add(newCursorRow);
-  } else if (newCursorCol !== cursorCol) {
-    changed.add(newCursorRow);
-  }
-
-  cursorRow = newCursorRow;
-  cursorCol = newCursorCol;
-  cursorHidden = msg_cursorHidden;
-  cursorStyleVal = msg_cursorStyle;
-  setCursorBlink(msg_cursorBlink);
-
-  const liveStart = allRows.length - liveCount;
-  for (const idx of changed) {
-    const row = rows[idx];
-    const el = allRows[liveStart + idx];
-    if (row !== undefined && el) {
-      const cursorAt = !cursorHidden && idx === cursorRow ? cursorCol : -1;
-      const newSpans = buildRowSpans(row, cursorAt);
-      el.replaceChildren(...newSpans);
+  // Alt screen: render the ephemeral grid instead of the absolute buffer.
+  if (store.isAlt()) {
+    renderAlt(store.getAltRows());
+    if (onCursorMove) {
+      onCursorMove();
     }
+    return;
   }
+  if (altRendered) {
+    // Just exited alt: drop the ephemeral rows and rebuild from the store.
+    altRendered = false;
+    output.replaceChildren();
+    rowEls.clear();
+    store.forEachLine((abs) => ch.dirtyLines.push(abs));
+  }
+
+  // Rows needing a (re)build: content changes plus the old and new cursor rows
+  // (so the inline cursor span moves off the old row and onto the new one).
+  const toRender = new Set<number>(ch.dirtyLines);
+  if (prevCursorAbs !== newCursorAbs && prevCursorAbs >= 0) {
+    toRender.add(prevCursorAbs);
+  }
+  toRender.add(newCursorAbs);
+
+  for (const abs of toRender) {
+    upsertRow(abs);
+  }
+
   if (onCursorMove) {
     onCursorMove();
   }
+}
 
-  // Collapse the browser's internal caret to the end of the
-  // contenteditable so typing doesn't scroll to the top — but only
-  // when the user has no active text selection (preserves copy ability
-  // during spinner/progress updates) AND the user hasn't scrolled up
-  // (collapseToEnd triggers browser scroll-into-view on the caret,
-  // which yanks the viewport to the bottom).
-  const sel = window.getSelection();
-  if (sel && document.activeElement === output && sel.isCollapsed && !scroll.isUserScrolledUp()) {
-    sel.selectAllChildren(output);
-    sel.collapseToEnd();
+// upsertRow builds or updates the DOM row for an absolute index, or removes it
+// if the store no longer holds it. New rows are inserted in ascending data-abs
+// order.
+function upsertRow(abs: number): void {
+  const runs = store.getLine(abs);
+  if (runs === undefined) {
+    const stale = rowEls.get(abs);
+    if (stale) {
+      stale.remove();
+      rowEls.delete(abs);
+    }
+    return;
   }
-
-  if (bell) {
-    output.classList.add("term-bell");
-    setTimeout(() => {
-      output.classList.remove("term-bell");
-    }, 150);
+  const cursorAt = !cursorHidden && abs === cursorAbs ? cursorCol : -1;
+  const spans = buildRowSpans(runs, cursorAt);
+  let el = rowEls.get(abs);
+  if (el === undefined) {
+    el = document.createElement("div");
+    el.className = "term-row";
+    el.dataset["abs"] = String(abs);
+    el.replaceChildren(...spans);
+    insertRowInOrder(el, abs);
+    rowEls.set(abs, el);
+  } else {
+    el.replaceChildren(...spans);
   }
 }
 
+// insertRowInOrder places a freshly-created row element among output's
+// children so they stay in ascending data-abs order. The common case (a new
+// highest index) is an O(1) append; out-of-order inserts scan for the slot.
+function insertRowInOrder(el: HTMLDivElement, abs: number): void {
+  const last = output.lastElementChild as HTMLElement | null;
+  if (last === null || rowAbs(last) < abs) {
+    output.appendChild(el);
+    return;
+  }
+  for (const child of output.children) {
+    if (rowAbs(child as HTMLElement) > abs) {
+      output.insertBefore(el, child);
+      return;
+    }
+  }
+  output.appendChild(el);
+}
+
+function rowAbs(el: HTMLElement): number {
+  const v = el.dataset["abs"];
+  return v === undefined ? -1 : Number(v);
+}
+
+// --- Alt screen (ephemeral grid; no history) ---
+let altRendered = false;
+
+function renderAlt(rows: WireRun[][]): void {
+  altRendered = true;
+  rowEls.clear();
+  const els: HTMLDivElement[] = [];
+  for (let y = 0; y < rows.length; y++) {
+    const div = document.createElement("div");
+    div.className = "term-row";
+    const cursorAt = !cursorHidden && y === cursorAbs - store.getWindow().base ? cursorCol : -1;
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- y < rows.length
+    div.replaceChildren(...buildRowSpans(rows[y]!, cursorAt));
+    els.push(div);
+  }
+  output.replaceChildren(...els);
+}
+
 /** Pin the viewport to the bottom iff the user is "following" — not
- *  scrolled up and not mid-gesture. The single source of truth for
- *  auto-follow; called once per frame at the end of flushAll so it
- *  covers both screen repaints and scrollback-only flushes. */
+ *  scrolled up and not mid-gesture. (Brick 4 replaces scroll.ts with a single
+ *  scroll owner; this keeps the existing follow behavior until then.) */
 function stickToBottomIfFollowing(): void {
   if (!scroll.isUserScrolledUp() && !scroll.isInUserScroll()) {
     scroll.scrollToBottom();
   }
-}
-
-/** The row currently at the top of the viewport, used as a scroll
- *  anchor so rows inserted (scrollback) or trimmed elsewhere don't move
- *  what a scrolled-up user is reading. Null when there are no rows. */
-function rowAtViewportTop(): HTMLDivElement | null {
-  const top = termWrap.scrollTop;
-  for (const el of allRows) {
-    if (el.offsetTop + el.offsetHeight > top) {
-      return el;
-    }
-  }
-  return null;
-}
-
-// --- Scroll message handling (lines that fell off the server's screen) ---
-// These get inserted as frozen history above the live zone.
-const pendingScrollback: WireRun[][] = [];
-
-/**
- * Apply a `ScrollMessage` from the server: append the lines to the scrollback
- * region as frozen history above the live screen.
- */
-export function handleScroll(msg: ScrollMessage): void {
-  if (msg.lines.length === 0) {
-    return;
-  }
-  pendingScrollback.push(...msg.lines);
-  scheduleFlush();
 }
 
 // --- Cursor blink ---
@@ -736,7 +633,7 @@ function stopCursorBlink(): void {
   output.classList.remove("cursor-blink-off");
 }
 
-/** Called from flushScreenInner when cursorBlink state changes. */
+/** Called from the flush when cursorBlink state changes. */
 function setCursorBlink(enabled: boolean): void {
   if (enabled === blinkEnabled) {
     return;
@@ -793,50 +690,49 @@ export function computeSize(): { cols: number; rows: number } {
 /**
  * Returns the cursor's pixel position relative to the output element, plus
  * the current cell height, for positioning custom overlays (predicted-cursor,
- * IME composition, etc.).
+ * IME composition, etc.). Uses the cursor row's actual DOM offset.
  */
 export function getCursorPx(): { left: number; top: number; cellH: number } {
   const cs = window.getComputedStyle(termWrap);
   const padL = parseFloat(cs.paddingLeft);
   const padT = parseFloat(cs.paddingTop);
-  // Cursor position relative to the output container's top, offset by
-  // the history height above the live zone.
-  const liveStart = allRows.length - liveCount;
-  const historyHeight = liveStart > 0 ? (allRows[liveStart]?.offsetTop ?? 0) : 0;
+  const el = rowEls.get(cursorAbs);
+  const top = el ? el.offsetTop : padT;
   return {
     left: Math.round(padL + cursorCol * cellWidth),
-    top: Math.round(padT + historyHeight + cursorRow * cellHeight),
+    top: Math.round(top),
     cellH: cellHeight,
   };
 }
 
+let predCursorEl: HTMLElement | null = null;
+
 /**
- * Show or hide a "predicted" cursor overlay at (row, col). Useful for
- * client-side echo of typed characters before the server acknowledges them,
- * giving an instant-feedback UX over high-latency connections.
+ * Show or hide a "predicted" cursor overlay at window-relative (row, col).
+ * Useful for client-side echo of typed characters before the server
+ * acknowledges them, over high-latency connections.
  */
 export function setPredictedCursor(row: number, col: number, active: boolean): void {
   const el = predCursorEl ?? (predCursorEl = document.getElementById("pred-cursor"));
   if (!el) {
     return;
   }
-  if (!active || (row === cursorRow && col === cursorCol)) {
+  const win = store.getWindow();
+  const predAbs = win.base + row;
+  if (!active || (predAbs === cursorAbs && col === cursorCol)) {
     el.classList.remove("visible");
     return;
   }
   const cs = window.getComputedStyle(termWrap);
   const padL = parseFloat(cs.paddingLeft);
-  const padT = parseFloat(cs.paddingTop);
-  const liveStart = allRows.length - liveCount;
-  const historyHeight = liveStart > 0 ? (allRows[liveStart]?.offsetTop ?? 0) : 0;
+  const rowEl = rowEls.get(predAbs);
+  const top = rowEl ? rowEl.offsetTop : parseFloat(cs.paddingTop) + row * cellHeight;
   el.style.left = `${Math.round(padL + col * cellWidth)}px`;
-  el.style.top = `${Math.round(padT + historyHeight + row * cellHeight)}px`;
+  el.style.top = `${Math.round(top)}px`;
   el.style.width = `${cellWidth}px`;
   el.style.height = `${cellHeight}px`;
   el.classList.add("visible");
 }
-
-let predCursorEl: HTMLElement | null = null;
 
 /** Apply or remove the reverse-video class on the terminal output.
  *  When DECSCNM (mode 5) is active, default fg/bg are swapped via CSS. */

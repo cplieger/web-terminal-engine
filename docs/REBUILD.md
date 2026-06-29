@@ -712,6 +712,29 @@ bottom.
   or `document.fonts.load` never resolves and the client never sends the kiro-cli-starting
   resize. Also fixed: the first vibecli dev-loop commit landed on `main` by mistake and was
   moved to the `rebuild/terminal-viewer` branch (main reset to origin/main; nothing lost).
+- 2026-06-29 BRICK 3 COMPLETE (renderer rewritten to the store-backed, absolute-index DOM
+  model) and VERIFIED LIVE against real kiro-cli. `render.ts` now owns a `LineStore` and
+  reflects it: each line is a `div.term-row` with `data-abs`, rows live in one
+  absolute-ordered container, and a single rAF flush drains `store.drainChanges()` to
+  evict/upsert rows. Reused verbatim from the old renderer: `buildRowSpans` (cell→DOM, wide
+  chars, OSC 8 + autolink), the width-measurement cache, font metrics, `computeSize`, cursor
+  blink, reverse-video. Removed: the `allRows`/`liveCount` live-zone model, `ensureLiveZone`'s
+  trailing-blank trim (the bug-3 oscillation source), the `flushAll`/`flushScreenInner`
+  scroll+selection entanglement, and the per-frame `selectAllChildren+collapseToEnd` caret
+  hack (the bug-1 selection killer) — both gone. `handleScreen`/`handleScroll` now just feed
+  the store. `getCursorPx`/`setPredictedCursor` derive position from the cursor row's actual
+  DOM offset. API change: `getScrollbackRowCount()` (DOM-count, now meaningless) removed,
+  replaced by `getHighestIndex()` (the resume `haveThrough`); `resetScreen`/`resetScrollback`
+  both map to `store.reset()`. A basic alt-screen path renders the ephemeral grid and rebuilds
+  from the store on exit (untested live — chat never triggers alt; needs an editor session).
+  Live result (cdp-verify against real kiro-cli): rowCount=79 (the FULL fixed-height window,
+  not trimmed to the 22 non-empty lines — bug-3 fix confirmed), maxConsecutiveDup=1 (no dup),
+  zero console errors, scrollHeight==clientHeight (no oscillation). Tests: all 144 vitest green
+  (existing render/hyperlink/wide-render/pipeline tests pass unchanged against the new model,
+  proving DOM compatibility), plus new `render-store.test.ts` (6) pinning data-abs tagging,
+  fixed-height-no-trim, history+window ordering, re-delivery dedup, in-place update, cursor
+  span, and full-reset wipe. Brick 3 kills bug 3 (oscillation) and the core of bug 1 (selection
+  no longer destroyed every frame); the rest of bug 1 (touch/menu) is brick 5.
 
 ## 11. Open questions and risks
 

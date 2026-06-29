@@ -14,6 +14,14 @@ publish. It is a reorg + rename + extract + publish — no behavior change to th
   entirely: it does not need global uniqueness because it lives under `@cplieger` /
   `github.com/cplieger`. Rejected `DOMterm` specifically because DomTerm is an existing
   DOM-based terminal (exact-niche confusion).
+- **Per-artifact names.** `web-terminal` is the umbrella/family name, used by no single
+  artifact. The three published artifacts carry role suffixes: the engine is
+  `web-terminal-engine` (`github.com/cplieger/web-terminal-engine` +
+  `@cplieger/web-terminal-engine`), the reference UI is `@cplieger/web-terminal-ui`, and the
+  generic server is `web-terminal-server` (image `ghcr.io/cplieger/web-terminal-server` —
+  matching its repo, like every other app image in the fleet). The engine took the `-engine`
+  suffix rather than the bare name so all three read uniformly and the engine repo never
+  collides with the server's image name.
 - **Option A** (from REBUILD.md §6 discussion): the Go backend and TS frontend engine stay in
   ONE repo (the wire-protocol boundary; keeping both halves in one PR is the cheapest drift
   guard). Extract the UI into its own package; add a generic container. This was chosen over a
@@ -26,11 +34,11 @@ publish. It is a reorg + rename + extract + publish — no behavior change to th
 
 | Tier | Artifact | Contents |
 |---|---|---|
-| Engine (Go) | `github.com/cplieger/web-terminal` — pkgs `vt`, `terminal` | VT500 screen buffer; PTY + WebSocket + wire encode; scrollback; ping. |
-| Engine (TS) | `@cplieger/web-terminal` (same repo, `web/`) | render, scroll, connection, store, wire-binary, wire, wsurl, keyboard, mouse, modes, types, reconnect. Decode + render rows into a container; input/scroll/reconnect. No app UI, no CSS. |
+| Engine (Go) | `github.com/cplieger/web-terminal-engine` — pkgs `vt`, `terminal` | VT500 screen buffer; PTY + WebSocket + wire encode; scrollback; ping. |
+| Engine (TS) | `@cplieger/web-terminal-engine` (same repo, `web/`) | render, scroll, connection, store, wire-binary, wire, wsurl, keyboard, mouse, modes, types, reconnect. Decode + render rows into a container; input/scroll/reconnect. No app UI, no CSS. |
 | Wire contract | (in the engine repo) | `WIRE_PROTOCOL.md` + `wire-golden/` byte fixtures tested by BOTH the Go encoder and TS decoder. The drift guard. |
 | Reference UI | `@cplieger/web-terminal-ui` (new repo) | The full default UI built on the engine: textarea input model, mobile key toolbar, context menu, IME (composition), predictive echo, viewport/keyboard-inset handling, CSS, optional HTML scaffold + font loading. Optional — consumers can skip it and build on the engine. |
-| Generic server + image | `cplieger/web-terminal-server` → `ghcr.io/cplieger/web-terminal` (new) | Thin Go server: mount `terminal.Handler` + serve `web-terminal-ui`, env-configured (addr, command, workdir, scrollback, auth). The standalone "native-touch web terminal for any command." |
+| Generic server + image | `cplieger/web-terminal-server` → `ghcr.io/cplieger/web-terminal-server` (new) | Thin Go server: mount `terminal.Handler` + serve `web-terminal-ui`, env-configured (addr, command, workdir, scrollback, auth). The standalone "native-touch web terminal for any command." |
 | kiro-cli integration | `cplieger/vibecli` (thin) | kiro-cli install model + deployment; consumes engine (Go) + `web-terminal-ui`. |
 | Chat app | `cplieger/vibekit` | Consumes engine (Go + TS) directly; its own UI chrome. |
 
@@ -38,11 +46,11 @@ Dependency flow: `web-terminal` (engine) ← `web-terminal-ui` ← {`web-termina
 
 ## 2. File moves (from the current `rebuild/terminal-viewer` branches)
 
-Engine repo (rename `vterm` → `web-terminal`):
+Engine repo (rename `vterm` → `web-terminal-engine`):
 - `vt/**` → unchanged (Go pkg `vt`).
 - `terminal/**` → unchanged (Go pkg `terminal`).
 - `web/src/**` (render, scroll, connection, store, wire-binary, wire, wsurl, keyboard, mouse,
-  modes, types, reconnect, index) → unchanged content; published as `@cplieger/web-terminal`.
+  modes, types, reconnect, index) → unchanged content; published as `@cplieger/web-terminal-engine`.
 - Add `wire-golden/` + a Go test and a TS test that both assert against the same fixture bytes.
 
 Reference UI repo (new `web-terminal-ui`, extracted from vibecli):
@@ -64,7 +72,7 @@ Generic server (new `web-terminal-server`):
 
 ## 3. Public API surface (freeze before publish)
 
-TS engine `@cplieger/web-terminal` (current `web/src/index.ts`, unchanged):
+TS engine `@cplieger/web-terminal-engine` (current `web/src/index.ts`, unchanged):
 - `render`: init, handleScreen, handleScroll, updateReverseVideo, updateFontMetrics,
   computeSize, getCursorPx, setPredictedCursor, getHighestIndex, noteResumeBounds,
   resetScreen, resetScrollback.
@@ -74,7 +82,7 @@ TS engine `@cplieger/web-terminal` (current `web/src/index.ts`, unchanged):
 - `keyboard`: mapKeyboardEvent, bracketTextForPaste, prepareTextForTerminal. Plus `modes`,
   `mouse`, `types`, `decodeWireBinary`, `controlFrame`, `wsURL`.
 
-Go engine `github.com/cplieger/web-terminal`:
+Go engine `github.com/cplieger/web-terminal-engine`:
 - `terminal.NewHandler(cmd []string, opts ...Option)` with `WithWorkDir`,
   `WithScrollbackCapacity`, `WithLogger`, `WithEnv`, `WithAcceptOptions`; `Handler.RegisterRoutes`,
   `Handler.Shutdown`. `vt.New`, `vt.Screen`.
@@ -86,27 +94,27 @@ Reference UI `@cplieger/web-terminal-ui`:
 
 ## 4. Consumer updates
 
-- **vibecli**: `go.mod` require `github.com/cplieger/web-terminal`; `static-src/package.json`
-  deps `@cplieger/web-terminal` + `@cplieger/web-terminal-ui`. `routes.go` unchanged
+- **vibecli**: `go.mod` require `github.com/cplieger/web-terminal-engine`; `static-src/package.json`
+  deps `@cplieger/web-terminal-engine` + `@cplieger/web-terminal-ui`. `routes.go` unchanged
   (`terminal.NewHandler(..., WithScrollbackCapacity(5000))`). `app.ts` shrinks to: import
   `web-terminal-ui` `mount()` + kiro-cli-specific config. `index.html`/CSS come from the UI pkg.
-- **vibekit**: bump `go.mod` + `package.json` from `vterm`/`@cplieger/web-terminal` to
-  `web-terminal`/`@cplieger/web-terminal`. `shell.ts` import path changes only (it uses the
+- **vibekit**: bump `go.mod` + `package.json` from `vterm`/`@cplieger/web-terminal-engine` to
+  `web-terminal`/`@cplieger/web-terminal-engine`. `shell.ts` import path changes only (it uses the
   engine directly; brick-7 already added getHaveThrough/onResumeBounds).
 
 ## 5. Sequencing (pre-publish, all cheap)
 
-1. Rename engine repo `vterm` → `web-terminal`: Go module path, npm package name, `index.ts`
+1. Rename engine repo `vterm` → `web-terminal-engine`: Go module path, npm package name, `index.ts`
    unchanged, `WIRE_PROTOCOL.md` stays. Update the dev-overlay import paths in vibecli/vibekit.
 2. Add the `wire-golden/` contract test (Go + TS) + a `protocolVersion` constant in the resume
    handshake (fail-fast on a future engine/UI version skew).
 3. Extract `web-terminal-ui` from vibecli `static-src` (move files, define `mount()`,
    make it publish-ready and consumer-agnostic via opts).
-4. Create `web-terminal-server` (thin server + bundled UI) → the `ghcr.io/cplieger/web-terminal`
+4. Create `web-terminal-server` (thin server + bundled UI) → the `ghcr.io/cplieger/web-terminal-server`
    image, with auth/exposure guidance baked into its README and default config.
 5. Point vibecli at the engine + UI packages; slim `app.ts` to kiro-cli glue.
 6. Point vibekit at the engine package.
-7. First lockstep publish: Go module tag + npm `@cplieger/web-terminal` + `@cplieger/web-terminal-ui`
+7. First lockstep publish: Go module tag + npm `@cplieger/web-terminal-engine` + `@cplieger/web-terminal-ui`
    + the container image. After this point, wire changes follow the cross-language pairing rule
    within the engine repo (one PR, golden fixtures updated).
 
@@ -158,14 +166,14 @@ is pushed (push + GitHub repo creation are user-gated, below).
 
 | Repo | Location | Branch | Head | What landed |
 |---|---|---|---|---|
-| engine | dir still `vterm` | `rebuild/terminal-viewer` | `440ef26` | module/pkg rename → web-terminal (`83212a2`); wire `protocolVersion` + golden fixtures (`440ef26`) |
+| engine | dir still `vterm` | `rebuild/terminal-viewer` | `440ef26` | module/pkg rename → web-terminal-engine (`83212a2`); wire `protocolVersion` + golden fixtures (`440ef26`) |
 | web-terminal-ui | new local repo | `main` | `32c8be8` | extracted reference UI + `mount()`; tsgo + vitest 17/17 + full lint battery green |
 | web-terminal-server | new local repo | `main` | `1c42fd1` | thin generic Go server; full dev-build pipeline green; localhost-default + optional auth |
 | vibecli | existing | `rebuild/terminal-viewer` | `bb92804` | client slimmed to `mount()`; UI modules + css moved out; dev-build green |
 | vibekit | existing | `rebuild/terminal-viewer` | `e76f130` | shell repointed to the renamed engine; `go build` + tsgo green |
 
 Local builds resolve the unpublished engine via a **gitignored** `go.work`
-(`use .` + `replace github.com/cplieger/web-terminal => ../vterm`) and a
+(`use .` + `replace github.com/cplieger/web-terminal-engine => ../vterm`) and a
 node_modules overlay of the engine/UI TS. Both are dev-only and never committed
 — a plain `go.work use ../vterm` is NOT enough (Go still tries to fetch the
 pinned version's go.mod from the proxy; the `replace` reads `../vterm/go.mod`
@@ -187,28 +195,28 @@ Then, in dependency order:
    CI/lint/license files (§7) — confirm the `chore(sync)` PRs land + merge before
    trusting CI.
 
-2. **Rename the engine repo + local dir** `vterm` → `web-terminal`: `gh repo
+2. **Rename the engine repo + local dir** `vterm` → `web-terminal-engine`: `gh repo
    rename` (GitHub keeps redirects), then rename the local checkout. Update the
    dev-only paths that hardcode `../vterm`: each consumer's gitignored `go.work`
    `replace … => ../vterm`, and the `ENGINE_DIR`/`UI_DIR` defaults in
    `web-terminal-server/scripts/dev-build.sh`, `web-terminal-ui/scripts/verify.sh`,
    and `vibecli/scripts/dev-build.sh`. (The Go module path and npm name are
-   ALREADY `web-terminal`; only the directory + GitHub repo name lag.)
+   ALREADY `web-terminal-engine`; only the directory + GitHub repo name lag.)
 
 3. **First lockstep publish, in order** (the engine has no unpublished deps;
    everything else depends on it):
    - **a. Engine** — merge `rebuild/terminal-viewer`; the hybrid release pipeline
      tags the Go module (`vX.Y.Z`) and publishes the `web/` subpackage to npm +
-     JSR as `@cplieger/web-terminal`.
+     JSR as `@cplieger/web-terminal-engine`.
    - **b. web-terminal-ui** — publish npm + JSR `@cplieger/web-terminal-ui` (its
-     peer `@cplieger/web-terminal` must be live first).
+     peer `@cplieger/web-terminal-engine` must be live first).
    - **c. Consumers** (`web-terminal-server`, `vibecli`, `vibekit`) — replace the
      placeholder `v0.1.0`/`0.1.0` pins with the real published versions, run
      `npm install` to **regenerate each `package-lock.json`** (vibecli + vibekit
      locks still reference `@cplieger/vterm`; this is unfixable until the package
      is published with a real integrity hash), bump the Dockerfile
      `ARG …_VERSION` pins, and confirm CI is green. Then `web-terminal-server`'s
-     image builds → `ghcr.io/cplieger/web-terminal`.
+     image builds → `ghcr.io/cplieger/web-terminal-server`.
    - **d.** Drop the dev-only `go.work` reliance once the real versions resolve
      from the module proxy.
 
@@ -216,7 +224,7 @@ Then, in dependency order:
 
 - **`.kiro` steering docs** still describe `@cplieger/vterm` (`vterm.md`,
   `vibecli.md`, `vibekit*.md`, `shared-libraries.md`): rename the `#vterm` doc to
-  `#web-terminal`, fix package names + the "where it's used" inventory, and add
+  `#web-terminal-engine`, fix package names + the "where it's used" inventory, and add
   `web-terminal-ui` / `web-terminal-server` entries. Update in the `.kiro` repo at
   publish.
 - **web-terminal-server** has no Go tests (thin glue) → 0% coverage, OpenSSF

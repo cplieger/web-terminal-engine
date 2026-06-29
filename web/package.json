@@ -1,5 +1,5 @@
 {
-  "name": "@cplieger/web-terminal",
+  "name": "@cplieger/web-terminal-engine",
   "version": "0.1.0",
   "type": "module",
   "scripts": {
@@ -18,7 +18,7 @@
     "typescript-eslint": "8.62.0",
     "vitest": "4.1.9"
   },
-  "description": "Browser terminal renderer for @cplieger/vterm",
+  "description": "Browser terminal engine: VT500 screen buffer, DOM renderer, and binary wire protocol",
   "license": "GPL-3.0-or-later",
   "exports": {
     ".": "./src/index.ts"
@@ -29,7 +29,7 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/cplieger/vterm.git",
+    "url": "git+https://github.com/cplieger/web-terminal-engine.git",
     "directory": "web"
   },
   "files": [

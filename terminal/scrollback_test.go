@@ -3,7 +3,7 @@ package terminal
 import (
 	"testing"
 
-	"github.com/cplieger/web-terminal/vt"
+	"github.com/cplieger/web-terminal-engine/vt"
 )
 
 func makeLine(text string) []vt.WireRun {

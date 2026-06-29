@@ -1,14 +1,14 @@
-# web-terminal
+# web-terminal-engine
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal)
-[![npm](https://img.shields.io/npm/v/@cplieger/web-terminal)](https://www.npmjs.com/package/@cplieger/web-terminal)
-[![JSR](https://jsr.io/badges/@cplieger/web-terminal)](https://jsr.io/@cplieger/web-terminal)
-[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/web-terminal)](https://github.com/cplieger/web-terminal/blob/main/go.mod)
-[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/web-terminal)](https://goreportcard.com/report/github.com/cplieger/web-terminal)
-[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal/badges/coverage.json)](https://github.com/cplieger/web-terminal/actions/workflows/coverage.yml)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal/badges/mutation.json)](https://github.com/cplieger/web-terminal/issues?q=label%3Agremlins-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal-engine.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal-engine)
+[![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-engine)](https://www.npmjs.com/package/@cplieger/web-terminal-engine)
+[![JSR](https://jsr.io/badges/@cplieger/web-terminal-engine)](https://jsr.io/@cplieger/web-terminal-engine)
+[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/web-terminal-engine)](https://github.com/cplieger/web-terminal-engine/blob/main/go.mod)
+[![Go Report Card](https://goreportcard.com/badge/github.com/cplieger/web-terminal-engine)](https://goreportcard.com/report/github.com/cplieger/web-terminal-engine)
+[![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/coverage.json)](https://github.com/cplieger/web-terminal-engine/actions/workflows/coverage.yml)
+[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/mutation.json)](https://github.com/cplieger/web-terminal-engine/issues?q=label%3Agremlins-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13225/badge)](https://www.bestpractices.dev/projects/13225)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/web-terminal/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/web-terminal)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/web-terminal-engine/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/web-terminal-engine)
 
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).
 
@@ -16,7 +16,7 @@ A standalone library that bridges a PTY to a browser WebSocket. The Go packages 
 
 ## Install
 
-Go: `go get github.com/cplieger/web-terminal@latest` — TS: `npx jsr add @cplieger/web-terminal` or `npm i @cplieger/web-terminal`
+Go: `go get github.com/cplieger/web-terminal-engine@latest` — TS: `npx jsr add @cplieger/web-terminal-engine` or `npm i @cplieger/web-terminal-engine`
 
 ## Usage
 
@@ -25,7 +25,7 @@ import (
     "log/slog"
     "net/http"
 
-    "github.com/cplieger/web-terminal/terminal"
+    "github.com/cplieger/web-terminal-engine/terminal"
 )
 
 h := terminal.NewHandler(
@@ -40,7 +40,7 @@ h.RegisterRoutes(mux)
 ```
 
 ```typescript
-import { render, keyboard, mouse, decodeWireBinary } from "@cplieger/web-terminal";
+import { render, keyboard, mouse, decodeWireBinary } from "@cplieger/web-terminal-engine";
 
 render.init({
   output: document.getElementById("term-output")!,
@@ -58,7 +58,7 @@ if (msg?.type === "screen") render.handleScreen(msg);
 - **`vt`** — VT100/VT500 screen buffer: `New(rows, cols)`, `Write([]byte)`, `Resize(rows, cols)`, `RenderRowWire(y)`, `DrainScrollback()`, `CursorPos()`, `HoldFlush()`, `ReleaseFlush()`, `IsFlushHeld()`, `RenderViewport()`, `RowString(y)`. Public fields: `Cells`, `Width`, `Height`, `Title`, `MouseMode`, `InAltScreen`, cursor/mode state.
 - **`terminal`** — WebSocket session handler: `NewHandler(command, ...Option)`, `RegisterRoutes(mux)`, `ServeHTTP(w, r)`, `Shutdown()`. Options: `WithWorkDir`, `WithLogger`, `WithEnv`, `WithScrollbackCapacity`, `WithAcceptOptions`, `WithOnProcessExit`. Handles PTY lifecycle, binary wire protocol, reconnect with scrollback replay, adaptive ping.
 
-### TypeScript (`web/` — published as `@cplieger/web-terminal` on NPM and JSR)
+### TypeScript (`web/` — published as `@cplieger/web-terminal-engine` on NPM and JSR)
 
 - **`render`** — DOM renderer driven by `ScreenMessage` / `ScrollMessage` frames: `init`, `handleScreen`, `handleScroll`, `updateFontMetrics`, `computeSize`, `getCursorPx`, `setPredictedCursor`, `resetScreen`, `resetScrollback`, `getScrollbackRowCount`, `updateReverseVideo`.
 - **`keyboard`** — Translates `KeyboardEvent` to terminal byte sequences: `mapKeyboardEvent`, `bracketTextForPaste`, `prepareTextForTerminal`. Honors `applicationCursor`, `applicationKeypad`, `bracketedPaste`.

@@ -55,7 +55,7 @@ package terminal
 import (
 	"encoding/binary"
 
-	"github.com/cplieger/web-terminal/vt"
+	"github.com/cplieger/web-terminal-engine/vt"
 )
 
 const (

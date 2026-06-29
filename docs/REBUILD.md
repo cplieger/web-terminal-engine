@@ -722,6 +722,15 @@ Append-only. Each entry: date, decision, why, and what it rules out.
   vibekit's shell input model (a focusable div + a helper textarea) never had vibecli's
   contenteditable overload, so brick 5's element split did not apply there. Rules out: a
   vibecli-style contenteditable rework of the vibekit shell.
+- 2026-06-29 (post-brick-7) Budgeted per-frame rendering: the renderer builds at most
+  `MAX_ROWS_PER_FRAME` (300) DOM rows per rAF and queues the rest for subsequent frames. Why: a
+  kiro-cli `/chat` session restore dumps the whole transcript in one wire frame (a real burst
+  the user flagged, not just a synthetic `cat bigfile`); building thousands of rows in a single
+  frame janks or hangs/crashes the tab. The store still ingests the whole burst at once (pure
+  data, cheap); only the DOM apply is budgeted, and the cursor row is always built so the caret
+  never lags the backlog. Paired with vibecli raising the server scrollback ring to 5000 (from
+  the 1000 default, matching the client cap) so a chat-restore transcript survives a reconnect
+  without a trim. Rules out: applying an unbounded dirty set in one frame.
 
 ## 10. Progress log
 
@@ -975,6 +984,19 @@ bottom.
     confirmation, IME), then the coordinated vterm publish + consumer dep-bumps (vibecli and
     vibekit both have `rebuild/terminal-viewer` branches staged against the unpublished vterm).
 
+- 2026-06-29 BURST RENDERING FIXED (post-brick-7; resolves the §11 open observation). The user
+  confirmed a kiro-cli `/chat` session restore dumps the whole transcript at once — a real
+  instant burst. render.ts now drains DOM-build work in budgeted batches (`MAX_ROWS_PER_FRAME`
+  = 300) across rAF frames via a `renderQueue`: the store ingests the whole burst in one go
+  (cheap), the cursor row is always built (caret never lags), and the flush reschedules until
+  the queue drains. vibecli `routes.go` raises the server ring to 5000 (from the 1000 default)
+  to match the client cap so a chat restore survives a reconnect without a trim. Tests: vterm
+  +1 (a 700-line burst, > the 300 budget, renders fully across frames, contiguous + dup-free);
+  160 total green. LIVE: a 600-line instant burst that previously stalled the client at ~100
+  and crashed the shared CDP sidecar now fills fully and immediately (612 rows at the first
+  2.5s sample), contiguous, dup-free, no console errors. This was the one substantive gap left
+  after brick 7; the rebuild now handles the realistic chat-restore burst.
+
 ## 11. Open questions and risks
 
 - Ink redraw fidelity (section 5.3). Verify scroll-region and erase-display handling against
@@ -990,15 +1012,18 @@ bottom.
 - Predictive echo (`predict.ts`) and the local typing buffer interaction with the new input
   element: keep predictive echo, re-point it at the textarea-driven input. Verify it does not
   fight the server cursor under the new screen model.
-- Large instant bursts (`cat bigfile`): a 1500-line instant burst (a synthetic stress fixture,
-  larger than the 1000-line server ring) overwhelmed the shared desktop CDP sidecar's rendering
-  during brick 7 (it built ~1426 new DOM rows in one rAF and crashed the browser's debug port).
-  The wire side is fine — the server commits and delivers correctly, and a client connecting
-  after the burst gets the ring via resume replay — so this is a client-render throughput
-  concern, not a protocol bug, and it is outside the seven reported bugs (kiro-cli's Ink output
-  is incremental, never a 1500-line instant dump). Worth a future look if `cat bigfile` matters:
-  cap rows built per rAF (render a budget per frame, continue next frame) or coalesce a very
-  large dirty set. Not pursued now to avoid destabilizing the shared sidecar.
+- Large instant bursts (`cat bigfile`, and — the real trigger — a kiro-cli `/chat` session
+  restore, which dumps the whole transcript at once): RESOLVED (2026-06-29, post-brick-7). The
+  user confirmed `/chat` makes this a real scenario, not a curiosity. Two fixes: (1) the
+  renderer drains its DOM-build work in budgeted batches (`MAX_ROWS_PER_FRAME`, 300) across rAF
+  frames instead of building thousands of rows in one frame — the store still ingests the whole
+  burst at once (cheap, pure data), so nothing is lost; the cursor row is always built so the
+  caret never lags. (2) vibecli bumps the server scrollback ring to 5000 (from the 1000 default)
+  to match the client cap, so a chat-restore transcript survives a reconnect without a trim.
+  Verified live: a 600-line instant burst that previously stalled the client at ~100 (and
+  crashed the shared CDP sidecar) now fills fully and immediately, contiguous and dup-free, with
+  no console errors. Unit-tested: a 700-line burst (> the 300 budget) renders fully across
+  frames in `render-store.test.ts`.
 
 ### Device-validation checklist (real iPhone, after brick 5)
 

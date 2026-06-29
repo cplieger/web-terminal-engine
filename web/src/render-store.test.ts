@@ -162,4 +162,22 @@ describe("render (store-backed, brick 3)", () => {
     expect(outputEl.querySelector(".term-trim-marker")).toBeNull();
     expect(absList(outputEl)).toEqual([100, 101, 102]);
   });
+
+  it("renders a burst larger than the per-frame budget across multiple frames", async () => {
+    // A /chat session restore (or `cat bigfile`) dumps thousands of lines in
+    // one wire frame. The store ingests them at once; the renderer must drain
+    // them in budgeted batches without losing or duplicating any.
+    const N = 700; // > MAX_ROWS_PER_FRAME (300)
+    const texts = Array.from({ length: N }, (_, i) => `burst ${i}`);
+    render.handleScroll(scrollMsg(0, texts));
+
+    // Let the budgeted flush run across however many frames it needs.
+    for (let i = 0; i < 15 && outputEl.children.length < N; i++) {
+      await tick();
+    }
+
+    const list = absList(outputEl);
+    // Every line landed exactly once, contiguous and ascending 0..N-1.
+    expect(list).toEqual(Array.from({ length: N }, (_, i) => i));
+  });
 });

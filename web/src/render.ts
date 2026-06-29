@@ -120,6 +120,17 @@ const rowEls = new Map<number, HTMLDivElement>();
 // as a module ref so it is reused rather than recreated each flush.
 let trimMarkerEl: HTMLDivElement | null = null;
 
+// Rows awaiting a DOM (re)build, processed in budgeted batches across frames.
+// A session restore (kiro-cli's /chat) or a `cat bigfile` dumps thousands of
+// lines in one wire frame; building them all in a single rAF janks or, on a
+// constrained device, hangs the tab. The store still ingests the whole burst
+// at once (it is cheap, pure data); the renderer drains this queue at most
+// MAX_ROWS_PER_FRAME per frame and reschedules until it is empty, so each
+// frame stays short and the terminal fills smoothly. The cursor row is always
+// built regardless of the budget so the caret never lags.
+const renderQueue = new Set<number>();
+const MAX_ROWS_PER_FRAME = 300;
+
 // Cursor state, refreshed from the store window on each flush. Kept as module
 // vars because buildRowSpans/cursorClassName read them.
 let cursorAbs = -1; // absolute index of the row the cursor is on
@@ -165,6 +176,8 @@ export function init(opts: {
   // non-isolated module reuse) starts clean.
   store.reset();
   rowEls.clear();
+  renderQueue.clear();
+  trimMarkerEl = null;
   output.replaceChildren();
   cursorAbs = -1;
   if (pendingFrame !== undefined) {
@@ -495,6 +508,7 @@ function flushRenderInner(): void {
   if (ch.fullReset) {
     output.replaceChildren();
     rowEls.clear();
+    renderQueue.clear();
     trimMarkerEl = null;
     cursorAbs = -1;
   } else {
@@ -504,6 +518,7 @@ function flushRenderInner(): void {
         el.remove();
       }
       rowEls.delete(abs);
+      renderQueue.delete(abs);
     }
   }
 
@@ -530,23 +545,44 @@ function flushRenderInner(): void {
     altRendered = false;
     output.replaceChildren();
     rowEls.clear();
+    renderQueue.clear();
     trimMarkerEl = null;
-    store.forEachLine((abs) => ch.dirtyLines.push(abs));
+    store.forEachLine((abs) => renderQueue.add(abs));
   }
 
-  // Rows needing a (re)build: content changes plus the old and new cursor rows
-  // (so the inline cursor span moves off the old row and onto the new one).
-  const toRender = new Set<number>(ch.dirtyLines);
+  // Queue this frame's changed rows for building.
+  for (const abs of ch.dirtyLines) {
+    renderQueue.add(abs);
+  }
+
+  // The cursor rows are built every frame regardless of the budget so the
+  // inline cursor span is always current (it moves off the old row and onto
+  // the new one); a huge backlog must never make the caret lag.
   if (prevCursorAbs !== newCursorAbs && prevCursorAbs >= 0) {
-    toRender.add(prevCursorAbs);
+    upsertRow(prevCursorAbs);
+    renderQueue.delete(prevCursorAbs);
   }
-  toRender.add(newCursorAbs);
+  upsertRow(newCursorAbs);
+  renderQueue.delete(newCursorAbs);
 
-  for (const abs of toRender) {
+  // Drain up to MAX_ROWS_PER_FRAME queued rows this frame; the rest carry over
+  // to the next frame (scheduled below) so one big burst never blocks paint.
+  let built = 0;
+  for (const abs of renderQueue) {
+    if (built >= MAX_ROWS_PER_FRAME) {
+      break;
+    }
     upsertRow(abs);
+    renderQueue.delete(abs);
+    built++;
   }
 
   updateTrimMarker();
+
+  // More rows pending: keep draining on subsequent frames.
+  if (renderQueue.size > 0) {
+    scheduleFlush();
+  }
 
   if (onCursorMove) {
     onCursorMove();

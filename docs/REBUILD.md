@@ -735,6 +735,24 @@ bottom.
   fixed-height-no-trim, history+window ordering, re-delivery dedup, in-place update, cursor
   span, and full-reset wipe. Brick 3 kills bug 3 (oscillation) and the core of bug 1 (selection
   no longer destroyed every frame); the rest of bug 1 (touch/menu) is brick 5.
+- 2026-06-29 BRICK 4 COMPLETE (scroll controller) + VERIFIED LIVE with a streaming fixture.
+  `scroll.ts` rewritten to a single owner of `scrollTop` with one piece of state, `following`,
+  derived purely from scroll position (24px bottom tolerance). No suppress window, no debounce,
+  no 60-second touch timer — the heuristic soup (Cause A/E) is gone. `stickToBottom()` (renderer
+  calls it once per flush) pins to the bottom only while following; `scrollToBottom()` re-engages
+  following; `isUserScrolledUp()` = `!following`. Removed `suppressScroll`/`isInUserScroll`
+  (clean break); updated the two consumers — render.ts `stickToBottomIfFollowing` now just calls
+  `scroll.stickToBottom()`, and vibecli's `viewport.ts` dropped the `suppressScroll` call (its
+  settle→`scrollToBottom` already re-pins, so the transient keyboard-slide flip self-corrects).
+  Native `overflow-anchor` re-enable is a vibecli CSS change deferred to brick 5. Tests: new
+  `scroll.test.ts` (6, happy-dom with overridden scroll geometry: follow/hold toggle, tolerance,
+  stick-only-when-following, no-yank-when-holding, jump re-engages); full suite 150 green.
+  Live (emitter fixture bursting 120 lines then 1/0.4s, on a second vibecli instance :9850):
+  initiallyFollowing dist=0; scrolled up to 930 then 6 lines arrived (rows 182→188, scrollHeight
+  3102→3204) and scrollTop STAYED 930 — held, no yank (bug 4 fixed); jump-to-bottom re-followed
+  (dist=0). Bricks 3+4 together resolve bugs 3 and 4. Fixture: `vibecli/scripts/emit-fixture.sh`
+  (ignores its `chat` arg, emits forever) run as a vibecli `KIRO_CLI_PATH` from a non-noexec dir
+  (TrueNAS `/tmp` is noexec — run the dev binary from `~`, not `/tmp`).
 
 ## 11. Open questions and risks
 

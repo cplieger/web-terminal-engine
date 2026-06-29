@@ -1,112 +1,102 @@
-// Scroll state tracker.
+// Scroll controller: the single owner of the scroll container's scrollTop.
 //
-// Tracks whether the user has manually scrolled up (away from the
-// bottom) and exposes the scroll helpers the render layer uses.
+// One piece of state: `following`. The user is "following" when the viewport is
+// at (or within a small tolerance of) the bottom; otherwise they have scrolled
+// up to read and are "holding". The state is derived purely from scroll
+// position on every scroll event — there is no debounce window, no suppress
+// timer, and no programmatic-vs-user flag. That heuristic soup (a 100px
+// tolerance, a 150ms debounce, a 60-second touch window) was the source of the
+// view-jumping and scroll-interruption bugs (docs/REBUILD.md Cause A/E).
+//
+// The renderer calls stickToBottom() once after each flush: if following, pin
+// to the new bottom; if holding, do nothing and let native scroll anchoring
+// (overflow-anchor) hold the reading position when history is inserted above.
+// Appending content at the bottom does not fire a scroll event, so following
+// stays true across new output and the post-flush pin lands correctly. Pinning
+// to the bottom produces a scroll event whose recomputation yields
+// following=true again (no churn). Scrolling up past the tolerance flips to
+// holding; scrolling back flips to following.
 
-const BOTTOM_TOLERANCE_PX = 100;
-const USER_SCROLL_DEBOUNCE_MS = 150;
+const BOTTOM_TOLERANCE_PX = 24;
 
 let scrollEl: HTMLElement | null = null;
-let userScrolledUp = false;
-let userScrollingUntil = 0;
-let suppressUntil = 0;
-let onUserScrollChange: ((scrolledUp: boolean) => void) | null = null;
+let following = true;
+let onFollowChange: ((scrolledUp: boolean) => void) | null = null;
+let scrollHandler: (() => void) | null = null;
 
-function isAtBottom(): boolean {
+function distanceFromBottom(): number {
   if (!scrollEl) {
-    return true;
+    return 0;
   }
-  return scrollEl.scrollTop + scrollEl.clientHeight >= scrollEl.scrollHeight - BOTTOM_TOLERANCE_PX;
+  return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
+}
+
+function atBottom(): boolean {
+  return distanceFromBottom() <= BOTTOM_TOLERANCE_PX;
+}
+
+function setFollowing(next: boolean): void {
+  if (next === following) {
+    return;
+  }
+  following = next;
+  if (onFollowChange) {
+    onFollowChange(!following);
+  }
 }
 
 /**
- * Initialize the scroll tracker by attaching listeners to the scroll
- * container. Once initialized, the module observes wheel/touch interaction to
- * decide whether the user has manually scrolled up (auto-follow disengaged)
- * or is at the bottom (auto-follow active).
+ * Initialize the scroll controller on the scroll container. The optional
+ * callback fires whenever the follow state toggles (its argument is true when
+ * the user has scrolled up / disengaged auto-follow).
  *
- * @param opts.scrollEl            Element whose scroll position is observed.
- * @param opts.onUserScrollChange  Optional callback fired when auto-follow
- *                                 toggles (true = scrolled up).
+ * @param opts.scrollEl            Element whose scroll position is observed and owned.
+ * @param opts.onUserScrollChange  Optional callback fired on follow/hold toggle.
  */
 export function init(opts: {
   scrollEl: HTMLElement;
   onUserScrollChange?: (scrolledUp: boolean) => void;
 }): void {
+  // Detach any prior listener (re-init in tests / re-mount).
+  if (scrollEl && scrollHandler) {
+    scrollEl.removeEventListener("scroll", scrollHandler);
+  }
   scrollEl = opts.scrollEl;
-  onUserScrollChange = opts.onUserScrollChange ?? null;
-
-  scrollEl.addEventListener(
-    "scroll",
-    () => {
-      if (Date.now() < suppressUntil) {
-        return;
-      }
-      userScrollingUntil = Date.now() + USER_SCROLL_DEBOUNCE_MS;
-      const wasScrolledUp = userScrolledUp;
-      userScrolledUp = !isAtBottom();
-      if (wasScrolledUp !== userScrolledUp && onUserScrollChange) {
-        onUserScrollChange(userScrolledUp);
-      }
-    },
-    { passive: true },
-  );
-
-  scrollEl.addEventListener(
-    "touchstart",
-    () => {
-      userScrollingUntil = Date.now() + 60_000;
-    },
-    { passive: true },
-  );
-  scrollEl.addEventListener(
-    "touchend",
-    () => {
-      userScrollingUntil = Date.now() + USER_SCROLL_DEBOUNCE_MS;
-    },
-    { passive: true },
-  );
-  scrollEl.addEventListener(
-    "touchcancel",
-    () => {
-      userScrollingUntil = Date.now() + USER_SCROLL_DEBOUNCE_MS;
-    },
-    { passive: true },
-  );
+  onFollowChange = opts.onUserScrollChange ?? null;
+  following = true;
+  scrollHandler = () => {
+    setFollowing(atBottom());
+  };
+  scrollEl.addEventListener("scroll", scrollHandler, { passive: true });
 }
 
-/** Force scroll-to-bottom and re-engage auto-follow. */
+/**
+ * Pin the viewport to the bottom iff the user is following. Called by the
+ * renderer after each flush. A no-op when holding (scrolled up) or already at
+ * the bottom, so it never fights the user and never scrolls redundantly.
+ */
+export function stickToBottom(): void {
+  if (!scrollEl || !following) {
+    return;
+  }
+  if (distanceFromBottom() > 0) {
+    scrollEl.scrollTop = scrollEl.scrollHeight;
+  }
+}
+
+/**
+ * Force scroll to the bottom and re-engage following. Used by the explicit
+ * jump-to-bottom control.
+ */
 export function scrollToBottom(): void {
   if (!scrollEl) {
     return;
   }
-  userScrolledUp = false;
-  userScrollingUntil = 0;
-  if (onUserScrollChange) {
-    onUserScrollChange(false);
-  }
   scrollEl.scrollTop = scrollEl.scrollHeight;
+  setFollowing(true);
 }
 
-/**
- * Suppress user-scroll detection for the next `ms` milliseconds. Useful when
- * the renderer programmatically adjusts scroll position and doesn't want that
- * to count as the user scrolling away from the bottom.
- */
-export function suppressScroll(ms: number): void {
-  suppressUntil = Date.now() + ms;
-}
-
-/** Whether the user has scrolled away from the bottom of the buffer. */
+/** Whether the user has scrolled away from the bottom (auto-follow disengaged). */
 export function isUserScrolledUp(): boolean {
-  return userScrolledUp;
-}
-
-/**
- * Whether the user is actively interacting with the scrollbar/touch right
- * now (debounced). The renderer uses this to delay screen updates that would
- * otherwise jump the viewport mid-scroll.
- */
-export function isInUserScroll(): boolean {
-  return Date.now() < userScrollingUntil;
+  return !following;
 }

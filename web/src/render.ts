@@ -601,13 +601,10 @@ function renderAlt(rows: WireRun[][]): void {
   output.replaceChildren(...els);
 }
 
-/** Pin the viewport to the bottom iff the user is "following" — not
- *  scrolled up and not mid-gesture. (Brick 4 replaces scroll.ts with a single
- *  scroll owner; this keeps the existing follow behavior until then.) */
+/** Pin the viewport to the bottom iff the user is following. The scroll
+ *  controller (scroll.ts) owns scrollTop and the follow/hold decision. */
 function stickToBottomIfFollowing(): void {
-  if (!scroll.isUserScrolledUp() && !scroll.isInUserScroll()) {
-    scroll.scrollToBottom();
-  }
+  scroll.stickToBottom();
 }
 
 // --- Cursor blink ---

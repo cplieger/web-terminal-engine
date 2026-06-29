@@ -55,6 +55,33 @@ const outbox: Uint8Array[] = []; // chunks of unacked bytes (sum = bytesSent - b
 let outboxBytes = 0; // running sum of outbox chunk lengths; keeps applyAck O(n) instead of O(n²)
 let lastServerEpoch: number | null = null; // process-start nanos of the last connected server
 
+// --- Client-side liveness (bug 2 defense-in-depth) ---
+//
+// On iOS wake, visibilitychange + pageshow fire and call reconnectNow(),
+// which is the primary fix. But a socket can also go silently half-open
+// without any wake event (a NAT/idle timeout on a backgrounded-then-
+// foregrounded tab, a flaky network that drops the path without a close
+// frame). The socket then reads OPEN forever and delivers nothing. The
+// server's ping loop notices the dead client, but those are WS-protocol
+// pings the browser answers without surfacing to JS, so the client can't
+// see them. So the client runs its own probe: after a stretch of silence
+// it sends an app-level ping; the server echoes a pong. Any inbound frame
+// (the pong, or normal output) proves the socket is alive and clears the
+// probe. If the probe goes unanswered, the socket is stale and we
+// reconnectNow() — which resumes by absolute index, so nothing is lost or
+// duplicated. The probe is what distinguishes "idle but alive" from
+// "dead": without it, a quiet-but-healthy terminal would reconnect-flap.
+let lastActivityAt = 0; // Date.now() of the last inbound frame (any kind)
+let probeSentAt = 0; // Date.now() the outstanding probe ping was sent; 0 = none
+let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+
+/** How often liveness is evaluated. */
+const HEARTBEAT_INTERVAL_MS = 5_000;
+/** Inbound silence that must elapse before we actively probe with a ping. */
+const IDLE_BEFORE_PROBE_MS = 10_000;
+/** How long an unanswered probe is tolerated before declaring the socket stale. */
+const PONG_TIMEOUT_MS = 7_000;
+
 /**
  * Maximum bytes we keep in the outbox before refusing new input. 1
  * MiB at typical typing rates is hours of held keys; fast enough to
@@ -122,6 +149,11 @@ export interface Callbacks {
    *  banner so the user knows old input may have been lost. */
   onServerRestart?(): void;
   computeSize(): { cols: number; rows: number };
+  /** Returns the highest absolute line index the client currently holds, or
+   *  -1 if it holds nothing. Sent as `haveThrough` on resume so the server
+   *  replays only the lines missed (e.g. printed while the device slept).
+   *  When absent, the client requests a full retained replay (-1). */
+  getHaveThrough?(): number;
   /** Optional WebSocket endpoint path (default "/ws"). vibekit serves
    *  the shell at "/api/shell/ws"; vibecli at "/ws". */
   wsPath?: string;
@@ -239,19 +271,74 @@ function cancelScheduledReconnect(): void {
   }
 }
 
-export function reconnectNow(): void {
-  if (connState.status === "connected") {
+// markActivity records that the socket just delivered a frame. Any frame —
+// the pong, a screen update, anything — proves the socket is alive, so it
+// refreshes the liveness clock and clears any outstanding probe.
+function markActivity(): void {
+  lastActivityAt = Date.now();
+  probeSentAt = 0;
+}
+
+function startHeartbeat(): void {
+  stopHeartbeat();
+  markActivity();
+  heartbeatTimer = setInterval(heartbeatTick, HEARTBEAT_INTERVAL_MS);
+}
+
+function stopHeartbeat(): void {
+  if (heartbeatTimer !== null) {
+    clearInterval(heartbeatTimer);
+    heartbeatTimer = null;
+  }
+  probeSentAt = 0;
+}
+
+// heartbeatTick is the one place that decides a connected socket is stale.
+// It never touches scrollTop, never reconnects a healthy socket, and never
+// probes a backgrounded tab (timer throttling makes hidden-tab timing
+// meaningless, and the wake path handles foregrounding). Its only actions
+// are: send a probe after enough silence, or reconnect after a probe goes
+// unanswered.
+function heartbeatTick(): void {
+  if (connState.status !== "connected") {
     return;
   }
-  if (connState.status === "connecting") {
-    // Abort BEFORE close: aborting detaches all listeners on the
-    // existing sock, so any frames that arrive between close() and
-    // the close-handshake completion (or browser shutdown of the
-    // socket) won't be processed twice. Without this, on iPad wake
-    // the visibilitychange + pageshow events both trigger
-    // reconnectNow() within milliseconds; the first sock's listeners
-    // are otherwise still alive and re-process every frame the new
-    // sock receives, leading to duplicated DOM rows.
+  // A hidden tab is handled by visibilitychange/pageshow on wake; probing it
+  // is pointless (its timers are throttled or frozen) and could fire stale.
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    return;
+  }
+  const now = Date.now();
+  if (probeSentAt > 0) {
+    if (now - probeSentAt >= PONG_TIMEOUT_MS) {
+      // The probe drew no reply (nor any other frame) in the grace window:
+      // the socket is stale. Tear it down and resume by absolute index.
+      probeSentAt = 0;
+      reconnectNow();
+    }
+    return;
+  }
+  if (now - lastActivityAt >= IDLE_BEFORE_PROBE_MS) {
+    probeSentAt = now;
+    sendControl({ type: "ping" });
+  }
+}
+
+export function reconnectNow(): void {
+  // Unconditional teardown. On iOS wake (visibilitychange + pageshow), the
+  // socket frequently reads OPEN/"connected" for a while but is actually a
+  // zombie — the OS froze it during sleep and frames printed meanwhile never
+  // arrive. The old early-return on "connected" trusted that stale state and
+  // skipped the reconnect, which is exactly why content printed during sleep
+  // stayed missing until a manual refresh (bug 2). So we never trust the
+  // current state on a wake: abort + close whatever socket exists and
+  // reconnect. The resume protocol (by absolute index) then backfills exactly
+  // the missed lines, so a reconnect over a still-healthy socket is a cheap,
+  // duplicate-free no-op rather than a risk.
+  if (connState.status === "connecting" || connState.status === "connected") {
+    // Abort BEFORE close: aborting detaches all listeners on the existing
+    // sock, so frames arriving between close() and the close handshake aren't
+    // processed twice (the iPad-wake duplicate-output race).
     connState.abort.abort();
     try {
       connState.sock.close();
@@ -259,6 +346,7 @@ export function reconnectNow(): void {
       /* ignore */
     }
   }
+  stopHeartbeat();
   cancelScheduledReconnect();
   connState = { status: "disconnected" };
   connect();
@@ -327,16 +415,19 @@ export function connect(): void {
           type: "resume",
           sessionId,
           sentBytes: bytesSent,
-          // haveThrough is the highest absolute line index the client
-          // already holds; the server replays everything after it. The
-          // store-backed value is wired in brick 6 (connection state
-          // machine). Until then we send -1 (full retained replay),
-          // which is correct and safe because applying a line by
-          // absolute index is idempotent — re-delivering lines the
-          // client already has never duplicates.
-          haveThrough: -1,
+          // Highest absolute line index the client holds (-1 if none). The
+          // server replays everything after it, so lines printed while the
+          // device slept are backfilled exactly on wake (bug 2), with no
+          // duplication because applying a line by absolute index is
+          // idempotent. Falls back to -1 (full retained replay) if the
+          // consumer wired no getHaveThrough.
+          haveThrough: cb?.getHaveThrough?.() ?? -1,
         }),
       );
+
+      // Begin client-side liveness probing for this socket. Idempotent
+      // (clears any prior timer) and resets the activity clock to now.
+      startHeartbeat();
     },
     { signal: connectAbort.signal },
   );
@@ -350,6 +441,10 @@ export function connect(): void {
   sock.addEventListener(
     "message",
     (ev: MessageEvent) => {
+      // Any inbound frame — pong, screen update, anything — proves the
+      // socket is delivering, so it refreshes the liveness clock before we
+      // even decode it. A malformed frame that decodes to null still counts.
+      markActivity();
       if (ev.data instanceof ArrayBuffer) {
         handleDecoded(decodeWireBinary(ev.data));
         return;
@@ -454,6 +549,7 @@ export function connect(): void {
       if (connState.sock !== sock) {
         return;
       }
+      stopHeartbeat();
       connState = { status: "disconnected" };
       cb?.onClose();
       scheduleReconnect();

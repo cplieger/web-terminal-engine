@@ -632,6 +632,39 @@ Append-only. Each entry: date, decision, why, and what it rules out.
   retained replay) until brick 6 wires the store-backed value. Why: safe and correct now
   (idempotent apply means full replay never duplicates), keeps the TS compiling before the
   client store (brick 2) exists.
+- 2026-06-29 (brick 6) `reconnectNow()` made unconditional — it no longer early-returns when
+  `connState` is "connected". On any wake trigger it aborts+closes whatever socket exists and
+  reconnects. Why: the early-return trusted a zombie socket on iOS wake (reads OPEN but is
+  dead) — bug 2's smoking gun (Cause D). This IS the design's `ensureFresh()`. Kept the name
+  `reconnectNow` rather than renaming to avoid a churny cross-repo rename mid-rebuild (vibekit
+  reconcile is brick 7). All wake/staleness triggers funnel into it; `connect()` is the
+  fresh/initial entry; `scheduleReconnect()` is the post-close backoff. Rules out: trusting
+  `connState` on wake.
+- 2026-06-29 (brick 6) `haveThrough` on resume is now the store-backed highest absolute index
+  (`render.getHighestIndex` via a new `getHaveThrough` callback wired in vibecli `app.ts`), not
+  the temporary -1. The server replays exactly lines > haveThrough, so sleep-window output
+  backfills on wake; idempotent absolute-index apply means re-delivery never duplicates.
+- 2026-06-29 (brick 6) Added a client-side liveness probe (app-level ping/pong) rather than
+  relying only on wake events. Why: a socket can go silently half-open with no
+  visibilitychange/pageshow (a NAT/idle timeout, a flaky path); the server's WS-protocol pings
+  are invisible to JS, so the client cannot see them. The probe distinguishes "idle but alive"
+  (a pong returns) from "dead" (no reply), so a quiet terminal is never reconnect-flapped —
+  which a naive "reconnect after N seconds of silence" rule would do. Timings: the heartbeat
+  evaluates every 5s, probes after 10s of inbound silence, and declares the socket stale after
+  a 7s unanswered grace, then calls reconnectNow(). ANY inbound frame counts as liveness
+  (markActivity runs at the top of the message listener, before decode, so even a
+  null-decoding frame counts); a hidden tab is skipped (wake events own it; hidden-tab timers
+  are throttled). Rules out: silence-only staleness (false positives on idle), and a
+  JS-visible server heartbeat (WS ping/pong cannot be observed from JS).
+- 2026-06-29 (brick 6) The pong is wire msg type 5 (binary, `[1B type][8B ack=0]`) and decodes
+  to null; the ping is `ControlMessage {type:"ping"}`. Why: keep the single binary
+  server→client format; the pong carries no payload (its arrival is the whole signal), so
+  decoding it to null — handled exactly like a dropped frame — keeps it out of the onMessage
+  path without adding a ServerMessage union member that would ripple into every consumer.
+- 2026-06-29 (brick 6) vibecli also reconnects on the window `online` event, alongside
+  visibilitychange + pageshow. Why: a cheap, immediate trigger for a network handoff/restore
+  (cellular↔wifi, tunnel reconnect); reconnectNow tears down any zombie and resume-by-index
+  backfills what was missed.
 
 ## 10. Progress log
 
@@ -753,6 +786,56 @@ bottom.
   (dist=0). Bricks 3+4 together resolve bugs 3 and 4. Fixture: `vibecli/scripts/emit-fixture.sh`
   (ignores its `chat` arg, emits forever) run as a vibecli `KIRO_CLI_PATH` from a non-noexec dir
   (TrueNAS `/tmp` is noexec — run the dev binary from `~`, not `/tmp`).
+
+- 2026-06-29 BRICK 6 COMPLETE (connection state machine; bug 2) + VERIFIED LIVE end-to-end.
+  This is the resilience brick; it was done before brick 5 because it is CDP-verifiable without
+  a real device (brick 5's touch work needs the iPhone). Three coordinated changes plus a
+  defense-in-depth probe, all in vterm's shared `connection.ts` so vibecli AND vibekit inherit
+  them:
+  - `reconnectNow()` is now UNCONDITIONAL. It no longer early-returns on `connState ===
+    "connected"`; it aborts+closes whatever socket exists and reconnects. The early-return was
+    bug 2's smoking gun (Cause D): on iOS wake the socket reads OPEN but is a zombie, so the old
+    code skipped the reconnect, never resumed, and sleep-window output stayed missing until a
+    manual refresh. This is the design's `ensureFresh()` (kept the name reconnectNow; see the
+    decisions log).
+  - Resume now carries `haveThrough` = the highest absolute line index the client holds
+    (`render.getHighestIndex` via a new `getHaveThrough` callback, wired in vibecli `app.ts`),
+    replacing brick 1's temporary -1. The server (brick 1 `handleResume`) replays exactly lines
+    > haveThrough, so sleep-window output backfills on wake; idempotent absolute-index apply
+    means re-delivery never duplicates (also keeps bug 5 fixed across reconnects).
+  - Client-side liveness probe (defense-in-depth for a silently half-open socket that fires no
+    wake event). A heartbeat evaluates every 5s; after 10s of inbound silence on a VISIBLE tab
+    it sends `{type:"ping"}`; the server (`handleControl`→`handlePing`) echoes a binary pong
+    (wire msg type 5, `encodePongMsg`). ANY inbound frame (the pong or normal output) refreshes
+    the activity clock (`markActivity` runs at the top of the message listener, before decode);
+    if a probe draws no reply within a 7s grace the socket is declared stale and reconnectNow()
+    fires. The probe is what tells "idle but alive" from "dead", so a quiet terminal never
+    reconnect-flaps. Hidden tabs are skipped (wake events own them). Wire v2 grew by:
+    `ControlMessage |{type:"ping"}`; `MSG_PONG=5` decoding to null (no payload; arrival is the
+    signal). vibecli also wires the `online` event to reconnectNow alongside
+    visibilitychange+pageshow.
+  - Tests: TS `connection.test.ts` +5 (reconnectNow tears down a healthy socket and opens a
+    fresh one; resume carries the reported haveThrough; fallback -1 when unwired; probe →
+    reconnect on no pong; a pong/any-frame keeps the socket and stays out of onMessage). Go
+    `terminal_test.go` +1 (a ping elicits a pong frame, full round-trip via dialHandler, passes
+    `-race`). Full gate green: `go test -race ./...` + `golangci-lint` 0 issues; tsgo prod+test,
+    eslint, prettier, vitest 155/155.
+  - LIVE VERIFY (new `vibecli/scripts/cdp-bug2.cjs`): the :9850 emitter instance streams lines
+    continuously. The harness wraps `window.WebSocket` (injected via
+    `Page.addScriptToEvaluateOnNewDocument` — no production hook) so it can truly SEVER the
+    socket and block reconnects on demand. KEY HARNESS LEARNING: CDP
+    `Network.emulateNetworkConditions{offline:true}` does NOT close an already-established
+    WebSocket (the first attempt showed the client still receiving during the "outage"), so a
+    faithful outage needs the socket-wrapper approach, not Network offline. Result: before
+    outage maxAbs=585 (contiguous, 0 dup); DURING outage maxAbs stayed 585 (client genuinely
+    dark — the sever worked); after a pageshow-driven reconnect maxAbs=620 with the missed lines
+    586..620 ALL backfilled, abs indices contiguous 0..620, 0 duplicates, no console errors. Bug
+    2 is fixed at the root (resume-by-absolute-index + unconditional wake teardown), proven live,
+    not patched.
+  - Next: brick 5 (input/keyboard/selection separation; bugs 1, 6, 7) — needs the iPhone for
+    final touch validation, so it is the natural next step now that the CDP-verifiable bricks
+    (1–4, 6) are done. Then brick 7 (guard hardening §8 + vibekit reconcile, including any
+    rename of reconnectNow→ensureFresh).
 
 ## 11. Open questions and risks
 

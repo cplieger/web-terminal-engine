@@ -106,6 +106,44 @@ function makeMockWebSocket(): typeof WebSocket {
   return ctor;
 }
 
+// Decode a 0x00-prefixed control frame (the JSON the client sends for
+// resume/resize) back to an object. Returns null for raw-input frames or
+// non-frame sends, so callers can filter the send log down to control frames.
+interface DecodedControlFrame {
+  type?: string;
+  haveThrough?: number;
+  sentBytes?: number;
+  sessionId?: string;
+}
+
+function decodeControlFrame(arg: unknown): DecodedControlFrame | null {
+  let bytes: Uint8Array | null = null;
+  if (arg instanceof Uint8Array) {
+    bytes = arg;
+  } else if (arg instanceof ArrayBuffer) {
+    bytes = new Uint8Array(arg);
+  }
+  if (!bytes || bytes.length === 0 || bytes[0] !== 0x00) {
+    return null;
+  }
+  return JSON.parse(new TextDecoder().decode(bytes.subarray(1))) as DecodedControlFrame;
+}
+
+// Every control frame the mock socket was asked to send, decoded, in order.
+function controlFramesSent(sock: MockWS): DecodedControlFrame[] {
+  const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+  return calls
+    .map((c) => decodeControlFrame(c[0]))
+    .filter((m): m is DecodedControlFrame => m !== null);
+}
+
+// A binary pong frame as the server sends it: [1B type=5 pong][8B ack=0].
+// Mirrors encodePongMsg (Go) / MSG_PONG (wire-binary.ts). Decodes to null —
+// the client treats its mere arrival as proof of liveness.
+function pongFrame(): ArrayBuffer {
+  return new Uint8Array([5, 0, 0, 0, 0, 0, 0, 0, 0]).buffer;
+}
+
 describe("connection: a socket superseded by a reconnect delivers no duplicate messages", () => {
   // Drives the REAL connection module (init + connect + reconnectNow) with
   // a fake global WebSocket, asserting the observable contract: once a
@@ -183,6 +221,120 @@ describe("connection: a socket superseded by a reconnect delivers no duplicate m
     second.fireOpen();
     second.fireMessage(titleFrame("two"));
     expect(onMessage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("connection: wake reconnect resumes from the held index (bug 2)", () => {
+  // Bug 2: on iOS wake the socket is frequently a zombie that still reads
+  // OPEN, so the old reconnectNow() early-returned on "connected" and never
+  // resynced — anything printed during sleep stayed missing until a manual
+  // refresh. These pin the two halves of the fix: (a) reconnectNow()
+  // unconditionally tears down a healthy socket and opens a fresh one, and
+  // (b) the resume frame carries the highest absolute line index the client
+  // holds (getHaveThrough), so the server backfills exactly the missed lines.
+  let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    onMessage = vi.fn<(msg: ServerMessage) => void>();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function baseCallbacks() {
+    return {
+      onMessage,
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose: () => {
+        /* no-op */
+      },
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    };
+  }
+
+  it("tears down a healthy connected socket and opens a fresh one", () => {
+    init(baseCallbacks());
+    connect();
+    const first = allMockWebSockets[0]!;
+    first.fireOpen(); // status === "connected": the zombie-looking-but-healthy state
+    expect(first.closed).toBe(false);
+
+    // Simulate iOS wake. The old code returned early here (status was
+    // "connected") and never resynced — the exact bug-2 smoking gun.
+    reconnectNow();
+
+    expect(first.closed).toBe(true); // the (possibly zombie) socket is torn down ...
+    expect(allMockWebSockets.length).toBe(2); // ... and a fresh socket is opened
+    expect(allMockWebSockets[1]!).not.toBe(first);
+  });
+
+  it("sends a resume frame carrying the haveThrough the consumer reports", () => {
+    init({ ...baseCallbacks(), getHaveThrough: () => 42 });
+    connect();
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+
+    const resume = controlFramesSent(sock).find((m) => m.type === "resume");
+    expect(resume).toBeDefined();
+    expect(resume!.haveThrough).toBe(42); // server replays only lines after 42
+  });
+
+  it("falls back to haveThrough = -1 (full retained replay) when no getHaveThrough is wired", () => {
+    init(baseCallbacks());
+    connect();
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+
+    const resume = controlFramesSent(sock).find((m) => m.type === "resume");
+    expect(resume).toBeDefined();
+    expect(resume!.haveThrough).toBe(-1);
+  });
+
+  it("probes a silent socket with a ping and reconnects when the probe goes unanswered", () => {
+    init(baseCallbacks());
+    connect();
+    const first = allMockWebSockets[0]!;
+    first.fireOpen();
+
+    // No inbound frames at all. After IDLE_BEFORE_PROBE_MS of silence the
+    // heartbeat actively probes with a ping (10s; one tick lands at 10s).
+    vi.advanceTimersByTime(10_000);
+    expect(controlFramesSent(first).some((m) => m.type === "ping")).toBe(true);
+
+    // The probe draws no pong (nor any other frame): the socket is stale.
+    // Past the grace window the heartbeat tears it down and opens a fresh one.
+    vi.advanceTimersByTime(11_000);
+    expect(first.closed).toBe(true);
+    expect(allMockWebSockets.length).toBe(2);
+    expect(allMockWebSockets[1]!).not.toBe(first);
+  });
+
+  it("keeps a socket whose probe is answered by a pong (and the pong stays out of the UI)", () => {
+    init(baseCallbacks());
+    connect();
+    const first = allMockWebSockets[0]!;
+    first.fireOpen();
+
+    vi.advanceTimersByTime(10_000); // triggers a probe ping
+    expect(controlFramesSent(first).some((m) => m.type === "ping")).toBe(true);
+
+    // The pong arrives. It refreshes the liveness clock (so the socket is not
+    // declared stale) and decodes to null (so it never reaches onMessage).
+    first.fireMessage(pongFrame());
+    expect(onMessage).not.toHaveBeenCalled();
+
+    // Advance past the point where an unanswered probe WOULD have reconnected:
+    // because the pong reset the clock, the socket is kept.
+    vi.advanceTimersByTime(11_000);
+    expect(first.closed).toBe(false);
+    expect(allMockWebSockets.length).toBe(1);
   });
 });
 

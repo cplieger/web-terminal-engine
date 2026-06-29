@@ -385,6 +385,32 @@ func TestHandleControl_resumeResolvesSession(t *testing.T) {
 	}
 }
 
+// TestHandleControl_pingElicitsPong verifies a client liveness ping draws a
+// pong frame back. The client probes with a ping after a stretch of inbound
+// silence; the returning pong (or any frame) lets it tell an idle-but-healthy
+// socket from one iOS froze during sleep, so a quiet terminal is not
+// reconnect-flapped (bug 2 defense-in-depth).
+func TestHandleControl_pingElicitsPong(t *testing.T) {
+	ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+	defer cleanup()
+
+	// Deliberately send no resize: the child never starts, so no screen or
+	// scroll frames race the pong. The only frame the server sends is the pong.
+	sendControl(t, ws, map[string]any{"type": ctlTypePing})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	for {
+		_, msg, err := ws.Read(ctx)
+		if err != nil {
+			t.Fatalf("never received a pong after ping: %v", err)
+		}
+		if len(msg) > 0 && msg[0] == wireMsgPong {
+			return // got the liveness reply
+		}
+	}
+}
+
 // TestHandleResize_colsAboveMinNotFloored verifies a cols value above
 // minResizeCols is applied unchanged.
 func TestHandleResize_colsAboveMinNotFloored(t *testing.T) {

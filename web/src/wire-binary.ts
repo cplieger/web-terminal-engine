@@ -19,6 +19,7 @@ const MSG_SCROLL = 1;
 const MSG_RESUME_ACK = 2;
 const MSG_MODES = 3;
 const MSG_TITLE = 4;
+const MSG_PONG = 5;
 const MODE_FLAG_BRACKETED_PASTE = 1;
 const MODE_FLAG_APP_CURSOR_KEYS = 2;
 const MODE_FLAG_MOUSE_SGR = 4;
@@ -217,6 +218,12 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     const title = c.utf8(titleLen);
     const msg: TitleMessage = { type: "title", title, inputAck };
     return msg;
+  }
+  if (msgType === MSG_PONG) {
+    // Liveness pong: no payload to deliver. The message listener already
+    // refreshed the activity clock on arrival, so there is nothing to do
+    // here — returning null keeps it out of the onMessage path.
+    return null;
   }
   return null;
 }

@@ -37,7 +37,8 @@ export interface ScreenMessage {
    * Absolute line index of the top screen row (row 0). A changed row at
    * window index `y` has absolute index `base + y`. The client stores
    * every line by absolute index, so applying a row is idempotent and
-   * never duplicates (see docs/REBUILD.md section 6).
+   * never duplicates (see the #web-terminal-engine steering doc,
+   * "Design rationale").
    */
   base: number;
   /** Cursor position as [row, col], zero-indexed within the window. */

@@ -1,7 +1,8 @@
 // Absolute-index line store: the client's authoritative model of the
 // terminal. One buffer keyed by absolute line index, with the live screen
 // window sliding along it. This is the data model that resolves the
-// live/history split (see docs/REBUILD.md section 6): there is no separate
+// live/history split (see the #web-terminal-engine steering doc, "Design
+// rationale"): there is no separate
 // "live zone" and "scrollback" here, only lines addressed by absolute index,
 // the last `height` of which happen to still be changing.
 //
@@ -258,7 +259,8 @@ export class LineStore {
 
   /**
    * applyLine is the guarded core. It enforces the apply-line guard set
-   * (docs/REBUILD.md section 8.1): valid index, not stale, idempotent, and
+   * (see the #web-terminal-engine steering doc, "Design rationale"):
+   * valid index, not stale, idempotent, and
    * cap-bounded. Returns nothing; effects are recorded in the dirty/evicted
    * sets for the next drain.
    */

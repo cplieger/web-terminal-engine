@@ -143,11 +143,7 @@ export interface TitleMessage {
 
 /** Discriminated union of all messages the server can send to the client. */
 export type ServerMessage =
-  | ScreenMessage
-  | ScrollMessage
-  | ResumeAckMessage
-  | ModesMessage
-  | TitleMessage;
+  ScreenMessage | ScrollMessage | ResumeAckMessage | ModesMessage | TitleMessage;
 
 /**
  * Discriminated union of all control messages the client can send to the

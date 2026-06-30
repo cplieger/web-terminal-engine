@@ -5,8 +5,9 @@ import (
 	"testing"
 )
 
-// TestWireRunEncoding locks the WIRE_PROTOCOL.md v1 contract by asserting
-// that WireRun field values and attribute bit positions match the spec.
+// TestWireRunEncoding locks the binary wire contract by asserting that
+// WireRun field values and attribute bit positions match the canonical
+// encoder in terminal/wire_binary.go (the authoritative byte layout).
 func TestWireRunEncoding(t *testing.T) {
 	s := New(3, 10)
 	// Bold red FG (ANSI 1), default BG, with italic+underline.

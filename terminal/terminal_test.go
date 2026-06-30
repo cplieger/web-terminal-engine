@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -457,5 +458,273 @@ func TestHandleResize_holdsFlushOnSuccessfulStart(t *testing.T) {
 	h.mu.Unlock()
 	if !held {
 		t.Errorf("handleResize: IsFlushHeld()=false after a successful start; HoldFlush must run")
+	}
+}
+
+// dualConn stands up a throwaway WebSocket server, dials it, and returns BOTH
+// the SERVER-side conn (to hand to dispatchFrame/handleResume) and the
+// CLIENT-side conn (to read back the server→client frames a test wants to
+// assert on). The server goroutine drains client→server reads so the
+// connection stays healthy; nothing is sent that way in these tests.
+func dualConn(t *testing.T) (server, client *websocket.Conn, cleanup func()) {
+	t.Helper()
+	ch := make(chan *websocket.Conn, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		ch <- c
+		for {
+			if _, _, rerr := c.Read(r.Context()); rerr != nil {
+				return
+			}
+		}
+	}))
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/"
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	//nolint:bodyclose // coder/websocket Dial nils resp.Body on success
+	client, _, err := websocket.Dial(dctx, wsURL, nil)
+	dcancel()
+	if err != nil {
+		srv.Close()
+		t.Fatalf("dualConn dial: %v", err)
+	}
+	select {
+	case server = <-ch:
+	case <-time.After(3 * time.Second):
+		_ = client.Close(websocket.StatusNormalClosure, "")
+		srv.Close()
+		t.Fatalf("dualConn: server side never accepted")
+	}
+	cleanup = func() {
+		_ = client.Close(websocket.StatusNormalClosure, "")
+		_ = server.CloseNow()
+		srv.Close()
+	}
+	return server, client, cleanup
+}
+
+// readServerFrames reads every binary frame the server sent until no new frame
+// arrives within idle. Frames are already buffered by the time a synchronous
+// dispatchFrame/handleResume call returns, so only the final (no-more-frames)
+// read waits out idle.
+func readServerFrames(t *testing.T, client *websocket.Conn, idle time.Duration) [][]byte {
+	t.Helper()
+	var frames [][]byte
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), idle)
+		_, msg, err := client.Read(ctx)
+		cancel()
+		if err != nil {
+			return frames
+		}
+		cp := make([]byte, len(msg))
+		copy(cp, msg)
+		frames = append(frames, cp)
+	}
+}
+
+// countFramesByType tallies frames by their leading msg_type byte, ignoring
+// any zero-length frame.
+func countFramesByType(frames [][]byte) map[byte]int {
+	m := make(map[byte]int)
+	for _, f := range frames {
+		if len(f) > 0 {
+			m[f[0]]++
+		}
+	}
+	return m
+}
+
+// TestDispatchFrame_scrollOnlyEmitsScrollNotScreen verifies a frame carrying
+// scroll lines but no changed rows is sent as exactly one scroll frame and no
+// screen frame: the screen payload must be gated on len(changed) > 0 and the
+// scroll payload must be both built (len(scrollLines) > 0) and written.
+func TestDispatchFrame_scrollOnlyEmitsScrollNotScreen(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	frame := &FlushFrame{
+		clients:        map[*websocket.Conn]uint64{server: 0},
+		scrollLines:    [][]vt.WireRun{makeLine("scrolled")},
+		scrollFirstIdx: 0,
+		screenHeight:   3,
+	}
+	h.dispatchFrame(frame)
+
+	types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond))
+	if types[wireMsgScreen] != 0 {
+		t.Errorf("scroll-only frame emitted %d screen frame(s); want 0 (no changed rows ⇒ no screen payload)", types[wireMsgScreen])
+	}
+	if types[wireMsgScroll] != 1 {
+		t.Errorf("scroll-only frame emitted %d scroll frame(s); want 1", types[wireMsgScroll])
+	}
+}
+
+// TestDispatchFrame_changedOnlyEmitsScreenNotScroll verifies a frame carrying
+// changed rows but no scroll lines is sent as exactly one screen frame and no
+// scroll frame: the scroll payload must be gated on len(scrollLines) > 0.
+func TestDispatchFrame_changedOnlyEmitsScreenNotScroll(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	frame := &FlushFrame{
+		clients:      map[*websocket.Conn]uint64{server: 0},
+		rows:         [][]vt.WireRun{makeLine("row0")},
+		changed:      []int{0},
+		screenHeight: 1,
+	}
+	h.dispatchFrame(frame)
+
+	types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond))
+	if types[wireMsgScroll] != 0 {
+		t.Errorf("changed-only frame emitted %d scroll frame(s); want 0 (no scroll lines ⇒ no scroll payload)", types[wireMsgScroll])
+	}
+	if types[wireMsgScreen] != 1 {
+		t.Errorf("changed-only frame emitted %d screen frame(s); want 1", types[wireMsgScreen])
+	}
+}
+
+// TestDispatchFrame_modesPayloadIsWritten verifies a non-nil modes payload is
+// actually written to the client (the nil-guard must send when the payload is
+// present).
+func TestDispatchFrame_modesPayloadIsWritten(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	frame := &FlushFrame{
+		clients:      map[*websocket.Conn]uint64{server: 0},
+		modesPayload: encodeModesMsg(0, true, false, false, false, false, false, 0),
+		screenHeight: 1,
+	}
+	h.dispatchFrame(frame)
+
+	types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond))
+	if types[wireMsgModes] != 1 {
+		t.Errorf("frame with a modes payload emitted %d modes frame(s); want 1", types[wireMsgModes])
+	}
+}
+
+// TestHandleResume_commitsScrolledLinesToHistory verifies handleResume commits
+// the lines that scrolled off the screen while the client was away into the
+// scrollback ring, so they can be replayed. With the commit skipped, the ring
+// stays empty and that history is lost.
+func TestHandleResume_commitsScrolledLinesToHistory(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, cleanup := serverSideConn(t)
+	defer cleanup()
+
+	// Tiny screen + many newlines pushes lines off the top into the pending
+	// drain (not yet committed to the ring).
+	h.screen = vt.New(3, 20)
+	for range 20 {
+		if _, err := h.screen.Write([]byte("scrolled\r\n")); err != nil {
+			t.Fatalf("screen write: %v", err)
+		}
+	}
+
+	if before := h.scrollback.Committed(); before != 0 {
+		t.Fatalf("precondition: committed=%d, want 0 before resume", before)
+	}
+	h.handleResume(server, &ClientState{}, "sid", -1)
+
+	if got := h.scrollback.Committed(); got == 0 {
+		t.Errorf("handleResume committed %d lines to history; want > 0 (scrolled lines must be retained)", got)
+	}
+}
+
+// TestHandleResume_replayStartsAfterHaveThrough verifies the server replays
+// only the lines the client is missing: with haveThrough=0 the first replayed
+// line is absolute index 1, not 0. Pins from = haveThrough + 1 (so flipping the
+// +, or the haveThrough >= 0 guard, is caught — both would replay from 0 or
+// replay nothing).
+func TestHandleResume_replayStartsAfterHaveThrough(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")})
+
+	h.handleResume(server, &ClientState{}, "sid", 0) // client already holds index 0
+
+	frames := readServerFrames(t, client, 300*time.Millisecond)
+	var scroll []byte
+	for _, f := range frames {
+		if len(f) > 0 && f[0] == wireMsgScroll {
+			scroll = f
+			break
+		}
+	}
+	if scroll == nil {
+		t.Fatalf("handleResume(haveThrough=0): no replay scroll frame; want one starting at index 1")
+	}
+	if len(scroll) < 17 {
+		t.Fatalf("scroll frame too short (%d bytes) to carry a first-index field", len(scroll))
+	}
+	if firstIdx := binary.LittleEndian.Uint64(scroll[9:17]); firstIdx != 1 {
+		t.Errorf("replay first index = %d, want 1 (client holds index 0, replay starts at haveThrough+1)", firstIdx)
+	}
+}
+
+// TestHandleResume_replayChunkBoundaryEmitsSingleFrame verifies that when the
+// replay length is an exact multiple of the chunk size, the server sends one
+// scroll frame and no trailing empty frame. With the loop bound off by one, an
+// extra zero-line frame is emitted.
+func TestHandleResume_replayChunkBoundaryEmitsSingleFrame(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	// 50 lines == replayChunk, so the chunk loop lands exactly on len(replay).
+	lines := make([][]vt.WireRun, 50)
+	for i := range lines {
+		lines[i] = makeLine("x")
+	}
+	h.scrollback.Append(lines)
+
+	h.handleResume(server, &ClientState{}, "sid", -1) // -1 ⇒ replay everything from index 0
+
+	types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond))
+	if types[wireMsgScroll] != 1 {
+		t.Errorf("replay of exactly replayChunk lines emitted %d scroll frame(s); want 1 (no trailing empty frame)", types[wireMsgScroll])
+	}
+}
+
+// TestHandleResume_replayChunksCarryAscendingAbsoluteIndices verifies a replay
+// longer than one chunk tags each chunk with the correct absolute first index
+// (firstAbs + i), so the client stores every line at its true index. With the
+// offset computed the wrong way, later chunks carry a bogus index.
+func TestHandleResume_replayChunksCarryAscendingAbsoluteIndices(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	// 120 lines ⇒ three chunks of 50/50/20 at absolute indices 0, 50, 100.
+	lines := make([][]vt.WireRun, 120)
+	for i := range lines {
+		lines[i] = makeLine("x")
+	}
+	h.scrollback.Append(lines)
+
+	h.handleResume(server, &ClientState{}, "sid", -1) // replay all from index 0
+
+	var firstIdxs []uint64
+	for _, f := range readServerFrames(t, client, 300*time.Millisecond) {
+		if len(f) >= 17 && f[0] == wireMsgScroll {
+			firstIdxs = append(firstIdxs, binary.LittleEndian.Uint64(f[9:17]))
+		}
+	}
+	want := []uint64{0, 50, 100}
+	if len(firstIdxs) != len(want) {
+		t.Fatalf("replay sent %d scroll frames (first indices %v); want %d at %v", len(firstIdxs), firstIdxs, len(want), want)
+	}
+	for i, w := range want {
+		if firstIdxs[i] != w {
+			t.Errorf("scroll frame %d first index = %d, want %d (chunk %d starts at absolute index %d)", i, firstIdxs[i], w, i, w)
+		}
 	}
 }

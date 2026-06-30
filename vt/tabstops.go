@@ -53,8 +53,10 @@ func (s *Screen) nextTabStop(col int) int {
 // prevTabStop returns the previous tab stop column before col.
 func (s *Screen) prevTabStop(col int) int {
 	if s.tabStops == nil {
-		// Default: every 8 columns
-		return ((col - 1) &^ 7)
+		// Default tab stops every 8 columns, floored at column 0:
+		// prevTabStop(0) would otherwise compute (-1 &^ 7) == -8, a negative
+		// cursor column that only a downstream clamp currently saves.
+		return max((col-1)&^7, 0)
 	}
 	for i := col - 1; i >= 0; i-- {
 		if s.tabStops[i] {

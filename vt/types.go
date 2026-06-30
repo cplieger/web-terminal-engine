@@ -117,20 +117,3 @@ const (
 	maxIntermed = 2    // max intermediate bytes
 	maxDCSLen   = 256  // max DCS data for DECRQSS
 )
-
-// Backward-compatible aliases for tests that reference old constants/names.
-const (
-	maxCSIParams   = maxParams
-	maxCSIIntermed = maxIntermed
-)
-
-// State name aliases for backward compatibility with existing tests.
-const (
-	stateGround             = stGround
-	stateEscape             = stEscape
-	stateEscapeIntermediate = stEscapeIntermediate
-	stateCsiEntry           = stCsiEntry
-	stateCsiParam           = stCsiParam
-	stateCsiIntermediate    = stCsiIntermediate
-	stateOscString          = stOscString
-)

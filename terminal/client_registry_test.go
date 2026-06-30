@@ -13,14 +13,14 @@ import (
 // ResolveSession removes a session idle longer than the 60-minute window.
 // Resolving an unknown session id triggers the sweep.
 func TestResolveSession_GCsIdleSession(t *testing.T) {
-	r := NewClientRegistry()
+	r := newClientRegistry(slog.Default())
 	r.sessions["idle"] = &sessionState{
 		lastSeen:      time.Now().Add(-61 * time.Minute),
 		bytesReceived: 7,
 	}
 
 	// Resolving an unknown session id triggers the opportunistic GC sweep.
-	r.ResolveSession(&ClientState{}, "fresh")
+	r.ResolveSession(&clientState{}, "fresh")
 
 	r.mu.Lock()
 	_, present := r.sessions["idle"]
@@ -33,13 +33,13 @@ func TestResolveSession_GCsIdleSession(t *testing.T) {
 // TestResolveSession_retainsRecentSession verifies the GC sweep keeps a
 // session whose last activity is well within the 60-minute window.
 func TestResolveSession_retainsRecentSession(t *testing.T) {
-	r := NewClientRegistry()
+	r := newClientRegistry(slog.Default())
 	r.sessions["recent"] = &sessionState{
 		lastSeen:      time.Now().Add(-1 * time.Minute),
 		bytesReceived: 3,
 	}
 
-	r.ResolveSession(&ClientState{}, "fresh")
+	r.ResolveSession(&clientState{}, "fresh")
 
 	r.mu.Lock()
 	_, present := r.sessions["recent"]
@@ -63,24 +63,24 @@ func TestResolveSession_GCLogsOnlyWhenSessionHadBytes(t *testing.T) {
 	const logMsg = "gc'd idle session with received bytes"
 
 	// bytesReceived > 0 -> the GC must log.
-	r := NewClientRegistry()
+	r := newClientRegistry(slog.Default())
 	r.sessions["had-bytes"] = &sessionState{
 		lastSeen:      time.Now().Add(-61 * time.Minute),
 		bytesReceived: 5,
 	}
-	r.ResolveSession(&ClientState{}, "fresh1")
+	r.ResolveSession(&clientState{}, "fresh1")
 	if !strings.Contains(buf.String(), logMsg) {
 		t.Errorf("GC of idle session with bytesReceived>0 did not emit %q", logMsg)
 	}
 
 	// bytesReceived == 0 -> the GC must NOT log.
 	buf.Reset()
-	r2 := NewClientRegistry()
+	r2 := newClientRegistry(slog.Default())
 	r2.sessions["no-bytes"] = &sessionState{
 		lastSeen:      time.Now().Add(-61 * time.Minute),
 		bytesReceived: 0,
 	}
-	r2.ResolveSession(&ClientState{}, "fresh2")
+	r2.ResolveSession(&clientState{}, "fresh2")
 	if strings.Contains(buf.String(), logMsg) {
 		t.Errorf("GC of idle session with bytesReceived==0 emitted %q; want silent", logMsg)
 	}
@@ -89,8 +89,8 @@ func TestResolveSession_GCLogsOnlyWhenSessionHadBytes(t *testing.T) {
 // TestIncrementReceived_addsPositiveCount verifies a positive byte count is
 // added to the session's running total.
 func TestIncrementReceived_addsPositiveCount(t *testing.T) {
-	r := NewClientRegistry()
-	st := &ClientState{}
+	r := newClientRegistry(slog.Default())
+	st := &clientState{}
 	sess := &sessionState{}
 	st.session.Store(sess)
 
@@ -106,8 +106,8 @@ func TestIncrementReceived_addsPositiveCount(t *testing.T) {
 // lastSeen is the discriminating observable since += 0 is a no-op on the
 // counter regardless.
 func TestIncrementReceived_zeroIsNoOp(t *testing.T) {
-	r := NewClientRegistry()
-	st := &ClientState{}
+	r := newClientRegistry(slog.Default())
+	st := &clientState{}
 	sentinel := time.Unix(1_000_000, 0)
 	sess := &sessionState{lastSeen: sentinel}
 	st.session.Store(sess)
@@ -128,7 +128,7 @@ func TestIncrementReceived_zeroIsNoOp(t *testing.T) {
 // sessions map. Real *websocket.Conn values aren't needed — the contention
 // under test is on session state, not the client map keys.
 func TestRegistry_ConcurrentResolveIncrementSnapshot(t *testing.T) {
-	r := NewClientRegistry()
+	r := newClientRegistry(slog.Default())
 	const goroutines = 20
 	const iters = 200
 
@@ -138,9 +138,9 @@ func TestRegistry_ConcurrentResolveIncrementSnapshot(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := range iters {
-				state := &ClientState{}
+				state := &clientState{}
 				sessionID := "session-" + string(rune('A'+id)) + "-" + string(rune('0'+i%10))
-				_, _ = r.ResolveSession(state, sessionID)
+				_ = r.ResolveSession(state, sessionID)
 				r.IncrementReceived(state, 42)
 				_ = r.Snapshot()
 			}
@@ -153,7 +153,7 @@ func TestRegistry_ConcurrentResolveIncrementSnapshot(t *testing.T) {
 // sessionState: many goroutines resolve a small set of shared session ids and
 // increment their counters concurrently. Run under -race.
 func TestRegistry_ConcurrentResolveSharedSession(t *testing.T) {
-	r := NewClientRegistry()
+	r := newClientRegistry(slog.Default())
 	const goroutines = 50
 	const iters = 100
 
@@ -163,17 +163,57 @@ func TestRegistry_ConcurrentResolveSharedSession(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := range iters {
-				state := &ClientState{}
+				state := &clientState{}
 				sid := "shared-session"
 				if i%3 == 0 {
 					sid = "alt-session"
 				}
-				ack, replay := r.ResolveSession(state, sid)
-				_ = ack
-				_ = replay
+				_ = r.ResolveSession(state, sid)
 				r.IncrementReceived(state, 10)
 			}
 		}()
 	}
 	wg.Wait()
+}
+
+// TestResolveSession_evictsOldestWhenOverCap pins the maxSessions cap backstop
+// (CWE-770) that ResolveSession enforces via evictOldestSession: when a new
+// session pushes the retained count past maxSessions, the single oldest-lastSeen
+// entry is evicted (not the newcomer) and the count returns to maxSessions. The
+// eviction body (find-oldest loop + delete) was unexercised after extraction
+// into evictOldestSession (only the early-return ran, 22.2% coverage), so a
+// mutant in the `sx.lastSeen.Before(oldest)` comparison or the delete survived.
+func TestResolveSession_evictsOldestWhenOverCap(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+	now := time.Now()
+
+	// One session is distinctly the oldest, but still inside the 60-min
+	// retention window so the idle GC does NOT remove it -- forcing the cap
+	// eviction (not the GC) to be the remover we assert on.
+	const oldestID = "oldest"
+	r.sessions[oldestID] = &sessionState{lastSeen: now.Add(-30 * time.Minute)}
+	// Fill the rest to exactly maxSessions with recent entries. Distinct 2-byte
+	// keys avoid an fmt/strconv import (none collide with the longer ASCII ids).
+	for i := 1; i < maxSessions; i++ {
+		r.sessions[string([]byte{byte(i), byte(i >> 8)})] = &sessionState{lastSeen: now.Add(-time.Minute)}
+	}
+	if len(r.sessions) != maxSessions {
+		t.Fatalf("setup: %d sessions, want exactly maxSessions=%d", len(r.sessions), maxSessions)
+	}
+
+	// Resolving a new, unknown session id pushes the count to maxSessions+1 and
+	// triggers the cap eviction.
+	r.ResolveSession(&clientState{}, "newcomer")
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if got := len(r.sessions); got != maxSessions {
+		t.Errorf("after over-cap resolve: %d sessions retained, want %d (cap eviction must drop exactly one)", got, maxSessions)
+	}
+	if _, ok := r.sessions[oldestID]; ok {
+		t.Errorf("cap eviction kept the oldest session %q; want the oldest-lastSeen entry evicted", oldestID)
+	}
+	if _, ok := r.sessions["newcomer"]; !ok {
+		t.Error("cap eviction removed the just-added newcomer; want the OLDEST entry removed, not the newest")
+	}
 }

@@ -15,7 +15,7 @@
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
 /** Maximum lines retained client-side. Older lines are evicted from the top. */
-export const MAX_LINES = 5000;
+const MAX_LINES = 5000;
 
 /** The live screen window: a fixed `height`-row block at the tail of the buffer. */
 export interface WindowState {
@@ -305,12 +305,25 @@ export class LineStore {
         this.evicted.add(victim);
         this.dirty.delete(victim);
       }
-      // Advance oldest past the evicted line and any hole.
-      let next = victim + 1;
-      while (next <= this.highest && !this.lines.has(next)) {
-        next++;
+      // Advance oldest to the lowest remaining key. After evicting the current
+      // oldest, contiguous history (the common case: live scroll-off, resume
+      // replay, a cat-bigfile burst) leaves victim + 1 present -- an O(1) probe.
+      // Only a hole at the boundary falls back to a full key scan. That scan is
+      // bounded by map size (<= maxLines), NOT by the integer gap to the next
+      // retained line, so a malformed/compromised frame whose base jumps far
+      // ahead of a retained low index cannot make eviction walk billions of
+      // indices (an algorithmic-complexity DoS that freezes the tab).
+      if (this.lines.has(victim + 1)) {
+        this.oldest = victim + 1;
+      } else {
+        let min = -1;
+        for (const k of this.lines.keys()) {
+          if (min < 0 || k < min) {
+            min = k;
+          }
+        }
+        this.oldest = min;
       }
-      this.oldest = next > this.highest && !this.lines.has(this.highest) ? -1 : next;
       if (this.lines.size === 0) {
         this.oldest = -1;
         this.highest = -1;

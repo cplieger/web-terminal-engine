@@ -21,10 +21,10 @@ const wsPingInterval = 2 * time.Second
 // VPN-relayed mobile connection) where a fixed deadline either
 // false-disconnects on transient spikes or waits too long when the
 // peer truly drops.
-func pingLoop(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn) {
+func pingLoop(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, logger *slog.Logger) {
 	t := time.NewTicker(wsPingInterval)
 	defer t.Stop()
-	p := &pinger{ws: ws, stat: newPingStat()}
+	p := &pinger{ws: ws, stat: newPingStat(), logger: logger}
 	for {
 		select {
 		case <-ctx.Done():
@@ -44,6 +44,7 @@ func pingLoop(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn
 type pinger struct {
 	ws          *websocket.Conn
 	stat        *pingStat
+	logger      *slog.Logger
 	consecFails int
 }
 
@@ -56,7 +57,7 @@ func (p *pinger) tick(ctx context.Context, cancel context.CancelFunc) (stop bool
 	timeout, capped := p.stat.Timeout()
 	if capped {
 		srtt, rttvar := p.stat.Stats()
-		slog.Warn("terminal: ws ping timeout at cap",
+		p.logger.Warn("terminal: ws ping timeout at cap",
 			"timeout", timeout, "cap", maxPongTimeout,
 			"srtt", srtt, "rttvar", rttvar,
 			"consec_fails", p.consecFails)
@@ -87,7 +88,7 @@ func (p *pinger) handlePingFailure(err error, timeout, rtt time.Duration, cancel
 	p.consecFails++
 	if p.consecFails >= maxConsecutiveFailures {
 		srtt, rttvar := p.stat.Stats()
-		slog.Error("terminal: ws ping failed; closing connection",
+		p.logger.Error("terminal: ws ping failed; closing connection",
 			"error", err,
 			"timeout", timeout,
 			"observed_rtt", rtt,
@@ -96,7 +97,7 @@ func (p *pinger) handlePingFailure(err error, timeout, rtt time.Duration, cancel
 		cancel()
 		return true
 	}
-	slog.Warn("terminal: ws ping miss; backoff",
+	p.logger.Warn("terminal: ws ping miss; backoff",
 		"error", err,
 		"timeout", timeout,
 		"observed_rtt", rtt,

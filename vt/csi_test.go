@@ -509,23 +509,6 @@ func TestSoftResetScrollBottom(t *testing.T) {
 	}
 }
 
-// --- csiArg helper ---
-
-// TestCSIArgStripsMarker verifies csiArg strips a leading private marker before
-// parsing the numeric argument.
-func TestCSIArgStripsMarker(t *testing.T) {
-	if got := csiArg("?5", 0); got != 5 {
-		t.Errorf("csiArg(%q, 0) = %d, want 5", "?5", got)
-	}
-}
-
-// TestCSIArgParsesZero verifies csiArg accepts '0' as a valid digit.
-func TestCSIArgParsesZero(t *testing.T) {
-	if got := csiArg("0", 5); got != 0 {
-		t.Errorf("csiArg(%q, 5) = %d, want 0", "0", got)
-	}
-}
-
 // --- Device status / attributes ---
 
 // TestDeviceAttributesPrimary verifies the primary Device Attributes reply.
@@ -576,5 +559,94 @@ func TestUnhandledCSILogs(t *testing.T) {
 	s.dispatchCSI('W') // 'W' is unhandled -> default branch
 	if !strings.Contains(buf.String(), "unhandled CSI") {
 		t.Errorf("dispatchCSI('W') log = %q, want it to contain \"unhandled CSI\"", buf.String())
+	}
+}
+
+// TestEraseInLine verifies EL (CSI K): mode 0 erases cursor->end, mode 1 erases
+// start->cursor, mode 2 erases the whole row, each preserving the other columns.
+func TestEraseInLine(t *testing.T) {
+	cases := []struct {
+		name string
+		seq  string
+		want [10]rune
+	}{
+		{"mode 0 cursor to end", "\x1b[6G\x1b[K", [10]rune{'A', 'B', 'C', 'D', 'E', ' ', ' ', ' ', ' ', ' '}},
+		{"mode 1 start to cursor", "\x1b[6G\x1b[1K", [10]rune{' ', ' ', ' ', ' ', ' ', ' ', 'G', 'H', 'I', 'J'}},
+		{"mode 2 whole line", "\x1b[2K", [10]rune{' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' ', ' '}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(1, 10)
+			s.Write([]byte("ABCDEFGHIJ"))
+			s.Write([]byte(tc.seq))
+			for x, want := range tc.want {
+				if got := s.Cells[0][x].Ch; got != want {
+					t.Errorf("EL %q: Cells[0][%d].Ch = %q, want %q", tc.seq, x, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestEraseChars verifies ECH (CSI X) erases n cells from the cursor rightward,
+// clamped to the row end, leaving columns left of the cursor intact.
+func TestEraseChars(t *testing.T) {
+	cases := []struct {
+		name string
+		seq  string
+		want [10]rune
+	}{
+		{"erase 3 from col 2", "\x1b[3G\x1b[3X", [10]rune{'A', 'B', ' ', ' ', ' ', 'F', 'G', 'H', 'I', 'J'}},
+		{"clamped past row end", "\x1b[9G\x1b[100X", [10]rune{'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', ' ', ' '}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(1, 10)
+			s.Write([]byte("ABCDEFGHIJ"))
+			s.Write([]byte(tc.seq))
+			for x, want := range tc.want {
+				if got := s.Cells[0][x].Ch; got != want {
+					t.Errorf("ECH %q: Cells[0][%d].Ch = %q, want %q", tc.seq, x, got, want)
+				}
+			}
+		})
+	}
+}
+
+// TestCursorTabForward verifies CHT (CSI I) advances the cursor by n tab stops
+// (default stops every 8 columns), clamping at the right margin.
+func TestCursorTabForward(t *testing.T) {
+	cases := []struct {
+		name    string
+		seq     string
+		wantCol int
+	}{
+		{"one stop from col 0", "\x1b[1G\x1b[I", 8},
+		{"two stops from col 0", "\x1b[1G\x1b[2I", 16},
+		{"clamped at right margin", "\x1b[1G\x1b[100I", 79},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(24, 80)
+			s.Write([]byte(tc.seq))
+			if _, col := s.CursorPos(); col != tc.wantCol {
+				t.Errorf("CHT %q: col = %d, want %d", tc.seq, col, tc.wantCol)
+			}
+		})
+	}
+}
+
+// TestWindowManipulationReportSize verifies CSI 18 t reports the text-area size
+// as CSI 8 ; rows ; cols t, and that an unsupported parameter produces no reply.
+func TestWindowManipulationReportSize(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b[18t"))
+	if got, want := string(s.Response), "\x1b[8;24;80t"; got != want {
+		t.Errorf("CSI 18 t = %q, want %q", got, want)
+	}
+	s.Response = nil
+	s.Write([]byte("\x1b[99t"))
+	if len(s.Response) != 0 {
+		t.Errorf("CSI 99 t (unsupported) wrote %q, want no reply", string(s.Response))
 	}
 }

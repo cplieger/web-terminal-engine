@@ -80,7 +80,7 @@ func (s *Screen) translateChar(b byte) rune {
 	// Determine which G-set to use: single-shift overrides GL for one char.
 	var cs charset
 	if s.singleShft >= 2 {
-		cs = s.gsets[s.singleShft-2+2] // SS2→G2(index 2), SS3→G3(index 3)
+		cs = s.gsets[s.singleShft] // SS2→G2(index 2), SS3→G3(index 3)
 		s.singleShft = -1
 	} else {
 		cs = s.gsets[s.gl]

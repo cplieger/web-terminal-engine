@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -56,7 +57,7 @@ func TestPingLoop_repeatedFailuresCancel(t *testing.T) {
 		cancel()
 	}
 
-	go pingLoop(ctx, recordCancel, ws)
+	go pingLoop(ctx, recordCancel, ws, slog.Default())
 
 	// maxConsecutiveFailures (3) ticks at wsPingInterval (2s) is roughly 6s;
 	// generous bound for slow CI.
@@ -72,7 +73,7 @@ func TestPingLoop_repeatedFailuresCancel(t *testing.T) {
 // failure (below maxConsecutiveFailures) backs off and keeps the connection:
 // handlePingFailure returns stop=false and does NOT call cancel.
 func TestPinger_continuesBackoffBelowFailureThreshold(t *testing.T) {
-	p := &pinger{stat: newPingStat()} // consecFails starts at 0
+	p := &pinger{stat: newPingStat(), logger: slog.Default()} // consecFails starts at 0
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -97,7 +98,7 @@ func TestPinger_continuesBackoffBelowFailureThreshold(t *testing.T) {
 // flipping it to > (one failure too lenient) or to < (cancels immediately) is
 // caught.
 func TestPinger_cancelsConnectionAtFailureThreshold(t *testing.T) {
-	p := &pinger{stat: newPingStat(), consecFails: maxConsecutiveFailures - 1}
+	p := &pinger{stat: newPingStat(), logger: slog.Default(), consecFails: maxConsecutiveFailures - 1}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 

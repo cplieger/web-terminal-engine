@@ -60,10 +60,10 @@ if (msg?.type === "screen") render.handleScreen(msg);
 
 ### TypeScript (`web/` — published as `@cplieger/web-terminal-engine` on NPM and JSR)
 
-- **`render`** — DOM renderer driven by `ScreenMessage` / `ScrollMessage` frames: `init`, `handleScreen`, `handleScroll`, `updateFontMetrics`, `computeSize`, `getCursorPx`, `setPredictedCursor`, `resetScreen`, `resetScrollback`, `getScrollbackRowCount`, `updateReverseVideo`.
+- **`render`** — DOM renderer driven by `ScreenMessage` / `ScrollMessage` frames: `init`, `handleScreen`, `handleScroll`, `updateFontMetrics`, `computeSize`, `getCursorPx`, `setPredictedCursor`, `resetScreen`, `resetScrollback`, `getHighestIndex`, `noteResumeBounds`, `updateReverseVideo`.
 - **`keyboard`** — Translates `KeyboardEvent` to terminal byte sequences: `mapKeyboardEvent`, `bracketTextForPaste`, `prepareTextForTerminal`. Honors `applicationCursor`, `applicationKeypad`, `bracketedPaste`.
 - **`mouse`** — SGR 1006 mouse + focus reporting encoder: `init`, `encodeSGR`, `MouseInputHandler`.
-- **`scroll`** — Auto-follow tracker for the scroll container: `init`, `scrollToBottom`, `suppressScroll`, `isUserScrolledUp`, `isInUserScroll`.
+- **`scroll`** — Auto-follow tracker for the scroll container: `init`, `stickToBottom`, `scrollToBottom`, `isUserScrolledUp`.
 - **`modes`** — DEC private mode state (synced from server's `ModesMessage`): `setModes`, `isBracketedPaste`, `isApplicationCursor`, `getMouseMode`, `isMouseSGR`, `isFocusReporting`, `isApplicationKeypad`, `isReverseVideo`.
 - **`decodeWireBinary(buf)`** — Top-level decoder for binary WebSocket frames; returns a `ServerMessage` or `null` for invalid/truncated frames.
 - **`connection`** — Client → server WebSocket lifecycle: socket ownership, exponential-backoff reconnect, and the resume/inputAck reliability layer (outbox + server-restart detection). `init(callbacks)`, `connect`, `sendBinary`, `sendResize`, `reconnectNow`; `wsPath` callback option defaults to `"/ws"`. Decodes frames and applies `modes.setModes` internally, so consumers only dispatch screen/scroll to `render`. Pairs with the Go `terminal` handler's resume protocol. (`controlFrame` / `wsURL` are also exported for advanced use.)

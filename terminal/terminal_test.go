@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -335,7 +337,7 @@ func TestHandleControl_resizeStartsProcess(t *testing.T) {
 	defer h.Shutdown()
 
 	payload := mustJSON(t, controlMsg{Type: ctlTypeResize, Cols: 100, Rows: 40})
-	h.handleControl(nil, &ClientState{}, payload)
+	h.handleControl(nil, &clientState{}, payload)
 
 	if !h.started.Load() {
 		t.Fatalf("handleControl(valid resize): process not started")
@@ -355,7 +357,7 @@ func TestHandleControl_unknownTypeDoesNotStart(t *testing.T) {
 	defer h.Shutdown()
 
 	payload := mustJSON(t, controlMsg{Type: "bogus"})
-	h.handleControl(nil, &ClientState{}, payload)
+	h.handleControl(nil, &clientState{}, payload)
 
 	if h.started.Load() {
 		t.Errorf("handleControl(unknown type): process started; only a resize may start it")
@@ -371,12 +373,12 @@ func TestHandleControl_resumeResolvesSession(t *testing.T) {
 	ws, cleanup := serverSideConn(t)
 	defer cleanup()
 
-	state := &ClientState{}
+	state := &clientState{}
 	payload := mustJSON(t, controlMsg{Type: ctlTypeResume, SessionID: "sid"})
 	h.handleControl(ws, state, payload)
 
 	if state.session.Load() == nil {
-		t.Errorf("handleControl(resume): ClientState.session is nil; resume must resolve a session")
+		t.Errorf("handleControl(resume): clientState.session is nil; resume must resolve a session")
 	}
 	h.registry.mu.Lock()
 	_, ok := h.registry.sessions["sid"]
@@ -546,7 +548,7 @@ func TestDispatchFrame_scrollOnlyEmitsScrollNotScreen(t *testing.T) {
 	server, client, cleanup := dualConn(t)
 	defer cleanup()
 
-	frame := &FlushFrame{
+	frame := &flushFrame{
 		clients:        map[*websocket.Conn]uint64{server: 0},
 		scrollLines:    [][]vt.WireRun{makeLine("scrolled")},
 		scrollFirstIdx: 0,
@@ -571,7 +573,7 @@ func TestDispatchFrame_changedOnlyEmitsScreenNotScroll(t *testing.T) {
 	server, client, cleanup := dualConn(t)
 	defer cleanup()
 
-	frame := &FlushFrame{
+	frame := &flushFrame{
 		clients:      map[*websocket.Conn]uint64{server: 0},
 		rows:         [][]vt.WireRun{makeLine("row0")},
 		changed:      []int{0},
@@ -596,9 +598,9 @@ func TestDispatchFrame_modesPayloadIsWritten(t *testing.T) {
 	server, client, cleanup := dualConn(t)
 	defer cleanup()
 
-	frame := &FlushFrame{
+	frame := &flushFrame{
 		clients:      map[*websocket.Conn]uint64{server: 0},
-		modesPayload: encodeModesMsg(0, true, false, false, false, false, false, 0),
+		modesPayload: encodeModesMsg(true, false, false, false, false, false, 0),
 		screenHeight: 1,
 	}
 	h.dispatchFrame(frame)
@@ -606,6 +608,59 @@ func TestDispatchFrame_modesPayloadIsWritten(t *testing.T) {
 	types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond))
 	if types[wireMsgModes] != 1 {
 		t.Errorf("frame with a modes payload emitted %d modes frame(s); want 1", types[wireMsgModes])
+	}
+}
+
+// TestDispatchFrame_largeScrollBurstSplitsIntoChunks pins the chunking loop in
+// dispatchFrame: a drained burst larger than maxScrollLinesPerFrame is split into
+// several scroll frames, each tagged with its own absolute first index
+// (scrollFirstIdx + i). The other TestDispatchFrame_* cases pass a single scroll
+// line, so the loop only ever iterated once and the split plus the per-chunk index
+// offset were unverified. A mutant collapsing the split into one frame, or dropping
+// the +i so every chunk reuses scrollFirstIdx, would survive.
+func TestDispatchFrame_largeScrollBurstSplitsIntoChunks(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	const firstIdx uint64 = 7
+	lines := make([][]vt.WireRun, maxScrollLinesPerFrame+500)
+	for i := range lines {
+		lines[i] = makeLine("x")
+	}
+	frame := &flushFrame{
+		clients:        map[*websocket.Conn]uint64{server: 0},
+		scrollLines:    lines,
+		scrollFirstIdx: firstIdx,
+		screenHeight:   3,
+	}
+	h.dispatchFrame(frame)
+
+	var firstIdxs []uint64
+	var lineCounts []uint16
+	for _, f := range readServerFrames(t, client, 300*time.Millisecond) {
+		if len(f) >= 19 && f[0] == wireMsgScroll {
+			firstIdxs = append(firstIdxs, binary.LittleEndian.Uint64(f[9:17]))
+			lineCounts = append(lineCounts, binary.LittleEndian.Uint16(f[17:19]))
+		}
+	}
+	want := []uint64{firstIdx, firstIdx + maxScrollLinesPerFrame}
+	if len(firstIdxs) != len(want) {
+		t.Fatalf("burst of %d lines emitted %d scroll frame(s) (first indices %v); want %d at %v (split at maxScrollLinesPerFrame=%d)",
+			len(lines), len(firstIdxs), firstIdxs, len(want), want, maxScrollLinesPerFrame)
+	}
+	for i, w := range want {
+		if firstIdxs[i] != w {
+			t.Errorf("scroll chunk %d first index = %d, want %d (chunk i must start at scrollFirstIdx+i)", i, firstIdxs[i], w)
+		}
+	}
+	// Each chunk must be bounded by maxScrollLinesPerFrame and the chunks must
+	// together carry every input line exactly once: a mutant that stops bounding
+	// the slice end (shipping all lines in the first chunk and duplicating the
+	// tail) keeps the frame count and first indices but breaks these counts.
+	if lineCounts[0] != maxScrollLinesPerFrame || lineCounts[1] != uint16(len(lines)-maxScrollLinesPerFrame) {
+		t.Errorf("scroll chunk line counts = %v, want [%d %d] (each chunk bounded by maxScrollLinesPerFrame; no dropped or duplicated lines)",
+			lineCounts, maxScrollLinesPerFrame, len(lines)-maxScrollLinesPerFrame)
 	}
 }
 
@@ -630,10 +685,61 @@ func TestHandleResume_commitsScrolledLinesToHistory(t *testing.T) {
 	if before := h.scrollback.Committed(); before != 0 {
 		t.Fatalf("precondition: committed=%d, want 0 before resume", before)
 	}
-	h.handleResume(server, &ClientState{}, "sid", -1)
+	h.handleResume(server, &clientState{}, "sid", -1)
 
 	if got := h.scrollback.Committed(); got == 0 {
 		t.Errorf("handleResume committed %d lines to history; want > 0 (scrolled lines must be retained)", got)
+	}
+}
+
+// TestHandleResume_altStraddleDrainNotCommitted pins the alt-straddle guard in
+// handleResume (the !altTransitionPending term, the resume-side twin of Build's
+// guard): drain that straddles an alt-screen transition must NOT be committed to
+// main history on resume. TestHandleResume_commitsScrolledLinesToHistory covers
+// only the no-transition path (fresh builder => altTransitionPending false =>
+// commit). The two cases below share identical pending drain on the main screen
+// and differ ONLY in the builder's last-observed alt state, so the flipped commit
+// outcome proves the guard (not an empty drain) does the gating; a mutant dropping
+// the !altTransitionPending term commits alt lines as main history and is caught.
+func TestHandleResume_altStraddleDrainNotCommitted(t *testing.T) {
+	tests := []struct {
+		name          string
+		prevAltValid  bool
+		prevAlt       bool
+		wantCommitted bool
+	}{
+		{"transition pending (just left alt) drops straddling drain", true, true, false},
+		{"no pending transition commits drain", false, false, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+			server, cleanup := serverSideConn(t)
+			defer cleanup()
+
+			// Tiny screen + many newlines leaves lines in the pending (uncommitted)
+			// drain; the screen stays on the MAIN buffer (InAltScreen == false).
+			h.screen = vt.New(3, 20)
+			for range 20 {
+				if _, err := h.screen.Write([]byte("scrolled\r\n")); err != nil {
+					t.Fatalf("screen write: %v", err)
+				}
+			}
+			// With prevAlt=true and the screen now on main, altTransitionPending
+			// reports a not-yet-folded alt->main exit (Reset does not clear it).
+			h.builder.prevAltValid = tc.prevAltValid
+			h.builder.prevAlt = tc.prevAlt
+
+			if before := h.scrollback.Committed(); before != 0 {
+				t.Fatalf("precondition: committed=%d, want 0 before resume", before)
+			}
+			h.handleResume(server, &clientState{}, "sid", -1)
+
+			if gotCommitted := h.scrollback.Committed() > 0; gotCommitted != tc.wantCommitted {
+				t.Errorf("after resume: committed-history-present=%v, want %v (alt-straddle drain must be dropped; plain main-screen drain must commit)",
+					gotCommitted, tc.wantCommitted)
+			}
+		})
 	}
 }
 
@@ -649,7 +755,7 @@ func TestHandleResume_replayStartsAfterHaveThrough(t *testing.T) {
 
 	h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")})
 
-	h.handleResume(server, &ClientState{}, "sid", 0) // client already holds index 0
+	h.handleResume(server, &clientState{}, "sid", 0) // client already holds index 0
 
 	frames := readServerFrames(t, client, 300*time.Millisecond)
 	var scroll []byte
@@ -686,7 +792,7 @@ func TestHandleResume_replayChunkBoundaryEmitsSingleFrame(t *testing.T) {
 	}
 	h.scrollback.Append(lines)
 
-	h.handleResume(server, &ClientState{}, "sid", -1) // -1 ⇒ replay everything from index 0
+	h.handleResume(server, &clientState{}, "sid", -1) // -1 ⇒ replay everything from index 0
 
 	types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond))
 	if types[wireMsgScroll] != 1 {
@@ -710,7 +816,7 @@ func TestHandleResume_replayChunksCarryAscendingAbsoluteIndices(t *testing.T) {
 	}
 	h.scrollback.Append(lines)
 
-	h.handleResume(server, &ClientState{}, "sid", -1) // replay all from index 0
+	h.handleResume(server, &clientState{}, "sid", -1) // replay all from index 0
 
 	var firstIdxs []uint64
 	for _, f := range readServerFrames(t, client, 300*time.Millisecond) {
@@ -726,5 +832,203 @@ func TestHandleResume_replayChunksCarryAscendingAbsoluteIndices(t *testing.T) {
 		if firstIdxs[i] != w {
 			t.Errorf("scroll frame %d first index = %d, want %d (chunk %d starts at absolute index %d)", i, firstIdxs[i], w, i, w)
 		}
+	}
+}
+
+// TestHandleResize_belowMinimumIsFlooredUp pins the documented iPad
+// keyboard-slide behavior: a near-zero resize is floored UP to the minimum
+// (not dropped) and still starts the child. Existing resize tests only pass
+// dimensions above the minimum, so the `cols < minResizeCols` /
+// `rows < minResizeRows` floor branches were unexercised.
+func TestHandleResize_belowMinimumIsFlooredUp(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	defer h.Shutdown()
+
+	h.handleResize(1, 1)
+
+	if !h.started.Load() {
+		t.Fatalf("handleResize(1,1): process not started; a floored resize must still start the child")
+	}
+	h.mu.Lock()
+	w, ht := h.screen.Width, h.screen.Height
+	h.mu.Unlock()
+	if w != minResizeCols {
+		t.Errorf("handleResize(cols=1): screen.Width = %d, want %d (floored up to minResizeCols)", w, minResizeCols)
+	}
+	if ht != minResizeRows {
+		t.Errorf("handleResize(rows=1): screen.Height = %d, want %d (floored up to minResizeRows)", ht, minResizeRows)
+	}
+}
+
+// TestEnsureStarted_reaperInvokesOnProcessExitWithStatus exercises the
+// process-reaper goroutine added in cycle 1 (the `go func(){ cmd.Wait();
+// onProcessExit(werr); cancel() }` in ensureStarted). TestNewHandler_WithOnProcessExit
+// only calls the stored callback directly and never spawns a child, so the real
+// reaper path -- reap the child, forward cmd.Wait's exit status to onProcessExit --
+// was unasserted. Here a real child exits non-zero and the reaper must invoke
+// onProcessExit with the *exec.ExitError carrying the status. A mutant that drops
+// the callback invocation, or passes nil instead of cmd.Wait's result, is caught.
+func TestEnsureStarted_reaperInvokesOnProcessExitWithStatus(t *testing.T) {
+	exitErr := make(chan error, 1)
+	h := NewHandler([]string{"/bin/sh", "-c", "exit 7"},
+		WithWorkDir("/"),
+		WithLogger(nil),
+		WithOnProcessExit(func(err error) { exitErr <- err }),
+	)
+	defer h.Shutdown()
+
+	if err := h.ensureStarted(80, 24); err != nil {
+		t.Fatalf("ensureStarted: %v", err)
+	}
+
+	select {
+	case err := <-exitErr:
+		var ee *exec.ExitError
+		if !errors.As(err, &ee) {
+			t.Fatalf("onProcessExit err = %v (%T), want *exec.ExitError from cmd.Wait", err, err)
+		}
+		if ee.ExitCode() != 7 {
+			t.Errorf("child exit code = %d, want 7 (reaper must forward cmd.Wait's status)", ee.ExitCode())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("onProcessExit not called within 10s; the reaper goroutine must invoke it on child exit")
+	}
+}
+
+// TestHandlePTYData_writesDeviceQueryResponseToPTY pins the writeback half of
+// the handlePTYData refactor: a device-status query in the PTY output makes the
+// VT screen produce a Response, which handlePTYData must write back to the PTY
+// (outside h.mu). CSI 6 n (DSR cursor-position) on a fresh screen with the cursor
+// at home yields ESC[1;1R. No terminal-level test drove this path (handlePTYData
+// was 66.7%), so a mutant dropping the `resp = h.screen.Response` capture or the
+// `h.ptmx.Write(resp)` writeback survived. The read deadline is required so the
+// red case fails instead of blocking forever.
+func TestHandlePTYData_writesDeviceQueryResponseToPTY(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+	h.ptmx = pw
+
+	// DSR cursor-position query; the fresh 30x120 screen's cursor is at home.
+	h.handlePTYData([]byte("\x1b[6n"))
+
+	if err := pr.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, err := pr.Read(buf)
+	if err != nil {
+		t.Fatalf("reading device-query response from PTY: %v (handlePTYData must write screen.Response back)", err)
+	}
+	if got, want := string(buf[:n]), "\x1b[1;1R"; got != want {
+		t.Errorf("device-query response written to PTY = %q, want %q", got, want)
+	}
+}
+
+// TestHandleResume_frameOrderByAltState pins the resume frame-ordering invariant
+// behind findings l-f38 and h-f1: on resume with committed history beyond the
+// client's haveThrough, the server delivers the current-window screen frame and
+// the scroll replay in an order that depends on the live alt state, because the
+// window frame is what sets the client's alt flag and the client drops scroll
+// frames while that flag is set (store.ts applyScroll).
+//   - MAIN screen (InAltScreen=false): the window frame must PRECEDE the replay,
+//     so a client with a stale alt flag (disconnected in alt, app left alt while
+//     away) leaves alt before the replayed history lands; otherwise it is
+//     silently dropped (finding l-f38). The window must also be a full repaint at
+//     the committed base (num_changed == screen_height, base == committed).
+//   - ALT screen (InAltScreen=true): the replay must PRECEDE the window frame, so
+//     a client not yet in alt (fresh load / second tab on an in-alt session)
+//     stores the main-screen history before the window frame flips it into alt;
+//     otherwise that history is dropped (the h-f1 regression).
+//
+// In both arms the window frame must carry the live alt state (offset-26 bit3),
+// so a mutant hardcoding it false is caught.
+func TestHandleResume_frameOrderByAltState(t *testing.T) {
+	tests := []struct {
+		name        string
+		inAlt       bool
+		windowFirst bool // expected: window screen frame precedes the scroll replay
+	}{
+		{"main screen: window frame precedes replay", false, true},
+		{"in alt: replay precedes window frame", true, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+			server, client, cleanup := dualConn(t)
+			defer cleanup()
+
+			// Commit history the resuming client does not yet hold, so a scroll
+			// replay is generated alongside the window frame.
+			h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")})
+			// The window frame must carry this live alt state in both arms.
+			h.screen.InAltScreen = tc.inAlt
+
+			h.handleResume(server, &clientState{}, "sid", -1) // -1 ⇒ client holds nothing, replay all
+
+			frames := readServerFrames(t, client, 300*time.Millisecond)
+
+			firstScreen, firstScroll := -1, -1
+			for i, f := range frames {
+				if len(f) == 0 {
+					continue
+				}
+				switch f[0] {
+				case wireMsgScreen:
+					if firstScreen == -1 {
+						firstScreen = i
+					}
+				case wireMsgScroll:
+					if firstScroll == -1 {
+						firstScroll = i
+					}
+				}
+			}
+
+			if firstScreen == -1 {
+				t.Fatalf("resume sent no screen frame; the current window must be delivered on resume")
+			}
+			if firstScroll == -1 {
+				t.Fatalf("resume sent no scroll frame; committed history beyond haveThrough must be replayed")
+			}
+			if tc.windowFirst && firstScreen >= firstScroll {
+				t.Errorf("window screen frame at index %d, scroll replay at index %d; on the main screen the window frame must precede the replay so the client leaves alt before the history lands",
+					firstScreen, firstScroll)
+			}
+			if !tc.windowFirst && firstScroll >= firstScreen {
+				t.Errorf("scroll replay at index %d, window screen frame at index %d; in alt the replay must precede the window frame so a not-yet-alt client stores history before the window flips it into alt",
+					firstScroll, firstScreen)
+			}
+
+			// The window frame must carry the server's LIVE alt state. cursor_flags
+			// is the byte at offset 26 (1 type + 8 ack + 8 base + 2 row + 2 col + 2
+			// height + 2 num_changed + 1 style); bit3 (0x08) is altActive.
+			screenFrame := frames[firstScreen]
+			if len(screenFrame) < 27 {
+				t.Fatalf("screen frame too short (%d bytes) to carry the cursor_flags byte", len(screenFrame))
+			}
+			if gotAlt := screenFrame[26]&0x08 != 0; gotAlt != tc.inAlt {
+				t.Errorf("window frame altActive bit = %v, want %v (frame must reflect the server's live screen state)", gotAlt, tc.inAlt)
+			}
+
+			// On the main screen the resume window frame must additionally be a
+			// FULL repaint at the committed base: every screen row is present
+			// (num_changed == screen_height) and base equals the committed history
+			// length (3 lines appended above). The ordering and alt-bit checks read
+			// only the frame header, so neither pins the window's row set.
+			if !tc.inAlt {
+				gotHeight := binary.LittleEndian.Uint16(screenFrame[21:23])
+				gotChanged := binary.LittleEndian.Uint16(screenFrame[23:25])
+				if gotChanged != gotHeight {
+					t.Errorf("window frame num_changed = %d, want %d (== screen_height; resume window must repaint every row)", gotChanged, gotHeight)
+				}
+				if gotBase := binary.LittleEndian.Uint64(screenFrame[9:17]); gotBase != 3 {
+					t.Errorf("window frame base = %d, want 3 (committed history length; window sits just past committed)", gotBase)
+				}
+			}
+		})
 	}
 }

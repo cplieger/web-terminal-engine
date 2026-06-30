@@ -373,6 +373,14 @@ export function connect(): void {
       /* ignore */
     }
   }
+  // Re-entry while a backoff reconnect is pending (e.g. a consumer calling
+  // connect() to restore a panel during the 500ms-8s backoff window): clear the
+  // scheduled timer so it cannot fire later and spawn a SECOND socket alongside
+  // the one created below. The orphaned timer resets connState to disconnected
+  // and calls connect() again, while the existing socket's listeners stay bound
+  // (its abort never fired) -> a duplicate server connection + double delivery.
+  // cancelScheduledReconnect is a no-op in any non-reconnecting state.
+  cancelScheduledReconnect();
 
   cb?.onConnecting?.();
 

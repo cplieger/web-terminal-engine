@@ -1,7 +1,6 @@
 package vt
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 )
@@ -167,47 +166,7 @@ func clampByte(v int) uint8 {
 
 // sgrSequence emits an ANSI SGR escape that reproduces the given Style.
 func sgrSequence(st Style) string {
-	var params []string
-	if st == (Style{}) {
-		return "\x1b[0m"
-	}
-	params = append(params, "0")
-	if st.Bold {
-		params = append(params, "1")
-	}
-	if st.Dim {
-		params = append(params, "2")
-	}
-	if st.Italic {
-		params = append(params, "3")
-	}
-	if st.Underline {
-		params = append(params, "4")
-	}
-	if st.DoubleUnderline {
-		params = append(params, "21")
-	}
-	if st.Blink {
-		params = append(params, "5")
-	}
-	if st.Inverse {
-		params = append(params, "7")
-	}
-	if st.Hidden {
-		params = append(params, "8")
-	}
-	if st.Strikethrough {
-		params = append(params, "9")
-	}
-	if st.Overline {
-		params = append(params, "53")
-	}
-	params = appendColorParams(params, st.FG, 30)
-	params = appendColorParams(params, st.BG, 40)
-	if st.UnderlineColor.Type != 0 {
-		params = appendUnderlineColorParams(params, st.UnderlineColor)
-	}
-	return fmt.Sprintf("\x1b[%sm", strings.Join(params, ";"))
+	return "\x1b[" + sgrParamsString(st) + "m"
 }
 
 func appendColorParams(params []string, c Color, base int) []string {

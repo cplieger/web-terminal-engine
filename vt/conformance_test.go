@@ -214,3 +214,57 @@ func TestDECSCNM(t *testing.T) {
 		t.Errorf("DECRQM ?5 after set: got %q, want %q", string(s.Response), want)
 	}
 }
+
+// TestDECRQM_ANSI verifies DECRQM for ANSI modes (no '?' prefix): IRM (4) and
+// LNM (20) report reset (2); an unrecognized mode reports not-recognized (0).
+func TestDECRQM_ANSI(t *testing.T) {
+	cases := []struct {
+		seq  string
+		want string
+	}{
+		{"\x1b[4$p", "\x1b[4;2$y"},
+		{"\x1b[20$p", "\x1b[20;2$y"},
+		{"\x1b[99$p", "\x1b[99;0$y"},
+	}
+	for _, tc := range cases {
+		s := New(24, 80)
+		s.Write([]byte(tc.seq))
+		if got := string(s.Response); got != tc.want {
+			t.Errorf("DECRQM %q = %q, want %q", tc.seq, got, tc.want)
+		}
+	}
+}
+
+// TestAutoWrapMarginGating verifies DECAWM (CSI ?7h / ?7l) gates the right-margin
+// wrap. With autowrap on (the default) a printable written past the last column
+// wraps to the next row; with autowrap off the cursor parks at the last column and
+// the next printable overwrites it in place.
+func TestAutoWrapMarginGating(t *testing.T) {
+	cases := []struct {
+		name     string
+		mode     string
+		wantRow  int
+		wantLast rune
+		wantNext rune
+	}{
+		{"autowrap on wraps to next row", "\x1b[?7h", 1, 'E', 'F'},
+		{"autowrap off overwrites last cell", "\x1b[?7l", 0, 'F', ' '},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, 5)
+			s.Write([]byte(tc.mode))
+			s.Write([]byte("ABCDE")) // fills the row; cursor parks at the last column
+			s.Write([]byte("F"))     // the overflow character
+			if s.curY != tc.wantRow {
+				t.Errorf("%s: curY = %d, want %d", tc.name, s.curY, tc.wantRow)
+			}
+			if got := s.Cells[0][4].Ch; got != tc.wantLast {
+				t.Errorf("%s: Cells[0][4].Ch = %q, want %q", tc.name, got, tc.wantLast)
+			}
+			if got := s.Cells[1][0].Ch; got != tc.wantNext {
+				t.Errorf("%s: Cells[1][0].Ch = %q, want %q", tc.name, got, tc.wantNext)
+			}
+		})
+	}
+}

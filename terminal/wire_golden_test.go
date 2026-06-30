@@ -34,7 +34,7 @@ func goldenFrames() map[string][]byte {
 		// resumeAck: ack=7, epoch, committed=200, oldest=10.
 		"resumeack": encodeResumeAck(7, 1234567890, 200, 10),
 		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002.
-		"modes": encodeModesMsg(0, true, false, true, false, false, true, 1002),
+		"modes": encodeModesMsg(true, false, true, false, false, true, 1002),
 		"title": encodeTitleMsg(0, "hello world"),
 		"pong":  encodePongMsg(),
 	}

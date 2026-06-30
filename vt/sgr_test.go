@@ -221,3 +221,25 @@ func TestSGRSubparamMixed(t *testing.T) {
 		t.Errorf("BG 256: got %+v", cell.Style.BG)
 	}
 }
+
+// TestSGRSubparamNonColorAttrPreservesFollowingGroups verifies that a colon
+// subparam attached to a NON-color SGR attribute (4:3 = underline style 3) stays
+// inside its own parameter group: the trailing :3 must not leak out as a separate
+// SGR 3 (italic), and the groups that follow (31 = red FG, 1 = bold) still apply.
+func TestSGRSubparamNonColorAttrPreservesFollowingGroups(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b[4:3;31;1mX"))
+	st := s.Cells[0][0].Style
+	if !st.Underline {
+		t.Errorf("4:3;31;1: Underline = false, want true (group 0 = 4:3 = underline)")
+	}
+	if st.Italic {
+		t.Errorf("4:3;31;1: Italic = true, want false (the :3 subparam must stay inside group 0, not leak as SGR 3)")
+	}
+	if st.FG.Type != 1 || st.FG.Val != 1 {
+		t.Errorf("4:3;31;1: FG = %+v, want {Type:1 Val:1} (red, group 1 = 31)", st.FG)
+	}
+	if !st.Bold {
+		t.Errorf("4:3;31;1: Bold = false, want true (group 2 = 1 must apply after the colon group)")
+	}
+}

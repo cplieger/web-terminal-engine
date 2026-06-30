@@ -60,10 +60,16 @@ class Cursor {
     return v;
   }
   u64(): number {
-    // Number(v) is safe here: all values this protocol encodes in u64
-    // fields (bytesReceived, serverEpoch) fit within JavaScript's 53-bit
-    // integer precision. If the protocol ever needs true 64-bit values,
-    // this must return BigInt instead.
+    // Number(v) loses precision above 2^53. That is safe for every u64 this
+    // protocol decodes because of how each value is USED, not because they all fit:
+    //   - base / firstIndex / committed / oldestIndex / inputAck (bytesReceived)
+    //     stay well under 2^53 for any realistic session, so arithmetic is exact.
+    //   - serverEpoch is the server's time.Now().UnixNano() (~1.77e18, far ABOVE
+    //     2^53), so it DOES drop low bits here. That is harmless: it is only ever
+    //     equality-compared to detect a restart, and Number() is deterministic, so
+    //     one epoch always maps to one double and two distinct boots differ by far
+    //     more than the ~256ns rounding granularity at that magnitude.
+    // If a future u64 field needs exact values above 2^53, return BigInt instead.
     const v = this.view.getBigUint64(this.off, true);
     this.off += 8;
     return Number(v);

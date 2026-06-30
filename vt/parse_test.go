@@ -22,6 +22,23 @@ func TestC1BytesInGroundEmitReplacement(t *testing.T) {
 	}
 }
 
+// TestInvalidUTF8LeadBytesEmitReplacement verifies the invalid UTF-8 lead
+// bytes 0xF8-0xFF (no valid UTF-8 sequence begins with these) each emit one
+// U+FFFD in Ground and leave the parser in Ground - the same replacement
+// error model the C1 and overlong paths use.
+func TestInvalidUTF8LeadBytesEmitReplacement(t *testing.T) {
+	for b := 0xF8; b <= 0xFF; b++ {
+		s := New(1, 5)
+		s.Write([]byte{byte(b)})
+		if got := s.Cells[0][0].Ch; got != 0xFFFD {
+			t.Errorf("lead byte 0x%02x in Ground: Cells[0][0].Ch = %U, want U+FFFD", b, got)
+		}
+		if s.pState != stGround {
+			t.Errorf("lead byte 0x%02x: state=%d, want Ground (stGround)", b, s.pState)
+		}
+	}
+}
+
 // TestC1_0x9B_InGroundDoesNotStartCSI verifies 0x9B in Ground emits U+FFFD and
 // the following bytes are printed literally (it does not begin a CSI).
 func TestC1_0x9B_InGroundDoesNotStartCSI(t *testing.T) {
@@ -184,7 +201,10 @@ func TestParserSplitUTF8AcrossWrites(t *testing.T) {
 }
 
 // TestParserInvalidUTF8Continuation verifies an invalid continuation byte
-// resets UTF-8 state without leaving the cursor out of bounds.
+// aborts the truncated UTF-8 sequence by emitting one U+FFFD for the ill-formed
+// lead (the same error model every other malformed-UTF-8 path uses), then
+// re-processes the interrupting byte in Ground — without leaving the cursor out
+// of bounds.
 func TestParserInvalidUTF8Continuation(t *testing.T) {
 	s := New(5, 80)
 	s.Write([]byte{0xE6, 'A'}) // 0xE6 starts a 3-byte rune, 'A' is not a continuation
@@ -194,6 +214,14 @@ func TestParserInvalidUTF8Continuation(t *testing.T) {
 	}
 	if row < 0 || row >= s.Height {
 		t.Fatalf("row %d out of bounds", row)
+	}
+	// The truncated lead renders as U+FFFD and the interrupting byte is then
+	// printed in Ground, so no byte is silently dropped.
+	if s.Cells[0][0].Ch != 0xFFFD {
+		t.Errorf("Cells[0][0].Ch = %U, want U+FFFD for truncated lead", s.Cells[0][0].Ch)
+	}
+	if s.Cells[0][1].Ch != 'A' {
+		t.Errorf("Cells[0][1].Ch = %U, want 'A' (re-processed interrupting byte)", s.Cells[0][1].Ch)
 	}
 }
 
@@ -328,5 +356,33 @@ func TestBackspaceAtColumnZeroStaysPut(t *testing.T) {
 	s.Write([]byte{0x08}) // BS while already at column 0
 	if _, col := s.CursorPos(); col != 0 {
 		t.Errorf("backspace at column 0: col=%d, want 0 (must not decrement below 0)", col)
+	}
+}
+
+// TestUTF8ValidationEmitsReplacement verifies decodeUTF8Bytes rejects malformed
+// multi-byte sequences by emitting U+FFFD into the cell: overlong encodings,
+// surrogate code points, values above U+10FFFF, and U+FFFF itself (which collides
+// with the wire wide-continuation sentinel in cellsToRuns, so a real U+FFFF must
+// never reach a cell).
+func TestUTF8ValidationEmitsReplacement(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+	}{
+		{"overlong 2-byte NUL", []byte{0xC0, 0x80}},
+		{"overlong 3-byte solidus", []byte{0xE0, 0x80, 0xAF}},
+		{"overlong 4-byte NUL", []byte{0xF0, 0x80, 0x80, 0x80}},
+		{"surrogate U+D800", []byte{0xED, 0xA0, 0x80}},
+		{"U+FFFF wire-sentinel collision", []byte{0xEF, 0xBF, 0xBF}},
+		{"above U+10FFFF", []byte{0xF7, 0xBF, 0xBF, 0xBF}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(1, 5)
+			s.Write(tc.in)
+			if got := s.Cells[0][0].Ch; got != 0xFFFD {
+				t.Errorf("%s: Cells[0][0].Ch = %U, want U+FFFD", tc.name, got)
+			}
+		})
 	}
 }

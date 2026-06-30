@@ -70,7 +70,7 @@ golangci-lint fmt   # apply gofumpt + gci formatting
 `go.mod` targets Go 1.26+. Linting is golangci-lint v2 (`.golangci.yaml`):
 `golangci-lint run` reports unformatted files as issues, so run
 `golangci-lint fmt` before pushing. The config enables a strict linter set
-(gosec, gocritic, revive, gocyclo at complexity 18, sloglint kv-only, and
+(gosec, gocritic, revive, gocyclo and gocognit at complexity 15, sloglint kv-only, and
 the gofumpt/gci formatters with extra rules).
 
 ### TypeScript (`web/`)
@@ -101,7 +101,7 @@ both if you changed the wire format.
 - **Tests live beside the code** (`*_test.go`, `*.test.ts`). The suites lean
   heavily on fuzz and adversarial/red-team tests; when you change the parser
   or the wire codec, extend the fuzz corpus rather than only adding a happy
-  path. Wire round-trip fuzzing (`terminal/fuzz_wire_roundtrip_test.go`,
+  path. Wire round-trip fuzzing (`terminal/wire_binary_fuzz_test.go`,
   `web/src/wire-binary.fuzz.test.ts`) guards the cross-language contract.
 - **Public API is a surface.** The exported Go symbols (`vt.New`,
   `terminal.NewHandler`, the `WithX` options) and the TS package exports

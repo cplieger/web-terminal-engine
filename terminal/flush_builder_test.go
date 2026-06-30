@@ -33,7 +33,7 @@ func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 	if _, err := screen.Write([]byte("hello world")); err != nil {
 		t.Fatalf("screen write: %v", err)
 	}
-	b := &FlushFrameBuilder{}
+	b := &flushFrameBuilder{}
 
 	// First frame: full repaint baseline.
 	frame := b.Build(screen, true, noClients, 0)
@@ -89,7 +89,7 @@ func TestBuild_CursorBetweenRowsTouchesBothRows(t *testing.T) {
 	if _, err := screen.Write([]byte("\x1b[6;1Habcde\x1b[8;1Hxyz\x1b[6;6H")); err != nil {
 		t.Fatalf("screen write: %v", err)
 	}
-	b := &FlushFrameBuilder{}
+	b := &flushFrameBuilder{}
 	if frame := b.Build(screen, true, noClients, 0); frame == nil {
 		t.Fatal("baseline Build returned nil")
 	}
@@ -130,7 +130,7 @@ func TestBuild_scrollbackProducesScrollLines(t *testing.T) {
 		}
 	}
 
-	b := &FlushFrameBuilder{}
+	b := &flushFrameBuilder{}
 	frame := b.Build(screen, true, noClients, 0)
 	if frame == nil {
 		t.Fatalf("Build returned nil; expected a full-repaint baseline frame")
@@ -145,7 +145,7 @@ func TestBuild_scrollbackProducesScrollLines(t *testing.T) {
 // (returns nil) when the title is unchanged.
 func TestBuildTitlePayload_changeDetection(t *testing.T) {
 	screen := vt.New(5, 20)
-	b := &FlushFrameBuilder{}
+	b := &flushFrameBuilder{}
 
 	screen.Title = "first"
 	// First call: not yet announced -> must emit a payload.
@@ -188,7 +188,7 @@ func TestAppendRowIfMissing_rowCountBoundary(t *testing.T) {
 func TestBuild_AbsoluteIndexIntegrity(t *testing.T) {
 	screen := vt.New(3, 20) // tiny screen so each printed line soon scrolls
 	ring := newScrollbackRing(1000)
-	b := &FlushFrameBuilder{}
+	b := &flushFrameBuilder{}
 	client := map[uint64][]vt.WireRun{}
 
 	apply := func() {
@@ -263,4 +263,41 @@ func trimTrailingSpaces(s string) string {
 		end--
 	}
 	return s[:end]
+}
+
+// TestBuild_bellOnlyStillEmitsFrame pins the bell fold in Build: a BEL changes
+// no cell and moves no cursor, so diffWindow yields no changed rows and the
+// cursor is unmoved -- frameEmpty would drop the frame and the bell would never
+// reach the client. Build folds the cursor row into `changed` when the bell rang
+// so the screen frame is emitted with its bell flag set. A mutant removing that
+// fold makes this Build return nil. The first Build primes the previous-window
+// cache so the second sees a genuinely idle (bell-only) screen.
+func TestBuild_bellOnlyStillEmitsFrame(t *testing.T) {
+	screen := vt.New(10, 40)
+	if _, err := screen.Write([]byte("hello world")); err != nil {
+		t.Fatalf("screen write: %v", err)
+	}
+	b := &flushFrameBuilder{}
+
+	// Prime the prev-window cache with a full-repaint baseline.
+	if frame := b.Build(screen, true, noClients, 0); frame == nil {
+		t.Fatal("baseline Build returned nil; expected full repaint")
+	}
+
+	// Ring the bell only: no cell change, no cursor move.
+	if _, err := screen.Write([]byte{0x07}); err != nil {
+		t.Fatalf("write BEL: %v", err)
+	}
+
+	frame := b.Build(screen, true, noClients, 0)
+	if frame == nil {
+		t.Fatal("bell-only Build returned nil; the bell fold must emit a frame so the bell reaches the client")
+	}
+	if !frame.bell {
+		t.Error("bell-only frame has bell=false; want true")
+	}
+	curRow, _ := screen.CursorPos()
+	if !slices.Contains(frame.changed, curRow) {
+		t.Errorf("bell-only frame changed=%v missing cursor row %d (needed so the screen payload, and its bell bit, is emitted)", frame.changed, curRow)
+	}
 }

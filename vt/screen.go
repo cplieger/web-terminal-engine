@@ -300,7 +300,7 @@ func (s *Screen) put(r rune) {
 	}
 
 	// Width-2: if only 1 cell remains on the line, wrap first (xterm behavior).
-	if w == 2 && s.curX == s.Width-1 {
+	if w == 2 && s.curX == s.Width-1 && s.AutoWrap {
 		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style}
 		s.curX = 0
 		s.curY++
@@ -328,10 +328,12 @@ func (s *Screen) put(r rune) {
 	switch {
 	case s.curX >= s.Width:
 		s.curX = s.Width - 1
-		s.pendingWrap = true
+		s.pendingWrap = s.AutoWrap
 	case s.curX == s.Width-1:
-		// Don't advance — set pending wrap for next put.
-		s.pendingWrap = true
+		// At the right margin, arm a deferred wrap only when autowrap (DECAWM)
+		// is on. With DECAWM off (CSI ?7l) the cursor stays at the last column
+		// and the next printable overwrites it.
+		s.pendingWrap = s.AutoWrap
 	default:
 		s.curX++
 	}

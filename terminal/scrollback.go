@@ -92,7 +92,7 @@ func (r *scrollbackRing) LinesFrom(abs uint64) (firstAbs uint64, lines [][]vt.Wi
 }
 
 // Lines returns all retained lines in order (oldest first). Retained for
-// tests and debug paths; the live and resume paths use LinesFrom.
+// tests; the live and resume paths use LinesFrom.
 func (r *scrollbackRing) Lines() [][]vt.WireRun {
 	if r.count == 0 {
 		return nil

@@ -26,8 +26,10 @@ Three packages, two languages, one wire contract:
 ### The wire contract is load-bearing
 
 The Go server and TS client do **not** import shared types — they agree on a
-byte-level binary WebSocket frame format documented in
-[WIRE_PROTOCOL.md](WIRE_PROTOCOL.md). The canonical implementations are:
+byte-level binary WebSocket frame format. The code is the authoritative
+definition (guarded by the round-trip fuzz tests and the `wire-golden/*.bin`
+fixtures); the README's "Wire Protocol" section carries the design rationale.
+The canonical implementations are:
 
 - Encoder (Go): `terminal/wire_binary.go`
 - Decoder (Go): `vt/wire.go`
@@ -38,12 +40,12 @@ byte-level binary WebSocket frame format documented in
 There is no version byte in the frame header. The Go module and the npm/JSR
 package are released in lockstep, so a breaking wire change **must land in
 both the Go encoder/decoder and the TS decoder in a single PR/release**. If
-you touch one side of the protocol, update the other side, WIRE_PROTOCOL.md,
-and the round-trip fuzz tests together.
+you touch one side of the protocol, update the other side and the round-trip
+fuzz tests together (and the README "Wire Protocol" rationale if the model changes).
 
 ### Intentional non-features
 
-The README and WIRE_PROTOCOL.md both carry an "Unsupported by Design" table
+The README carries an "Unsupported by Design" table
 (selective erase, double-width lines, Sixel/Kitty graphics, NRCS charsets,
 exotic SGR, ZWJ clustering, DCS device control). These are deliberate scope
 decisions, not gaps — input for these sequences is consumed but produces no

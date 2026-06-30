@@ -355,11 +355,13 @@ describe("bindMobileToolbar: happy path", () => {
     fireDown(fixture.buttons["kb-ctrl"]!);
     expect(ctrl.isCtrlArmed()).toBe(true);
     expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(true);
+    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("true");
     expect(onChange).toHaveBeenLastCalledWith(true);
 
     fireDown(fixture.buttons["kb-ctrl"]!);
     expect(ctrl.isCtrlArmed()).toBe(false);
     expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(false);
+    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("false");
     expect(onChange).toHaveBeenLastCalledWith(false);
 
     expect(send).not.toHaveBeenCalled();
@@ -455,10 +457,12 @@ describe("bindMobileToolbar: dispose", () => {
     const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
     ctrl.setCtrlArmed(true);
     expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(true);
+    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("true");
 
     ctrl.dispose();
     expect(ctrl.isCtrlArmed()).toBe(false);
     expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(false);
+    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("false");
   });
 
   it("is idempotent", () => {

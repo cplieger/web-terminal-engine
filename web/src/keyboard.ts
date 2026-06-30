@@ -470,7 +470,7 @@ export interface MobileToolbarController {
    *     would garble it.
    */
   applyStickyCtrl(text: string): string;
-  /** Programmatically arm/disarm Ctrl. Updates the toolbar button visuals + fires `onCtrlChange`. */
+  /** Programmatically arm/disarm Ctrl. Updates the toolbar button visuals (`.armed` class + `aria-pressed`) + fires `onCtrlChange`. */
   setCtrlArmed(on: boolean): void;
   /** Whether sticky-Ctrl is currently armed. */
   isCtrlArmed(): boolean;
@@ -513,20 +513,28 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
   const enterBtn = findBtn(ids.enter);
   const escBtn = findBtn(ids.esc);
 
+  function paintCtrlBtn(on: boolean): void {
+    if (!ctrlBtn) {
+      return;
+    }
+    ctrlBtn.classList.toggle("armed", on);
+    // Keep the ARIA toggle state in sync with the visual `.armed` class so
+    // assistive tech announces the sticky-Ctrl button as pressed/unpressed.
+    // The scaffold ships kb-ctrl as `aria-pressed="false"`; consumers used to
+    // own this in their own setCtrlArmed before delegating the toolbar here.
+    ctrlBtn.setAttribute("aria-pressed", on ? "true" : "false");
+  }
+
   function setCtrlArmed(on: boolean): void {
     if (armed === on) {
       // Still update visuals defensively (e.g. after dispose was called
       // and someone re-armed via setCtrlArmed) — but skip the change
       // notification to keep onCtrlChange edge-triggered.
-      if (ctrlBtn) {
-        ctrlBtn.classList.toggle("armed", on);
-      }
+      paintCtrlBtn(on);
       return;
     }
     armed = on;
-    if (ctrlBtn) {
-      ctrlBtn.classList.toggle("armed", on);
-    }
+    paintCtrlBtn(on);
     opts.onCtrlChange?.(on);
   }
 

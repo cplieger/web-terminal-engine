@@ -178,6 +178,12 @@ export function init(opts: {
   rowEls.clear();
   renderQueue.clear();
   trimMarkerEl = null;
+  // Drop the predicted-cursor overlay (re-created lazily against the new
+  // termWrap on the next setPredictedCursor call) so re-init starts clean.
+  if (predCursorEl) {
+    predCursorEl.remove();
+    predCursorEl = null;
+  }
   output.replaceChildren();
   cursorAbs = -1;
   if (pendingFrame !== undefined) {
@@ -785,16 +791,28 @@ export function getCursorPx(): { left: number; top: number; cellH: number } {
 
 let predCursorEl: HTMLElement | null = null;
 
+// Create the predicted-cursor overlay the renderer owns. Appended to termWrap
+// (the positioned scroll container) so its absolute left/top math matches the
+// row offsets. Styled by the `.pred-cursor` class from the UI CSS bundle. The
+// renderer owning this means the engine never depends on a host-provided
+// `#pred-cursor` scaffold element.
+function createPredCursorEl(): HTMLElement {
+  const el = document.createElement("div");
+  el.className = "pred-cursor";
+  el.setAttribute("aria-hidden", "true");
+  termWrap.appendChild(el);
+  return el;
+}
+
 /**
  * Show or hide a "predicted" cursor overlay at window-relative (row, col).
  * Useful for client-side echo of typed characters before the server
- * acknowledges them, over high-latency connections.
+ * acknowledges them, over high-latency connections. The overlay element is
+ * created lazily on first use (a consumer that never predicts never creates
+ * it).
  */
 export function setPredictedCursor(row: number, col: number, active: boolean): void {
-  const el = predCursorEl ?? (predCursorEl = document.getElementById("pred-cursor"));
-  if (!el) {
-    return;
-  }
+  const el = predCursorEl ?? (predCursorEl = createPredCursorEl());
   const win = store.getWindow();
   const predAbs = win.base + row;
   if (!active || (predAbs === cursorAbs && col === cursorCol)) {

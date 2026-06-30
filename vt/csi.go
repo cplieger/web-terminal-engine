@@ -451,7 +451,7 @@ func (s *Screen) insertChars(n int) {
 		row[x] = row[x-n]
 	}
 	for x := s.curX; x < s.curX+n && x < s.Width; x++ {
-		row[x] = Cell{Ch: ' '}
+		row[x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 	}
 }
 
@@ -465,7 +465,7 @@ func (s *Screen) deleteChars(n int) {
 		row[x] = row[x+n]
 	}
 	for x := s.Width - n; x < s.Width; x++ {
-		row[x] = Cell{Ch: ' '}
+		row[x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 	}
 }
 
@@ -529,7 +529,7 @@ func (s *Screen) shiftLeft(n int) {
 	if n >= s.Width {
 		for y := s.scrollTop; y <= s.scrollBottom; y++ {
 			for x := range s.Width {
-				s.Cells[y][x] = Cell{Ch: ' '}
+				s.Cells[y][x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 			}
 		}
 		return
@@ -540,7 +540,7 @@ func (s *Screen) shiftLeft(n int) {
 			row[x] = row[x+n]
 		}
 		for x := s.Width - n; x < s.Width; x++ {
-			row[x] = Cell{Ch: ' '}
+			row[x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 		}
 	}
 }
@@ -549,7 +549,7 @@ func (s *Screen) shiftRight(n int) {
 	if n >= s.Width {
 		for y := s.scrollTop; y <= s.scrollBottom; y++ {
 			for x := range s.Width {
-				s.Cells[y][x] = Cell{Ch: ' '}
+				s.Cells[y][x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 			}
 		}
 		return
@@ -560,7 +560,7 @@ func (s *Screen) shiftRight(n int) {
 			row[x] = row[x-n]
 		}
 		for x := range n {
-			row[x] = Cell{Ch: ' '}
+			row[x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 		}
 	}
 }
@@ -589,31 +589,3 @@ func (s *Screen) softReset() {
 
 // maxCSIArgValue is the maximum value a single CSI parameter can take.
 const maxCSIArgValue = 65535
-
-// csiArg is a backward-compatible helper that parses the first numeric
-// parameter from a raw CSI parameter string. Used only by tests.
-func csiArg(args string, def int) int {
-	clean := args
-	for clean != "" && (clean[0] == '?' || clean[0] == '>' || clean[0] == '!') {
-		clean = clean[1:]
-	}
-	if clean == "" {
-		return def
-	}
-	// Extract first number (up to ; or end)
-	end := 0
-	for end < len(clean) && clean[end] >= '0' && clean[end] <= '9' {
-		end++
-	}
-	if end == 0 {
-		return def
-	}
-	var n int
-	for _, ch := range clean[:end] {
-		n = n*10 + int(ch-'0')
-		if n > maxCSIArgValue {
-			return maxCSIArgValue
-		}
-	}
-	return n
-}

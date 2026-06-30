@@ -137,6 +137,9 @@ let cursorAbs = -1; // absolute index of the row the cursor is on
 let cursorCol = 0;
 let cursorHidden = false;
 let cursorStyleVal = 0; // 0-6: DECSCUSR
+let prevCursorCol = -1;
+let prevCursorHidden = false;
+let prevCursorStyleVal = -1;
 
 function cursorClassName(): string {
   // DECSCUSR: 0/1=blinking block, 2=steady block, 3=blinking underline,
@@ -463,7 +466,7 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
   }
   if (out.length === 0) {
     const span = document.createElement("span");
-    span.innerHTML = "&nbsp;";
+    span.textContent = "\u00a0";
     out.push(span);
   }
   return linkifySpans(out);
@@ -561,15 +564,28 @@ function flushRenderInner(): void {
     renderQueue.add(abs);
   }
 
-  // The cursor rows are built every frame regardless of the budget so the
-  // inline cursor span is always current (it moves off the old row and onto
-  // the new one); a huge backlog must never make the caret lag.
+  // The cursor rows are built regardless of the budget so the inline cursor span
+  // is always current; a huge backlog must never make the caret lag. But skip
+  // rebuilding the current cursor row when neither the cursor's visual state nor
+  // the row content changed: an unconditional replaceChildren() would discard a
+  // text selection on that row, defeating the byte-identical selection-preserving
+  // guarantee the store idempotency gives every other row.
   if (prevCursorAbs !== newCursorAbs && prevCursorAbs >= 0) {
     upsertRow(prevCursorAbs);
     renderQueue.delete(prevCursorAbs);
   }
-  upsertRow(newCursorAbs);
+  const cursorVisualChanged =
+    prevCursorAbs !== newCursorAbs ||
+    cursorCol !== prevCursorCol ||
+    cursorHidden !== prevCursorHidden ||
+    cursorStyleVal !== prevCursorStyleVal;
+  if (cursorVisualChanged || renderQueue.has(newCursorAbs)) {
+    upsertRow(newCursorAbs);
+  }
   renderQueue.delete(newCursorAbs);
+  prevCursorCol = cursorCol;
+  prevCursorHidden = cursorHidden;
+  prevCursorStyleVal = cursorStyleVal;
 
   // Drain up to MAX_ROWS_PER_FRAME queued rows this frame; the rest carry over
   // to the next frame (scheduled below) so one big burst never blocks paint.

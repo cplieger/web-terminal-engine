@@ -122,6 +122,28 @@ describe("LineStore", () => {
     expect(s.getLine(0)).toBeUndefined();
   });
 
+  it("advances oldest across a large index gap when evicting at the cap (bounded scan, no integer walk)", () => {
+    // A compromised or malformed server frame can deliver content at an
+    // absolute index far above the retained low index. When the cap then
+    // forces eviction of that low line, advancing `oldest` must scan the small
+    // retained key set, never walk the integer gap to the next index -- a naive
+    // `while (!has(oldest)) oldest++` fallback would iterate ~1e9 times here and
+    // freeze the tab (an algorithmic-complexity DoS). The bounded key-scan lands
+    // oldest on the surviving far block immediately.
+    const s = new LineStore(3); // tiny cap
+    s.applyScroll(scrollMsg(0, ["low"]));
+    const far = 1_000_000_000;
+    s.applyScroll(scrollMsg(far, ["a", "b", "c"])); // 4 lines, cap 3 -> evict abs 0
+    expect(s.getLine(0)).toBeUndefined();
+    expect(s.oldestIndex()).toBe(far);
+    expect(s.highestIndex()).toBe(far + 2);
+    expect(lineTexts(s)).toEqual([
+      { abs: far, text: "a" },
+      { abs: far + 1, text: "b" },
+      { abs: far + 2, text: "c" },
+    ]);
+  });
+
   it("skips holes when iterating (trimmed-history gap shows as a jump in abs)", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, ["a", "b"]));
@@ -184,6 +206,20 @@ describe("LineStore", () => {
     // Negative and non-integer indices via a hand-built scroll frame.
     s.applyScroll({ type: "scroll", firstIndex: -5, lines: [row("neg")] });
     expect(s.highestIndex()).toBe(-1); // -5 rejected
+  });
+
+  it("drops a malformed line whose runs are not an array (apply-line guard 3)", () => {
+    const s = new LineStore();
+    // A malformed scroll frame (reachable via the JSON text-frame path, which
+    // is parsed without structural validation) carries a line payload that is
+    // not a WireRun array. Guard 3 must drop it rather than store a corrupt row.
+    s.applyScroll({
+      type: "scroll",
+      firstIndex: 0,
+      lines: ["not-a-run-array" as unknown as WireRun[]],
+    });
+    expect(s.highestIndex()).toBe(-1);
+    expect(s.getLine(0)).toBeUndefined();
   });
 
   it("reports trimmed history from a client-side eviction (resync guard 8.2.2)", () => {

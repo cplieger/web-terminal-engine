@@ -122,3 +122,56 @@ describe("mouse: pointer events emit SGR input", () => {
     expect(sent).toEqual([]);
   });
 });
+
+describe("mouse: motion and wheel events", () => {
+  function setup(): { term: HTMLDivElement; sent: string[] } {
+    const term = document.createElement("div");
+    const sent: string[] = [];
+    const handler: MouseInputHandler = {
+      send: (d) => sent.push(d),
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => term,
+    };
+    initMouse(handler);
+    return { term, sent };
+  }
+
+  it("mode 1003 (any-event) emits motion with no button held", () => {
+    modes.setModes(true, false, true, true, 1003);
+    const { term, sent } = setup();
+    term.dispatchEvent(new MouseEvent("mousemove", { clientX: 16, clientY: 32, buttons: 0 }));
+    expect(sent).toEqual(["\x1b[<32;3;3M"]);
+  });
+
+  it("mode 1000 (normal) suppresses all motion events", () => {
+    modes.setModes(true, false, true, true, 1000);
+    const { term, sent } = setup();
+    term.dispatchEvent(new MouseEvent("mousemove", { clientX: 16, clientY: 32, buttons: 1 }));
+    expect(sent).toEqual([]);
+  });
+
+  it("mode 1002 (button-event) emits motion only while a button is held", () => {
+    modes.setModes(true, false, true, true, 1002);
+    const { term, sent } = setup();
+    term.dispatchEvent(new MouseEvent("mousemove", { clientX: 16, clientY: 32, buttons: 0 }));
+    expect(sent).toEqual([]);
+    term.dispatchEvent(new MouseEvent("mousemove", { clientX: 16, clientY: 32, buttons: 1 }));
+    expect(sent).toEqual(["\x1b[<32;3;3M"]);
+  });
+
+  it("wheel up/down emit buttons 64/65", () => {
+    modes.setModes(true, false, true, true, 1000);
+    const { term, sent } = setup();
+    // happy-dom's WheelEvent honours deltaY but not clientX/clientY from the
+    // init dict; set the coordinates explicitly so pixel->cell hit-testing runs.
+    const wheel = (deltaY: number): WheelEvent => {
+      const w = new WheelEvent("wheel", { deltaY });
+      Object.defineProperty(w, "clientX", { value: 16, configurable: true });
+      Object.defineProperty(w, "clientY", { value: 32, configurable: true });
+      return w;
+    };
+    term.dispatchEvent(wheel(-1));
+    term.dispatchEvent(wheel(1));
+    expect(sent).toEqual(["\x1b[<64;3;3M", "\x1b[<65;3;3M"]);
+  });
+});

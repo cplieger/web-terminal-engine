@@ -6,19 +6,23 @@
 // endian fixed-width fields; no length-prefixed dictionary keys, no
 // repeated string identifiers.
 //
-//	[1B] msg_type:    0=screen, 1=scroll, 2=resumeAck
+//	[1B] msg_type:    0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong
 //	[8B] inputAck:    uint64  (server-confirmed bytesReceived for this session)
 //
 //	If msg_type == screen:
+//	  [8B] base          uint64  (absolute index of top screen row; changed[y] -> base+y)
 //	  [2B] cursor_row    uint16
 //	  [2B] cursor_col    uint16
 //	  [2B] screen_height uint16  (full terminal height; rows below is sparse)
 //	  [2B] num_changed   uint16
+//	  [1B] cursor_style  uint8   (DECSCUSR style 0-6)
+//	  [1B] cursor_flags  uint8   (bit0=hidden, bit1=bell, bit2=blink, bit3=altActive)
 //	  For each changed row:
 //	    [2B] row_idx     uint16
 //	    [row payload]
 //
 //	If msg_type == scroll:
+//	  [8B] first_index  uint64  (absolute index of lines[0]; line i applies at first_index+i)
 //	  [2B] num_lines    uint16
 //	  For each line:
 //	    [row payload]
@@ -31,6 +35,8 @@
 //	                    silent-data-loss case (server has no record of
 //	                    bytes the client thinks are acked) is surfaced
 //	                    instead of being papered over.
+//	  [8B] committed    uint64 (absolute index of the next line to commit)
+//	  [8B] oldestIndex  uint64 (absolute index of the oldest retained line)
 //
 //	row payload:
 //	  [2B] num_runs    uint16
@@ -54,6 +60,7 @@ package terminal
 
 import (
 	"encoding/binary"
+	"unicode/utf8"
 
 	"github.com/cplieger/web-terminal-engine/vt"
 )
@@ -97,7 +104,9 @@ const (
 // terminal height (rowEls count on the client) — needed because rows
 // is sparse on the wire.
 //
-//nolint:unparam // ack always 0; real per-client value patched in by withClientAck (parity with encodeScrollMsg)
+// ack is non-zero only on the resume window frame (handleResume passes the
+// resolved per-client ack); the per-flush dispatch path still encodes ack=0
+// and patches the real value in via withClientAck.
 func encodeScreenMsg(base uint64, screenHeight, curRow, curCol int, ack uint64, changed []int, rows [][]vt.WireRun, cursorStyle uint8, cursorHidden, cursorBlink, bell, altActive bool) []byte {
 	buf := make([]byte, 0, 64)
 	buf = append(buf, wireMsgScreen)
@@ -169,9 +178,9 @@ func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64
 }
 
 // encodeModesMsg builds a frame announcing the current DEC private
-// mode state. flushLoop emits this when it observes a change in
-// screen.BracketedPaste or screen.AppCursorKeys so the client's input
-// path can format paste and arrow keys correctly:
+// mode state. The builder emits this whenever it observes a change in
+// any tracked mode (see modesStable) so the client's input path can
+// format paste, arrow keys, keypad, mouse, and reverse video correctly:
 //
 //	[1B] msg_type = 3 (modes)
 //	[8B] inputAck (uint64)
@@ -180,11 +189,14 @@ func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64
 //	     bit 1: application cursor keys (DECCKM, CSI ?1h) enabled
 //	     bit 2: SGR mouse encoding (DEC ?1006h) enabled
 //	     bit 3: focus reporting (DEC ?1004h) enabled
+//	     bit 4: application keypad (DECKPAM, ESC =) enabled
+//	     bit 5: reverse video (DECSCNM, DEC ?5h) enabled
 //	[2B] mouseMode (uint16): 0=off, 1000=normal, 1002=button-event, 1003=any-event
-func encodeModesMsg(ack uint64, bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo bool, mouseMode uint16) []byte {
+func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo bool, mouseMode uint16) []byte {
 	buf := make([]byte, 0, 12)
 	buf = append(buf, wireMsgModes)
-	buf = binary.LittleEndian.AppendUint64(buf, ack)
+	// inputAck placeholder (0); withClientAck patches the real per-client value at wireAckOffset.
+	buf = binary.LittleEndian.AppendUint64(buf, 0)
 	var flags byte
 	if bracketedPaste {
 		flags |= modeFlagBracketedPaste
@@ -242,15 +254,16 @@ func encodePongMsg() []byte {
 func appendRowRuns(buf []byte, runs []vt.WireRun) []byte {
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(runs)))
 	for _, run := range runs {
-		text := run.T
+		text := truncateUTF8(run.T, 0xFFFF)
 		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(text)))
 		buf = append(buf, text...)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.F)) // #nosec G115 -- bit-cast
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.B)) // #nosec G115 -- bit-cast
 		buf = binary.LittleEndian.AppendUint16(buf, run.A)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.Uc)) // #nosec G115 -- bit-cast
-		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(run.U)))
-		buf = append(buf, run.U...)
+		url := truncateUTF8(run.U, 0xFFFF)
+		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(url)))
+		buf = append(buf, url...)
 	}
 	return buf
 }
@@ -263,6 +276,21 @@ func clampU16(n int) uint16 {
 		return 0xFFFF
 	}
 	return uint16(n)
+}
+
+// truncateUTF8 returns s limited to at most maxBytes bytes without splitting a
+// multi-byte rune, so the wire length field (clampU16(len)) always matches the
+// appended payload. Only a pathological oversize run is clamped; every run
+// <= maxBytes bytes (the normal case) is returned unchanged.
+func truncateUTF8(s string, maxBytes int) string {
+	if len(s) <= maxBytes {
+		return s
+	}
+	t := s[:maxBytes]
+	for t != "" && !utf8.ValidString(t) {
+		t = t[:len(t)-1]
+	}
+	return t
 }
 
 // encodeTitleMsg builds a title frame carrying the window title string.

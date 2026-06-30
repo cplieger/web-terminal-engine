@@ -9,9 +9,12 @@
 // Wire protocol (binary WebSocket frames):
 //
 //	client → server: raw terminal input bytes
-//	server → client: raw PTY output bytes
+//	server → client: binary frames encoding screen/scroll/modes/title/
+//	                 resumeAck/pong messages (see wire_binary.go) — PTY
+//	                 output is rendered into the VT screen and sent as
+//	                 absolute-indexed cell runs, not as raw bytes
 //	client → server: JSON control messages prefixed with 0x00:
-//	  {"type":"resize","cols":N,"rows":N}
+//	  {"type":"resize",...}, {"type":"resume",...}, {"type":"ping"}
 //
 // The 0x00 prefix byte distinguishes control messages from raw
 // input; no valid terminal input starts with NUL.
@@ -21,7 +24,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -41,6 +43,13 @@ const (
 	defaultCols   = 120
 	defaultRows   = 30
 	flushInterval = 50 * time.Millisecond
+
+	// maxScrollLinesPerFrame bounds the lines packed into one scroll frame so the wire
+	// num_lines (a uint16) can never be exceeded by the payload and a large drained burst
+	// (a fast child can produce far more than 65535 lines in one 50ms flush) is split into
+	// several < ~100KB frames instead of one multi-MB message. Mirrors handleResume's
+	// replayChunk. Any value well under 65535 works; 1000 keeps each frame small.
+	maxScrollLinesPerFrame = 1000
 
 	// minResizeCols/minResizeRows are the smallest dimensions we
 	// accept from a resize control message. Anything below is floored
@@ -128,17 +137,16 @@ func WithOnProcessExit(fn func(error)) Option {
 // to send back, which the client compares to its sent count to
 // determine which bytes (if any) need retransmission after a blip.
 type sessionState struct {
-	lastSeen           time.Time
-	bytesReceived      uint64
-	replayedScrollback bool // true after first resume; prevents re-replay on reconnect
+	lastSeen      time.Time
+	bytesReceived uint64
 }
 
-// ClientState tracks per-WS-connection state. session is resolved
-// from the sessionId in the resume control message. session is
-// stored as an atomic pointer so flushLoop's snapshot pass can read
-// it without the handler-wide mutex (snapshot copies the pointer
-// value into a local; sessionState mutations stay under h.mu).
-type ClientState struct {
+// clientState tracks per-WS-connection state. session is resolved
+// from the sessionId in the resume control message. session is stored
+// as an atomic.Pointer so IncrementReceived can test whether a session
+// is attached without taking registry.mu; the pointed-to sessionState's
+// fields are guarded by the clientRegistry's mutex (registry.mu), not h.mu.
+type clientState struct {
 	session atomic.Pointer[sessionState]
 }
 
@@ -147,7 +155,7 @@ type ClientState struct {
 //
 // h.started is atomic.Bool so the fast-path check in handleWS does not
 // race with ensureStarted's write under h.mu. Screen and PTY state is
-// guarded by h.mu; client tracking lives in the ClientRegistry with its
+// guarded by h.mu; client tracking lives in the clientRegistry with its
 // own lock. flushLoop snapshots the per-flush data under h.mu and then
 // performs ws.Write outside the lock so a slow client can't block
 // readLoop / handleControl / new handleWS connections.
@@ -155,12 +163,11 @@ type Handler struct {
 	ptmx       *os.File
 	cmd        *exec.Cmd
 	screen     *vt.Screen
-	registry   *ClientRegistry
-	builder    *FlushFrameBuilder
+	registry   *clientRegistry
+	builder    *flushFrameBuilder
 	scrollback *scrollbackRing
 	cancel     context.CancelFunc
 	command    []string
-	rawRing    []byte
 	cfg        handlerConfig
 	bootEpoch  int64
 	mu         sync.Mutex
@@ -185,8 +192,8 @@ func NewHandler(command []string, opts ...Option) *Handler {
 		command:    command,
 		cfg:        cfg,
 		screen:     vt.New(defaultRows, defaultCols),
-		registry:   NewClientRegistry(),
-		builder:    &FlushFrameBuilder{},
+		registry:   newClientRegistry(cfg.logger),
+		builder:    &flushFrameBuilder{},
 		scrollback: newScrollbackRing(cfg.scrollbackCapacity),
 		bootEpoch:  time.Now().UnixNano(),
 	}
@@ -195,8 +202,6 @@ func NewHandler(command []string, opts ...Option) *Handler {
 // RegisterRoutes wires /ws on mux.
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/ws", h.handleWS)
-	mux.HandleFunc("/debug/screen", h.debugScreen)
-	mux.HandleFunc("/debug/raw", h.debugRaw)
 }
 
 // ServeHTTP implements http.Handler, delegating to the WebSocket handler.
@@ -211,35 +216,13 @@ func (h *Handler) Shutdown() {
 	if !h.started.Load() {
 		return
 	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.cancel != nil {
 		h.cancel()
 	}
-	h.mu.Lock()
 	if h.ptmx != nil {
 		_ = h.ptmx.Close() // best-effort during shutdown
-	}
-	h.mu.Unlock()
-}
-
-func (h *Handler) debugRaw(w http.ResponseWriter, _ *http.Request) {
-	h.mu.Lock()
-	raw := make([]byte, len(h.rawRing))
-	copy(raw, h.rawRing)
-	h.mu.Unlock()
-	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", "attachment; filename=pty-raw.bin")
-	w.Write(raw) //nolint:errcheck // best-effort debug write
-}
-
-func (h *Handler) debugScreen(w http.ResponseWriter, _ *http.Request) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	w.Header().Set("Content-Type", "text/plain")
-	row, col := h.screen.CursorPos()
-	fmt.Fprintf(w, "cursor: row=%d col=%d  screen: %dx%d  held=%v alt=%v\n",
-		row, col, h.screen.Height, h.screen.Width, h.screen.IsFlushHeld(), h.screen.InAltScreen)
-	for y := range h.screen.Cells {
-		fmt.Fprintf(w, "%3d: %s\n", y, h.screen.RowString(y))
 	}
 }
 
@@ -289,6 +272,24 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	go h.readLoop(ctx)
 	// Flush ticker — sends screen updates to all clients.
 	go h.flushLoop(ctx)
+	// Process monitor — reaps the child (so it does not linger as a
+	// zombie), fires the documented onProcessExit callback with the
+	// exit status, and cancels the read/flush loops on natural child
+	// exit so flushLoop's ticker does not leak after the process dies.
+	go func() {
+		werr := cmd.Wait() // reap; werr carries the exit status
+		// Symmetric with the "process started" INFO above so operators see the
+		// session lifecycle end and its exit status in the logs, not just the
+		// start. werr is nil on a clean (exit 0) shutdown; a child exiting
+		// non-zero is a normal session end, not a server fault, so this stays
+		// INFO (avoids WARN-spam on ordinary command exits).
+		h.cfg.logger.Info("terminal: process exited",
+			"pid", cmd.Process.Pid, "error", werr)
+		if h.cfg.onProcessExit != nil {
+			h.cfg.onProcessExit(werr)
+		}
+		cancel() // stop readLoop/flushLoop on child exit
+	}()
 	return nil
 }
 
@@ -302,18 +303,7 @@ func (h *Handler) readLoop(ctx context.Context) {
 		}
 		n, err := h.ptmx.Read(buf)
 		if n > 0 {
-			// Capture raw bytes for debugging (last 16KB).
-			h.mu.Lock()
-			h.rawRing = append(h.rawRing, buf[:n]...)
-			if len(h.rawRing) > 16384 {
-				h.rawRing = h.rawRing[len(h.rawRing)-16384:]
-			}
-			h.screen.Write(buf[:n]) //nolint:errcheck // screen.Write always returns nil
-			if len(h.screen.Response) > 0 {
-				h.ptmx.Write(h.screen.Response) //nolint:errcheck // best-effort
-				h.screen.Response = nil
-			}
-			h.mu.Unlock()
+			h.handlePTYData(buf[:n])
 		}
 		if err != nil {
 			return
@@ -321,11 +311,28 @@ func (h *Handler) readLoop(ctx context.Context) {
 	}
 }
 
-// FlushFrame is the per-flush snapshot built under h.mu and consumed
+// handlePTYData feeds raw PTY output to the screen under h.mu and writes
+// any query response back outside the lock so a slow write never stalls
+// goroutines waiting on h.mu.
+func (h *Handler) handlePTYData(data []byte) {
+	var resp []byte
+	h.mu.Lock()
+	h.screen.Write(data) //nolint:errcheck // screen.Write always returns nil
+	if len(h.screen.Response) > 0 {
+		resp = h.screen.Response
+		h.screen.Response = nil
+	}
+	h.mu.Unlock()
+	if len(resp) > 0 {
+		h.ptmx.Write(resp) //nolint:errcheck // best-effort
+	}
+}
+
+// flushFrame is the per-flush snapshot built under h.mu and consumed
 // outside the lock. Holding the lock during the network write would
 // stall every other goroutine on a slow client; the snapshot pattern
 // keeps the lock window bounded to local memory work.
-type FlushFrame struct {
+type flushFrame struct {
 	clients        map[*websocket.Conn]uint64
 	rows           [][]vt.WireRun
 	scrollLines    [][]vt.WireRun
@@ -347,7 +354,7 @@ type FlushFrame struct {
 // buildFrame computes the next outbound frame under h.mu. Returns nil
 // if there is nothing to send (no resize yet, flush held, or no
 // changed rows and no scroll lines).
-func (h *Handler) buildFrame() *FlushFrame {
+func (h *Handler) buildFrame() *flushFrame {
 	h.mu.Lock()
 	clients := h.registry.Snapshot()
 	committedBefore := h.scrollback.Committed()
@@ -381,22 +388,29 @@ func (h *Handler) flushLoop(ctx context.Context) {
 // flushLoop with h.mu NOT held — a slow client only blocks itself, not
 // readLoop / handleControl / new handleWS connections. Extracted from
 // flushLoop so that select-loop stays small and readable.
-func (h *Handler) dispatchFrame(frame *FlushFrame) {
+func (h *Handler) dispatchFrame(frame *flushFrame) {
 	if len(frame.changed) > 0 || len(frame.scrollLines) > 0 {
-		h.cfg.logger.Info("terminal: flush",
+		h.cfg.logger.Debug("terminal: flush",
 			"changed", len(frame.changed),
 			"scroll_lines", len(frame.scrollLines),
 			"clients", len(frame.clients))
 	}
 
 	// Pre-encode payloads once; identical bytes for every client.
-	var screenPayload, scrollPayload []byte
+	var screenPayload []byte
 	if len(frame.changed) > 0 {
 		screenPayload = encodeScreenMsg(frame.base, frame.screenHeight, frame.curRow, frame.curCol,
 			0, frame.changed, frame.rows, frame.cursorStyle, frame.cursorHidden, frame.cursorBlink, frame.bell, frame.altActive)
 	}
-	if len(frame.scrollLines) > 0 {
-		scrollPayload = encodeScrollMsg(0, frame.scrollFirstIdx, frame.scrollLines)
+	// Split a large drained burst across several frames so num_lines never overflows the
+	// uint16 count and no single frame reaches multiple MB. Each chunk keeps its absolute
+	// firstIndex, so the client applies every line at the right index (idempotent), exactly
+	// as handleResume's chunked replay does.
+	var scrollPayloads [][]byte
+	for i := 0; i < len(frame.scrollLines); i += maxScrollLinesPerFrame {
+		end := min(i+maxScrollLinesPerFrame, len(frame.scrollLines))
+		scrollPayloads = append(scrollPayloads,
+			encodeScrollMsg(0, frame.scrollFirstIdx+uint64(i), frame.scrollLines[i:end]))
 	}
 
 	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -411,8 +425,8 @@ func (h *Handler) dispatchFrame(frame *FlushFrame) {
 		if screenPayload != nil {
 			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(screenPayload, ack)) //nolint:errcheck // best-effort
 		}
-		if scrollPayload != nil {
-			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(scrollPayload, ack)) //nolint:errcheck // best-effort
+		for _, sp := range scrollPayloads {
+			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(sp, ack)) //nolint:errcheck // best-effort
 		}
 	}
 }
@@ -474,7 +488,7 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	// because ws.Read() honors ctx cancellation.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	go pingLoop(ctx, cancel, ws)
+	go pingLoop(ctx, cancel, ws, h.cfg.logger)
 
 	// Read input from this client and write to the shared PTY.
 	for {
@@ -510,9 +524,10 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) handleControl(ws *websocket.Conn, state *ClientState, payload []byte) {
+func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload []byte) {
 	var c controlMsg
 	if err := json.Unmarshal(payload, &c); err != nil {
+		h.cfg.logger.Debug("terminal: bad control frame", "error", err, "bytes", len(payload))
 		return
 	}
 	if c.Type == ctlTypeResume && c.SessionID != "" {
@@ -547,16 +562,32 @@ func (h *Handler) handlePing(ws *websocket.Conn) {
 // handleResume looks up or creates the session for sessionID, attaches
 // it to state, replies with a resumeAck carrying the server's current
 // bytesReceived count plus the absolute-index bounds of retained
-// history, replays the lines the client is missing (by absolute index),
-// and forces a full repaint of the current window on the next flush.
+// history, sends a full-repaint frame of the current window (carrying
+// the live alt-screen state) and replays the lines the client is missing
+// (by absolute index), and leaves the next flush to repaint the window
+// idempotently.
+//
+// The order of the window frame and the replay depends on the live alt
+// state, because the window frame is what sets the client's alt flag and
+// the client drops scroll frames while that flag is set (store.ts
+// applyScroll):
+//   - main screen (winAlt == false): the window frame precedes the replay
+//     so a client with a stale alt flag (disconnected in alt, app left alt
+//     while away) leaves alt before the replayed history lands; otherwise
+//     it silently drops those frames (finding l-f38).
+//   - alt screen (winAlt == true): the replay precedes the window frame so
+//     a client not yet in alt (fresh load / second tab on an in-alt
+//     session) stores the main-screen history before the window frame
+//     flips it into alt; otherwise that history is lost (the h-f1
+//     regression).
 //
 // haveThrough is the highest absolute line index the client already
 // holds (-1 = none). The server replays lines with index > haveThrough,
 // clamped into the retained range; the resumeAck's oldestIndex lets the
 // client detect an eviction gap when its haveThrough is older than what
 // the ring still holds.
-func (h *Handler) handleResume(ws *websocket.Conn, state *ClientState, sessionID string, haveThrough int64) {
-	ack, _ := h.registry.ResolveSession(state, sessionID)
+func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID string, haveThrough int64) {
+	ack := h.registry.ResolveSession(state, sessionID)
 
 	h.mu.Lock()
 	// Force a full repaint on the next flush so the resuming client sees
@@ -567,7 +598,9 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *ClientState, sessionID
 	// computing the replay, so lines that scrolled while the client was
 	// away are retained (the old code discarded them here).
 	drained := h.screen.DrainScrollback()
-	if !h.screen.InAltScreen && len(drained) > 0 {
+	// Match Build's guard: drain that straddles an alt-screen transition belongs to the
+	// buffer just left and must not enter main history.
+	if !h.screen.InAltScreen && !h.builder.altTransitionPending(h.screen) && len(drained) > 0 {
 		h.scrollback.Append(drained)
 	}
 	committed := h.scrollback.Committed()
@@ -577,7 +610,32 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *ClientState, sessionID
 		from = uint64(haveThrough) + 1
 	}
 	firstAbs, replay := h.scrollback.LinesFrom(from)
+	// Snapshot the current window under h.mu so it can be encoded into a
+	// full-repaint screen frame and sent relative to the replay (below; the
+	// order depends on winAlt). The base equals committed in all cases: on the
+	// main screen the window sits just past committed history; in alt the base
+	// is frozen there too.
+	winBase := committed
+	winRows := make([][]vt.WireRun, h.screen.Height)
+	for y := range h.screen.Height {
+		winRows[y] = h.screen.RenderRowWire(y)
+	}
+	winCurRow, winCurCol := h.screen.CursorPos()
+	winHeight := h.screen.Height
+	winAlt := h.screen.InAltScreen
+	winCursorStyle := h.screen.CursorStyle
+	winCursorHidden := h.screen.CursorHidden
+	winCursorBlink := h.screen.CursorBlink
 	h.mu.Unlock()
+
+	// Build the full-repaint changed list (every window row) and encode the
+	// window frame outside the lock.
+	winChanged := make([]int, winHeight)
+	for i := range winChanged {
+		winChanged[i] = i
+	}
+	windowPayload := encodeScreenMsg(winBase, winHeight, winCurRow, winCurCol, ack,
+		winChanged, winRows, winCursorStyle, winCursorHidden, winCursorBlink, false, winAlt)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
@@ -586,16 +644,33 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *ClientState, sessionID
 	// history bounds (for gap detection) before the replay lands.
 	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest)) //nolint:errcheck // best-effort
 
-	// Replay missing history in chunks, each tagged with its absolute
-	// first index so the client applies lines at the right indices.
-	const replayChunk = 50
-	for i := 0; i < len(replay); i += replayChunk {
-		end := min(i+replayChunk, len(replay))
-		payload := encodeScrollMsg(ack, firstAbs+uint64(i), replay[i:end])
-		ws.Write(ctx, websocket.MessageBinary, payload) //nolint:errcheck // best-effort
+	// replayHistory sends the missing committed lines in chunks, each tagged
+	// with its absolute first index so the client applies them idempotently.
+	replayHistory := func() {
+		const replayChunk = 50
+		for i := 0; i < len(replay); i += replayChunk {
+			end := min(i+replayChunk, len(replay))
+			payload := encodeScrollMsg(ack, firstAbs+uint64(i), replay[i:end])
+			ws.Write(ctx, websocket.MessageBinary, payload) //nolint:errcheck // best-effort
+		}
 	}
-	// The current window is delivered by the next flush (builder.Reset
-	// above guarantees a full window frame within one tick).
+
+	// The client gates scroll application on its alt flag (store.ts applyScroll),
+	// and the window frame is what sets that flag to winAlt:
+	//   - winAlt == false: window FIRST so a client with a stale alt flag
+	//     (disconnected in alt, app left alt while away) leaves alt before the
+	//     replay lands (finding l-f38).
+	//   - winAlt == true: replay FIRST so a client not yet in alt (fresh load /
+	//     second tab on an in-alt session) stores the main-screen history before
+	//     the window frame puts it into alt; otherwise the replay is dropped and
+	//     that history is lost until the next non-alt reconnect.
+	if winAlt {
+		replayHistory()
+		ws.Write(ctx, websocket.MessageBinary, windowPayload) //nolint:errcheck // best-effort
+	} else {
+		ws.Write(ctx, websocket.MessageBinary, windowPayload) //nolint:errcheck // best-effort
+		replayHistory()
+	}
 }
 
 // handleResize floors the requested dimensions to a sane minimum and
@@ -632,7 +707,6 @@ func (h *Handler) handleResize(cols, rows int) {
 		h.cfg.logger.Debug("terminal: resize", "error", err)
 	}
 	h.screen.Resize(rows, cols)
-	h.screen.DrainScrollback() // discard pre-resize drain
 	// Hold flushes during the SIGWINCH redraw window so the user
 	// doesn't see the child process's transient cleared-screen state. Either
 	// the child process's CSI ?2026l or the 1s deadline releases the hold.

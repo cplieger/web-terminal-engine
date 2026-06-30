@@ -141,3 +141,32 @@ func TestRenderRowWireWidePlaceholder(t *testing.T) {
 		t.Errorf("wire row rune count = %d, want 10", len([]rune(got)))
 	}
 }
+
+// TestRenderRowWire256Color verifies the 256-color -> 0xRRGGBB wire conversion
+// (color256RGB via colorToWire) for the <16 palette delegate, the 6x6x6 color
+// cube, and the grayscale ramp, driven through the public SGR + RenderRowWire path.
+func TestRenderRowWire256Color(t *testing.T) {
+	cases := []struct {
+		seq  string
+		idx  int
+		want int32
+	}{
+		{"\x1b[38;5;9mX\x1b[0m", 9, 0xff5555},     // <16: delegates to basic-16 palette
+		{"\x1b[38;5;21mX\x1b[0m", 21, 0x0000ff},   // cube: pure blue
+		{"\x1b[38;5;46mX\x1b[0m", 46, 0x00ff00},   // cube: pure green
+		{"\x1b[38;5;196mX\x1b[0m", 196, 0xff0000}, // cube: pure red
+		{"\x1b[38;5;232mX\x1b[0m", 232, 0x080808}, // grayscale ramp: darkest
+		{"\x1b[38;5;255mX\x1b[0m", 255, 0xeeeeee}, // grayscale ramp: lightest
+	}
+	for _, tc := range cases {
+		s := New(1, 4)
+		s.Write([]byte(tc.seq))
+		runs := s.RenderRowWire(0)
+		if len(runs) == 0 {
+			t.Fatalf("256-color %d: no runs", tc.idx)
+		}
+		if runs[0].F != tc.want {
+			t.Errorf("256-color %d -> F = 0x%06x, want 0x%06x", tc.idx, runs[0].F, tc.want)
+		}
+	}
+}

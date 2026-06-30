@@ -20,7 +20,7 @@ func TestOSCBufferBounded(t *testing.T) {
 	}
 	// Terminate the OSC — title should be the capped content.
 	s.Write([]byte("\x07"))
-	if s.pState != stateGround {
+	if s.pState != stGround {
 		t.Errorf("parser not back to ground after BEL")
 	}
 }
@@ -39,8 +39,8 @@ func TestCSIParamsBounded(t *testing.T) {
 	if !s.ignoring {
 		t.Errorf("expected ignoring flag set after param count overflow")
 	}
-	if s.numParams > maxCSIParams {
-		t.Errorf("numParams grew to %d, want <= %d", s.numParams, maxCSIParams)
+	if s.numParams > maxParams {
+		t.Errorf("numParams grew to %d, want <= %d", s.numParams, maxParams)
 	}
 }
 
@@ -53,8 +53,8 @@ func TestCSIIntermedBounded(t *testing.T) {
 		chunk[i] = 0x20 + byte(i%16)
 	}
 	s.Write(chunk)
-	if s.numInterm > maxCSIIntermed {
-		t.Errorf("numInterm grew to %d, want <= %d", s.numInterm, maxCSIIntermed)
+	if s.numInterm > maxIntermed {
+		t.Errorf("numInterm grew to %d, want <= %d", s.numInterm, maxIntermed)
 	}
 }
 
@@ -110,15 +110,6 @@ func TestCSIArgClamped(t *testing.T) {
 	row, _ := s.CursorPos()
 	if row != 0 {
 		t.Errorf("cursor row after huge CUU: got %d, want 0", row)
-	}
-	// Test csiArg backward compat helper
-	got := csiArg("999999999", 1)
-	if got != maxCSIArgValue {
-		t.Errorf("csiArg(999999999) = %d, want %d", got, maxCSIArgValue)
-	}
-	got = csiArg("42", 1)
-	if got != 42 {
-		t.Errorf("csiArg(42) = %d, want 42", got)
 	}
 }
 

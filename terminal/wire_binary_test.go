@@ -2,7 +2,9 @@ package terminal
 
 import (
 	"bytes"
+	"encoding/binary"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/cplieger/web-terminal-engine/vt"
 )
@@ -119,5 +121,156 @@ func TestClampU16_boundaryValues(t *testing.T) {
 		if got := clampU16(c.in); got != c.want {
 			t.Errorf("clampU16(%d) = %d, want %d", c.in, got, c.want)
 		}
+	}
+}
+
+// TestEncodeModesMsg_eachFlagSetsItsBit asserts that each DEC-mode flag sets
+// exactly its own bit in the modes frame's flags byte (index 9), independently.
+// The existing callers only ever set bracketed/mouseSGR/reverseVideo, so the
+// appCursorKeys/focusReporting/appKeypad branches were unexercised and a mutant
+// dropping any `flags |= modeFlagX` survived.
+func TestEncodeModesMsg_eachFlagSetsItsBit(t *testing.T) {
+	cases := []struct {
+		name string
+		args [6]bool // bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo
+		want byte
+	}{
+		{"none", [6]bool{false, false, false, false, false, false}, 0},
+		{"bracketedPaste", [6]bool{true, false, false, false, false, false}, modeFlagBracketedPaste},
+		{"appCursorKeys", [6]bool{false, true, false, false, false, false}, modeFlagAppCursorKeys},
+		{"mouseSGR", [6]bool{false, false, true, false, false, false}, modeFlagMouseSGR},
+		{"focusReporting", [6]bool{false, false, false, true, false, false}, modeFlagFocusReporting},
+		{"appKeypad", [6]bool{false, false, false, false, true, false}, modeFlagAppKeypad},
+		{"reverseVideo", [6]bool{false, false, false, false, false, true}, modeFlagReverseVideo},
+		{"all", [6]bool{true, true, true, true, true, true}, modeFlagBracketedPaste | modeFlagAppCursorKeys | modeFlagMouseSGR | modeFlagFocusReporting | modeFlagAppKeypad | modeFlagReverseVideo},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			a := c.args
+			buf := encodeModesMsg(a[0], a[1], a[2], a[3], a[4], a[5], 0)
+			if len(buf) < 12 {
+				t.Fatalf("encodeModesMsg returned %d bytes, want >= 12", len(buf))
+			}
+			if buf[9] != c.want {
+				t.Errorf("encodeModesMsg flags byte = %08b, want %08b", buf[9], c.want)
+			}
+		})
+	}
+}
+
+// TestEncodeScreenMsg_eachCursorFlagSetsItsBit asserts that each cursor-state
+// flag sets exactly its own bit in the screen frame's cursorFlags byte
+// (index 26), independently. Existing tests only cover all-false and blink=true
+// (golden), so the hidden/bell/altActive branches were unexercised and a mutant
+// dropping `cursorFlags |= 1|2|8` survived.
+func TestEncodeScreenMsg_eachCursorFlagSetsItsBit(t *testing.T) {
+	cases := []struct {
+		name                     string
+		hidden, blink, bell, alt bool
+		want                     byte
+	}{
+		{"none", false, false, false, false, 0},
+		{"hidden", true, false, false, false, 1},
+		{"bell", false, false, true, false, 2},
+		{"blink", false, true, false, false, 4},
+		{"alt", false, false, false, true, 8},
+		{"all", true, true, true, true, 1 | 2 | 4 | 8},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			buf := encodeScreenMsg(0, 1, 0, 0, 0, nil, nil, 0, c.hidden, c.blink, c.bell, c.alt)
+			if len(buf) < 27 {
+				t.Fatalf("encodeScreenMsg returned %d bytes, want >= 27", len(buf))
+			}
+			if buf[26] != c.want {
+				t.Errorf("cursorFlags byte = %08b, want %08b (hidden=%v blink=%v bell=%v alt=%v)",
+					buf[26], c.want, c.hidden, c.blink, c.bell, c.alt)
+			}
+		})
+	}
+}
+
+// TestAppendRowRuns_encodesHyperlinkAndStyle pins the per-run wire encoding
+// (the cross-language contract appendRowRuns writes): text, fg, bg, attrs, uc,
+// and the OSC 8 url_len + url. No existing test encodes a run with a non-empty
+// URL or non-default colors/attrs, so a mutant in any of those field writes
+// survived. Asserts via encodeScrollMsg, whose body is exactly one
+// appendRowRuns call after an 19-byte header.
+func TestAppendRowRuns_encodesHyperlinkAndStyle(t *testing.T) {
+	const url = "https://example.com/x"
+	run := vt.WireRun{T: "go", U: url, F: 0x112233, B: 0x445566, A: 5, Uc: 0x778899}
+	buf := encodeScrollMsg(0, 0, [][]vt.WireRun{{run}})
+
+	if got := binary.LittleEndian.Uint16(buf[17:19]); got != 1 {
+		t.Fatalf("num_lines = %d, want 1", got)
+	}
+	off := 19
+	if got := binary.LittleEndian.Uint16(buf[off:]); got != 1 {
+		t.Fatalf("num_runs = %d, want 1", got)
+	}
+	off += 2
+	tlen := int(binary.LittleEndian.Uint16(buf[off:]))
+	off += 2
+	if got := string(buf[off : off+tlen]); got != "go" {
+		t.Fatalf("run text = %q, want %q", got, "go")
+	}
+	off += tlen
+	if got := int32(binary.LittleEndian.Uint32(buf[off:])); got != 0x112233 {
+		t.Errorf("fg = %#x, want 0x112233", got)
+	}
+	off += 4
+	if got := int32(binary.LittleEndian.Uint32(buf[off:])); got != 0x445566 {
+		t.Errorf("bg = %#x, want 0x445566", got)
+	}
+	off += 4
+	if got := binary.LittleEndian.Uint16(buf[off:]); got != 5 {
+		t.Errorf("attrs = %d, want 5", got)
+	}
+	off += 2
+	if got := int32(binary.LittleEndian.Uint32(buf[off:])); got != 0x778899 {
+		t.Errorf("uc = %#x, want 0x778899", got)
+	}
+	off += 4
+	ulen := int(binary.LittleEndian.Uint16(buf[off:]))
+	off += 2
+	if ulen != len(url) {
+		t.Fatalf("url_len = %d, want %d", ulen, len(url))
+	}
+	if got := string(buf[off : off+ulen]); got != url {
+		t.Errorf("url = %q, want %q", got, url)
+	}
+}
+
+// TestTruncateUTF8_clampsAtRuneBoundary pins truncateUTF8's contract: a run
+// longer than the wire cap is truncated WITHOUT splitting a multi-byte rune, so
+// the encoded length field always matches valid UTF-8 payload bytes. Only the
+// under-cap early return was exercised (33.3% coverage), leaving the
+// rune-boundary backoff loop -- the cross-language wire-safety invariant --
+// untested; a mutant dropping the loop emits a half rune, caught by ValidString.
+func TestTruncateUTF8_clampsAtRuneBoundary(t *testing.T) {
+	cases := []struct {
+		name     string
+		s        string
+		maxBytes int
+		want     string
+	}{
+		{"under cap unchanged", "hello", 10, "hello"},
+		{"exact length unchanged", "hello", 5, "hello"},
+		{"ascii truncated", "hello", 3, "hel"},
+		{"zero cap empties", "hello", 0, ""},
+		// "é" is 2 bytes (0xC3 0xA9); a cap landing mid-rune backs off to "h".
+		{"multibyte split backs off", "héllo", 2, "h"},
+		{"multibyte kept when it fits", "héllo", 3, "hé"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateUTF8(c.s, c.maxBytes)
+			if got != c.want {
+				t.Errorf("truncateUTF8(%q, %d) = %q, want %q", c.s, c.maxBytes, got, c.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateUTF8(%q, %d) = %q: not valid UTF-8 (wire length would mismatch payload)", c.s, c.maxBytes, got)
+			}
+		})
 	}
 }

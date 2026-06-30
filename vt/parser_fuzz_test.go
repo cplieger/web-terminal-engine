@@ -73,6 +73,24 @@ func FuzzParser(f *testing.F) {
 		if col < 0 || col >= s.Width {
 			t.Fatalf("cursor col %d out of bounds [0,%d)", col, s.Width)
 		}
+		// Grid structural invariant: the buffer always holds exactly Height
+		// rows of exactly Width cells. A parser bug in scroll / alt-screen /
+		// erase handling can corrupt the grid without tripping the cursor check.
+		if len(s.Cells) != s.Height {
+			t.Fatalf("len(Cells) = %d, want Height %d", len(s.Cells), s.Height)
+		}
+		for y := range s.Cells {
+			if len(s.Cells[y]) != s.Width {
+				t.Fatalf("len(Cells[%d]) = %d, want Width %d", y, len(s.Cells[y]), s.Width)
+			}
+		}
+		// Buffer-bounds invariant: OSC/DCS accumulation never exceeds its cap.
+		if len(s.oscBuf) > maxOSCLen {
+			t.Fatalf("oscBuf = %d bytes, want <= %d", len(s.oscBuf), maxOSCLen)
+		}
+		if len(s.dcsBuf) > maxDCSLen {
+			t.Fatalf("dcsBuf = %d bytes, want <= %d", len(s.dcsBuf), maxDCSLen)
+		}
 	})
 }
 

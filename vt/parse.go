@@ -17,8 +17,13 @@ func (s *Screen) feed(b byte) {
 			}
 			return
 		}
-		// Invalid continuation — abort UTF-8 sequence, re-process byte
+		// Invalid continuation — the in-progress multi-byte sequence is
+		// truncated. Emit one U+FFFD for the ill-formed lead (matching the
+		// U+FFFD error model every other malformed-UTF-8 path uses: C1 bytes,
+		// orphan continuations, and decodeUTF8Bytes), then re-process the
+		// current byte in Ground.
 		s.utf8Len = 0
+		s.put(0xFFFD)
 	}
 
 	t := stateTable[s.pState][b]
@@ -169,8 +174,9 @@ func (s *Screen) pushParam(newGroup bool) {
 	}
 }
 
-// finalizeParams pushes the last accumulated param (if any digits were seen or
-// the param string was non-empty).
+// finalizeParams always pushes the trailing param (even an empty/default 0). A bare
+// "CSI m" therefore yields one group [0] (paramCount() == 1, not zero); applySGR's
+// reset detection relies on numParams == 1 && pParams[0] == 0.
 func (s *Screen) finalizeParams() {
 	if s.ignoring {
 		return
@@ -200,18 +206,11 @@ func (s *Screen) parserClear() {
 	s.numGroups = 1
 }
 
-// groupStartIdx returns the index in pParams where group g starts.
+// groupStartIdx returns the pParams index where semicolon-group g starts: the
+// sum of the lengths of all groups before g. Each group stores its length in
+// pGroupLen at its own start index, so walk start(0)=0,
+// start(k+1)=start(k)+pGroupLen[start(k)] — the same walk paramGroup uses.
 func (s *Screen) groupStartIdx(g uint8) uint8 {
-	var idx uint8
-	for range g {
-		idx += s.pGroupLen[s.groupStartForGroup(idx)]
-	}
-	return idx
-}
-
-// groupStartForGroup returns the pGroupLen index for group i (which stores its length).
-// The first group's length is at pGroupLen[0], second at pGroupLen[sum of first group's len], etc.
-func (s *Screen) groupStartForGroup(g uint8) uint8 {
 	var idx uint8
 	for range g {
 		idx += s.pGroupLen[idx]
@@ -354,13 +353,30 @@ func (s *Screen) dispatchEsc(b byte) {
 }
 
 func decodeUTF8Bytes(buf [4]byte, n uint8) rune {
+	var r rune
 	switch n {
 	case 2:
-		return rune(buf[0]&0x1F)<<6 | rune(buf[1]&0x3F)
+		r = rune(buf[0]&0x1F)<<6 | rune(buf[1]&0x3F)
+		if r < 0x80 {
+			return 0xFFFD // overlong
+		}
 	case 3:
-		return rune(buf[0]&0x0F)<<12 | rune(buf[1]&0x3F)<<6 | rune(buf[2]&0x3F)
+		r = rune(buf[0]&0x0F)<<12 | rune(buf[1]&0x3F)<<6 | rune(buf[2]&0x3F)
+		if r < 0x800 {
+			return 0xFFFD // overlong
+		}
 	case 4:
-		return rune(buf[0]&0x07)<<18 | rune(buf[1]&0x3F)<<12 | rune(buf[2]&0x3F)<<6 | rune(buf[3]&0x3F)
+		r = rune(buf[0]&0x07)<<18 | rune(buf[1]&0x3F)<<12 | rune(buf[2]&0x3F)<<6 | rune(buf[3]&0x3F)
+		if r < 0x10000 {
+			return 0xFFFD // overlong
+		}
+	default:
+		return 0xFFFD
 	}
-	return '?'
+	// Reject surrogates, > U+10FFFF, and U+FFFF (collides with the wire
+	// wide-continuation sentinel in cellsToRuns — see wire.go).
+	if r > 0x10FFFF || (r >= 0xD800 && r <= 0xDFFF) || r == 0xFFFF {
+		return 0xFFFD
+	}
+	return r
 }

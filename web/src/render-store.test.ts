@@ -181,3 +181,84 @@ describe("render (store-backed, brick 3)", () => {
     expect(list).toEqual(Array.from({ length: N }, (_, i) => i));
   });
 });
+
+describe("render: cursor-row tracking across frames (selective rebuild)", () => {
+  let outputEl: HTMLDivElement;
+  let termWrap: HTMLDivElement;
+
+  beforeEach(() => {
+    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
+    termWrap = document.getElementById("term") as HTMLDivElement;
+    outputEl = document.getElementById("term-output") as HTMLDivElement;
+    render.init({ output: outputEl, termWrap });
+    render.updateFontMetrics();
+  });
+
+  it("moves the visible cursor span to the new row and clears it from the row the cursor left", async () => {
+    render.handleScreen({
+      type: "screen",
+      base: 0,
+      rows: [row("aa"), row("bb")],
+      changed: [0, 1],
+      cursor: [0, 0],
+      cursorHidden: false,
+      cursorStyle: 0,
+      cursorBlink: false,
+    });
+    await tick();
+    expect((outputEl.children[0] as HTMLElement).querySelector(".term-cursor")).not.toBeNull();
+    expect((outputEl.children[1] as HTMLElement).querySelector(".term-cursor")).toBeNull();
+
+    // Cursor moves to row 1 with NO row-content change (changed is empty): the
+    // renderer must repaint the row the cursor left so its stale cursor span is
+    // dropped, and paint the cursor onto the new row.
+    render.handleScreen({
+      type: "screen",
+      base: 0,
+      rows: [row("aa"), row("bb")],
+      changed: [],
+      cursor: [1, 0],
+      cursorHidden: false,
+      cursorStyle: 0,
+      cursorBlink: false,
+    });
+    await tick();
+    expect((outputEl.children[0] as HTMLElement).querySelector(".term-cursor")).toBeNull();
+    expect((outputEl.children[1] as HTMLElement).querySelector(".term-cursor")).not.toBeNull();
+  });
+
+  it("leaves the cursor row's DOM untouched when only another row changes (selection-preserving)", async () => {
+    render.handleScreen({
+      type: "screen",
+      base: 0,
+      rows: [row("hello"), row("world")],
+      changed: [0, 1],
+      cursor: [0, 0],
+      cursorHidden: false,
+      cursorStyle: 0,
+      cursorBlink: false,
+    });
+    await tick();
+    const cursorRowEl = outputEl.children[0] as HTMLElement;
+    const spanBefore = cursorRowEl.firstElementChild;
+    expect(spanBefore).not.toBeNull();
+
+    // A frame that changes ONLY the non-cursor row. The cursor stays put and the
+    // cursor row's content is unchanged, so an unconditional rebuild would
+    // replaceChildren() and discard a text selection on that row.
+    render.handleScreen({
+      type: "screen",
+      base: 0,
+      rows: [row("hello"), row("WORLD")],
+      changed: [1],
+      cursor: [0, 0],
+      cursorHidden: false,
+      cursorStyle: 0,
+      cursorBlink: false,
+    });
+    await tick();
+    expect(outputEl.children[0]).toBe(cursorRowEl);
+    expect(cursorRowEl.firstElementChild).toBe(spanBefore);
+    expect((outputEl.children[1]?.textContent ?? "").trim()).toBe("WORLD");
+  });
+});

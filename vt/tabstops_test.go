@@ -59,6 +59,25 @@ func TestClearTabStopBounds(t *testing.T) {
 	}
 }
 
+// TestPrevTabStopFloorsAtZero verifies prevTabStop never returns a negative
+// column on the default (nil) tab-stop table. prevTabStop(0) computes
+// (-1 &^ 7) == -8 without the floor — a negative cursor column that only a
+// downstream clamp would otherwise have to absorb. Normal backward-tab
+// behavior (previous multiple of 8) is unchanged.
+func TestPrevTabStopFloorsAtZero(t *testing.T) {
+	s := New(5, 24)
+	s.tabStops = nil // exercise the default-every-8 branch explicitly
+	if got := s.prevTabStop(0); got != 0 {
+		t.Errorf("prevTabStop(0) = %d, want 0 (must not go negative)", got)
+	}
+	if got := s.prevTabStop(8); got != 0 {
+		t.Errorf("prevTabStop(8) = %d, want 0", got)
+	}
+	if got := s.prevTabStop(9); got != 8 {
+		t.Errorf("prevTabStop(9) = %d, want 8", got)
+	}
+}
+
 // TestRestoreCursorClampsCurY verifies restoreCursor clamps a saved row at
 // Height to Height-1.
 func TestRestoreCursorClampsCurY(t *testing.T) {

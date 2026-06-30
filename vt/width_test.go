@@ -25,6 +25,10 @@ func TestRuneWidth(t *testing.T) {
 		{"just below DEL stays width 1", 0x7E, 1},
 		{"C1 band interior", 0x9F, 0},
 		{"NBSP is width 1", 0xA0, 1},
+		// Combining set now comes from the stdlib (unicode.Mn/Me/Cf), current to
+		// the toolchain's Unicode version, with SOFT HYPHEN carved back to 1.
+		{"Soft hyphen is width 1 (Cf carve-out)", 0x00AD, 1},
+		{"Post-Unicode-5.0 combining mark U+1AB0", 0x1AB0, 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -36,14 +40,14 @@ func TestRuneWidth(t *testing.T) {
 }
 
 // TestInTableEndpointsMatch checks that inTable includes both endpoints of a
-// range: the lower bound of the first combining range (U+0300) and the upper
-// bound of the last (U+E01EF) must both report as members.
+// range: the lower bound of the first wideRanges entry (U+1100) and the upper
+// bound of the last (U+3FFFD) must both report as members.
 func TestInTableEndpointsMatch(t *testing.T) {
-	if !inTable(0x0300, combining) {
-		t.Errorf("inTable(0x0300, combining) = false, want true (lower endpoint of first range)")
+	if !inTable(0x1100, wideRanges) {
+		t.Errorf("inTable(0x1100, wideRanges) = false, want true (lower endpoint of first range)")
 	}
-	if !inTable(0xE01EF, combining) {
-		t.Errorf("inTable(0xE01EF, combining) = false, want true (upper endpoint of last range)")
+	if !inTable(0x3FFFD, wideRanges) {
+		t.Errorf("inTable(0x3FFFD, wideRanges) = false, want true (upper endpoint of last range)")
 	}
 }
 

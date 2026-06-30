@@ -71,7 +71,13 @@ if (msg?.type === "screen") render.handleScreen(msg);
 
 ## Wire Protocol
 
-The Go server and TypeScript client communicate over a binary WebSocket frame format rather than shared code. The full byte-level specification — frame headers, all message types, row payloads, attribute flags, and client → server input encoding (mouse, focus, application keypad) — lives in [WIRE_PROTOCOL.md](WIRE_PROTOCOL.md). A breaking change to the wire format must land in both the Go encoder/decoder and the TS decoder in a single release.
+The Go server and TypeScript client communicate over a binary WebSocket frame format rather than shared code. The **authoritative byte-level definition is the code itself** — the Go encoder (`terminal/wire_binary.go`), the Go `WireRun` types (`vt/wire.go`), and the TS decoder (`web/src/wire-binary.ts`), all guarded by the round-trip fuzz tests and the `wire-golden/*.bin` fixtures. The design rationale, which a prose byte-table cannot capture and tends to drift from, is:
+
+- **Binary, not JSON.** Frames are WebSocket _binary_ messages with little-endian integers; an earlier JSON encoding produced >100 KB frames on a full repaint (a high-latency regression), and the compact binary format is the fix. Client → server, raw terminal input flows unframed, while control messages (resize, resume) are a `0x00` prefix byte + a JSON body — no valid terminal input starts with NUL, so the prefix is unambiguous.
+- **Absolute line indexing.** Every line the server produces gets a monotonic absolute index that does not change as the screen scrolls, so the client keeps one buffer keyed by absolute index. Applying a line is idempotent (re-delivery overwrites its slot, never duplicates), and resume aligns by absolute index rather than a fragile count — which also makes an eviction gap detectable (the client compares the server's oldest-retained index against its highest-held index and shows a "history trimmed" marker instead of stitching misaligned lines). A server-epoch value detects restarts across reconnects.
+- **Versioning by lockstep.** There is no version byte in the frame header: the Go module and the npm/JSR package release together from this one repository, so a breaking wire change must land in the Go encoder/decoder and the TS decoder in a single release (`feat!:` / `BREAKING CHANGE:`). A version byte is added only if a break ever cannot be coordinated in one release.
+
+Client → server input for the DEC modes (SGR 1006 mouse, focus reporting, application keypad) is encoded by the TS `mouse` / `keyboard` modules and consumed server-side by `vt`; the sequences live in those sources. For VT/DEC features intentionally absent from the wire, see [Unsupported by Design](#unsupported-by-design).
 
 ## License
 

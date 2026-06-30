@@ -320,3 +320,13 @@ func TestBackspaceDecrementsCurX(t *testing.T) {
 		t.Errorf("backspace from column 5: col=%d, want 4", col)
 	}
 }
+
+// TestBackspaceAtColumnZeroStaysPut verifies BS (0x08) at the left margin is a
+// no-op: the cursor must not move past column 0 into a negative column.
+func TestBackspaceAtColumnZeroStaysPut(t *testing.T) {
+	s := New(2, 10)
+	s.Write([]byte{0x08}) // BS while already at column 0
+	if _, col := s.CursorPos(); col != 0 {
+		t.Errorf("backspace at column 0: col=%d, want 0 (must not decrement below 0)", col)
+	}
+}

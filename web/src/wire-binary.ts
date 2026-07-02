@@ -10,6 +10,7 @@ import type {
   ResumeAckMessage,
   ModesMessage,
   TitleMessage,
+  ClipboardMessage,
   ServerMessage,
 } from "./types.js";
 
@@ -20,6 +21,7 @@ const MSG_RESUME_ACK = 2;
 const MSG_MODES = 3;
 const MSG_TITLE = 4;
 const MSG_PONG = 5;
+const MSG_CLIPBOARD = 6;
 
 /**
  * Wire protocol version. Sent by the client in the `resume` control message so
@@ -35,6 +37,7 @@ const MODE_FLAG_MOUSE_SGR = 4;
 const MODE_FLAG_FOCUS_REPORTING = 8;
 const MODE_FLAG_APP_KEYPAD = 16;
 const MODE_FLAG_REVERSE_VIDEO = 32;
+const MODE_FLAG_MOUSE_PIXELS = 64;
 
 class Cursor {
   view: DataView;
@@ -177,6 +180,7 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     const bell = (cursorFlags & 2) !== 0;
     const cursorBlink = (cursorFlags & 4) !== 0;
     const altActive = (cursorFlags & 8) !== 0;
+    const scrollbackCleared = (cursorFlags & 16) !== 0;
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- pre-allocated array filled below
     const rows: WireRun[][] = new Array(screenHeight);
     // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment -- pre-allocated array filled below
@@ -197,6 +201,7 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
       cursorHidden,
       cursorBlink,
       bell,
+      scrollbackCleared,
       inputAck,
     };
     return msg;
@@ -223,6 +228,7 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
       mouseSGR: (flags & MODE_FLAG_MOUSE_SGR) !== 0,
       focusReporting: (flags & MODE_FLAG_FOCUS_REPORTING) !== 0,
       reverseVideo: (flags & MODE_FLAG_REVERSE_VIDEO) !== 0,
+      mousePixels: (flags & MODE_FLAG_MOUSE_PIXELS) !== 0,
       mouseMode,
       inputAck,
     };
@@ -232,6 +238,12 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     const titleLen = c.u16();
     const title = c.utf8(titleLen);
     const msg: TitleMessage = { type: "title", title, inputAck };
+    return msg;
+  }
+  if (msgType === MSG_CLIPBOARD) {
+    const textLen = c.u16();
+    const text = c.utf8(textLen);
+    const msg: ClipboardMessage = { type: "clipboard", text, inputAck };
     return msg;
   }
   if (msgType === MSG_PONG) {

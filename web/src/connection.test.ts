@@ -367,8 +367,11 @@ describe("generateSessionId: session token is cryptographically random", () => {
 
     const id = generateSessionId();
 
-    expect(getRandomValues).toHaveBeenCalledTimes(1);
-    // 16 bytes -> 32 lowercase hex chars; deterministic given the stub.
+    // The output IS the CSPRNG bytes rendered as hex, so it proves the fallback
+    // consulted getRandomValues (asserting the exact call count would pin an
+    // internal detail — reading 16 bytes in one call vs several is not part of
+    // the contract). 16 bytes -> 32 lowercase hex chars; deterministic here.
+    expect(getRandomValues).toHaveBeenCalled();
     expect(id).toBe("000102030405060708090a0b0c0d0e0f");
   });
 

@@ -1,6 +1,14 @@
 // @vitest-environment happy-dom
 //
-// Tests that OSC 8 hyperlink runs are rendered as <a> elements.
+// OSC 8 hyperlink rendering: a run carrying an OSC 8 URI is painted as an <a>.
+//
+// Spec: xterm ctlseqs OSC 8 (`OSC 8 ; params ; URI ST`) — the URI in the
+// sequence is authoritative and is what the link points at. Anchors are opened
+// safely (target=_blank, rel=noopener guards reverse-tabnabbing). render.ts
+// only linkifies http/https URIs (a conservative allow-list); the adversarial
+// scheme sweep proving javascript:/data:/etc. never become clickable lives in
+// hyperlink-safety.fuzz.test.ts. Expectations here derive from the OSC 8 spec,
+// not from reading render.ts.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import * as render from "./render.js";
@@ -77,7 +85,11 @@ describe("OSC 8 hyperlink rendering", () => {
     const anchors = output.querySelectorAll("a.term-link");
     expect(anchors.length).toBeGreaterThanOrEqual(1);
     const a = anchors[0] as HTMLAnchorElement;
+    // The OSC 8 target is carried verbatim on the attribute (spec: the URI in
+    // the sequence is authoritative), and resolves to the absolute URL.
+    expect(a.getAttribute("href")).toBe("http://example.com");
     expect(a.href).toBe("http://example.com/");
+    // Opened safely: a new context with no window.opener handle back.
     expect(a.target).toBe("_blank");
     expect(a.rel).toBe("noopener");
     expect(a.textContent).toBe("here");
@@ -110,5 +122,17 @@ describe("OSC 8 hyperlink rendering", () => {
     // Raw attribute is the OSC 8 target, not the truncated visible fragment.
     expect(a.getAttribute("href")).toBe(full);
     expect(a.textContent).toBe("http://example.com/very/long/pa");
+  });
+
+  it("does not linkify a non-http(s) OSC 8 scheme (renders as inert text)", async () => {
+    // render.ts uses a conservative http/https-only allow-list, so even a
+    // benign non-http scheme like mailto: is NOT turned into a live anchor —
+    // the text renders inert. (Dangerous schemes are swept in the fuzz file.)
+    const runs: WireRun[] = [{ t: "mail me", f: -1, b: -1, a: 0, uc: -1, u: "mailto:a@b.example" }];
+    const msg = frame({ 0: runs }, [0, 0]);
+    await flushFrame(msg);
+
+    expect(output.querySelectorAll("a").length).toBe(0);
+    expect(output.textContent).toContain("mail me");
   });
 });

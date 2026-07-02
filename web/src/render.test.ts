@@ -152,11 +152,18 @@ describe("render: cursor cell updates with inline inverse-video character", () =
   });
 });
 
-// expectInverseAtCol asserts that the row at the given index in the
-// output element's live zone has an inverse-styled span containing
-// `expectedChar` whose starting column is `col`. Spans are flat; we
-// reconstruct columns by summing the textContent length of preceding
-// spans.
+// expectInverseAtCol asserts that the row at the given absolute index in the
+// output element has an inverse-styled span containing `expectedChar` whose
+// starting column is `col`. Spans are flat; we reconstruct columns by summing
+// the textContent length of preceding spans.
+//
+// The visible cursor these frames carry is the application's own inverse-video
+// cell (the native cursor is hidden: every frame sets cursorHidden). Per the
+// ANSI spec, inverse video over default colors swaps the theme's default
+// fg/bg; render.ts expresses that as `color: var(--bg); background: var(--text)`
+// (matching the tier-1 assertion in render-attributes.test.ts). Detect the
+// inverse cell by that exact swap — requiring BOTH properties, so a renderer
+// that dropped half the swap (an invisible inverse blank) would fail here.
 function expectInverseAtCol(
   output: HTMLElement,
   rowIdx: number,
@@ -171,12 +178,7 @@ function expectInverseAtCol(
   let foundInverseText = "";
   for (const span of spans) {
     const text = span.textContent ?? "";
-    const isInverse =
-      span.style.background === "var(--text)" ||
-      span.style.color === "var(--bg)" ||
-      span.classList.contains("term-cursor") ||
-      span.classList.contains("term-cursor-underline") ||
-      span.classList.contains("term-cursor-bar");
+    const isInverse = span.style.background === "var(--text)" && span.style.color === "var(--bg)";
     if (isInverse) {
       // First inverse span found; record its starting column and the
       // expected char (text content's first character).

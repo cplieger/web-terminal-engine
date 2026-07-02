@@ -5,7 +5,7 @@ import (
 	"strings"
 )
 
-//nolint:gocyclo // SGR parameter parsing
+//nolint:gocyclo,gocognit // SGR parameter parsing is a wide, flat attribute switch
 func (s *Screen) applySGR() {
 	// Handle empty params (SGR 0 = reset)
 	if s.numGroups == 0 || (s.numGroups == 1 && s.numParams == 1 && s.pParams[0] == 0) {
@@ -30,7 +30,26 @@ func (s *Screen) applySGR() {
 		case p == 3:
 			s.style.Italic = true
 		case p == 4:
-			s.style.Underline = true
+			// Underline, with optional style subparam 4:x. 4:0 = off,
+			// 4:2 = double; 4:1 single and 4:3/4:4/4:5 (curly/dotted/dashed)
+			// all render as a single underline for now (distinct curly/dotted/
+			// dashed rendering would need a wire attribute + client CSS). Plain
+			// SGR 4 (no subparam) is a single underline.
+			if g.Len >= 2 {
+				switch g.Params[1] {
+				case 0:
+					s.style.Underline = false
+					s.style.DoubleUnderline = false
+				case 2:
+					s.style.DoubleUnderline = true
+					s.style.Underline = false
+				default:
+					s.style.Underline = true
+					s.style.DoubleUnderline = false
+				}
+			} else {
+				s.style.Underline = true
+			}
 		case p == 5:
 			s.style.Blink = true
 		case p == 6:
@@ -110,11 +129,19 @@ func parseExtColorColon(g ParamGroup, c *Color) {
 	switch int(g.Params[1]) {
 	case 5: // 256-color: 38:5:N
 		*c = Color{Type: 2, Val: clampByte(int(g.Params[2]))}
-	case 2: // RGB: 38:2:R:G:B or 38:2:cs:R:G:B
-		if g.Len >= 5 {
+	case 2:
+		// RGB. Two colon forms exist: the plain 38:2:R:G:B (Len 5) and the
+		// ITU-T T.416 form 38:2:cs:R:G:B (Len 6) whose extra element is a
+		// color-space id at index 2 (often empty, e.g. 38:2::R:G:B); in that
+		// form R:G:B live at indices 3:4:5. 38:2:R:G (Len 4) is a lenient
+		// partial. Reading the wrong indices for the 6-element form dropped
+		// blue and shifted the channels.
+		switch {
+		case g.Len >= 6:
+			*c = Color{Type: 3, R: clampByte(int(g.Params[3])), G: clampByte(int(g.Params[4])), B: clampByte(int(g.Params[5]))}
+		case g.Len == 5:
 			*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3])), B: clampByte(int(g.Params[4]))}
-		} else if g.Len == 4 {
-			// Some implementations send 38:2:R:G (incomplete) — treat as partial.
+		case g.Len == 4:
 			*c = Color{Type: 3, R: clampByte(int(g.Params[2])), G: clampByte(int(g.Params[3]))}
 		}
 	}
@@ -172,7 +199,13 @@ func sgrSequence(st Style) string {
 func appendColorParams(params []string, c Color, base int) []string {
 	switch c.Type {
 	case 1:
-		params = append(params, strconv.Itoa(base+int(c.Val)))
+		if c.Val < 8 {
+			params = append(params, strconv.Itoa(base+int(c.Val)))
+		} else {
+			// Bright indices 8-15 map to 90-97 (fg, base 30) / 100-107 (bg,
+			// base 40), NOT base+Val (which would emit 38/39/48/49 and higher).
+			params = append(params, strconv.Itoa(base+60+int(c.Val)-8))
+		}
 	case 2:
 		params = append(params, strconv.Itoa(base+8), "5", strconv.Itoa(int(c.Val)))
 	case 3:

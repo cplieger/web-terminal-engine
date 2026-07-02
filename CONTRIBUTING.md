@@ -46,8 +46,8 @@ fuzz tests together (and the README "Wire Protocol" rationale if the model chang
 ### Intentional non-features
 
 The README carries an "Unsupported by Design" table
-(selective erase, double-width lines, Sixel/Kitty graphics, NRCS charsets,
-exotic SGR, ZWJ clustering, DCS device control). These are deliberate scope
+(double-width lines, Sixel/Kitty graphics, NRCS charsets, exotic SGR,
+ZWJ clustering, tmux DCS passthrough, and programmatic window/column resize). These are deliberate scope
 decisions, not gaps — input for these sequences is consumed but produces no
 effect. Don't file them as bugs or implement them without first proposing a
 scope change.

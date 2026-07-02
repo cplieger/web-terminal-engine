@@ -13,11 +13,22 @@ import fc from "fast-check";
 import { controlFrame, CONTROL_FRAME_PREFIX } from "./wire.js";
 
 describe("controlFrame property", () => {
+  it("exports the control-frame prefix as the spec's NUL byte (0x00)", () => {
+    // The wire protocol (terminal.go header, wire.ts doc) defines the
+    // control-message prefix as 0x00 because no terminal input starts with NUL.
+    // Pin the exported constant to that spec literal directly, so a drift in the
+    // constant is caught here rather than hiding behind self-referential asserts.
+    expect(CONTROL_FRAME_PREFIX).toBe(0x00);
+  });
+
   it("first byte is always the control prefix 0x00", () => {
     fc.assert(
       fc.property(fc.jsonValue(), (msg) => {
         const frame = controlFrame(msg);
-        expect(frame[0]).toBe(CONTROL_FRAME_PREFIX);
+        // Assert the concrete spec value (0x00), not the imported constant:
+        // comparing the output against the same constant the producer used would
+        // still pass if that constant were mutated to a non-spec value.
+        expect(frame[0]).toBe(0x00);
       }),
     );
   });

@@ -16,7 +16,7 @@
 //	  [2B] screen_height uint16  (full terminal height; rows below is sparse)
 //	  [2B] num_changed   uint16
 //	  [1B] cursor_style  uint8   (DECSCUSR style 0-6)
-//	  [1B] cursor_flags  uint8   (bit0=hidden, bit1=bell, bit2=blink, bit3=altActive)
+//	  [1B] cursor_flags  uint8   (bit0=hidden, bit1=bell, bit2=blink, bit3=altActive, bit4=scrollbackCleared)
 //	  For each changed row:
 //	    [2B] row_idx     uint16
 //	    [row payload]
@@ -72,6 +72,10 @@ const (
 	wireMsgModes     byte = 3
 	wireMsgTitle     byte = 4
 	wireMsgPong      byte = 5
+	// wireMsgClipboard carries text an app copied via OSC 52, for the client to
+	// write to the system clipboard. New opcodes are back-compatible (older
+	// clients ignore unknown message types), so no wireProtocolVersion bump.
+	wireMsgClipboard byte = 6
 
 	// wireProtocolVersion is the binary-protocol revision. The client sends
 	// it in the resume control message; handleControl warns when it differs
@@ -97,6 +101,7 @@ const (
 	modeFlagFocusReporting byte = 1 << 3
 	modeFlagAppKeypad      byte = 1 << 4
 	modeFlagReverseVideo   byte = 1 << 5
+	modeFlagMousePixels    byte = 1 << 6
 )
 
 // encodeScreenMsg builds a binary screen frame containing only the
@@ -107,7 +112,7 @@ const (
 // ack is non-zero only on the resume window frame (handleResume passes the
 // resolved per-client ack); the per-flush dispatch path still encodes ack=0
 // and patches the real value in via withClientAck.
-func encodeScreenMsg(base uint64, screenHeight, curRow, curCol int, ack uint64, changed []int, rows [][]vt.WireRun, cursorStyle uint8, cursorHidden, cursorBlink, bell, altActive bool) []byte {
+func encodeScreenMsg(base uint64, screenHeight, curRow, curCol int, ack uint64, changed []int, rows [][]vt.WireRun, cursorStyle uint8, cursorHidden, cursorBlink, bell, altActive, scrollbackCleared bool) []byte {
 	buf := make([]byte, 0, 64)
 	buf = append(buf, wireMsgScreen)
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
@@ -130,6 +135,9 @@ func encodeScreenMsg(base uint64, screenHeight, curRow, curCol int, ack uint64, 
 	}
 	if altActive {
 		cursorFlags |= 8
+	}
+	if scrollbackCleared {
+		cursorFlags |= 16
 	}
 	buf = append(buf, cursorFlags)
 	for _, idx := range changed {
@@ -191,8 +199,9 @@ func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64
 //	     bit 3: focus reporting (DEC ?1004h) enabled
 //	     bit 4: application keypad (DECKPAM, ESC =) enabled
 //	     bit 5: reverse video (DECSCNM, DEC ?5h) enabled
+//	     bit 6: SGR-pixels mouse (DEC ?1016h) enabled
 //	[2B] mouseMode (uint16): 0=off, 1000=normal, 1002=button-event, 1003=any-event
-func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo bool, mouseMode uint16) []byte {
+func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo, mousePixels bool, mouseMode uint16) []byte {
 	buf := make([]byte, 0, 12)
 	buf = append(buf, wireMsgModes)
 	// inputAck placeholder (0); withClientAck patches the real per-client value at wireAckOffset.
@@ -215,6 +224,9 @@ func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, app
 	}
 	if reverseVideo {
 		flags |= modeFlagReverseVideo
+	}
+	if mousePixels {
+		flags |= modeFlagMousePixels
 	}
 	buf = append(buf, flags)
 	buf = binary.LittleEndian.AppendUint16(buf, mouseMode)
@@ -305,5 +317,28 @@ func encodeTitleMsg(ack uint64, title string) []byte {
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(title)))
 	buf = append(buf, title...)
+	return buf
+}
+
+// encodeClipboardMsg builds a clipboard frame carrying text an app copied via
+// OSC 52, for the client to write to the system clipboard:
+//
+//	[1B] msg_type = 6 (clipboard)
+//	[8B] inputAck (uint64)
+//	[2B] text_byte_len (uint16)
+//	[N B] UTF-8 text
+//
+// The payload originates from an OSC sequence, whose buffer (maxOSCLen) caps it
+// well below the uint16 length limit; the guard below is defensive only.
+func encodeClipboardMsg(ack uint64, text []byte) []byte {
+	body := text
+	if len(body) > 0xFFFF {
+		body = body[:0xFFFF]
+	}
+	buf := make([]byte, 0, 11+len(body))
+	buf = append(buf, wireMsgClipboard)
+	buf = binary.LittleEndian.AppendUint64(buf, ack)
+	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(body)))
+	buf = append(buf, body...)
 	return buf
 }

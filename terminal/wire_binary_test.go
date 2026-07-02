@@ -25,7 +25,7 @@ func assertWireBytes(t *testing.T, label string, got, want []byte) {
 func TestEncodeScreenMsg_zeroRowIndexEncodesRunPayload(t *testing.T) {
 	run := vt.WireRun{T: "runtext", F: -1, B: -1, Uc: -1}
 	rows := [][]vt.WireRun{{run}}
-	buf := encodeScreenMsg(0, 3, 0, 0, 0, []int{0}, rows, 0, false, false, false, false)
+	buf := encodeScreenMsg(0, 3, 0, 0, 0, []int{0}, rows, 0, false, false, false, false, false)
 
 	if !bytes.Contains(buf, []byte("runtext")) {
 		t.Errorf("encodeScreenMsg(changed=[0]): row-0 run text missing; index 0 must be in range so rows[0] is appended")
@@ -39,7 +39,7 @@ func TestEncodeScreenMsg_outOfRangeIdxWritesZeroRuns(t *testing.T) {
 	rows := [][]vt.WireRun{{}} // len 1; only index 0 is valid
 	changed := []int{1}        // idx == len(rows): out of range by exactly one
 
-	got := encodeScreenMsg(0, 1, 0, 0, 0, changed, rows, 0, false, false, false, false)
+	got := encodeScreenMsg(0, 1, 0, 0, 0, changed, rows, 0, false, false, false, false, false)
 
 	want := []byte{
 		0x00,                   // wireMsgScreen
@@ -129,6 +129,13 @@ func TestClampU16_boundaryValues(t *testing.T) {
 // The existing callers only ever set bracketed/mouseSGR/reverseVideo, so the
 // appCursorKeys/focusReporting/appKeypad branches were unexercised and a mutant
 // dropping any `flags |= modeFlagX` survived.
+//
+// want values are the bit positions documented in the wire layout (wire_binary.go
+// encodeModesMsg: bit0 bracketed, bit1 appCursor, bit2 mouseSGR, bit3 focus,
+// bit4 appKeypad, bit5 reverseVideo) written as literals rather than the encoder's
+// modeFlagX constants, so a regression that changes a constant's value (which the
+// cross-language TS decoder would then mis-read) is caught here too, not only by
+// the byte-exact golden fixture.
 func TestEncodeModesMsg_eachFlagSetsItsBit(t *testing.T) {
 	cases := []struct {
 		name string
@@ -136,18 +143,18 @@ func TestEncodeModesMsg_eachFlagSetsItsBit(t *testing.T) {
 		want byte
 	}{
 		{"none", [6]bool{false, false, false, false, false, false}, 0},
-		{"bracketedPaste", [6]bool{true, false, false, false, false, false}, modeFlagBracketedPaste},
-		{"appCursorKeys", [6]bool{false, true, false, false, false, false}, modeFlagAppCursorKeys},
-		{"mouseSGR", [6]bool{false, false, true, false, false, false}, modeFlagMouseSGR},
-		{"focusReporting", [6]bool{false, false, false, true, false, false}, modeFlagFocusReporting},
-		{"appKeypad", [6]bool{false, false, false, false, true, false}, modeFlagAppKeypad},
-		{"reverseVideo", [6]bool{false, false, false, false, false, true}, modeFlagReverseVideo},
-		{"all", [6]bool{true, true, true, true, true, true}, modeFlagBracketedPaste | modeFlagAppCursorKeys | modeFlagMouseSGR | modeFlagFocusReporting | modeFlagAppKeypad | modeFlagReverseVideo},
+		{"bracketedPaste", [6]bool{true, false, false, false, false, false}, 1 << 0},
+		{"appCursorKeys", [6]bool{false, true, false, false, false, false}, 1 << 1},
+		{"mouseSGR", [6]bool{false, false, true, false, false, false}, 1 << 2},
+		{"focusReporting", [6]bool{false, false, false, true, false, false}, 1 << 3},
+		{"appKeypad", [6]bool{false, false, false, false, true, false}, 1 << 4},
+		{"reverseVideo", [6]bool{false, false, false, false, false, true}, 1 << 5},
+		{"all", [6]bool{true, true, true, true, true, true}, 1<<0 | 1<<1 | 1<<2 | 1<<3 | 1<<4 | 1<<5},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			a := c.args
-			buf := encodeModesMsg(a[0], a[1], a[2], a[3], a[4], a[5], 0)
+			buf := encodeModesMsg(a[0], a[1], a[2], a[3], a[4], a[5], false, 0)
 			if len(buf) < 12 {
 				t.Fatalf("encodeModesMsg returned %d bytes, want >= 12", len(buf))
 			}
@@ -178,7 +185,7 @@ func TestEncodeScreenMsg_eachCursorFlagSetsItsBit(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			buf := encodeScreenMsg(0, 1, 0, 0, 0, nil, nil, 0, c.hidden, c.blink, c.bell, c.alt)
+			buf := encodeScreenMsg(0, 1, 0, 0, 0, nil, nil, 0, c.hidden, c.blink, c.bell, c.alt, false)
 			if len(buf) < 27 {
 				t.Fatalf("encodeScreenMsg returned %d bytes, want >= 27", len(buf))
 			}
@@ -251,16 +258,16 @@ func TestTruncateUTF8_clampsAtRuneBoundary(t *testing.T) {
 	cases := []struct {
 		name     string
 		s        string
-		maxBytes int
 		want     string
+		maxBytes int
 	}{
-		{"under cap unchanged", "hello", 10, "hello"},
-		{"exact length unchanged", "hello", 5, "hello"},
-		{"ascii truncated", "hello", 3, "hel"},
-		{"zero cap empties", "hello", 0, ""},
+		{name: "under cap unchanged", s: "hello", maxBytes: 10, want: "hello"},
+		{name: "exact length unchanged", s: "hello", maxBytes: 5, want: "hello"},
+		{name: "ascii truncated", s: "hello", maxBytes: 3, want: "hel"},
+		{name: "zero cap empties", s: "hello", maxBytes: 0, want: ""},
 		// "é" is 2 bytes (0xC3 0xA9); a cap landing mid-rune backs off to "h".
-		{"multibyte split backs off", "héllo", 2, "h"},
-		{"multibyte kept when it fits", "héllo", 3, "hé"},
+		{name: "multibyte split backs off", s: "héllo", maxBytes: 2, want: "h"},
+		{name: "multibyte kept when it fits", s: "héllo", maxBytes: 3, want: "hé"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -272,5 +279,56 @@ func TestTruncateUTF8_clampsAtRuneBoundary(t *testing.T) {
 				t.Errorf("truncateUTF8(%q, %d) = %q: not valid UTF-8 (wire length would mismatch payload)", c.s, c.maxBytes, got)
 			}
 		})
+	}
+}
+
+// TestEncodeScreenMsgScrollbackClearedFlag verifies the scrollbackCleared bit
+// (bit 4 of cursor_flags) round-trips through the encoder. The cursor_flags
+// byte sits at offset 26: [1B type][8B ack][8B base][2B curRow][2B curCol]
+// [2B height][2B numChanged][1B cursorStyle][1B cursorFlags].
+func TestEncodeScreenMsgScrollbackClearedFlag(t *testing.T) {
+	const flagsOffset = 26
+	off := encodeScreenMsg(0, 1, 0, 0, 0, nil, nil, 0, false, false, false, false, false)
+	if off[flagsOffset]&16 != 0 {
+		t.Fatalf("scrollbackCleared=false must not set bit4; flags=%#x", off[flagsOffset])
+	}
+	on := encodeScreenMsg(0, 1, 0, 0, 0, nil, nil, 0, false, false, false, false, true)
+	if on[flagsOffset]&16 == 0 {
+		t.Fatalf("scrollbackCleared=true must set bit4; flags=%#x", on[flagsOffset])
+	}
+}
+
+// TestEncodeClipboardMsg verifies the OSC 52 clipboard frame layout:
+// [1B type=6][8B ack][2B len][text].
+func TestEncodeClipboardMsg(t *testing.T) {
+	buf := encodeClipboardMsg(0, []byte("hi"))
+	if buf[0] != wireMsgClipboard {
+		t.Fatalf("opcode = %d, want %d", buf[0], wireMsgClipboard)
+	}
+	if len(buf) != 13 { // 1 + 8 + 2 + 2
+		t.Fatalf("len = %d, want 13", len(buf))
+	}
+	textLen := binary.LittleEndian.Uint16(buf[9:11])
+	if textLen != 2 {
+		t.Errorf("text len = %d, want 2", textLen)
+	}
+	if got := string(buf[11 : 11+textLen]); got != "hi" {
+		t.Errorf("text = %q, want hi", got)
+	}
+}
+
+// TestEncodeModesMsgMousePixelsFlag verifies the SGR-pixels (DEC 1016) flag
+// occupies bit 6 of the modes frame's flags byte, per the documented layout
+// (asserted as the literal bit position, not the modeFlagMousePixels constant).
+func TestEncodeModesMsgMousePixelsFlag(t *testing.T) {
+	const mousePixelsBit = byte(1 << 6) // wire_binary.go modes layout: bit 6
+	buf := encodeModesMsg(false, false, false, false, false, false, true, 0)
+	if buf[9]&mousePixelsBit == 0 {
+		t.Errorf("mousePixels flag not set: flags = %08b", buf[9])
+	}
+	// And absent when the param is false.
+	buf2 := encodeModesMsg(false, false, false, false, false, false, false, 0)
+	if buf2[9]&mousePixelsBit != 0 {
+		t.Errorf("mousePixels flag set when false: flags = %08b", buf2[9])
 	}
 }

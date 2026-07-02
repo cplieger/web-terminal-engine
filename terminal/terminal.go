@@ -86,6 +86,7 @@ type handlerConfig struct {
 	logger             *slog.Logger
 	acceptOptions      *websocket.AcceptOptions
 	onProcessExit      func(error)
+	theme              *vt.Theme
 	workDir            string
 	env                []string
 	scrollbackCapacity int
@@ -131,6 +132,15 @@ func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
 
+// WithTheme sets the default foreground, background, and cursor colors the
+// terminal reports to programs via OSC 10/11/12 queries (and restores on
+// OSC 110/111/112 reset). Pass the colors your client actually renders so
+// color-probing apps — light/dark detection, "reset to default" — see the real
+// theme. Defaults to vt.DefaultTheme (a dark scheme). Build colors with vt.RGB.
+func WithTheme(t vt.Theme) Option {
+	return func(c *handlerConfig) { c.theme = &t }
+}
+
 // sessionState persists across WS reconnects for the same logical
 // client. The client identifies its session via the resume control
 // message; the server uses sessionState.bytesReceived as the ack value
@@ -160,19 +170,22 @@ type clientState struct {
 // performs ws.Write outside the lock so a slow client can't block
 // readLoop / handleControl / new handleWS connections.
 type Handler struct {
-	ptmx       *os.File
-	cmd        *exec.Cmd
-	screen     *vt.Screen
-	registry   *clientRegistry
-	builder    *flushFrameBuilder
-	scrollback *scrollbackRing
-	cancel     context.CancelFunc
-	command    []string
-	cfg        handlerConfig
-	bootEpoch  int64
-	mu         sync.Mutex
-	started    atomic.Bool
-	resized    bool
+	cmd                      *exec.Cmd
+	screen                   *vt.Screen
+	registry                 *clientRegistry
+	builder                  *flushFrameBuilder
+	scrollback               *scrollbackRing
+	cancel                   context.CancelFunc
+	ptmx                     *os.File
+	pendingClipboard         []byte
+	command                  []string
+	cfg                      handlerConfig
+	bootEpoch                int64
+	mu                       sync.Mutex
+	started                  atomic.Bool
+	resized                  bool
+	scrollbackClearedPending bool
+	paletteChangedPending    bool
 }
 
 // NewHandler returns a terminal handler. command is the argv to spawn
@@ -188,10 +201,14 @@ func NewHandler(command []string, opts ...Option) *Handler {
 			o(&cfg)
 		}
 	}
+	var vtOpts []vt.Option
+	if cfg.theme != nil {
+		vtOpts = append(vtOpts, vt.WithTheme(*cfg.theme))
+	}
 	return &Handler{
 		command:    command,
 		cfg:        cfg,
-		screen:     vt.New(defaultRows, defaultCols),
+		screen:     vt.New(defaultRows, defaultCols, vtOpts...),
 		registry:   newClientRegistry(cfg.logger),
 		builder:    &flushFrameBuilder{},
 		scrollback: newScrollbackRing(cfg.scrollbackCapacity),
@@ -318,6 +335,25 @@ func (h *Handler) handlePTYData(data []byte) {
 	var resp []byte
 	h.mu.Lock()
 	h.screen.Write(data) //nolint:errcheck // screen.Write always returns nil
+	if h.screen.ScrollbackCleared {
+		// ED3 (erase scrollback): the app discarded its saved lines (kiro-cli
+		// does this on every resize redraw). Clear the retained ring to match a
+		// real terminal — Clear preserves committed so absolute indices stay
+		// monotonic — and flag the next frame to tell clients to drop history.
+		h.screen.ScrollbackCleared = false
+		h.scrollback.Clear()
+		h.scrollbackClearedPending = true
+	}
+	if h.screen.PaletteChanged {
+		// OSC 4/104 changed the palette; defer a full repaint to the next frame.
+		h.screen.PaletteChanged = false
+		h.paletteChangedPending = true
+	}
+	if len(h.screen.PendingClipboard) > 0 {
+		// OSC 52 copy; hand it to the next frame as a clipboard message.
+		h.pendingClipboard = h.screen.PendingClipboard
+		h.screen.PendingClipboard = nil
+	}
 	if len(h.screen.Response) > 0 {
 		resp = h.screen.Response
 		h.screen.Response = nil
@@ -333,22 +369,26 @@ func (h *Handler) handlePTYData(data []byte) {
 // stall every other goroutine on a slow client; the snapshot pattern
 // keeps the lock window bounded to local memory work.
 type flushFrame struct {
-	clients        map[*websocket.Conn]uint64
-	rows           [][]vt.WireRun
-	scrollLines    [][]vt.WireRun
-	changed        []int
-	modesPayload   []byte
-	titlePayload   []byte
-	base           uint64 // absolute index of the top screen row (changed[y] -> base+y)
-	scrollFirstIdx uint64 // absolute index of scrollLines[0]
-	curRow         int
-	curCol         int
-	screenHeight   int
-	cursorStyle    uint8
-	cursorHidden   bool
-	cursorBlink    bool
-	altActive      bool
-	bell           bool
+	clients          map[*websocket.Conn]uint64
+	rows             [][]vt.WireRun
+	scrollLines      [][]vt.WireRun
+	changed          []int
+	modesPayload     []byte
+	titlePayload     []byte
+	clipboardPayload []byte
+	base             uint64 // absolute index of the top screen row (changed[y] -> base+y)
+	scrollFirstIdx   uint64 // absolute index of scrollLines[0]
+	curRow           int
+	curCol           int
+	screenHeight     int
+	cursorStyle      uint8
+	cursorHidden     bool
+	cursorBlink      bool
+	altActive        bool
+	bell             bool
+	// scrollbackCleared signals the client to drop its scrollback history
+	// (all indices below base) because the app issued ED3 (erase scrollback).
+	scrollbackCleared bool
 }
 
 // buildFrame computes the next outbound frame under h.mu. Returns nil
@@ -356,11 +396,32 @@ type flushFrame struct {
 // changed rows and no scroll lines).
 func (h *Handler) buildFrame() *flushFrame {
 	h.mu.Lock()
+	// An OSC 4/104 palette change re-colors already-drawn cells; force a full
+	// repaint so every visible row re-resolves through the new palette. The
+	// Reset persists if Build produces no frame this tick (flush held / no
+	// resize yet), so the repaint still lands on the next frame.
+	if h.paletteChangedPending {
+		h.builder.Reset()
+		h.paletteChangedPending = false
+	}
 	clients := h.registry.Snapshot()
 	committedBefore := h.scrollback.Committed()
 	frame := h.builder.Build(h.screen, h.resized, clients, committedBefore)
 	if frame != nil && len(frame.scrollLines) > 0 {
 		h.scrollback.Append(frame.scrollLines)
+	}
+	if frame != nil && h.scrollbackClearedPending {
+		frame.scrollbackCleared = true
+		h.scrollbackClearedPending = false
+	}
+	// OSC 52 clipboard is a one-shot event that can arrive with no screen
+	// change, so ensure it rides a frame even when Build produced none.
+	if len(h.pendingClipboard) > 0 {
+		if frame == nil {
+			frame = &flushFrame{clients: clients}
+		}
+		frame.clipboardPayload = encodeClipboardMsg(0, h.pendingClipboard)
+		h.pendingClipboard = nil
 	}
 	h.mu.Unlock()
 	return frame
@@ -400,7 +461,7 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 	var screenPayload []byte
 	if len(frame.changed) > 0 {
 		screenPayload = encodeScreenMsg(frame.base, frame.screenHeight, frame.curRow, frame.curCol,
-			0, frame.changed, frame.rows, frame.cursorStyle, frame.cursorHidden, frame.cursorBlink, frame.bell, frame.altActive)
+			0, frame.changed, frame.rows, frame.cursorStyle, frame.cursorHidden, frame.cursorBlink, frame.bell, frame.altActive, frame.scrollbackCleared)
 	}
 	// Split a large drained burst across several frames so num_lines never overflows the
 	// uint16 count and no single frame reaches multiple MB. Each chunk keeps its absolute
@@ -421,6 +482,9 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 		}
 		if frame.titlePayload != nil {
 			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.titlePayload, ack)) //nolint:errcheck // best-effort
+		}
+		if frame.clipboardPayload != nil {
+			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.clipboardPayload, ack)) //nolint:errcheck // best-effort
 		}
 		if screenPayload != nil {
 			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(screenPayload, ack)) //nolint:errcheck // best-effort
@@ -635,7 +699,7 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 		winChanged[i] = i
 	}
 	windowPayload := encodeScreenMsg(winBase, winHeight, winCurRow, winCurCol, ack,
-		winChanged, winRows, winCursorStyle, winCursorHidden, winCursorBlink, false, winAlt)
+		winChanged, winRows, winCursorStyle, winCursorHidden, winCursorBlink, false, winAlt, false)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

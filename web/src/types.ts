@@ -59,6 +59,13 @@ export interface ScreenMessage {
   cursorBlink?: boolean;
   /** True if the server emitted a BEL since the last screen update. */
   bell?: boolean;
+  /**
+   * True when the app issued ED3 (`CSI 3 J`, "erase saved lines") this frame:
+   * the client drops its scrollback history (all lines below `base`), matching
+   * a real terminal. Inline TUIs (kiro-cli) emit ED3 on every resize redraw to
+   * discard the previous frame; honoring it stops stale frames accumulating.
+   */
+  scrollbackCleared?: boolean;
   /** Server-confirmed bytesReceived for the input ACK protocol. */
   inputAck?: number;
 }
@@ -122,6 +129,8 @@ export interface ModesMessage {
   focusReporting: boolean;
   /** DEC 5: screen is in reverse-video mode. */
   reverseVideo: boolean;
+  /** DEC 1016: mouse reports carry pixel coordinates instead of cell coords. */
+  mousePixels: boolean;
   /** Mouse tracking: 0=off, 1000=normal, 1002=button-event, 1003=any-event. */
   mouseMode: number;
   /** Server-confirmed bytesReceived for the input ACK protocol. */
@@ -141,9 +150,23 @@ export interface TitleMessage {
   inputAck?: number;
 }
 
+/**
+ * Clipboard text an app copied via OSC 52 (`OSC 52 ; c ; <base64> ST`). The
+ * client writes it to the system clipboard. Set-only: the query form is
+ * refused server-side, so this message never carries a read request.
+ */
+export interface ClipboardMessage {
+  /** Discriminator — always `"clipboard"`. */
+  type: "clipboard";
+  /** Text to place on the system clipboard. */
+  text: string;
+  /** Server-confirmed bytesReceived for the input ACK protocol. */
+  inputAck?: number;
+}
+
 /** Discriminated union of all messages the server can send to the client. */
 export type ServerMessage =
-  ScreenMessage | ScrollMessage | ResumeAckMessage | ModesMessage | TitleMessage;
+  ScreenMessage | ScrollMessage | ResumeAckMessage | ModesMessage | TitleMessage | ClipboardMessage;
 
 /**
  * Discriminated union of all control messages the client can send to the

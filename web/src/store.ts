@@ -183,6 +183,12 @@ export class LineStore {
       return;
     }
     this.exitAltIfNeeded();
+    if (msg.scrollbackCleared) {
+      // ED3 (erase scrollback): the app cleared its saved lines (kiro-cli does
+      // this on every resize redraw). Drop our matching history below the live
+      // window so the previous frame doesn't accumulate beneath the new one.
+      this.dropHistoryBelow(msg.base);
+    }
     this.updateWindow(msg);
     for (const y of msg.changed) {
       const row = msg.rows[y];
@@ -190,6 +196,7 @@ export class LineStore {
         this.applyLine(msg.base + y, row);
       }
     }
+    this.truncateBelowWindow();
   }
 
   /** Apply a decoded scroll/history frame: each line at firstIndex + i. */
@@ -295,6 +302,70 @@ export class LineStore {
     }
     // Guard 10: enforce the cap by evicting from the oldest end.
     this.enforceCap();
+  }
+
+  // dropHistoryBelow evicts all retained lines with an absolute index below
+  // `base` — the scrollback history under the live window. Called when the
+  // server signals ED3 (erase scrollback): an inline TUI (kiro-cli) clears its
+  // saved lines on every resize redraw, so the client drops its matching
+  // history to stop the previous frame accumulating beneath the new one. Window
+  // rows (>= base) are kept and refreshed by the frame carrying the signal.
+  // everEvictedThrough is left untouched: the app discarded the lines
+  // deliberately (not a cap trim), so no "earlier output trimmed" marker fits.
+  private dropHistoryBelow(base: number): void {
+    if (this.oldest < 0 || this.oldest >= base) {
+      return;
+    }
+    for (let abs = this.oldest; abs < base; abs++) {
+      if (this.lines.delete(abs)) {
+        this.evicted.add(abs);
+        this.dirty.delete(abs);
+      }
+    }
+    if (base > this.highest) {
+      this.oldest = -1;
+      this.highest = -1;
+    } else {
+      this.oldest = base;
+    }
+  }
+
+  // truncateBelowWindow evicts every retained line past the window's bottom row.
+  // The window's bottom row is the most recent line in the terminal, so no line
+  // can exist at a higher absolute index. A resize that SHRINKS the screen (the
+  // iOS soft keyboard opening) moves the window bottom up while the taller
+  // screen's former bottom rows stay in the store at higher indices — stranded
+  // below the live window. Cap eviction only trims the top/oldest, so nothing
+  // removes them: they linger as phantom blank rows beneath the real content, an
+  // "empty" region the user can scroll into and the reason the content never
+  // appears to shrink to fit on a short viewport. Evicting them keeps the tail
+  // invariant (highest === window bottom); it is the tail-side complement to the
+  // top-side cap eviction.
+  private truncateBelowWindow(): void {
+    if (this.highest < 0) {
+      return;
+    }
+    const windowBottom = this.win.base + this.win.height - 1;
+    if (this.highest <= windowBottom) {
+      return;
+    }
+    for (let abs = windowBottom + 1; abs <= this.highest; abs++) {
+      if (this.lines.delete(abs)) {
+        this.evicted.add(abs);
+        this.dirty.delete(abs);
+      }
+    }
+    // New highest is the greatest retained index at or below the window bottom.
+    let h = windowBottom;
+    while (h >= this.oldest && !this.lines.has(h)) {
+      h--;
+    }
+    if (h >= this.oldest) {
+      this.highest = h;
+    } else {
+      this.highest = -1;
+      this.oldest = -1;
+    }
   }
 
   private enforceCap(): void {

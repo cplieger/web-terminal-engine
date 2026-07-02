@@ -82,9 +82,7 @@ func TestPrevTabStopFloorsAtZero(t *testing.T) {
 // Height to Height-1.
 func TestRestoreCursorClampsCurY(t *testing.T) {
 	s := New(5, 10)
-	s.cursorStateSaved = true
-	s.savedY = s.Height
-	s.savedX = 0
+	s.mainSaved = savedCursor{y: s.Height, x: 0, valid: true}
 	s.restoreCursor()
 	if s.curY != s.Height-1 {
 		t.Errorf("restoreCursor with savedY=Height: curY = %d, want %d", s.curY, s.Height-1)
@@ -95,9 +93,7 @@ func TestRestoreCursorClampsCurY(t *testing.T) {
 // Width to Width-1.
 func TestRestoreCursorClampsCurX(t *testing.T) {
 	s := New(5, 10)
-	s.cursorStateSaved = true
-	s.savedY = 0
-	s.savedX = s.Width
+	s.mainSaved = savedCursor{y: 0, x: s.Width, valid: true}
 	s.restoreCursor()
 	if s.curX != s.Width-1 {
 		t.Errorf("restoreCursor with savedX=Width: curX = %d, want %d", s.curX, s.Width-1)

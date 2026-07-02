@@ -1,0 +1,91 @@
+// Shared render harness for the DOM-tier display-conformance tests (tier 1
+// per-attribute, tier 2 cross-language golden). It drives the REAL render.ts
+// under happy-dom and returns the DOM a caller can assert against — the tests
+// state the SPEC and check compliance; this file only provides the plumbing.
+//
+// Requires the happy-dom environment (`// @vitest-environment happy-dom` in the
+// importing test file).
+import * as render from "../render.js";
+import type { ScreenMessage, WireRun } from "../types.js";
+
+// Fixed cell metric so measureText is deterministic. happy-dom has no Canvas2D.
+const CELL_PX = 8;
+
+// Rows in the rendered window. Content under test goes on row 0; the cursor is
+// parked on the last row so it never adds a span to the row being asserted.
+const SCREEN_H = 8;
+
+function installCanvasStub(): void {
+  HTMLCanvasElement.prototype.getContext = function fakeGetContext(): unknown {
+    return {
+      font: "",
+      measureText: (text: string): { width: number } => ({ width: text.length * CELL_PX }),
+    };
+  } as typeof HTMLCanvasElement.prototype.getContext;
+}
+
+/**
+ * initHarness resets and initializes the render module against a fresh DOM.
+ * Call in beforeEach. Returns the output element.
+ */
+export function initHarness(): HTMLElement {
+  document.body.innerHTML = `<div class="term-wrap"><div class="term-output"></div></div>`;
+  const termWrap = document.querySelector<HTMLElement>(".term-wrap")!;
+  const output = document.querySelector<HTMLElement>(".term-output")!;
+  installCanvasStub();
+  render.resetScreen();
+  render.init({ output, termWrap });
+  render.updateFontMetrics();
+  return output;
+}
+
+/**
+ * renderRow renders `runs` on row 0 of a fresh window and returns that row's
+ * child elements (spans / anchors), awaiting the render flush.
+ */
+export async function renderRow(runs: WireRun[]): Promise<HTMLElement[]> {
+  const blank: WireRun[] = [{ t: " ".repeat(40), f: -1, b: -1, a: 0, uc: -1 }];
+  const rows: WireRun[][] = [];
+  const changed: number[] = [];
+  for (let i = 0; i < SCREEN_H; i++) {
+    rows[i] = i === 0 ? runs : blank;
+    changed.push(i);
+  }
+  const msg: ScreenMessage = {
+    type: "screen",
+    base: 0,
+    rows,
+    cursor: [SCREEN_H - 1, 0],
+    changed,
+    cursorHidden: true,
+    cursorStyle: 0,
+    cursorBlink: false,
+  };
+  render.handleScreen(msg);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const output = document.querySelector<HTMLElement>(".term-output")!;
+  const rowEl = output.children[0] as HTMLElement;
+  return Array.from(rowEl.children) as HTMLElement[];
+}
+
+/** firstTextSpan returns the first element whose text is non-blank. */
+export function firstTextSpan(spans: HTMLElement[]): HTMLElement | undefined {
+  return spans.find((s) => (s.textContent ?? "").trim().length > 0);
+}
+
+/**
+ * renderScreen renders a full decoded ScreenMessage through the real renderer
+ * and returns the output element, awaiting the flush. Used by the cross-language
+ * golden tier (the message comes from the Go-generated fixture).
+ */
+export async function renderScreen(msg: ScreenMessage): Promise<HTMLElement> {
+  render.handleScreen(msg);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  return document.querySelector<HTMLElement>(".term-output")!;
+}
+
+/** rowSpans returns the child elements of the rendered row at absolute `index`. */
+export function rowSpans(output: HTMLElement, index: number): HTMLElement[] {
+  const rowEl = output.children[index] as HTMLElement | undefined;
+  return rowEl ? (Array.from(rowEl.children) as HTMLElement[]) : [];
+}

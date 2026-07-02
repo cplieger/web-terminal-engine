@@ -28,13 +28,13 @@ func goldenFrames() map[string][]byte {
 	return map[string][]byte{
 		// screen: base=100, height=3, cursor=(1,2), changed rows 0 and 2,
 		// cursorStyle=2, blink=true.
-		"screen": encodeScreenMsg(100, 3, 1, 2, 0, []int{0, 2}, screenRows, 2, false, true, false, false),
+		"screen": encodeScreenMsg(100, 3, 1, 2, 0, []int{0, 2}, screenRows, 2, false, true, false, false, false),
 		// scroll: two history lines starting at absolute index 50.
 		"scroll": encodeScrollMsg(0, 50, [][]vt.WireRun{row("h0"), row("h1")}),
 		// resumeAck: ack=7, epoch, committed=200, oldest=10.
 		"resumeack": encodeResumeAck(7, 1234567890, 200, 10),
 		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002.
-		"modes": encodeModesMsg(true, false, true, false, false, true, 1002),
+		"modes": encodeModesMsg(true, false, true, false, false, true, false, 1002),
 		"title": encodeTitleMsg(0, "hello world"),
 		"pong":  encodePongMsg(),
 	}

@@ -42,24 +42,27 @@ func TestMouseModeTracking(t *testing.T) {
 	}
 }
 
-// TestMouseCoordsAtBoundary verifies enabling SGR mouse mode and reporting a
-// boundary cursor position keeps the cursor in bounds and the modes set.
-func TestMouseCoordsAtBoundary(t *testing.T) {
+// TestMousePixelsModeTracked verifies SGR-pixels mouse (DEC private mode 1016)
+// sets and clears the MousePixels flag and that the flag survives a resize (the
+// mode is independent of screen dimensions). 1016 is the pixel-coordinate
+// variant of SGR mouse (1006); the engine tracks only the flag while the client
+// encodes the pixel coordinates.
+func TestMousePixelsModeTracked(t *testing.T) {
 	s := New(5, 5)
-	s.Write([]byte("\x1b[?1000h\x1b[?1006h"))
-	if s.MouseMode != 1000 {
-		t.Fatalf("expected mouse mode 1000, got %d", s.MouseMode)
+	if s.MousePixels {
+		t.Fatal("default MousePixels should be false")
 	}
-	if !s.MouseSGR {
-		t.Fatal("expected SGR mouse encoding")
+	s.Write([]byte("\x1b[?1016h"))
+	if !s.MousePixels {
+		t.Error("after ?1016h, MousePixels = false, want true")
 	}
-	s.Write([]byte("\x1b[5;5R")) // CPR at boundary (1-indexed)
-	row, col := s.CursorPos()
-	if col < 0 || col >= s.Width {
-		t.Fatalf("cursor col %d out of bounds", col)
+	s.Resize(1, 1)
+	if !s.MousePixels {
+		t.Error("MousePixels must survive a resize")
 	}
-	if row < 0 || row >= s.Height {
-		t.Fatalf("cursor row %d out of bounds", row)
+	s.Write([]byte("\x1b[?1016l"))
+	if s.MousePixels {
+		t.Error("after ?1016l, MousePixels = true, want false")
 	}
 }
 

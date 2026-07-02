@@ -9,10 +9,10 @@ import (
 // alt-screen, and returns the restored (clamped) cursor on an 5x8 screen.
 func restoredAltCursor(savedX, savedY int) (gotX, gotY int) {
 	s := New(5, 8)
-	s.enterAltScreen()
+	s.enterAltScreen(1049)
 	s.savedMainCurX = savedX
 	s.savedMainCurY = savedY
-	s.exitAltScreen()
+	s.exitAltScreen(1049)
 	return s.curX, s.curY
 }
 
@@ -28,7 +28,7 @@ func exitedAltScreen(t *testing.T, height, width, savedScrollBottom int) *Screen
 		s.savedMainCells[i] = make([]Cell, width)
 	}
 	s.savedMainScrollBottom = savedScrollBottom
-	s.exitAltScreen()
+	s.exitAltScreen(1049)
 	return s
 }
 
@@ -216,7 +216,7 @@ func TestEraseRegionSkipsOutOfRangeCol(t *testing.T) {
 func TestEnterAltScreenScrollBottom(t *testing.T) {
 	s := New(5, 8)
 	s.scrollBottom = 99 // poison; enterAltScreen must overwrite with Height-1
-	s.enterAltScreen()
+	s.enterAltScreen(1049)
 	if s.scrollBottom != 4 {
 		t.Errorf("enterAltScreen scrollBottom = %d, want 4 (Height-1)", s.scrollBottom)
 	}

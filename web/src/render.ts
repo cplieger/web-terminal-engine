@@ -408,6 +408,12 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
             prev.style.letterSpacing = `${cellWidth * 2 - w}px`;
           }
         }
+        // The spacer occupies the wide char's second cell, so it advances the
+        // column exactly like a printed cell. The engine reports cursor_col in
+        // true cell coordinates (a wide glyph moves curX by 2), so col must
+        // count this cell too — otherwise a visible cursor positioned after a
+        // wide char lands one cell too far right per preceding wide char.
+        col++;
         continue;
       }
       if (col === cursorAt) {

@@ -22,58 +22,109 @@ import (
 
 // Screen is a minimal VT100 screen buffer with SGR support.
 type Screen struct {
-	FlushHoldUntil time.Time
-	Title          string
-	hyperlink      string
-	tabStops       []bool
-	Response       []byte
-	Drained        [][]WireRun
-	Cells          [][]Cell
+	FlushHoldUntil   time.Time
+	ansiModeState    map[int]bool
+	paletteOverride  map[uint8]int32
+	dynColors        map[int]int32
+	specialColors    map[int]int32
+	decModeState     map[int]bool
+	savedModeValues  map[int]bool
+	Title            string
+	iconTitle        string
+	hyperlink        string
+	tabStops         []bool
+	Drained          [][]WireRun
+	Cells            [][]Cell
+	PendingClipboard []byte
+	selectionData    []byte
+	Response         []byte
+	titleStack       []titleEntry
 	altScreenState
 	ParserState
 	CursorState
-	scrollBottom     int
-	Width            int
-	Height           int
+	linesPerScreen   int
 	scrollTop        int
+	conformanceLevel int
+	linesPerPage     int
+	scrollBottom     int
+	leftMargin       int
+	rightMargin      int
+	Height           int
+	Width            int
+	// theme holds the default fg/bg/cursor colors reported by OSC 10/11/12 and
+	// restored by OSC 110/111/112. Configurable via WithTheme; DefaultTheme()
+	// otherwise (a dark scheme matching web-terminal-ui).
+	theme            Theme
 	lastPrintedRune  rune
 	MouseMode        uint16
 	lastPrintedStyle Style
 	charsetState
-	CursorHidden   bool
-	pendingWrap    bool
-	BracketedPaste bool
-	AppCursorKeys  bool
-	CursorBlink    bool
-	AutoWrap       bool
-	CursorStyle    uint8
-	BellRing       bool
-	MouseSGR       bool
-	FocusReporting bool
-	AppKeypad      bool
-	ReverseVideo   bool
-	OriginMode     bool
+	OriginMode        bool
+	noClearOnColumn   bool
+	titleSetHex       bool
+	titleQueryHex     bool
+	CursorBlink       bool
+	AutoWrap          bool
+	CursorStyle       uint8
+	BellRing          bool
+	ScrollbackCleared bool
+	MouseSGR          bool
+	FocusReporting    bool
+	AppKeypad         bool
+	ReverseVideo      bool
+	pendingWrap       bool
+	AppCursorKeys     bool
+	InsertMode        bool
+	LRMarginMode      bool
+	MousePixels       bool
+	LineFeedNewLine   bool
+	ReverseWrap       bool
+	curIsoProtected   bool
+	CursorHidden      bool
+	BracketedPaste    bool
+	allow80To132      bool
+	curProtected      bool
+	moreFix           bool
+	AllowScreenReport bool
+	PaletteChanged    bool
 }
 
 // CursorState holds cursor position, saved cursor, and current style.
 // Embedded in Screen.
+// savedCursor is the full state DECSC/DECRC (and DEC mode 1048) preserve:
+// position, SGR, charsets, origin/autowrap modes, the deferred-wrap flag, and
+// the DECSCA protection attribute. xterm keeps a separate slot for the main and
+// alternate screens (see savedSlot).
+type savedCursor struct {
+	style       Style
+	charsets    [4]charset
+	x           int
+	y           int
+	gl          uint8
+	origin      bool
+	pendingWrap bool
+	protected   bool
+	valid       bool
+}
+
+// CursorState holds the cursor position, the per-screen saved cursors
+// (DECSC/DECRC), and the current SGR style. Embedded in Screen.
 type CursorState struct {
-	savedX           int
-	savedY           int
-	savedStyle       Style
-	savedOrigin      bool
-	savedAutoWrap    bool
-	savedCharsets    [4]charset
-	savedGL          uint8
-	curY             int
-	curX             int
-	style            Style
-	cursorStateSaved bool
+	style     Style
+	mainSaved savedCursor
+	altSaved  savedCursor
+	curY      int
+	curX      int
 }
 
 // altScreenState holds alt-screen save/restore state. Embedded in Screen.
 type altScreenState struct {
-	savedMainCells        [][]Cell
+	savedMainCells [][]Cell
+	// altCells is the persistent alternate-screen buffer. It survives across
+	// switches so re-entering via mode 47 shows the prior contents; modes 1047
+	// and 1049 clear it (on exit / on enter respectively). While InAltScreen is
+	// true it aliases s.Cells. nil until the alt screen is first entered.
+	altCells              [][]Cell
 	savedMainCurX         int
 	savedMainCurY         int
 	savedMainScrollTop    int
@@ -83,12 +134,40 @@ type altScreenState struct {
 	InAltScreen bool
 }
 
-// New creates a screen buffer of the given dimensions.
-func New(rows, cols int) *Screen {
-	s := &Screen{Height: rows, Width: cols, Cells: make([][]Cell, rows), scrollTop: 0, scrollBottom: rows - 1, AutoWrap: true, CursorBlink: true}
+// Option configures a Screen at construction time. Pass options to New.
+type Option func(*Screen)
+
+// WithTheme sets the default foreground, background, and cursor colors the
+// screen reports on OSC 10/11/12 queries and restores on OSC 110/111/112 reset.
+// Consumers should pass their real rendering colors so color-probing apps see
+// the terminal's actual appearance. Defaults to DefaultTheme.
+func WithTheme(t Theme) Option {
+	return func(s *Screen) { s.theme = t }
+}
+
+// DefaultTheme is the built-in dark color scheme (light-grey text on a black
+// background) matching web-terminal-ui's default CSS, used when no WithTheme
+// option is given.
+func DefaultTheme() Theme {
+	return Theme{
+		Foreground: RGB(0xdd, 0xde, 0xe1),
+		Background: RGB(0x00, 0x00, 0x00),
+		Cursor:     RGB(0xdd, 0xde, 0xe1),
+	}
+}
+
+// New creates a screen buffer of the given dimensions. Optional behavior (e.g.
+// the reported color theme) is configured via functional Option values.
+func New(rows, cols int, opts ...Option) *Screen {
+	s := &Screen{Height: rows, Width: cols, Cells: make([][]Cell, rows), scrollTop: 0, scrollBottom: rows - 1, rightMargin: cols - 1, conformanceLevel: 65, AutoWrap: true, CursorBlink: true, theme: DefaultTheme()}
 	s.singleShft = -1
 	for i := range s.Cells {
 		s.Cells[i] = makeRow(cols, Color{})
+	}
+	for _, o := range opts {
+		if o != nil {
+			o(s)
+		}
 	}
 	return s
 }
@@ -152,6 +231,10 @@ func (s *Screen) Resize(rows, cols int) {
 	// Reset scroll region to full screen on resize.
 	s.scrollTop = 0
 	s.scrollBottom = s.Height - 1
+	// Reset the left/right margins to the full width; a dimension change
+	// invalidates any DECSLRM box (xterm does the same on DECCOLM).
+	s.leftMargin = 0
+	s.rightMargin = s.Width - 1
 	// Note: we deliberately do NOT clear cells or reset the cursor here.
 	// the host application starts at the correct dimensions (first resize message
 	// triggers ensureStarted) so initial-paint stale content is no longer
@@ -282,6 +365,48 @@ func (s *Screen) RowString(y int) string {
 
 // --- Cell-level helpers used across files ---
 
+// leftBound and rightBound return the active horizontal scrolling bounds: the
+// DECSLRM left/right margins when DECLRMM is set, otherwise the full width.
+// Every column-clamp, wrap, and scroll decision goes through these so the
+// left/right-margin box and the normal full-width path share one code path.
+func (s *Screen) leftBound() int {
+	if s.LRMarginMode {
+		return s.leftMargin
+	}
+	return 0
+}
+
+func (s *Screen) rightBound() int {
+	if s.LRMarginMode {
+		return s.rightMargin
+	}
+	return s.Width - 1
+}
+
+// withinHMargins reports whether column x lies within [leftBound, rightBound].
+func (s *Screen) withinHMargins(x int) bool {
+	return x >= s.leftBound() && x <= s.rightBound()
+}
+
+// wrapEdge is the column at which autowrap triggers for the current cursor: the
+// right margin when the cursor is inside the left/right margins, else the
+// screen's last column (text outside the margins wraps at the screen edge).
+func (s *Screen) wrapEdge() int {
+	if s.withinHMargins(s.curX) {
+		return s.rightBound()
+	}
+	return s.Width - 1
+}
+
+// wrapColumn is the column autowrap lands on after crossing wrapEdge: the left
+// margin when wrapping inside the box, else column 0.
+func (s *Screen) wrapColumn() int {
+	if s.withinHMargins(s.curX) {
+		return s.leftBound()
+	}
+	return 0
+}
+
 func (s *Screen) put(r rune) {
 	w := runeWidth(r)
 
@@ -290,25 +415,33 @@ func (s *Screen) put(r rune) {
 		return
 	}
 
-	// Pending wrap: if previous put landed cursor at width-1 and another
-	// char arrives, wrap to next line first. xterm.js behavior.
+	// Pending wrap: if the previous put landed the cursor on the wrap edge and
+	// another char arrives, wrap to the next line first (to the left margin when
+	// inside the box). xterm.js behavior.
 	if s.pendingWrap {
 		s.pendingWrap = false
-		s.curX = 0
+		s.curX = s.wrapColumn()
 		s.curY++
 		s.scrollIfNeeded()
 	}
 
-	// Width-2: if only 1 cell remains on the line, wrap first (xterm behavior).
-	if w == 2 && s.curX == s.Width-1 && s.AutoWrap {
+	// Width-2: if only 1 cell remains before the wrap edge, wrap first.
+	if w == 2 && s.curX >= s.wrapEdge() && s.AutoWrap {
 		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style}
-		s.curX = 0
+		s.curX = s.wrapColumn()
 		s.curY++
 		s.scrollIfNeeded()
+	}
+
+	// IRM (ANSI insert mode, CSI 4 h): shift the row right by the glyph width
+	// at the cursor so the new character is inserted rather than overwriting;
+	// cells pushed past the right margin are lost (xterm behavior).
+	if s.InsertMode {
+		s.insertChars(w)
 	}
 
 	if s.curY < s.Height && s.curX < s.Width {
-		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink}
+		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected}
 	}
 	s.lastPrintedRune = r
 	s.lastPrintedStyle = s.style
@@ -317,22 +450,23 @@ func (s *Screen) put(r rune) {
 		// Place spacer/continuation cell.
 		s.curX++
 		if s.curX < s.Width && s.curY < s.Height {
-			s.Cells[s.curY][s.curX] = Cell{Ch: 0, Style: s.style}
+			s.Cells[s.curY][s.curX] = Cell{Ch: 0, Style: s.style, Protected: s.curProtected}
 		}
 	}
 
-	// Clamp curX into [0, Width-1] before the wrap decision. On very
-	// narrow screens (e.g. Width=1) a width-2 char's spacer can push
-	// curX past the last column without triggering pendingWrap, leaving
-	// the cursor out of bounds.
+	// Advance, arming a deferred wrap at the effective right edge. The edge is
+	// the right margin inside the box and the screen edge outside it; on very
+	// narrow screens a width-2 spacer can push curX past the last column, so the
+	// >= Width case clamps defensively.
+	edge := s.wrapEdge()
 	switch {
 	case s.curX >= s.Width:
 		s.curX = s.Width - 1
 		s.pendingWrap = s.AutoWrap
-	case s.curX == s.Width-1:
-		// At the right margin, arm a deferred wrap only when autowrap (DECAWM)
-		// is on. With DECAWM off (CSI ?7l) the cursor stays at the last column
-		// and the next printable overwrites it.
+	case s.curX >= edge:
+		// At the wrap edge, arm a deferred wrap only when autowrap (DECAWM) is
+		// on. With DECAWM off the cursor stays and the next printable overwrites.
+		s.curX = edge
 		s.pendingWrap = s.AutoWrap
 	default:
 		s.curX++
@@ -349,25 +483,62 @@ func (s *Screen) scrollIfNeeded() {
 		s.curY = s.scrollBottom
 	}
 	if s.curY >= s.Height {
-		s.Drained = append(s.Drained, cellsToRuns(s.Cells[0]))
+		s.Drained = append(s.Drained, s.cellsToRuns(s.Cells[0]))
 		copy(s.Cells, s.Cells[1:])
 		s.Cells[s.Height-1] = makeRow(s.Width, s.style.BG)
 		s.curY = s.Height - 1
 	}
 }
 
-func (s *Screen) eraseRegion(y1, x1, y2, x2 int) {
+// eraseMode selects which per-cell protection attributes an erase spares.
+type eraseMode uint8
+
+const (
+	eraseAll         eraseMode = iota // clear every cell (plain ED 2, scroll blanks, RIS)
+	eraseSpareISO                     // spare ISO (SPA/EPA) guarded cells — regular ED 0/1, EL, ECH
+	eraseSpareDECSCA                  // spare DECSCA-protected cells — DECSERA
+	eraseSpareBoth                    // spare DECSCA OR ISO — DECSED/DECSEL (xterm backward-compat)
+)
+
+// eraseRegionMode blanks the rectangle [y1,x1]..[y2,x2], honoring the given
+// protection mode. Coordinates outside the screen are skipped.
+//
+//nolint:gocognit // per-cell bounds + protection-mode guard over a 2-D region
+func (s *Screen) eraseRegionMode(y1, x1, y2, x2 int, mode eraseMode) {
+	blank := Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 	for y := y1; y <= y2; y++ {
 		if y < 0 || y >= s.Height {
 			continue
 		}
+		row := s.Cells[y]
 		for x := x1; x <= x2; x++ {
 			if x < 0 || x >= s.Width {
 				continue
 			}
-			s.Cells[y][x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+			switch mode {
+			case eraseSpareISO:
+				if row[x].IsoProtected {
+					continue
+				}
+			case eraseSpareDECSCA:
+				if row[x].Protected {
+					continue
+				}
+			case eraseSpareBoth:
+				if row[x].Protected || row[x].IsoProtected {
+					continue
+				}
+			case eraseAll:
+			}
+			row[x] = blank
 		}
 	}
+}
+
+// eraseRegion clears the rectangle unconditionally (no protection). Used by the
+// scroll blanks, RIS, and other full clears.
+func (s *Screen) eraseRegion(y1, x1, y2, x2 int) {
+	s.eraseRegionMode(y1, x1, y2, x2, eraseAll)
 }
 
 func makeRow(cols int, bg Color) []Cell {
@@ -378,19 +549,38 @@ func makeRow(cols int, bg Color) []Cell {
 	return r
 }
 
-// enterAltScreen saves the current main-screen state and switches to a
-// fresh alt buffer. Idempotent: a second h while already in alt is a
-// no-op (matches xterm behavior).
-func (s *Screen) enterAltScreen() {
+// blankCols clears columns [x1, x2] of row y to a blank cell with the current
+// background. Used by the boxed (left/right-margin) scroll/insert/delete paths.
+func (s *Screen) blankCols(y, x1, x2 int) {
+	if y < 0 || y >= s.Height {
+		return
+	}
+	row := s.Cells[y]
+	for x := x1; x <= x2 && x < s.Width; x++ {
+		if x >= 0 {
+			row[x] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+		}
+	}
+}
+
+// enterAltScreen saves the main-screen state and switches to the alternate
+// buffer. The three DECSET modes differ (matching xterm):
+//   - 47 / 1047: the cursor and SGR are shared with the main screen (not moved
+//     or reset); the alt buffer is NOT cleared on entry, and mode 47 preserves
+//     it across switches.
+//   - 1049: saves the cursor (restored on exit), clears the alt buffer, and
+//     homes the cursor in it.
+//
+// Idempotent: a second set while already in alt is a no-op.
+func (s *Screen) enterAltScreen(mode int) {
 	if s.InAltScreen {
 		return
 	}
-	// Save main-screen cells (deep copy — alt screen will mutate them
-	// directly, and we need to restore on exit).
+	// Save main-screen cells (deep copy — the alt buffer mutates in place) and
+	// the main cursor/scroll region for restore on exit.
 	saved := make([][]Cell, len(s.Cells))
 	for i, row := range s.Cells {
-		saved[i] = make([]Cell, len(row))
-		copy(saved[i], row)
+		saved[i] = append([]Cell(nil), row...)
 	}
 	s.savedMainCells = saved
 	s.savedMainCurY = s.curY
@@ -399,22 +589,46 @@ func (s *Screen) enterAltScreen() {
 	s.savedMainScrollTop = s.scrollTop
 	s.savedMainScrollBottom = s.scrollBottom
 
-	// Fresh alt buffer.
-	s.Cells = make([][]Cell, s.Height)
-	for i := range s.Cells {
-		s.Cells[i] = makeRow(s.Width, Color{})
+	// Switch to the persistent alt buffer, creating it on first use. 1049 always
+	// starts cleared; a dimension change since the last session (the stashed
+	// buffer no longer matches the screen) also forces a fresh buffer.
+	if mode == 1049 || !s.altCellsFit() {
+		s.altCells = make([][]Cell, s.Height)
+		for i := range s.altCells {
+			s.altCells[i] = makeRow(s.Width, Color{})
+		}
 	}
-	s.curY, s.curX = 0, 0
-	s.style = Style{}
+	s.Cells = s.altCells
 	s.scrollTop = 0
 	s.scrollBottom = s.Height - 1
+	if mode == 1049 {
+		// 1049 homes the cursor and resets SGR in the cleared alt buffer; 47 and
+		// 1047 leave both shared with the main screen.
+		s.curY, s.curX = 0, 0
+		s.style = Style{}
+	}
 	s.InAltScreen = true
 }
 
-// exitAltScreen restores the saved main-screen state.
-func (s *Screen) exitAltScreen() {
+// altCellsFit reports whether the stashed alt buffer matches the current screen
+// dimensions, so it can be reused; a resize since the last alt session leaves
+// it stale and forces a fresh buffer.
+func (s *Screen) altCellsFit() bool {
+	return len(s.altCells) == s.Height && s.Height > 0 && len(s.altCells[0]) == s.Width
+}
+
+// exitAltScreen restores the saved main-screen state. Mode governs the alt
+// buffer's fate and whether the cursor is restored (see enterAltScreen): 1047
+// and 1049 clear the alt buffer on exit, 47 keeps it; only 1049 restores the
+// saved cursor (47/1047 leave the cursor shared with the alt session).
+func (s *Screen) exitAltScreen(mode int) {
 	if !s.InAltScreen || s.savedMainCells == nil {
 		return
+	}
+	// Persist (or discard) the alt buffer for a later re-enter.
+	s.altCells = s.Cells
+	if mode == 1047 || mode == 1049 {
+		s.altCells = nil
 	}
 	// Resize-resilient restore: if dimensions changed while in alt,
 	// truncate or pad rows to match current height.
@@ -433,11 +647,13 @@ func (s *Screen) exitAltScreen() {
 		}
 	}
 	s.Cells = restored
-	s.curY = s.savedMainCurY
-	s.curX = s.savedMainCurX
 	s.style = s.savedMainStyle
 	s.scrollTop = s.savedMainScrollTop
 	s.scrollBottom = s.savedMainScrollBottom
+	if mode == 1049 {
+		s.curY = s.savedMainCurY
+		s.curX = s.savedMainCurX
+	}
 	if s.curY >= s.Height {
 		s.curY = s.Height - 1
 	}

@@ -1,10 +1,11 @@
-// Property-based tests for the WebSocket reconnect-backoff scheduler.
+// Tests for the WebSocket reconnect-backoff scheduler.
 //
-// Invariants tested:
-// 1. nextBaseMs doubles or saturates at MAX_DELAY_MS (never exceeds).
+// Behaviors tested:
+// 1. The base-delay ladder: the base doubles each attempt and saturates at
+//    MAX_DELAY_MS (hardcoded sequence, not a recomputation of the formula).
 // 2. scheduledMs is in [currentBaseMs, currentBaseMs + JITTER_MS).
 // 3. scheduledMs is always >= currentBaseMs (jitter is additive, not subtractive).
-// 4. With deterministic random=0, the formula is exactly currentBaseMs.
+// 4. With deterministic random=0, the scheduled wait is exactly currentBaseMs.
 // 5. Eventually-monotonic: from any starting base, repeated calls
 //    converge to MAX_DELAY_MS as the new base.
 // 6. Robustness: malformed random() (NaN, negative, >=1, +/-Infinity)
@@ -15,19 +16,28 @@ import fc from "fast-check";
 
 import { nextBackoffDelay, INITIAL_DELAY_MS, MAX_DELAY_MS, JITTER_MS } from "./reconnect.js";
 
-describe("nextBackoffDelay property", () => {
-  it("nextBaseMs is min(currentBaseMs * 2, MAX_DELAY_MS)", () => {
-    fc.assert(
-      fc.property(
-        fc.double({ min: 0, max: 100_000, noNaN: true, noDefaultInfinity: true }),
-        (base) => {
-          const { nextBaseMs } = nextBackoffDelay(base);
-          expect(nextBaseMs).toBe(Math.min(base * 2, MAX_DELAY_MS));
-        },
-      ),
-    );
-  });
+describe("nextBackoffDelay backoff ladder", () => {
+  // The observable backoff ladder: the base delay doubles on each attempt and
+  // saturates at MAX_DELAY_MS. Expectations are hardcoded — this pins the exact
+  // sequence the reconnect strategy climbs, rather than re-deriving it from
+  // `min(base * 2, cap)` (which would just assert the implementation against a
+  // copy of itself). nextBaseMs does not depend on the jitter RNG.
+  const ladder: { base: number; nextBase: number }[] = [
+    { base: 500, nextBase: 1000 }, // INITIAL_DELAY_MS: first retry after a clean connection
+    { base: 1000, nextBase: 2000 },
+    { base: 2000, nextBase: 4000 },
+    { base: 4000, nextBase: 8000 }, // reaches the cap exactly
+    { base: 6000, nextBase: 8000 }, // 12000 would overshoot the cap -> clamped
+    { base: 8000, nextBase: 8000 }, // already capped -> stays put
+  ];
+  for (const { base, nextBase } of ladder) {
+    it(`base ${base}ms advances to ${nextBase}ms next attempt`, () => {
+      expect(nextBackoffDelay(base).nextBaseMs).toBe(nextBase);
+    });
+  }
+});
 
+describe("nextBackoffDelay property", () => {
   it("nextBaseMs never exceeds MAX_DELAY_MS", () => {
     fc.assert(
       fc.property(

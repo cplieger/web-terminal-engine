@@ -109,7 +109,7 @@ func makeSavedMain(rows, cols int) [][]Cell {
 // and returns the post-resize saved main cursor.
 func resizeSavedCursor(savedX, savedY, newRows, newCols int) (gotX, gotY int) {
 	s := New(8, 12)
-	s.enterAltScreen()
+	s.enterAltScreen(1049)
 	s.savedMainCurX = savedX
 	s.savedMainCurY = savedY
 	s.Resize(newRows, newCols)
@@ -147,7 +147,7 @@ func TestResizeTabStopsGrow(t *testing.T) {
 // main-screen buffer exists rebuilds that buffer at the new dimensions.
 func TestResizeRebuildsSavedMainCells(t *testing.T) {
 	s := New(5, 10)
-	s.enterAltScreen() // populates savedMainCells (5x10)
+	s.enterAltScreen(1049) // populates savedMainCells (5x10)
 	s.Resize(8, 20)
 	if got := len(s.savedMainCells); got != 8 {
 		t.Fatalf("savedMainCells rows after resize = %d, want 8", got)

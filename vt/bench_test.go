@@ -13,9 +13,8 @@ func BenchmarkScreenWrite(b *testing.B) {
 	}
 
 	s := New(24, 80)
-	b.ResetTimer()
 	b.ReportAllocs()
-	for range b.N {
+	for b.Loop() {
 		s.Write(frame)
 	}
 }
@@ -28,9 +27,8 @@ func BenchmarkRenderRowWire(b *testing.B) {
 	frame := []byte("\x1b[1;31mHello \x1b[0;32mWorld \x1b[4;34mTest content padding.")
 	s.Write(frame)
 
-	b.ResetTimer()
 	b.ReportAllocs()
-	for range b.N {
+	for b.Loop() {
 		_ = s.RenderRowWire(0)
 	}
 }

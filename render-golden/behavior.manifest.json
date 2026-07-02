@@ -1,0 +1,704 @@
+[
+  {
+    "name": "clear_screen_ed2",
+    "input": "\u001b[1;1HABC\u001b[2;1HDEF\u001b[2J",
+    "want": [
+      "",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 3,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAMABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "erase_below_ed0",
+    "input": "\u001b[1;1HAAAA\u001b[2;1HBBBB\u001b[3;1HCCCC\u001b[2;3H\u001b[0J",
+    "want": [
+      "AAAA",
+      "BB",
+      "",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAIABAAEAAABAAABAAgAQUFBQSAgICD//////////wAA/////wAAAQABAAgAQkIgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "erase_above_ed1",
+    "input": "\u001b[1;1HAAAA\u001b[2;1HBBBB\u001b[3;1HCCCC\u001b[2;3H\u001b[1J",
+    "want": [
+      "",
+      "   B",
+      "CCCC",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAIABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgQiAgICD//////////wAA/////wAAAgABAAgAQ0NDQyAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "erase_line_to_end_el0",
+    "input": "HELLOWOR\u001b[1;3H\u001b[0K",
+    "want": [
+      "HE",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgASEUgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "erase_line_to_start_el1",
+    "input": "HELLOWOR\u001b[1;4H\u001b[1K",
+    "want": [
+      "    OWOR",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 3,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAMABAAEAAABAAABAAgAICAgIE9XT1L//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "erase_whole_line_el2",
+    "input": "HELLOWOR\u001b[2K",
+    "want": [
+      "",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 7,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAcABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_position_write",
+    "input": "\u001b[2;4HX",
+    "want": [
+      "",
+      "   X",
+      "",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAQABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgWCAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "overwrite_middle",
+    "input": "AAAAAAAA\u001b[1;3HBB",
+    "want": [
+      "AABBAAAA",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAQABAAEAAABAAABAAgAQUFCQkFBQUH//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "carriage_return",
+    "input": "ABCDEF\rXY",
+    "want": [
+      "XYCDEF",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgAWFlDREVGICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "backspace_overwrite",
+    "input": "ABC\bX",
+    "want": [
+      "ABX",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 3,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAMABAAEAAABAAABAAgAQUJYICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "tab_stop",
+    "input": "A\tB",
+    "want": [
+      "A      B",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 7,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAcABAAEAAABAAABAAgAQSAgICAgIEL//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "insert_char_ich",
+    "input": "ABCDEF\u001b[1;3H\u001b[2@",
+    "want": [
+      "AB  CDEF",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgAQUIgIENERUb//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "delete_char_dch",
+    "input": "ABCDEFGH\u001b[1;3H\u001b[2P",
+    "want": [
+      "ABEFGH",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgAQUJFRkdIICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "erase_char_ech",
+    "input": "ABCDEFGH\u001b[1;3H\u001b[2X",
+    "want": [
+      "AB  EFGH",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgAQUIgIEVGR0j//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "insert_line_il",
+    "input": "\u001b[1;1HR0\u001b[2;1HR1\u001b[3;1HR2\u001b[4;1HR3\u001b[2;1H\u001b[L",
+    "want": [
+      "R0",
+      "",
+      "R1",
+      "R2"
+    ],
+    "curRow": 1,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAAABAAEAAABAAABAAgAUjAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAUjEgICAgICD//////////wAA/////wAAAwABAAgAUjIgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "delete_line_dl",
+    "input": "\u001b[1;1HR0\u001b[2;1HR1\u001b[3;1HR2\u001b[4;1HR3\u001b[2;1H\u001b[M",
+    "want": [
+      "R0",
+      "R2",
+      "R3",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAAABAAEAAABAAABAAgAUjAgICAgICD//////////wAA/////wAAAQABAAgAUjIgICAgICD//////////wAA/////wAAAgABAAgAUjMgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "autowrap_to_next_row",
+    "input": "ABCDEFGHIJKL",
+    "want": [
+      "ABCDEFGH",
+      "IJKL",
+      "",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAQABAAEAAABAAABAAgAQUJDREVGR0j//////////wAA/////wAAAQABAAgASUpLTCAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "newline_scroll_up",
+    "input": "\u001b[1;1HR0\u001b[2;1HR1\u001b[3;1HR2\u001b[4;1HR3\u001b[4;1H\n",
+    "want": [
+      "R1",
+      "R2",
+      "R3",
+      ""
+    ],
+    "curRow": 3,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAADAAAABAAEAAABAAABAAgAUjEgICAgICD//////////wAA/////wAAAQABAAgAUjIgICAgICD//////////wAA/////wAAAgABAAgAUjMgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "reverse_index_scroll_down",
+    "input": "\u001b[1;1HR0\u001b[2;1HR1\u001b[3;1HR2\u001b[4;1HR3\u001b[1;1H\u001bM",
+    "want": [
+      "",
+      "R0",
+      "R1",
+      "R2"
+    ],
+    "curRow": 0,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAAABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAUjAgICAgICD//////////wAA/////wAAAgABAAgAUjEgICAgICD//////////wAA/////wAAAwABAAgAUjIgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_up_cuu",
+    "input": "\u001b[4;1H\u001b[2AX",
+    "want": [
+      "",
+      "X",
+      "",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAEABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAWCAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_down_cud",
+    "input": "\u001b[1;1H\u001b[2BX",
+    "want": [
+      "",
+      "",
+      "X",
+      ""
+    ],
+    "curRow": 2,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAACAAEABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAWCAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_forward_cuf",
+    "input": "\u001b[1;1H\u001b[3CX",
+    "want": [
+      "   X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAQABAAEAAABAAABAAgAICAgWCAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_back_cub",
+    "input": "\u001b[1;8H\u001b[4DX",
+    "want": [
+      "   X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAQABAAEAAABAAABAAgAICAgWCAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_col_absolute_cha",
+    "input": "\u001b[1;1H\u001b[5GX",
+    "want": [
+      "    X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 5,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAUABAAEAAABAAABAAgAICAgIFggICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_hpa",
+    "input": "\u001b[1;1H\u001b[6`X",
+    "want": [
+      "     X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 6,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAYABAAEAAABAAABAAgAICAgICBYICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_hpr",
+    "input": "\u001b[1;1H\u001b[3aX",
+    "want": [
+      "   X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAQABAAEAAABAAABAAgAICAgWCAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_vpa",
+    "input": "\u001b[1;3H\u001b[3dX",
+    "want": [
+      "",
+      "",
+      "  X",
+      ""
+    ],
+    "curRow": 2,
+    "curCol": 3,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAACAAMABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICBYICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_vpr",
+    "input": "\u001b[1;1H\u001b[2eX",
+    "want": [
+      "",
+      "",
+      "X",
+      ""
+    ],
+    "curRow": 2,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAACAAEABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAWCAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_next_line_cnl",
+    "input": "\u001b[1;5H\u001b[2EX",
+    "want": [
+      "",
+      "",
+      "X",
+      ""
+    ],
+    "curRow": 2,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAACAAEABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAWCAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_prev_line_cpl",
+    "input": "\u001b[4;5H\u001b[2FX",
+    "want": [
+      "",
+      "X",
+      "",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAEABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAWCAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_forward_tab_cht",
+    "input": "\u001b[1;1H\u001b[IX",
+    "want": [
+      "       X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 7,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAcABAAEAAABAAABAAgAICAgICAgIFj//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "cursor_back_tab_cbt",
+    "input": "\u001b[1;8H\u001b[ZX",
+    "want": [
+      "X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAEABAAEAAABAAABAAgAWCAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "index_ind",
+    "input": "\u001b[2;1H\u001bDX",
+    "want": [
+      "",
+      "",
+      "X",
+      ""
+    ],
+    "curRow": 2,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAACAAEABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAWCAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "next_line_nel",
+    "input": "\u001b[2;5H\u001bEX",
+    "want": [
+      "",
+      "",
+      "X",
+      ""
+    ],
+    "curRow": 2,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAACAAEABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAWCAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "scroll_up_su",
+    "input": "\u001b[1;1HR0\u001b[2;1HR1\u001b[3;1HR2\u001b[4;1HR3\u001b[2S",
+    "want": [
+      "R2",
+      "R3",
+      "",
+      ""
+    ],
+    "curRow": 3,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAADAAIABAAEAAABAAABAAgAUjIgICAgICD//////////wAA/////wAAAQABAAgAUjMgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "scroll_down_sd",
+    "input": "\u001b[1;1HR0\u001b[2;1HR1\u001b[3;1HR2\u001b[4;1HR3\u001b[2T",
+    "want": [
+      "",
+      "",
+      "R0",
+      "R1"
+    ],
+    "curRow": 3,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAADAAIABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAUjAgICAgICD//////////wAA/////wAAAwABAAgAUjEgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "repeat_rep",
+    "input": "X\u001b[5bY",
+    "want": [
+      "XXXXXXY",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 7,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAcABAAEAAABAAABAAgAWFhYWFhYWSD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "set_tab_hts",
+    "input": "\u001b[1;4H\u001bH\u001b[1;1H\tX",
+    "want": [
+      "   X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAQABAAEAAABAAABAAgAICAgWCAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "clear_tabs_tbc",
+    "input": "\u001b[1;1H\u001b[3g\tX",
+    "want": [
+      "       X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 7,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAcABAAEAAABAAABAAgAICAgICAgIFj//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "save_restore_cursor_decsc",
+    "input": "\u001b[2;3H\u001b7\u001b[4;7HZ\u001b8X",
+    "want": [
+      "",
+      "  X",
+      "",
+      "      Z"
+    ],
+    "curRow": 1,
+    "curCol": 3,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAMABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICBYICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgWiD//////////wAA/////wAA"
+  },
+  {
+    "name": "screen_alignment_decaln",
+    "input": "\u001b#8",
+    "want": [
+      "EEEEEEEE",
+      "EEEEEEEE",
+      "EEEEEEEE",
+      "EEEEEEEE"
+    ],
+    "curRow": 0,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAAABAAEAAABAAABAAgARUVFRUVFRUX//////////wAA/////wAAAQABAAgARUVFRUVFRUX//////////wAA/////wAAAgABAAgARUVFRUVFRUX//////////wAA/////wAAAwABAAgARUVFRUVFRUX//////////wAA/////wAA"
+  },
+  {
+    "name": "scroll_region_decstbm",
+    "input": "\u001b[1;1HR0\u001b[2;1HR1\u001b[3;1HR2\u001b[4;1HR3\u001b[2;3r\u001b[3;1H\nX",
+    "want": [
+      "R0",
+      "R2",
+      "X",
+      "R3"
+    ],
+    "curRow": 2,
+    "curCol": 1,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAACAAEABAAEAAABAAABAAgAUjAgICAgICD//////////wAA/////wAAAQABAAgAUjIgICAgICD//////////wAA/////wAAAgABAAgAWCAgICAgICD//////////wAA/////wAAAwABAAgAUjMgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "origin_mode_margins",
+    "input": "\u001b[2;3r\u001b[?69h\u001b[3;6s\u001b[?6h\u001b[1;1HX",
+    "want": [
+      "",
+      "  X",
+      "",
+      ""
+    ],
+    "curRow": 1,
+    "curCol": 3,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAABAAMABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICBYICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "fill_rect_decfra",
+    "input": "\u001b[88;2;3;3;5$x",
+    "want": [
+      "",
+      "  XXX",
+      "  XXX",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAAABAAEAAABAAABAAgAICAgICAgICD//////////wAA/////wAAAQABAAgAICBYWFggICD//////////wAA/////wAAAgABAAgAICBYWFggICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "erase_rect_decera",
+    "input": "\u001b#8\u001b[2;3;3;5$z",
+    "want": [
+      "EEEEEEEE",
+      "EE   EEE",
+      "EE   EEE",
+      "EEEEEEEE"
+    ],
+    "curRow": 0,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAAABAAEAAABAAABAAgARUVFRUVFRUX//////////wAA/////wAAAQABAAgARUUgICBFRUX//////////wAA/////wAAAgABAAgARUUgICBFRUX//////////wAA/////wAAAwABAAgARUVFRUVFRUX//////////wAA/////wAA"
+  },
+  {
+    "name": "copy_rect_deccra",
+    "input": "\u001b[1;1HAB\u001b[1;1;1;2;1;3;1;1$v",
+    "want": [
+      "AB",
+      "",
+      "AB",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgAQUIgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAQUIgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "shift_left_sl",
+    "input": "\u001b[1;1HABCDEFGH\u001b[2 @",
+    "want": [
+      "CDEFGH",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 7,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAcABAAEAAABAAABAAgAQ0RFRkdIICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "shift_right_sr",
+    "input": "\u001b[1;1HABCDEFGH\u001b[2 A",
+    "want": [
+      "  ABCDEF",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 7,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAcABAAEAAABAAABAAgAICBBQkNERUb//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "insert_col_decic",
+    "input": "\u001b[1;1HAAAAAAAA\u001b[2;1HBBBBBBBB\u001b[1;3H\u001b[2'}",
+    "want": [
+      "AA  AAAA",
+      "BB  BBBB",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgAQUEgIEFBQUH//////////wAA/////wAAAQABAAgAQkIgIEJCQkL//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "delete_col_decdc",
+    "input": "\u001b[1;1HAAAAAAAA\u001b[2;1HBBBBBBBB\u001b[1;3H\u001b[2'~",
+    "want": [
+      "AAAAAA",
+      "BBBBBB",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 2,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAIABAAEAAABAAABAAgAQUFBQUFBICD//////////wAA/////wAAAQABAAgAQkJCQkJCICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "back_index_decbi",
+    "input": "\u001b[1;4H\u001b6X",
+    "want": [
+      "  X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 3,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAMABAAEAAABAAABAAgAICBYICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "forward_index_decfi",
+    "input": "\u001b[1;4H\u001b9X",
+    "want": [
+      "    X",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 5,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAUABAAEAAABAAABAAgAICAgIFggICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "selective_erase_display_decsed",
+    "input": "\u001b[1;1H\u001b[1\"qAB\u001b[0\"qCD\u001b[?2J",
+    "want": [
+      "AB",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 4,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAQABAAEAAABAAABAAgAQUIgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  },
+  {
+    "name": "selective_erase_line_decsel",
+    "input": "\u001b[1;1H\u001b[1\"qAB\u001b[0\"qCD\u001b[1;1H\u001b[?2K",
+    "want": [
+      "AB",
+      "",
+      "",
+      ""
+    ],
+    "curRow": 0,
+    "curCol": 0,
+    "frame": "AAAAAAAAAAAAAAAAAAAAAAAAAAAABAAEAAABAAABAAgAQUIgICAgICD//////////wAA/////wAAAQABAAgAICAgICAgICD//////////wAA/////wAAAgABAAgAICAgICAgICD//////////wAA/////wAAAwABAAgAICAgICAgICD//////////wAA/////wAA"
+  }
+]

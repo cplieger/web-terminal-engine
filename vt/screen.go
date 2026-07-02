@@ -22,16 +22,21 @@ import (
 
 // Screen is a minimal VT100 screen buffer with SGR support.
 type Screen struct {
-	FlushHoldUntil   time.Time
-	ansiModeState    map[int]bool
-	paletteOverride  map[uint8]int32
-	dynColors        map[int]int32
-	specialColors    map[int]int32
-	decModeState     map[int]bool
-	savedModeValues  map[int]bool
-	Title            string
-	iconTitle        string
-	hyperlink        string
+	FlushHoldUntil  time.Time
+	ansiModeState   map[int]bool
+	paletteOverride map[uint8]int32
+	dynColors       map[int]int32
+	specialColors   map[int]int32
+	decModeState    map[int]bool
+	savedModeValues map[int]bool
+	Title           string
+	iconTitle       string
+	hyperlink       string
+	// Notification holds the last OSC 9 desktop-notification message (ESC ] 9 ;
+	// <text>), stripped of control bytes and length-clamped. The engine stays
+	// generic and does not interpret the text; a consumer's status classifier
+	// maps it (see NotificationSeq for edge detection).
+	Notification     string
 	tabStops         []bool
 	Drained          [][]WireRun
 	Cells            [][]Cell
@@ -51,6 +56,10 @@ type Screen struct {
 	rightMargin      int
 	Height           int
 	Width            int
+	// NotificationSeq increments each time a new OSC 9 notification is captured,
+	// so a reader (the status layer) detects a fresh notification even when the
+	// message text repeats. Starts at 0 (no notification seen).
+	NotificationSeq uint64
 	// theme holds the default fg/bg/cursor colors reported by OSC 10/11/12 and
 	// restored by OSC 110/111/112. Configurable via WithTheme; DefaultTheme()
 	// otherwise (a dark scheme matching web-terminal-ui).

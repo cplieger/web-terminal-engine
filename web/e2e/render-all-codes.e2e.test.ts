@@ -217,11 +217,15 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
     // was missing (16 distinct-but-wrong colors used to pass). Then re-assert
     // the ANSI consistency: SGR 38;5;n (n<16) addresses the SAME slot as 3n/9n. ---
     for (let n = 0; n < 8; n++) {
-      expect.soft(hexOrUndef(basicFg.get(30 + n)), `SGR 3${n} fg == VGA[${n}]`).toBe(hexStr(vga16[n]!));
+      expect
+        .soft(hexOrUndef(basicFg.get(30 + n)), `SGR 3${n} fg == VGA[${n}]`)
+        .toBe(hexStr(vga16[n]!));
       expect
         .soft(hexOrUndef(basicFg.get(90 + n)), `SGR 9${n} fg == VGA[${8 + n}]`)
         .toBe(hexStr(vga16[8 + n]!));
-      expect.soft(hexOrUndef(basicBg.get(40 + n)), `SGR 4${n} bg == VGA[${n}]`).toBe(hexStr(vga16[n]!));
+      expect
+        .soft(hexOrUndef(basicBg.get(40 + n)), `SGR 4${n} bg == VGA[${n}]`)
+        .toBe(hexStr(vga16[n]!));
       expect
         .soft(hexOrUndef(basicBg.get(100 + n)), `SGR 10${n} bg == VGA[${8 + n}]`)
         .toBe(hexStr(vga16[8 + n]!));
@@ -311,14 +315,20 @@ function checkDefaultColor(code: number, set: CellDump, def: CellDump, at: strin
       expect.soft(parseRGBOrNull(def.color), `${at}: 39 restores default fg`).toBe(DEFAULT_FG);
       break;
     case 49: // default bg = transparent (unset)
-      expect.soft(parseRGBOrNull(set.backgroundColor), `${at}: set glyph bg is red`).toBe(vga16[1]!);
-      expect.soft(isTransparent(def.backgroundColor), `${at}: 49 restores transparent bg`).toBe(true);
+      expect
+        .soft(parseRGBOrNull(set.backgroundColor), `${at}: set glyph bg is red`)
+        .toBe(vga16[1]!);
+      expect
+        .soft(isTransparent(def.backgroundColor), `${at}: 49 restores transparent bg`)
+        .toBe(true);
       break;
     case 59: // default underline color = currentColor (the glyph's own text color)
-      expect.soft(parseRGBOrNull(set.textDecorationColor), `${at}: set ul color green`).toBe(
-        rgb(0, 255, 0),
-      );
-      expect.soft(def.textDecorationColor, `${at}: 59 reverts ul color to text color`).toBe(def.color);
+      expect
+        .soft(parseRGBOrNull(set.textDecorationColor), `${at}: set ul color green`)
+        .toBe(rgb(0, 255, 0));
+      expect
+        .soft(def.textDecorationColor, `${at}: 59 reverts ul color to text color`)
+        .toBe(def.color);
       break;
     default:
       throw new Error(`unhandled defaultColor code ${code}`);

@@ -418,12 +418,7 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
         (r.textContent ?? "").replace(/\u00a0/g, " ").replace(/[ ]+$/, ""),
       );
     };
-    const mainRows = [
-      [run("MAIN-A")],
-      [run("MAIN-B")],
-      [run(" ".repeat(8))],
-      [run(" ".repeat(8))],
-    ];
+    const mainRows = [[run("MAIN-A")], [run("MAIN-B")], [run(" ".repeat(8))], [run(" ".repeat(8))]];
     // Main buffer content.
     await renderMsg(page, screenMsg(mainRows, [3, 0]));
     const main = await page.evaluate(readGrid);

@@ -433,13 +433,14 @@ func TestLineDownClampsCurY(t *testing.T) {
 
 // --- REP ---
 
-// TestREPRepeatsLastRune verifies REP (CSI b) repeats the last printed rune.
+// TestREPRepeatsLastRune verifies REP (CSI Pn b) reprints the last printed rune
+// Pn more times, driven through the real print path.
 func TestREPRepeatsLastRune(t *testing.T) {
 	s := New(5, 5)
-	s.lastPrintedRune = 'X'
-	s.dispatchCSI('b') // REP, default count 1
-	if s.Cells[0][0].Ch != 'X' {
-		t.Errorf("REP with lastPrintedRune='X': Cells[0][0].Ch = %q, want 'X'", s.Cells[0][0].Ch)
+	s.Write([]byte("X"))       // print 'X' at col 0 (records it as the last rune)
+	s.Write([]byte("\x1b[3b")) // REP 3 -> three more 'X' at cols 1,2,3
+	if got := s.RowString(0); got != "XXXX" {
+		t.Errorf("REP after printing 'X': RowString(0) = %q, want %q", got, "XXXX")
 	}
 }
 
@@ -511,12 +512,14 @@ func TestSoftResetScrollBottom(t *testing.T) {
 
 // --- Device status / attributes ---
 
-// TestDeviceAttributesPrimary verifies the primary Device Attributes reply.
+// TestDeviceAttributesPrimary verifies the primary Device Attributes reply
+// advertises the VT525 (level 5) feature profile the engine implements.
 func TestDeviceAttributesPrimary(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[c"))
-	if got := string(s.Response); got != "\x1b[?62;22c" {
-		t.Errorf("DA1 = %q, want %q", got, "\x1b[?62;22c")
+	want := "\x1b[?65;1;2;6;9;15;16;17;18;21;22;28;29c"
+	if got := string(s.Response); got != want {
+		t.Errorf("DA1 = %q, want %q", got, want)
 	}
 }
 
@@ -539,8 +542,9 @@ func TestCSIPrivateMarkerRouting(t *testing.T) {
 		t.Error("CSI ?25l should hide cursor")
 	}
 	s.Write([]byte("\x1b[>c")) // secondary DA
-	if got := string(s.Response); got != "\x1b[>1;10;0c" {
-		t.Errorf("secondary DA = %q, want %q", got, "\x1b[>1;10;0c")
+	want := "\x1b[>64;410;0c"  // VT525-class model, firmware level 410
+	if got := string(s.Response); got != want {
+		t.Errorf("secondary DA = %q, want %q", got, want)
 	}
 }
 

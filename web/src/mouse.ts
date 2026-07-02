@@ -14,7 +14,7 @@
 //   - urxvt encoding (mode 1015): not supported.
 //   - DEFAULT encoding (raw bytes): not supported; only SGR 1006.
 
-import { getMouseMode, isMouseSGR, isFocusReporting } from "./modes.js";
+import { getMouseMode, isMouseSGR, isMousePixels, isFocusReporting } from "./modes.js";
 
 const ESC = "\x1b";
 
@@ -59,12 +59,14 @@ export function encodeSGR(code: number, col: number, row: number, release: boole
 
 /** Map DOM button index to xterm button number. */
 function domButtonToXterm(button: number): number {
-  // DOM: 0=left, 1=middle, 2=right
-  // xterm: 0=left, 1=middle, 2=right
+  // DOM MouseEvent.button: 0=left, 1=middle, 2=right, 3=back, 4=forward.
+  // xterm: 0/1/2 for left/middle/right; the "additional buttons" (X11 8-11,
+  // reached via DOM back/forward) use the +128 extended-button encoding, so
+  // back (DOM 3 = X11 8) → 128 and forward (DOM 4 = X11 9) → 129.
   if (button <= 2) {
     return button;
   }
-  return 0; // fallback
+  return 128 + (button - 3);
 }
 
 /**
@@ -100,12 +102,25 @@ export function init(h: MouseInputHandler): void {
   el.addEventListener("focusout", onFocusOut);
 }
 
+// pixelToCell returns the coordinate pair to report for a mouse event. Normally
+// that's the 1-based cell column/row; under DEC 1016 (SGR-pixels) it's instead
+// the 1-based pixel offset within the terminal element (same SGR grammar, so
+// encodeSGR is reused unchanged). The {col,row} field names carry whichever the
+// active mode reports.
 function pixelToCell(e: MouseEvent): { col: number; row: number } | null {
   if (!handler) {
     return null;
   }
   const el = handler.termElement();
   const rect = el.getBoundingClientRect();
+  if (isMousePixels()) {
+    const px = Math.round(e.clientX - rect.left);
+    const py = Math.round(e.clientY - rect.top);
+    if (px < 0 || py < 0) {
+      return null;
+    }
+    return { col: px + 1, row: py + 1 }; // 1-based pixel offsets
+  }
   const { width, height } = handler.cellSize();
   if (width <= 0 || height <= 0) {
     return null;
@@ -120,7 +135,7 @@ function pixelToCell(e: MouseEvent): { col: number; row: number } | null {
 
 function onMouseDown(e: MouseEvent): void {
   const mode = getMouseMode();
-  if (mode === 0 || !isMouseSGR() || !handler) {
+  if (mode === 0 || !(isMouseSGR() || isMousePixels()) || !handler) {
     return;
   }
   const pos = pixelToCell(e);
@@ -135,7 +150,7 @@ function onMouseDown(e: MouseEvent): void {
 
 function onMouseUp(e: MouseEvent): void {
   const mode = getMouseMode();
-  if (mode === 0 || !isMouseSGR() || !handler) {
+  if (mode === 0 || !(isMouseSGR() || isMousePixels()) || !handler) {
     return;
   }
   const pos = pixelToCell(e);
@@ -151,7 +166,7 @@ function onMouseUp(e: MouseEvent): void {
 
 function onMouseMove(e: MouseEvent): void {
   const mode = getMouseMode();
-  if (mode === 0 || !isMouseSGR() || !handler) {
+  if (mode === 0 || !(isMouseSGR() || isMousePixels()) || !handler) {
     return;
   }
   // mode 1000: no motion events
@@ -167,14 +182,16 @@ function onMouseMove(e: MouseEvent): void {
   if (!pos) {
     return;
   }
-  const btn = e.buttons ? (e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : e.buttons & 2 ? 2 : 0) : 0;
+  // No button held (bare motion in mode 1003) reports xterm's "no button"
+  // code 3, not 0 — code 0 would be read as a left-button drag during hover.
+  const btn = e.buttons ? (e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : e.buttons & 2 ? 2 : 0) : 3;
   const code = buttonCode(btn, true, e.shiftKey, e.altKey, e.ctrlKey);
   handler.send(encodeSGR(code, pos.col, pos.row, false));
 }
 
 function onWheel(e: WheelEvent): void {
   const mode = getMouseMode();
-  if (mode === 0 || !isMouseSGR() || !handler) {
+  if (mode === 0 || !(isMouseSGR() || isMousePixels()) || !handler) {
     return;
   }
   const pos = pixelToCell(e);

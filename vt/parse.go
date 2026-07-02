@@ -279,33 +279,62 @@ func (s *Screen) execControl(b byte) {
 	case 0x07:
 		s.BellRing = true
 	case '\b':
-		s.pendingWrap = false
-		if s.curX > 0 {
-			s.curX--
-		}
+		s.backspace()
 	case '\n', 0x0B, 0x0C: // LF, VT, FF
 		s.pendingWrap = false
+		if s.LineFeedNewLine {
+			// LNM (ANSI mode 20): a line feed also carriage-returns.
+			s.curX = 0
+		}
 		s.lineDown()
 	case '\r':
-		s.curX = 0
+		// CR moves to the left margin when the cursor is at or right of it,
+		// else to the screen's left edge (xterm left/right-margin behavior).
+		if s.curX >= s.leftBound() {
+			s.curX = s.leftBound()
+		} else {
+			s.curX = 0
+		}
 		s.pendingWrap = false
 	case '\t':
-		s.pendingWrap = false
-		s.curX = s.nextTabStop(s.curX)
-		if s.curX >= s.Width {
-			s.curX = s.Width - 1
+		switch {
+		case !s.pendingWrap:
+			s.tabOnce()
+		case s.moreFix:
+			// more(1) fix (DEC mode ?41): a TAB in the deferred-wrap position
+			// honors the pending wrap (advance to the next line) before tabbing.
+			s.pendingWrap = false
+			s.curX = s.wrapColumn()
+			s.curY++
+			s.scrollIfNeeded()
+			s.tabOnce()
+		default:
+			// Without the fix, a TAB in the deferred-wrap position is a no-op:
+			// the cursor stays at the right margin and the pending wrap is
+			// preserved, so the NEXT printable still wraps. This reproduces the
+			// curses/more(1) behavior xterm's mode 41 works around.
 		}
 	case 0x0E: // SO — Shift Out: activate G1 in GL
 		s.gl = 1
 	case 0x0F: // SI — Shift In: activate G0 in GL
 		s.gl = 0
+	case 0x96: // SPA (C1) — start of guarded area
+		s.curIsoProtected = true
+	case 0x97: // EPA (C1) — end of guarded area
+		s.curIsoProtected = false
 	}
 }
 
+//nolint:gocyclo // flat dispatch over the ESC final bytes
 func (s *Screen) dispatchEsc(b byte) {
-	// Handle ESC intermediates (charset designation)
+	// Handle ESC intermediates. '#' introduces the DEC line-size / alignment
+	// group (DECALN etc.); '(', ')', '*', '+' designate character sets.
 	if s.numInterm > 0 {
-		s.designateCharset(s.pIntermed[0], b)
+		if s.pIntermed[0] == '#' {
+			s.decLineSize(b)
+		} else {
+			s.designateCharset(s.pIntermed[0], b)
+		}
 		return
 	}
 	switch b {
@@ -318,16 +347,38 @@ func (s *Screen) dispatchEsc(b byte) {
 	case 'D': // IND
 		s.pendingWrap = false
 		s.lineDown()
-	case 'E': // NEL
+	case 'E': // NEL — index then carriage return. lineDown runs first so its
+		// scroll decision uses the original column (outside the left/right
+		// margins it must not scroll); then the CR rule places the column (to the
+		// left margin when at/right of it, else to the screen edge).
 		s.pendingWrap = false
-		s.curX = 0
 		s.lineDown()
-	case 'M': // RI
+		if s.curX >= s.leftBound() {
+			s.curX = s.leftBound()
+		} else {
+			s.curX = 0
+		}
+	case 'V': // SPA — start of guarded (ISO-protected) area
+		s.curIsoProtected = true
+	case 'W': // EPA — end of guarded area
+		s.curIsoProtected = false
+	case 'Z': // DECID — identify terminal (obsolete alias for primary DA)
+		s.deviceAttributes()
+	case 'M': // RI — reverse index. Clears the deferred wrap like IND/NEL.
+		s.pendingWrap = false
 		if s.curY == s.scrollTop {
-			s.scrollDownOnce()
+			// At the top margin, scroll down only when within the left/right
+			// margins; outside the box RI neither scrolls nor moves.
+			if s.withinHMargins(s.curX) {
+				s.scrollDownOnce()
+			}
 		} else if s.curY > 0 {
 			s.curY--
 		}
+	case '6': // DECBI — back index
+		s.decBackIndex()
+	case '9': // DECFI — forward index
+		s.decForwardIndex()
 	case '=': // DECKPAM
 		s.AppKeypad = true
 	case '>': // DECKPNM
@@ -336,12 +387,19 @@ func (s *Screen) dispatchEsc(b byte) {
 		s.singleShft = 2
 	case 'O': // SS3
 		s.singleShft = 3
-	case 'c': // RIS
+	case 'c': // RIS — hard reset. Beyond the attribute/screen reset, home the
+		// cursor and clear the client scrollback (a hard reset discards
+		// history); RIS also resets tab stops to the default every-8 grid.
 		s.softReset()
 		s.eraseRegion(0, 0, s.Height-1, s.Width-1)
+		s.curY, s.curX = 0, 0
+		s.pendingWrap = false
 		s.Drained = nil
+		s.ScrollbackCleared = true
 		s.InAltScreen = false
 		s.savedMainCells = nil
+		s.altCells = nil
+		s.specialColors = nil
 		s.BracketedPaste = false
 		s.AppCursorKeys = false
 		s.AppKeypad = false
@@ -350,6 +408,33 @@ func (s *Screen) dispatchEsc(b byte) {
 		s.ReverseVideo = false
 		s.tabStops = nil
 	}
+}
+
+// decLineSize handles the ESC # <n> line-size / alignment group. Only DECALN
+// (ESC # 8) is implemented: it fills the whole screen with 'E' (the classic
+// alignment test) using default attributes, resets the scroll region, and homes
+// the cursor. DECDHL/DECDWL/DECSWL (ESC # 3/4/5/6 — double-height, double-width
+// and single-width lines) are intentionally not implemented: rendering them
+// needs a per-line size attribute plus wire + client support, and they are
+// effectively unused by modern TUIs. They are consumed as no-ops.
+func (s *Screen) decLineSize(final byte) {
+	if final != '8' { // DECALN only
+		return
+	}
+	for y := range s.Cells {
+		row := s.Cells[y]
+		for x := range row {
+			row[x] = Cell{Ch: 'E'}
+		}
+	}
+	s.scrollTop = 0
+	s.scrollBottom = s.Height - 1
+	// DECALN also clears the left/right margins (DECLRMM off, full width).
+	s.LRMarginMode = false
+	s.leftMargin = 0
+	s.rightMargin = s.Width - 1
+	s.curY, s.curX = 0, 0
+	s.pendingWrap = false
 }
 
 func decodeUTF8Bytes(buf [4]byte, n uint8) rune {

@@ -31,11 +31,13 @@ func (s *Screen) RenderRowWire(y int) []WireRun {
 	if y < 0 || y >= s.Height {
 		return nil
 	}
-	return cellsToRuns(s.Cells[y])
+	return s.cellsToRuns(s.Cells[y])
 }
 
 // cellsToRuns converts a row of cells to wire runs (same-style coalesced).
-func cellsToRuns(row []Cell) []WireRun {
+// A method (not a free function) so color resolution can consult the Screen's
+// OSC 4 palette overrides.
+func (s *Screen) cellsToRuns(row []Cell) []WireRun {
 	var runs []WireRun
 	if len(row) == 0 {
 		return runs
@@ -45,7 +47,7 @@ func cellsToRuns(row []Cell) []WireRun {
 	prevURL := row[0].Hyperlink
 	for x, cell := range row {
 		if x > 0 && (cell.Style != prev || cell.Hyperlink != prevURL) {
-			runs = append(runs, makeRunWithURL(buf.String(), prev, prevURL))
+			runs = append(runs, s.makeRunWithURL(buf.String(), prev, prevURL))
 			buf.Reset()
 			prev = cell.Style
 			prevURL = cell.Hyperlink
@@ -57,20 +59,20 @@ func cellsToRuns(row []Cell) []WireRun {
 		buf.WriteRune(ch)
 	}
 	if buf.Len() > 0 {
-		runs = append(runs, makeRunWithURL(buf.String(), prev, prevURL))
+		runs = append(runs, s.makeRunWithURL(buf.String(), prev, prevURL))
 	}
 	return runs
 }
 
-func makeRunWithURL(text string, st Style, url string) WireRun {
+func (s *Screen) makeRunWithURL(text string, st Style, url string) WireRun {
 	fg, bg := st.FG, st.BG
 	if st.Inverse {
 		fg, bg = bg, fg
 	}
 	r := WireRun{T: text, U: url}
-	r.F = colorToWire(fg)
-	r.B = colorToWire(bg)
-	r.Uc = colorToWire(st.UnderlineColor)
+	r.F = s.colorToWire(fg)
+	r.B = s.colorToWire(bg)
+	r.Uc = s.colorToWire(st.UnderlineColor)
 	if st.Bold {
 		r.A |= 1
 	}
@@ -104,14 +106,21 @@ func makeRunWithURL(text string, st Style, url string) WireRun {
 	return r
 }
 
-func colorToWire(c Color) int32 {
+func (s *Screen) colorToWire(c Color) int32 {
 	switch c.Type {
 	case 0:
 		return wireDefaultColor
 	case 1:
-		// Basic 8/16 — resolve the ANSI palette index to 0xRRGGBB.
+		// Basic 8/16: an OSC 4 override wins, else the default ANSI palette.
+		// (Reading a nil paletteOverride map is safe and returns ok=false.)
+		if v, ok := s.paletteOverride[c.Val]; ok {
+			return v
+		}
 		return basic16RGB(c.Val)
 	case 2:
+		if v, ok := s.paletteOverride[c.Val]; ok {
+			return v
+		}
 		return color256RGB(c.Val)
 	case 3:
 		return int32(c.R)<<16 | int32(c.G)<<8 | int32(c.B)

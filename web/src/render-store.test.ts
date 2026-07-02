@@ -89,11 +89,27 @@ describe("render (store-backed, brick 3)", () => {
     render.handleScroll(scrollMsg(0, ["a", "b", "c"]));
     await tick();
     expect(outputEl.children.length).toBe(3);
+    // Capture each row's inner span. Idempotent re-delivery must skip the DOM
+    // write entirely (the store treats byte-identical content as a no-op), so
+    // the renderer never rebuilds these rows and the exact span nodes survive.
+    // A rebuild would call replaceChildren with FRESH spans, changing identity
+    // and discarding any text selection on the row. Pinning the inner-span
+    // identity is what catches a lost-idempotency regression; a bare
+    // count/order check passes even if every row is torn down and recreated.
+    const span0 = outputEl.children[0]?.firstElementChild;
+    const span1 = outputEl.children[1]?.firstElementChild;
+    const span2 = outputEl.children[2]?.firstElementChild;
+    expect(span0).not.toBeNull();
+
     // Re-deliver the identical batch (fast-burst re-send / reconnect replay).
     render.handleScroll(scrollMsg(0, ["a", "b", "c"]));
     await tick();
     expect(outputEl.children.length).toBe(3);
     expect(absList(outputEl)).toEqual([0, 1, 2]);
+    // Same inner-span identities: no row was rebuilt on the redundant frame.
+    expect(outputEl.children[0]?.firstElementChild).toBe(span0);
+    expect(outputEl.children[1]?.firstElementChild).toBe(span1);
+    expect(outputEl.children[2]?.firstElementChild).toBe(span2);
   });
 
   it("updates a row in place when its content changes (Ink redraw)", async () => {

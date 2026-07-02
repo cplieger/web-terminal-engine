@@ -20,6 +20,7 @@ let applicationCursor = false;
 let applicationKeypad = false;
 let mouseMode = 0; // 0=off, 1000=normal, 1002=button-event, 1003=any-event
 let mouseSGR = false;
+let mousePixels = false; // DEC 1016: report pixel coords instead of cell coords
 let focusReporting = false;
 let reverseVideo = false;
 
@@ -36,6 +37,7 @@ export function setModes(
   mMode?: number,
   appKeypad?: boolean,
   revVideo?: boolean,
+  mPixels?: boolean,
 ): void {
   bracketedPaste = bracketed;
   applicationCursor = appCursor;
@@ -53,6 +55,9 @@ export function setModes(
   }
   if (revVideo !== undefined) {
     reverseVideo = revVideo;
+  }
+  if (mPixels !== undefined) {
+    mousePixels = mPixels;
   }
 }
 
@@ -77,6 +82,12 @@ export function getMouseMode(): number {
 /** True when the server has DEC 1006 (SGR mouse encoding) enabled. */
 export function isMouseSGR(): boolean {
   return mouseSGR;
+}
+
+/** True when the server has DEC 1016 (SGR-pixels mouse) enabled: mouse reports
+ *  carry pixel coordinates instead of cell coordinates. */
+export function isMousePixels(): boolean {
+  return mousePixels;
 }
 
 /** True when the server has DEC 1004 (focus event reporting) enabled. */

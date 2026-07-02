@@ -13,11 +13,13 @@ package vt
 //   - ESC N          → SS2 (single shift G2 for next printable)
 //   - ESC O          → SS3 (single shift G3 for next printable)
 //
-// Supported charsets: B = US ASCII (identity), 0 = DEC Special Graphics.
-// All other final bytes (A, etc.) are treated as ASCII (consumed, no error).
+// Supported charsets: B = US ASCII (identity), 0 = DEC Special Graphics,
+// A = UK NRCS ('#' -> '£'). All other final bytes are treated as ASCII
+// (consumed, no error).
 //
-// OUT OF SCOPE: NRCS national replacement character sets. The final byte is
-// consumed but the charset is treated as ASCII.
+// OUT OF SCOPE: the remaining NRCS national replacement sets (French, German,
+// etc.). Their final byte is consumed but the charset is treated as ASCII —
+// they only matter for legacy non-UTF-8 apps.
 //
 // Reference: xterm.js Charsets.ts (MIT), VT220 Programmer Reference Manual
 // Table 2-4, Wikipedia "DEC Special Graphics".
@@ -28,6 +30,7 @@ type charset uint8
 const (
 	charsetASCII   charset = iota // US-ASCII (identity mapping)
 	charsetGraphic                // DEC Special Graphics (line-drawing)
+	charsetUK                     // UK National Replacement Set ('#' -> '£')
 )
 
 // charsetState holds G0-G3 designations and the active GL pointer.
@@ -85,8 +88,19 @@ func (s *Screen) translateChar(b byte) rune {
 	} else {
 		cs = s.gsets[s.gl]
 	}
-	if cs == charsetGraphic && b >= 0x60 && b <= 0x7E {
-		return decSpecialGraphics[b-0x60]
+	switch cs {
+	case charsetGraphic:
+		if b >= 0x60 && b <= 0x7E {
+			return decSpecialGraphics[b-0x60]
+		}
+		if b == 0x5F {
+			// DEC Special Graphics maps 0x5F ('_') to a blank, not underscore.
+			return ' '
+		}
+	case charsetUK:
+		if b == '#' {
+			return '\u00a3' // '£'
+		}
 	}
 	return rune(b)
 }
@@ -111,7 +125,9 @@ func (s *Screen) designateCharset(intermediate, final byte) {
 	switch final {
 	case '0':
 		s.gsets[idx] = charsetGraphic
-	default:
+	case 'A':
+		s.gsets[idx] = charsetUK
+	default: // 'B' (US-ASCII) and any unrecognized/NRCS set fall back to ASCII
 		s.gsets[idx] = charsetASCII
 	}
 }

@@ -28,11 +28,14 @@ func TestOSC0SetsTitleAndIcon(t *testing.T) {
 	}
 }
 
-func TestOSC1SetsTitle(t *testing.T) {
+// TestOSC1DoesNotSetTitle verifies OSC 1 (set icon name only) does NOT change
+// the window title — it must not clobber a title set via OSC 0/2.
+func TestOSC1DoesNotSetTitle(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]1;icon name\x07"))
-	if s.Title != "icon name" {
-		t.Fatalf("expected title %q, got %q", "icon name", s.Title)
+	s.Write([]byte("\x1b]2;window\x07"))    // real window title
+	s.Write([]byte("\x1b]1;icon name\x07")) // icon name only — must be ignored
+	if s.Title != "window" {
+		t.Fatalf("OSC 1 clobbered the window title: got %q, want %q", s.Title, "window")
 	}
 }
 
@@ -40,8 +43,10 @@ func TestUnknownOSCIgnored(t *testing.T) {
 	s := New(24, 80)
 	// Write some content first
 	s.Write([]byte("ABC"))
-	// Send an unknown OSC (e.g. OSC 52)
-	s.Write([]byte("\x1b]52;some clipboard data\x07"))
+	// Send an out-of-scope OSC (777 = urxvt notifications): it must be consumed
+	// and ignored (dispatchOsc's default case), touching neither the screen nor
+	// the title. OSC 52 is a real handler now, so it's covered in features_test.
+	s.Write([]byte("\x1b]777;notify;title;body\x07"))
 	// Verify screen is not corrupted
 	if s.RowString(0) != "ABC" {
 		t.Fatalf("screen corrupted after unknown OSC: got %q", s.RowString(0))
@@ -130,27 +135,26 @@ func TestOSCNoTerminatorThenNewSequence(t *testing.T) {
 }
 
 // TestOSCAllDigitPayloadNoSeparator verifies an all-digit OSC payload with no
-// separator (e.g. "2") is parsed in-bounds, and OSC 2 sets the title to the
-// empty data.
+// separator ("2", no ';') is parsed in-bounds, and OSC 2 sets the title to the
+// empty (absent) data. Driven through the public parser (ESC ] 2 BEL) rather
+// than by hand-seeding the internal OSC buffer.
 func TestOSCAllDigitPayloadNoSeparator(t *testing.T) {
 	s := New(1, 10)
 	s.Title = "prev"
-	s.oscBuf = []byte("2") // OSC id 2, all digits, no separator
-	s.dispatchOsc()
+	s.Write([]byte("\x1b]2\x07")) // OSC 2, no ';' separator, terminated by BEL
 	if s.Title != "" {
-		t.Errorf("dispatchOsc(%q): Title = %q, want \"\" (OSC 2 sets title to empty data)", "2", s.Title)
+		t.Errorf("OSC 2 with no separator: Title = %q, want \"\" (empty data)", s.Title)
 	}
 }
 
 // TestOSCUnhandledIdLeavesTitle verifies an unhandled OSC id (9) leaves the
-// title unchanged.
+// window title unchanged. Driven through the public parser (ESC ] 9 ; … BEL).
 func TestOSCUnhandledIdLeavesTitle(t *testing.T) {
 	s := New(1, 10)
 	const keep = "keep"
 	s.Title = keep
-	s.oscBuf = []byte("9") // id 9 (unhandled)
-	s.dispatchOsc()
+	s.Write([]byte("\x1b]9;iTerm-only notification\x07")) // OSC 9 is unhandled here
 	if s.Title != keep {
-		t.Errorf("dispatchOsc(%q): Title = %q, want %q (id 9 unhandled, title unchanged)", "9", s.Title, keep)
+		t.Errorf("unhandled OSC 9: Title = %q, want %q (unchanged)", s.Title, keep)
 	}
 }

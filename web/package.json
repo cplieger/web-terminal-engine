@@ -5,11 +5,14 @@
   "scripts": {
     "typecheck": "tsgo -p tsconfig.json",
     "typecheck:tests": "tsgo -p tsconfig.test.json",
-    "test": "vitest --run"
+    "test": "vitest --run",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@playwright/test": "1.61.1",
     "@vitest/coverage-v8": "4.1.9",
+    "esbuild": "0.28.1",
     "eslint": "10.6.0",
     "fast-check": "4.8.0",
     "happy-dom": "20.10.6",
@@ -35,7 +38,7 @@
   "files": [
     "src/",
     "!src/**/*.test.ts",
-    "!src/**/__test-helpers__",
+    "!src/**/test-helpers",
     "!src/**/fc-strict-setup.ts",
     "jsr.json"
   ]

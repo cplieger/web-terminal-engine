@@ -68,35 +68,51 @@ func (s *Screen) prevTabStop(col int) int {
 
 // --- DECSC / DECRC cursor save/restore ---
 
-// saveCursor saves the full cursor state per DECSC spec:
-// position, style, origin mode, autowrap, and active charset.
+// savedSlot returns the DECSC/DECRC save slot for the active screen. xterm keeps
+// the main and alternate screens' saved cursors separate.
+func (s *Screen) savedSlot() *savedCursor {
+	if s.InAltScreen {
+		return &s.altSaved
+	}
+	return &s.mainSaved
+}
+
+// saveCursor saves the full cursor state per DECSC spec: position, style, origin
+// mode, autowrap, active charset, the deferred-wrap flag, and DECSCA protection.
 func (s *Screen) saveCursor() {
-	s.savedY = s.curY
-	s.savedX = s.curX
-	s.savedStyle = s.style
-	s.savedOrigin = s.OriginMode
-	s.savedAutoWrap = s.AutoWrap
-	s.savedCharsets = s.gsets
-	s.savedGL = s.gl
-	s.cursorStateSaved = true
+	*s.savedSlot() = savedCursor{
+		style:       s.style,
+		charsets:    s.gsets,
+		x:           s.curX,
+		y:           s.curY,
+		gl:          s.gl,
+		origin:      s.OriginMode,
+		pendingWrap: s.pendingWrap,
+		protected:   s.curProtected,
+		valid:       true,
+	}
 }
 
 // restoreCursor restores the full cursor state per DECRC spec.
 func (s *Screen) restoreCursor() {
-	if !s.cursorStateSaved {
+	slot := s.savedSlot()
+	if !slot.valid {
 		// No saved state — move to home per xterm behavior.
 		s.curY, s.curX = 0, 0
 		s.pendingWrap = false
 		return
 	}
-	s.curY = s.savedY
-	s.curX = s.savedX
-	s.style = s.savedStyle
-	s.OriginMode = s.savedOrigin
-	s.AutoWrap = s.savedAutoWrap
-	s.gsets = s.savedCharsets
-	s.gl = s.savedGL
-	s.pendingWrap = false
+	s.curY = slot.y
+	s.curX = slot.x
+	s.style = slot.style
+	s.OriginMode = slot.origin
+	// DECAWM (autowrap) is intentionally NOT restored: DEC STD 070 has DECSC/DECRC
+	// save the cursor, SGR, charset, origin mode, protection, and the last-column
+	// flag — but not autowrap. Restoring it would defeat a DECRESET(DECAWM).
+	s.gsets = slot.charsets
+	s.gl = slot.gl
+	s.curProtected = slot.protected
+	s.pendingWrap = slot.pendingWrap
 	if s.curY >= s.Height {
 		s.curY = s.Height - 1
 	}
@@ -109,6 +125,8 @@ func (s *Screen) restoreCursor() {
 
 // decModeStatus returns the DECRPM Ps value for a DEC private mode.
 // 1=set, 2=reset, 0=not recognized.
+//
+//nolint:gocyclo // flat per-mode status dispatch
 func (s *Screen) decModeStatus(mode int) int {
 	switch mode {
 	case 1: // DECCKM
@@ -123,6 +141,12 @@ func (s *Screen) decModeStatus(mode int) int {
 		return boolToModeStatus(s.CursorBlink)
 	case 25: // DECTCEM
 		return boolToModeStatus(!s.CursorHidden)
+	case 45: // reverse-wraparound
+		return boolToModeStatus(s.ReverseWrap)
+	case 66: // DECNKM (application keypad)
+		return boolToModeStatus(s.AppKeypad)
+	case 69: // DECLRMM (left/right margin mode)
+		return boolToModeStatus(s.LRMarginMode)
 	case 47, 1047, 1049: // Alt screen
 		return boolToModeStatus(s.InAltScreen)
 	case 1000, 1002, 1003: // Mouse modes
@@ -131,25 +155,90 @@ func (s *Screen) decModeStatus(mode int) int {
 		return boolToModeStatus(s.FocusReporting)
 	case 1006: // SGR mouse
 		return boolToModeStatus(s.MouseSGR)
+	case 1016: // SGR-pixels mouse
+		return boolToModeStatus(s.MousePixels)
 	case 2004: // Bracketed paste
 		return boolToModeStatus(s.BracketedPaste)
 	case 2026: // Synchronized output
 		return boolToModeStatus(s.IsFlushHeld())
 	default:
+		// Settable no-op modes: report the tracked set/reset bit (default reset).
+		if settableDECModes[mode] {
+			return boolToModeStatus(s.decModeState[mode])
+		}
+		// Modes xterm recognizes but we don't implement: report the
+		// xterm-canonical DECRPM value so a probing app sees a consistent
+		// "recognized" status rather than "unknown".
+		if v, ok := recognizedDECModes[mode]; ok {
+			return v
+		}
 		return 0 // not recognized
 	}
+}
+
+// settableDECModes are DEC private modes the engine recognizes and tracks the
+// set/reset bit for (so DECRQM reports a consistent settable state, matching
+// xterm) but otherwise implements as no-ops. DECCOLM (3) is the exception: its
+// bit is tracked here and it also performs the column-mode clear side effect.
+var settableDECModes = map[int]bool{
+	3:  true, // DECCOLM (132-column) — bit tracked; 80<->132 resize declined
+	4:  true, // DECSCLM (smooth scroll)
+	18: true, // DECPFF (print form feed)
+	19: true, // DECPEX (print extent)
+	35: true, // DECHEBM (Hebrew)
+	42: true, // DECNRCM (national replacement charset)
+	67: true, // DECBKM (backarrow key)
+}
+
+// settableANSIModes are ANSI modes tracked the same way (set/reset bit reported
+// via DECRQM) but implemented as no-ops.
+var settableANSIModes = map[int]bool{
+	2:  true, // KAM (keyboard action mode)
+	12: true, // SRM (send/receive mode)
+}
+
+// recognizedDECModes maps DEC private modes we recognize but do not implement to
+// their fixed xterm DECRPM value: 4 = permanently reset (no implementation).
+// Settable no-op modes live in settableDECModes instead.
+var recognizedDECModes = map[int]int{
+	60: 4, // DECHCCM (horizontal cursor coupling)
 }
 
 // ansiModeStatus returns the DECRPM Ps value for an ANSI mode.
 func (s *Screen) ansiModeStatus(mode int) int {
 	switch mode {
-	case 4: // IRM (insert/replace) — we don't track IRM, always replace
-		return 2 // reset
-	case 20: // LNM (line feed/new line) — always reset (LF doesn't imply CR)
-		return 2
+	case 4: // IRM (insert/replace) — report the tracked state
+		return boolToModeStatus(s.InsertMode)
+	case 20: // LNM (newline mode)
+		return boolToModeStatus(s.LineFeedNewLine)
 	default:
+		// Settable no-op modes (KAM, SRM): report the tracked bit (default reset).
+		if settableANSIModes[mode] {
+			return boolToModeStatus(s.ansiModeState[mode])
+		}
+		if v, ok := recognizedANSIModes[mode]; ok {
+			return v
+		}
 		return 0 // not recognized
 	}
+}
+
+// recognizedANSIModes maps legacy ANSI modes xterm recognizes but does not
+// implement to their fixed xterm DECRPM value (4 = permanently reset). Settable
+// no-op modes (KAM, SRM) live in settableANSIModes instead.
+var recognizedANSIModes = map[int]int{
+	1:  4, // GATM
+	5:  4, // SRTM
+	7:  4, // VEM
+	10: 4, // HEM
+	11: 4, // PUM
+	13: 4, // FEAM
+	14: 4, // FETM
+	15: 4, // MATM
+	16: 4, // TTM
+	17: 4, // SATM
+	18: 4, // TSM
+	19: 4, // EBM
 }
 
 func boolToModeStatus(v bool) int {

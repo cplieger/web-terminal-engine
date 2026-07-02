@@ -44,14 +44,38 @@ type Style struct {
 	Hidden bool
 }
 
+// Theme holds the default foreground, background, and cursor colors a terminal
+// reports via OSC 10/11/12 queries and restores on OSC 110/111/112 reset — the
+// engine's analogue of xterm's -fg/-bg/-cr resources. Each color is packed
+// 0xRRGGBB (use RGB to build one). A consumer sets these to its real rendering
+// colors via WithTheme so color-probing apps (light/dark detection, "reset to
+// default") see the terminal's actual appearance rather than a hardcoded guess.
+type Theme struct {
+	Foreground int32
+	Background int32
+	Cursor     int32
+}
+
+// RGB packs 8-bit red, green, and blue channels into a 0xRRGGBB value.
+func RGB(r, g, b uint8) int32 {
+	return int32(r)<<16 | int32(g)<<8 | int32(b)
+}
+
+// titleEntry is one saved (icon, window) title pair on the XTWINOPS title
+// stack (CSI 22/23 t). A push snapshots both current titles; a pop restores the
+// fields the Ps parameter selects.
+type titleEntry struct {
+	icon   string
+	window string
+}
+
 // Cell is a single character cell in the screen grid.
 type Cell struct {
-	// Hyperlink is the OSC 8 hyperlink URI; empty means no link.
-	Hyperlink string
-	// Style holds the SGR attributes applied to this cell.
-	Style Style
-	// Ch is the Unicode codepoint displayed in this cell.
-	Ch rune
+	Hyperlink    string
+	Ch           rune
+	Style        Style
+	Protected    bool
+	IsoProtected bool
 }
 
 // ParserState holds the VT500-style state machine state used by the
@@ -105,9 +129,10 @@ const (
 type dcsFunction uint8
 
 const (
-	dcsNone    dcsFunction = iota
-	dcsDecrqss             // DCS $ q ... ST
-	dcsIgnored             // unknown/unhandled DCS
+	dcsNone      dcsFunction = iota
+	dcsDecrqss               // DCS $ q ... ST
+	dcsXTGetTcap             // DCS + q ... ST (XTGETTCAP terminfo query)
+	dcsIgnored               // unknown/unhandled DCS
 )
 
 // Buffer size limits.

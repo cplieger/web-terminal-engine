@@ -546,6 +546,7 @@ export function connect(): void {
         msg.mouseMode,
         msg.applicationKeypad,
         msg.reverseVideo,
+        msg.mousePixels,
       );
       if (typeof msg.inputAck === "number") {
         applyAck(msg.inputAck);

@@ -29,6 +29,10 @@ func TestDECSpecialGraphics_FullRange(t *testing.T) {
 		input[i] = byte(0x60 + i)
 	}
 	s.Write(input)
+	// The expected runes are the DEC Special Graphics -> Unicode mapping from the
+	// VT220 Programmer Reference (Table 2-4) / the "DEC Special Graphics" chart,
+	// i.e. the spec, not a copy of the engine's table: 0x60 '`' -> ◆, the
+	// line-drawing box (j-x), the scan lines (o-s), and ≤ ≥ π ≠ £ · at the tail.
 	expected := []rune{
 		'\u25c6', '\u2592', '\u2409', '\u240c', '\u240d', '\u240a',
 		'\u00b0', '\u00b1', '\u2424', '\u240b', '\u2518', '\u2510',
@@ -134,20 +138,25 @@ func TestESCHash_Consumed(t *testing.T) {
 	}
 }
 
-// TestSingleShiftConsumedResetsSentinel verifies that after a single shift
-// (SS2/ESC N) is consumed by translating one character, singleShft returns to
-// the -1 "no single shift pending" sentinel.
-func TestSingleShiftConsumedResetsSentinel(t *testing.T) {
+// TestSingleShiftConsumedAffectsOneChar verifies a single shift (SS2/ESC N)
+// applies to exactly ONE printable: the first char is translated through G2,
+// and every char after it reverts to GL (G0 = ASCII), so the shift does not
+// linger.
+func TestSingleShiftConsumedAffectsOneChar(t *testing.T) {
 	s := New(2, 20)
-	// G2 = DEC Special Graphics, SS2 (ESC N), then print one char.
-	s.Write([]byte("\x1b*0\x1bNq"))
+	// G2 = DEC Special Graphics; SS2 (ESC N), then three 'q'.
+	s.Write([]byte("\x1b*0\x1bNqqq"))
 
-	// SS2 translated 'q' through G2 graphics -> U+2500.
+	// Only the first 'q' is translated through G2 graphics -> U+2500 (─).
 	if got := s.Cells[0][0].Ch; got != '\u2500' {
-		t.Errorf("SS2 translate('q') = U+%04X, want U+2500", got)
+		t.Errorf("SS2 first char = U+%04X, want U+2500 (─)", got)
 	}
-	if got := int(s.singleShft); got != -1 {
-		t.Errorf("singleShft after single-shift consumed = %d, want -1", got)
+	// The shift is consumed after one char: the rest print as ASCII 'q'.
+	if got := s.Cells[0][1].Ch; got != 'q' {
+		t.Errorf("char after single shift = U+%04X, want 'q' (shift consumed)", got)
+	}
+	if got := s.Cells[0][2].Ch; got != 'q' {
+		t.Errorf("second char after single shift = U+%04X, want 'q'", got)
 	}
 }
 

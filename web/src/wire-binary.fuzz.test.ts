@@ -8,71 +8,51 @@ describe("wire-binary fuzz: random ArrayBuffers", () => {
       fc.property(fc.uint8Array({ minLength: 0, maxLength: 512 }), (bytes) => {
         const buf = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
         const msg = decodeWireBinary(buf);
+        // Graceful-decode contract: arbitrary bytes decode to either null (a
+        // dropped frame) or a well-typed ServerMessage object — never a throw
+        // (a throw here fails the run) and never a partially-typed value that
+        // would crash the render path downstream. This assertion runs on every
+        // input, so requireAssertions holds even for the all-null runs.
+        expect(msg === null || typeof msg === "object").toBe(true);
         if (msg === null) {
-          return true;
+          return;
         }
         if (msg.type === "screen") {
-          if (!Number.isFinite(msg.cursor[0])) {
-            return false;
-          }
-          if (!Number.isFinite(msg.cursor[1])) {
-            return false;
-          }
+          expect(Number.isFinite(msg.cursor[0])).toBe(true);
+          expect(Number.isFinite(msg.cursor[1])).toBe(true);
           for (const idx of msg.changed) {
-            if (!Number.isFinite(idx)) {
-              return false;
-            }
+            expect(Number.isFinite(idx)).toBe(true);
           }
           for (const row of msg.rows) {
             if (!row) {
               continue;
             }
             for (const run of row) {
-              if (typeof run.t !== "string") {
-                return false;
-              }
-              if (!Number.isFinite(run.f)) {
-                return false;
-              }
-              if (!Number.isFinite(run.b)) {
-                return false;
-              }
-              if (run.u !== undefined && typeof run.u !== "string") {
-                return false;
+              expect(typeof run.t).toBe("string");
+              expect(Number.isFinite(run.f)).toBe(true);
+              expect(Number.isFinite(run.b)).toBe(true);
+              if (run.u !== undefined) {
+                expect(typeof run.u).toBe("string");
               }
             }
           }
         } else if (msg.type === "scroll") {
           for (const line of msg.lines) {
             for (const run of line) {
-              if (typeof run.t !== "string") {
-                return false;
-              }
-              if (!Number.isFinite(run.f)) {
-                return false;
-              }
+              expect(typeof run.t).toBe("string");
+              expect(Number.isFinite(run.f)).toBe(true);
             }
           }
         } else if (msg.type === "resumeAck") {
-          if (!Number.isFinite(msg.received)) {
-            return false;
-          }
+          expect(Number.isFinite(msg.received)).toBe(true);
         } else if (msg.type === "modes") {
-          if (typeof msg.bracketedPaste !== "boolean") {
-            return false;
-          }
-          if (!Number.isFinite(msg.mouseMode)) {
-            return false;
-          }
+          expect(typeof msg.bracketedPaste).toBe("boolean");
+          expect(Number.isFinite(msg.mouseMode)).toBe(true);
         } else if (msg.type === "title") {
-          if (typeof msg.title !== "string") {
-            return false;
-          }
+          expect(typeof msg.title).toBe("string");
         }
-        return true;
       }),
     );
-    expect(true).toBe(true);
   });
 });
 

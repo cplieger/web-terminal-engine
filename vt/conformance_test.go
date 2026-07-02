@@ -4,8 +4,9 @@ import (
 	"testing"
 )
 
-// TestDECSC_RoundTrip verifies that DECSC/DECRC saves and restores the full
-// cursor state: position, style (SGR), origin mode, autowrap, and charset.
+// TestDECSC_RoundTrip verifies that DECSC/DECRC saves and restores the DEC STD
+// 070 cursor state: position, style (SGR), origin mode, and charset. It also
+// verifies that DECAWM (autowrap) is deliberately NOT part of that state.
 func TestDECSC_RoundTrip(t *testing.T) {
 	s := New(24, 80)
 
@@ -42,8 +43,10 @@ func TestDECSC_RoundTrip(t *testing.T) {
 	if !s.OriginMode {
 		t.Error("OriginMode not restored")
 	}
-	if s.AutoWrap {
-		t.Error("AutoWrap not restored (should be false)")
+	// DECAWM is NOT saved/restored by DECSC/DECRC (DEC STD 070), so the value
+	// set AFTER the save (autowrap on) must survive the restore.
+	if !s.AutoWrap {
+		t.Error("AutoWrap should NOT be restored by DECRC; it must keep its post-save value (on)")
 	}
 	if s.gsets[0] != charsetGraphic {
 		t.Error("G0 charset not restored to DEC Special Graphics")
@@ -153,7 +156,8 @@ func TestDECXCPR(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[10;20H")) // move to row 10, col 20
 	s.Write([]byte("\x1b[?6n"))    // DECXCPR
-	want := "\x1b[?10;20R"
+	// VT400+ (which the engine advertises) includes the page number (always 1).
+	want := "\x1b[?10;20;1R"
 	if string(s.Response) != want {
 		t.Errorf("DECXCPR response: got %q, want %q", string(s.Response), want)
 	}

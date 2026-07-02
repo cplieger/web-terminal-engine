@@ -12,12 +12,14 @@ import (
 func TestC1BytesInGroundEmitReplacement(t *testing.T) {
 	for b := byte(0x80); b <= 0x9F; b++ {
 		s := New(1, 5)
-		s.Write([]byte{b})
+		s.Write([]byte{b, 'X'}) // C1 byte, then a printable
 		if s.Cells[0][0].Ch != 0xFFFD {
-			t.Errorf("byte 0x%02x in Ground: got %U, want U+FFFD", b, s.Cells[0][0].Ch)
+			t.Errorf("byte 0x%02x in Ground: Cells[0][0].Ch = %U, want U+FFFD", b, s.Cells[0][0].Ch)
 		}
-		if s.pState != stGround {
-			t.Errorf("byte 0x%02x in Ground: state=%d, want Ground", b, s.pState)
+		// The parser did not start a sequence and stays in Ground: the following
+		// 'X' prints in the next cell rather than being consumed as a sequence.
+		if s.Cells[0][1].Ch != 'X' {
+			t.Errorf("byte 0x%02x in Ground: Cells[0][1].Ch = %U, want 'X' (parser stayed in Ground)", b, s.Cells[0][1].Ch)
 		}
 	}
 }
@@ -29,12 +31,14 @@ func TestC1BytesInGroundEmitReplacement(t *testing.T) {
 func TestInvalidUTF8LeadBytesEmitReplacement(t *testing.T) {
 	for b := 0xF8; b <= 0xFF; b++ {
 		s := New(1, 5)
-		s.Write([]byte{byte(b)})
+		s.Write([]byte{byte(b), 'X'})
 		if got := s.Cells[0][0].Ch; got != 0xFFFD {
 			t.Errorf("lead byte 0x%02x in Ground: Cells[0][0].Ch = %U, want U+FFFD", b, got)
 		}
-		if s.pState != stGround {
-			t.Errorf("lead byte 0x%02x: state=%d, want Ground (stGround)", b, s.pState)
+		// Parser stays in Ground (no multi-byte sequence begins with these):
+		// the following 'X' prints in the next cell.
+		if s.Cells[0][1].Ch != 'X' {
+			t.Errorf("lead byte 0x%02x: Cells[0][1].Ch = %U, want 'X' (parser stayed in Ground)", b, s.Cells[0][1].Ch)
 		}
 	}
 }
@@ -52,63 +56,70 @@ func TestC1_0x9B_InGroundDoesNotStartCSI(t *testing.T) {
 	}
 }
 
-// TestC1_0x90_InGroundDoesNotStartDCS verifies 0x90 in Ground emits U+FFFD and
-// stays in Ground.
+// TestC1_0x90_InGroundDoesNotStartDCS verifies 0x90 (8-bit DCS introducer) in
+// Ground emits U+FFFD and does NOT begin a device-control string: the bytes
+// that follow print literally instead of being swallowed as DCS data.
 func TestC1_0x90_InGroundDoesNotStartDCS(t *testing.T) {
 	s := New(1, 10)
-	s.Write([]byte{0x90})
+	s.Write([]byte{0x90})  // 8-bit DCS introducer — suppressed in Ground
+	s.Write([]byte("$qm")) // would be consumed as DCS data if 0x90 had started one
 	if s.Cells[0][0].Ch != 0xFFFD {
-		t.Errorf("0x90 in Ground: got %U, want U+FFFD", s.Cells[0][0].Ch)
+		t.Errorf("0x90 in Ground: Cells[0][0].Ch = %U, want U+FFFD", s.Cells[0][0].Ch)
 	}
-	if s.pState != stGround {
-		t.Errorf("0x90 in Ground: state=%d, want Ground", s.pState)
+	if s.Cells[0][1].Ch != '$' {
+		t.Errorf("0x90 in Ground did not start a DCS: Cells[0][1].Ch = %U, want '$' (printed literally)", s.Cells[0][1].Ch)
 	}
 }
 
 // TestC1_0x9B_InEscapeStartsCSI verifies 0x9B (8-bit CSI) initiates a CSI when
-// the parser is already in a non-Ground (Escape) state.
+// the parser is already in a non-Ground (Escape) state: a CUP sequence
+// introduced by 0x9B moves the cursor.
 func TestC1_0x9B_InEscapeStartsCSI(t *testing.T) {
-	s := New(1, 10)
-	s.Write([]byte{0x1B}) // Escape
-	s.Write([]byte{0x9B}) // 8-bit CSI
-	if s.pState != stCsiEntry {
-		t.Errorf("0x9B in Escape: state=%d, want CsiEntry", s.pState)
+	s := New(5, 10)
+	s.Write([]byte{0x1B})   // ESC (into a non-Ground state)
+	s.Write([]byte{0x9B})   // 8-bit CSI introducer
+	s.Write([]byte("3;5H")) // CUP row 3, col 5
+	if row, col := s.CursorPos(); row != 2 || col != 4 {
+		t.Errorf("ESC then 0x9B then 3;5H: cursor = %d,%d, want 2,4 (0x9B started a CSI)", row, col)
 	}
 }
 
 // TestC1_0x90_InEscapeStartsDCS verifies 0x90 (8-bit DCS) initiates a DCS from
-// the Escape state.
+// the Escape state: the DCS body is swallowed (not printed) and a printable
+// after the ST prints normally, proving the bytes were consumed as DCS data.
 func TestC1_0x90_InEscapeStartsDCS(t *testing.T) {
-	s := New(1, 10)
-	s.Write([]byte{0x1B})
-	s.Write([]byte{0x90})
-	if s.pState != stDcsEntry {
-		t.Errorf("0x90 in Escape: state=%d, want DcsEntry", s.pState)
+	s := New(5, 10)
+	s.Write([]byte{0x1B})             // ESC (into a non-Ground state)
+	s.Write([]byte{0x90})             // 8-bit DCS introducer
+	s.Write([]byte("Xignored\x1b\\")) // DCS body + ST — consumed, never printed
+	s.Write([]byte("Z"))              // prints only after the DCS returns to Ground
+	if got := s.RowString(0); got != "Z" {
+		t.Errorf("ESC then 0x90 then DCS body: RowString(0) = %q, want %q (0x90 started a DCS that swallowed its body)", got, "Z")
 	}
 }
 
 // TestC1_0x9D_InEscapeStartsOSC verifies 0x9D (8-bit OSC) initiates an OSC from
-// the Escape state.
+// the Escape state: an OSC 2 sequence introduced by 0x9D sets the window title.
 func TestC1_0x9D_InEscapeStartsOSC(t *testing.T) {
 	s := New(5, 80)
-	s.Write([]byte{0x1B})
-	s.Write([]byte{0x9D})
-	if s.pState != stOscString {
-		t.Errorf("0x9D in Escape: state=%d, want OscString", s.pState)
+	s.Write([]byte{0x1B})          // ESC (into a non-Ground state)
+	s.Write([]byte{0x9D})          // 8-bit OSC introducer
+	s.Write([]byte("2;hello\x07")) // OSC 2 (set window title) + BEL terminator
+	if s.Title != "hello" {
+		t.Errorf("ESC then 0x9D then OSC 2: Title = %q, want %q (0x9D started an OSC)", s.Title, "hello")
 	}
 }
 
 // TestC1_0x9C_InCsiEntryGoesToGround verifies 0x9C (8-bit ST) aborts an
-// in-progress CSI back to Ground.
+// in-progress CSI back to Ground: a printable after the abort lands at column 0
+// (a 'Z' still inside the CSI would be dispatched as CBT, not printed).
 func TestC1_0x9C_InCsiEntryGoesToGround(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b["))
-	if s.pState != stCsiEntry {
-		t.Fatalf("not in CsiEntry: state=%d", s.pState)
-	}
-	s.Write([]byte{0x9C})
-	if s.pState != stGround {
-		t.Errorf("0x9C in CsiEntry: state=%d, want Ground", s.pState)
+	s.Write([]byte("\x1b[")) // begin a CSI
+	s.Write([]byte{0x9C})    // 8-bit ST aborts it
+	s.Write([]byte("Z"))     // prints at column 0 only if the parser returned to Ground
+	if got := s.RowString(0); got != "Z" {
+		t.Errorf("CSI then 0x9C then 'Z': RowString(0) = %q, want %q (0x9C aborted the CSI to Ground)", got, "Z")
 	}
 }
 
@@ -146,18 +157,23 @@ func TestC0_LF_ExecutesMidEscape(t *testing.T) {
 
 // --- CAN / SUB abort ---
 
-// TestCAN_AbortsCSICleanly verifies CAN aborts a partial CSI to Ground and the
-// next sequence parses normally.
+// TestCAN_AbortsCSICleanly verifies CAN aborts a partial CSI (the pending SGR
+// never applies) and the parser recovers so the next sequence parses normally.
 func TestCAN_AbortsCSICleanly(t *testing.T) {
 	s := New(5, 80)
-	s.Write([]byte("\x1b[31")) // partial CSI
-	s.Write([]byte{0x18})      // CAN
-	if s.pState != stGround {
-		t.Fatalf("CAN in CSI: state=%d, want Ground", s.pState)
+	s.Write([]byte("\x1b[31")) // partial CSI — would be SGR 31 (red fg) if completed
+	s.Write([]byte{0x18})      // CAN aborts the sequence
+	s.Write([]byte("m"))       // 'm' now prints literally instead of finishing an SGR
+	if s.Cells[0][0].Ch != 'm' {
+		t.Fatalf("after CAN, Cells[0][0].Ch = %q, want 'm' (CAN must abort the CSI so 'm' prints)", s.Cells[0][0].Ch)
 	}
-	s.Write([]byte("\x1b[1;1H"))
-	if row, col := s.CursorPos(); row != 0 || col != 0 {
-		t.Errorf("after CAN recovery = %d,%d, want 0,0", row, col)
+	if s.Cells[0][0].Style != (Style{}) {
+		t.Errorf("after CAN, Cells[0][0].Style = %+v, want zero (the aborted SGR 31 must not apply)", s.Cells[0][0].Style)
+	}
+	// The parser is back in Ground: a fresh CSI takes effect.
+	s.Write([]byte("\x1b[2;3H"))
+	if row, col := s.CursorPos(); row != 1 || col != 2 {
+		t.Errorf("post-CAN CUP = %d,%d, want 1,2", row, col)
 	}
 }
 
@@ -165,12 +181,14 @@ func TestCAN_AbortsCSICleanly(t *testing.T) {
 // is not entered) and returns to Ground.
 func TestSUB_AbortsCSI(t *testing.T) {
 	s := New(5, 80)
-	s.Write([]byte("\x1b[?1049\x1A")) // SUB aborts before final byte
+	s.Write([]byte("\x1b[?1049")) // partial private-mode CSI (would enter alt screen)
+	s.Write([]byte{0x1A})         // SUB aborts before the final byte
+	s.Write([]byte("h"))          // 'h' prints literally instead of completing ?1049h
 	if s.InAltScreen {
-		t.Fatal("SUB should have aborted the CSI, not entered alt screen")
+		t.Fatal("SUB must abort the CSI; ?1049 must not complete and enter the alt screen")
 	}
-	if s.pState != stGround {
-		t.Fatalf("parser not in Ground after SUB, got %d", s.pState)
+	if s.Cells[0][0].Ch != 'h' {
+		t.Errorf("after SUB, Cells[0][0].Ch = %q, want 'h' (SUB aborts, so 'h' prints in Ground)", s.Cells[0][0].Ch)
 	}
 }
 
@@ -236,13 +254,16 @@ func TestParserMalformedCSIMissingFinal(t *testing.T) {
 }
 
 // TestRapidESCTransitions verifies many back-to-back ESC bytes leave the parser
-// recoverable: a following ground-state char returns it to Ground.
+// recoverable: a full sequence written after the storm still takes effect.
 func TestRapidESCTransitions(t *testing.T) {
 	s := New(5, 80)
-	s.Write([]byte(strings.Repeat("\x1b\x1b\x1b", 100)))
-	s.Write([]byte("A"))
-	if s.pState != stGround {
-		t.Fatalf("not in Ground after repeated ESC + final char, got %d", s.pState)
+	s.Write([]byte(strings.Repeat("\x1b\x1b\x1b", 100))) // a storm of ESC bytes
+	s.Write([]byte("\x1b[2;3HZ"))                        // CUP row 2, col 3, then print 'Z'
+	if s.Cells[1][2].Ch != 'Z' {
+		t.Fatalf("after ESC storm, Cells[1][2].Ch = %U, want 'Z' (parser must recover)", s.Cells[1][2].Ch)
+	}
+	if row, col := s.CursorPos(); row != 1 || col != 3 {
+		t.Errorf("cursor after recovery = %d,%d, want 1,3", row, col)
 	}
 }
 

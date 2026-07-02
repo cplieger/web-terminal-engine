@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -47,7 +48,10 @@ func TestSGRRGB(t *testing.T) {
 	}
 }
 
-func TestNoBArtifacts(t *testing.T) {
+// TestCursorVisibilityModesNoArtifacts verifies the cursor show/hide DEC modes
+// (DECTCEM, CSI ?25h / ?25l) are consumed without emitting stray characters
+// into the buffer: the following text lands intact at column 0.
+func TestCursorVisibilityModesNoArtifacts(t *testing.T) {
 	s := New(5, 40)
 	s.Write([]byte("\x1b[?25h\x1b[?25lHello"))
 	if s.RowString(0) != "Hello" {
@@ -59,28 +63,29 @@ func TestRenderViewport(t *testing.T) {
 	s := New(3, 10)
 	s.Write([]byte("\x1b[31mHi\x1b[0m"))
 	out := s.RenderViewport()
-	if len(out) == 0 {
-		t.Error("RenderViewport returned empty")
+	// The text and its foreground color must both survive to the rendered
+	// output: red is ANSI 31, emitted once at the run start as CSI 0;31 m.
+	if !strings.Contains(out, "Hi") {
+		t.Errorf("RenderViewport dropped the text; out=%q", out)
 	}
-	if !containsStr(out, "\x1b[") {
-		t.Error("RenderViewport missing SGR sequences")
+	if !strings.Contains(out, "\x1b[0;31m") {
+		t.Errorf("RenderViewport missing the red SGR (\\x1b[0;31m); out=%q", out)
 	}
 }
 
 func TestScrollbackDrain(t *testing.T) {
 	s := New(3, 10)
-	s.Write([]byte("Line1\nLine2\nLine3\nLine4\n"))
+	s.Write([]byte("Line1\r\nLine2\r\nLine3\r\nLine4\r\n"))
 	drained := s.DrainScrollback()
 	if len(drained) == 0 {
-		t.Error("expected drained lines")
+		t.Fatal("expected drained lines after scrolling 4 lines into a 3-row screen")
 	}
-}
-
-func containsStr(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
+	// The oldest line scrolls off first, so it heads the drain.
+	var text strings.Builder
+	for _, run := range drained[0] {
+		text.WriteString(run.T)
 	}
-	return false
+	if got := strings.TrimRight(text.String(), " "); got != "Line1" {
+		t.Errorf("first drained line = %q, want %q", got, "Line1")
+	}
 }

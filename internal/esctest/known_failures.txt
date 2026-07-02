@@ -1,0 +1,108 @@
+# esctest2 known failures (allowlist for internal/esctest TestConformance).
+#
+# Each line is a test that fails against the engine's VT and is EXPECTED to.
+# The gate errors if a listed test starts passing (stale) or an unlisted test
+# fails (regression), so this file is the conformance contract.
+#
+# Run against esctest2 at the pin in scripts/esctest.sh, --max-vt-level=5,
+# --expected-terminal=xterm. Current tally: 493 pass, 41 esctest-known-bugs,
+# 34 allowlisted below. Every allowlisted test is a deliberate deviation, not a
+# TODO; the rationale for each category is inline. All 34 are genuinely
+# inapplicable to a browser terminal (X11 color-management, a program-driven
+# window/size the browser owns, or a self-contradictory legacy edge case).
+#
+# Categories:
+#   [xcms]    X11 Xcms color-space specs (CIE*/rgbi/TekHVC) — see below
+#   [revwrap] reverse-wraparound (DEC ?45) version-contradictory edge case
+#   [deccolm] 132-column mode — the browser viewport owns the width
+#   [winops]  window geometry / size / iconify — the browser owns the window
+
+# --- [xcms] X11 Xcms color-space color specifications -----------------------
+# OSC 4/5/10-19 accept X11 color specs. The engine parses the forms CLI tools
+# actually emit — rgb:h/h/h and #RGB..#RRRRGGGGBBBB — but not the CIE color
+# spaces (CIELab/CIELuv/CIEXYZ/CIEuvY/CIExyY), rgb-intensity (rgbi), or TekHVC.
+# These are X11's color-management subsystem, not the VT/ANSI spec: libX11
+# converts them through the screen's Device Color Characterization (the
+# XDCCC_LINEAR_RGB_MATRICES / _CORRECTION root-window properties — a 3x3
+# CIEXYZ<->linear-RGB matrix plus per-channel gamma tables). The proof they are
+# not a portable standard: rgbi:0.5/0.5/0.5 -> c1c1/bbbb/bbbb, an *asymmetric*
+# result for a *symmetric* input, which only arises from a specific screen
+# characterization's white point and primaries — a plain sRGB/D65 pipeline
+# yields a symmetric value. The expected numbers are keyed to one libX11 build
+# on one X server. No browser has an X11 color pipeline (the web is sRGB), no
+# CLI application emits these forms, and non-X11 terminals don't implement them
+# (esctest marks the whole set @knownBug for iTerm2). Reproducing them would be
+# ~500 LOC of X11-specific colorimetry with zero real-world value.
+ChangeColorTests.test_ChangeColor_CIELab
+ChangeColorTests.test_ChangeColor_CIELuv
+ChangeColorTests.test_ChangeColor_CIEXYZ
+ChangeColorTests.test_ChangeColor_CIEuvY
+ChangeColorTests.test_ChangeColor_CIExyY
+ChangeColorTests.test_ChangeColor_RGBI
+ChangeColorTests.test_ChangeColor_TekHVC
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIELab
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIELuv
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIEXYZ
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIEuvY
+ChangeDynamicColorTests.test_ChangeDynamicColor_CIExyY
+ChangeDynamicColorTests.test_ChangeDynamicColor_RGBI
+ChangeDynamicColorTests.test_ChangeDynamicColor_TekHVC
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIELab
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIELuv
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIEXYZ
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIEuvY
+ChangeSpecialColorTests.test_ChangeSpecialColor_CIExyY
+ChangeSpecialColorTests.test_ChangeSpecialColor_RGBI
+ChangeSpecialColorTests.test_ChangeSpecialColor_TekHVC
+
+# --- [revwrap] reverse-wraparound (DEC ?45) contradictory edge case ---------
+# The engine implements xterm's version-0 mode-45 semantics (the default esctest
+# asserts, --xterm-reverse-wrap=0): reverse-wrap wraps UNCONDITIONALLY across
+# line boundaries, including around the top of the scroll region to the bottom.
+# That makes the common cases pass — test_BS_WrapsInWraparoundMode,
+# test_BS_ReverseWrapGoesToBottom, test_BS_ReverseWrapStartingInDoWrapPosition,
+# test_BS_AfterNoWrappedInlines/_AfterOneWrappedInline, and the CUB counterparts
+# test_CUB_AfterNoWrappedInlines/_AfterOneWrappedInline plus
+# test_DECSET_ReverseWraparound_Multi (CUB honors reverse-wrap like BS).
+# test_BS_InitialReverseWraparound is the lone hold-out: it asserts the POST-2023
+# "inline" semantics where a Backspace onto a line that was reached by NEL (not
+# by autowrap) must NOT reverse-wrap (xterm's `!LineTstWrapped(ld)` guard in
+# CursorBack). That directly contradicts test_BS_AfterNoWrappedInlines, which at
+# version 0 requires wrapping THROUGH non-autowrapped lines. The two cannot both
+# hold: version-0 semantics pass 4+ reverse-wrap tests, the inline semantics
+# would pass only this one and break the others. Version-0 is the higher-
+# conformance choice, so this stays a deliberate deviation.
+BSTests.test_BS_InitialReverseWraparound
+
+# --- [deccolm] 132-column mode (DECCOLM) ------------------------------------
+# The browser viewport (via the PTY winsize) owns the terminal width; a program
+# cannot resize it to 132 columns. Applications query the size through the PTY
+# ioctl (TIOCGWINSZ), which is driven by the browser, so resizing the VT model
+# alone would desync from the size apps actually see and from what the browser
+# renders. DECCOLM's clear-screen side effect IS implemented (so DECSCL
+# level-4/5 and DECNCSM behave correctly); only the 80<->132 width change is
+# declined. xterm.js declines the DECCOLM resize the same way.
+DECSETTests.test_DECSET_Allow80To132
+DECSETTests.test_DECSET_DECCOLM
+RISTests.test_RIS_ResetDECCOLM
+
+# --- [winops] window geometry / size / iconify manipulation -----------------
+# A browser terminal has no OS window to move, resize (in pixels or by a
+# programmatic character count), or iconify — the viewport and the PTY winsize
+# are authoritative. DECSLPP/RESIZE_CHARS/ResizePixels are program-driven
+# resizes that would desync from the browser/PTY (same reasoning as DECCOLM);
+# Move/Iconify address a window a browser tab does not expose (window.moveTo is
+# blocked for non-popups, and there is no content API to iconify a tab), and
+# faking the state would mislead applications. The report-style winops that DO
+# have browser meaning ARE implemented (title stack 22/23, text-area/char-cell
+# size 18/19, icon/window label 20/21); these remaining ops assert a state
+# change the browser cannot make.
+XtermWinopsTests.test_XtermWinops_DECSLPP
+XtermWinopsTests.test_XtermWinops_IconifyDeiconfiy
+XtermWinopsTests.test_XtermWinops_MoveToXY
+XtermWinopsTests.test_XtermWinops_MoveToXY_Defaults
+XtermWinopsTests.test_XtermWinops_ResizePixels_BothParameters
+XtermWinopsTests.test_XtermWinops_ResizePixels_OmittedHeight
+XtermWinopsTests.test_XtermWinops_ResizePixels_OmittedWidth
+XtermWinopsTests.test_XtermWinops_ResizePixels_ZeroHeight
+XtermWinopsTests.test_XtermWinops_ResizePixels_ZeroWidth

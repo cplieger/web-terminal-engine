@@ -2,3 +2,9 @@ node_modules/
 dist/
 .vitest-cache/
 coverage/
+
+# Playwright outputs (the e2e/**-snapshots/ baselines ARE committed)
+test-results/
+playwright-report/
+blob-report/
+.last-run.json

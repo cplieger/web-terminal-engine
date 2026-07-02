@@ -25,6 +25,7 @@ type flushFrameBuilder struct {
 	prevCurCol      int
 	prevMouseMode   uint16
 	prevMouseSGR    bool
+	prevMousePixels bool
 	prevAppCursor   bool
 	prevFocusReport bool
 	prevAppKeypad   bool
@@ -182,6 +183,7 @@ func (b *flushFrameBuilder) modesStable(screen *vt.Screen) bool {
 		screen.BracketedPaste == b.prevBracketed &&
 		screen.AppCursorKeys == b.prevAppCursor &&
 		screen.MouseSGR == b.prevMouseSGR &&
+		screen.MousePixels == b.prevMousePixels &&
 		screen.FocusReporting == b.prevFocusReport &&
 		screen.MouseMode == b.prevMouseMode &&
 		screen.AppKeypad == b.prevAppKeypad &&
@@ -197,12 +199,13 @@ func (b *flushFrameBuilder) buildModesPayload(screen *vt.Screen) []byte {
 	b.prevBracketed = screen.BracketedPaste
 	b.prevAppCursor = screen.AppCursorKeys
 	b.prevMouseSGR = screen.MouseSGR
+	b.prevMousePixels = screen.MousePixels
 	b.prevFocusReport = screen.FocusReporting
 	b.prevMouseMode = screen.MouseMode
 	b.prevAppKeypad = screen.AppKeypad
 	b.prevReverseVid = screen.ReverseVideo
 	b.modesAnnounced = true
-	return encodeModesMsg(b.prevBracketed, b.prevAppCursor, b.prevMouseSGR, b.prevFocusReport, b.prevAppKeypad, b.prevReverseVid, b.prevMouseMode)
+	return encodeModesMsg(b.prevBracketed, b.prevAppCursor, b.prevMouseSGR, b.prevFocusReport, b.prevAppKeypad, b.prevReverseVid, b.prevMousePixels, b.prevMouseMode)
 }
 
 // titleStable reports whether the screen's title matches the last

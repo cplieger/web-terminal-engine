@@ -397,11 +397,11 @@ function expectInverseAtCol(
   let foundInverseText = "";
   for (const span of spans) {
     const text = span.textContent ?? "";
-    const isInverse =
-      span.style.background === "var(--text)" ||
-      span.classList.contains("term-cursor") ||
-      span.classList.contains("term-cursor-underline") ||
-      span.classList.contains("term-cursor-bar");
+    // The application's inverse-video cell over default colors: the spec swap
+    // is theme bg-on-fg, which render.ts emits as color:var(--bg) +
+    // background:var(--text). Require BOTH (the native cursor stays hidden in
+    // these frames, so there is no term-cursor span to match instead).
+    const isInverse = span.style.background === "var(--text)" && span.style.color === "var(--bg)";
     if (isInverse) {
       foundInverseAt = cumCol;
       foundInverseText = text;

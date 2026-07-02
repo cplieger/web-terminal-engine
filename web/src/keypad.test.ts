@@ -1,7 +1,23 @@
 // @vitest-environment happy-dom
 
-// Tests for application keypad mode (DECKPAM/DECKPNM).
-// When AppKeypad is active, numpad keys send SS3 (ESC O <letter>) sequences.
+// SPEC-FIRST tests for application keypad mode (DECKPAM, enabled by ESC =).
+//
+// Expected sequences are transcribed from the "VT220-Style Function Keys"
+// application-keypad table in
+//   https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
+// which maps each numeric-keypad key to an SS3 (ESC O <letter>) sequence in
+// application mode, and to the bare character in numeric mode (DECKPNM):
+//
+//   0..9 -> SS3 p q r s t u v w x y      (p is 0, y is 9)
+//   . -> SS3 n    - -> SS3 m    + -> SS3 k    * -> SS3 j    / -> SS3 o
+//   Enter -> SS3 M
+//
+// Numpad keys are recognised via KeyboardEvent.code ("Numpad0".."Numpad9",
+// "NumpadDecimal", etc.), so every event below sets `code`. A failing
+// assertion is a real deviation from the spec; see the accompanying report.
+//
+// Content transcribed/rephrased from invisible-island.net xterm docs for
+// compliance with licensing restrictions.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { mapKeyboardEvent, type KeyboardResult } from "./keyboard.js";
@@ -11,58 +27,87 @@ function ev(init: KeyboardEventInit & { key: string; code: string }): KeyboardEv
   return new KeyboardEvent("keydown", init);
 }
 
-function send(result: KeyboardResult): string {
+function sent(result: KeyboardResult): string {
   if (result.kind !== "send") {
     throw new Error(`expected send, got ${result.kind}`);
   }
   return result.bytes;
 }
 
+/** Enable application keypad (DECKPAM): bracketed on, cursor normal, appKeypad on. */
+function enableAppKeypad(): void {
+  modes.setModes(true, false, false, false, 0, true);
+}
+
 beforeEach(() => {
+  // Reset to defaults: application keypad OFF (numeric / DECKPNM).
   modes.setModes(true, false, false, false, 0, false);
 });
 
-describe("application keypad mode (DECKPAM)", () => {
-  it("numpad digits send SS3 codes when app keypad active", () => {
-    modes.setModes(true, false, false, false, 0, true);
-    expect(send(mapKeyboardEvent(ev({ key: "0", code: "Numpad0" })))).toBe("\x1bOp");
-    expect(send(mapKeyboardEvent(ev({ key: "1", code: "Numpad1" })))).toBe("\x1bOq");
-    expect(send(mapKeyboardEvent(ev({ key: "2", code: "Numpad2" })))).toBe("\x1bOr");
-    expect(send(mapKeyboardEvent(ev({ key: "3", code: "Numpad3" })))).toBe("\x1bOs");
-    expect(send(mapKeyboardEvent(ev({ key: "4", code: "Numpad4" })))).toBe("\x1bOt");
-    expect(send(mapKeyboardEvent(ev({ key: "5", code: "Numpad5" })))).toBe("\x1bOu");
-    expect(send(mapKeyboardEvent(ev({ key: "6", code: "Numpad6" })))).toBe("\x1bOv");
-    expect(send(mapKeyboardEvent(ev({ key: "7", code: "Numpad7" })))).toBe("\x1bOw");
-    expect(send(mapKeyboardEvent(ev({ key: "8", code: "Numpad8" })))).toBe("\x1bOx");
-    expect(send(mapKeyboardEvent(ev({ key: "9", code: "Numpad9" })))).toBe("\x1bOy");
-  });
+// The full VT220-style application-keypad mapping (spec transcription).
+const KEYPAD: { key: string; code: string; ss3: string; label: string }[] = [
+  { key: "0", code: "Numpad0", ss3: "p", label: "0" },
+  { key: "1", code: "Numpad1", ss3: "q", label: "1" },
+  { key: "2", code: "Numpad2", ss3: "r", label: "2" },
+  { key: "3", code: "Numpad3", ss3: "s", label: "3" },
+  { key: "4", code: "Numpad4", ss3: "t", label: "4" },
+  { key: "5", code: "Numpad5", ss3: "u", label: "5" },
+  { key: "6", code: "Numpad6", ss3: "v", label: "6" },
+  { key: "7", code: "Numpad7", ss3: "w", label: "7" },
+  { key: "8", code: "Numpad8", ss3: "x", label: "8" },
+  { key: "9", code: "Numpad9", ss3: "y", label: "9" },
+  { key: ".", code: "NumpadDecimal", ss3: "n", label: ". (decimal)" },
+  { key: "-", code: "NumpadSubtract", ss3: "m", label: "- (subtract)" },
+  { key: "+", code: "NumpadAdd", ss3: "k", label: "+ (add)" },
+  { key: "*", code: "NumpadMultiply", ss3: "j", label: "* (multiply)" },
+  { key: "/", code: "NumpadDivide", ss3: "o", label: "/ (divide)" },
+];
 
-  it("numpad operators send SS3 codes when app keypad active", () => {
-    modes.setModes(true, false, false, false, 0, true);
-    expect(send(mapKeyboardEvent(ev({ key: ".", code: "NumpadDecimal" })))).toBe("\x1bOn");
-    expect(send(mapKeyboardEvent(ev({ key: "-", code: "NumpadSubtract" })))).toBe("\x1bOm");
-    expect(send(mapKeyboardEvent(ev({ key: "+", code: "NumpadAdd" })))).toBe("\x1bOk");
-    expect(send(mapKeyboardEvent(ev({ key: "*", code: "NumpadMultiply" })))).toBe("\x1bOj");
-    expect(send(mapKeyboardEvent(ev({ key: "/", code: "NumpadDivide" })))).toBe("\x1bOo");
-  });
+describe("application keypad mode (DECKPAM) [spec: SS3 sequences]", () => {
+  beforeEach(enableAppKeypad);
 
-  it("numpad Enter sends SS3 M when app keypad active", () => {
-    modes.setModes(true, false, false, false, 0, true);
-    expect(send(mapKeyboardEvent(ev({ key: "Enter", code: "NumpadEnter" })))).toBe("\x1bOM");
-  });
+  for (const { code, key, ss3, label } of KEYPAD) {
+    it(`numpad ${label} → SS3 ${ss3} (ESC O ${ss3})`, () => {
+      expect(sent(mapKeyboardEvent(ev({ key, code })))).toBe(`\x1bO${ss3}`);
+    });
+  }
 
-  it("numpad keys send normal chars when app keypad inactive", () => {
-    modes.setModes(true, false, false, false, 0, false);
-    // Numpad digits should be ignored (deferred to input event)
-    expect(mapKeyboardEvent(ev({ key: "5", code: "Numpad5" })).kind).toBe("ignore");
-    // Numpad Enter should send normal CR
-    expect(send(mapKeyboardEvent(ev({ key: "Enter", code: "NumpadEnter" })))).toBe("\r");
+  it("Numpad Enter → SS3 M (ESC O M)", () => {
+    expect(sent(mapKeyboardEvent(ev({ key: "Enter", code: "NumpadEnter" })))).toBe("\x1bOM");
   });
+});
 
-  it("numpad keys with modifiers bypass app keypad", () => {
-    modes.setModes(true, false, false, false, 0, true);
-    // Ctrl+numpad should not send SS3 (modifiers suppress app keypad)
+describe("numeric keypad mode (DECKPNM, default) [spec: bare character]", () => {
+  // In numeric mode the digit/operator characters are produced by the DOM
+  // input event, so mapKeyboardEvent defers them (kind='ignore'); only
+  // Numpad Enter has a dedicated keydown byte (CR).
+  for (const { code, key, label } of KEYPAD) {
+    it(`numpad ${label} → ignore (character emitted by the input event)`, () => {
+      expect(mapKeyboardEvent(ev({ key, code })).kind).toBe("ignore");
+    });
+  }
+
+  it("Numpad Enter → CR (0x0d)", () => {
+    expect(sent(mapKeyboardEvent(ev({ key: "Enter", code: "NumpadEnter" })))).toBe("\x0d");
+  });
+});
+
+describe("application keypad — modifiers suppress SS3 [spec: modified keypad is not application-keypad]", () => {
+  beforeEach(enableAppKeypad);
+
+  it("Ctrl+Numpad5 does NOT emit the SS3 application-keypad sequence", () => {
     const result = mapKeyboardEvent(ev({ key: "5", code: "Numpad5", ctrlKey: true }));
+    // Ctrl+numpad has no C0 mapping for '5', so it defers to the input event.
     expect(result.kind).not.toBe("send");
+    expect(result.kind).toBe("ignore");
+  });
+
+  it("Meta+Numpad5 does NOT emit the SS3 application-keypad sequence", () => {
+    const result = mapKeyboardEvent(ev({ key: "5", code: "Numpad5", metaKey: true }));
+    if (result.kind === "send") {
+      expect(result.bytes).not.toBe("\x1bOu");
+    } else {
+      expect(result.kind).toBe("ignore");
+    }
   });
 });

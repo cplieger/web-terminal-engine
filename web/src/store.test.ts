@@ -22,7 +22,7 @@ function screenMsg(
   base: number,
   height: number,
   changedRows: Record<number, string>,
-  opts: Partial<{ cursor: [number, number]; altActive: boolean }> = {},
+  opts: Partial<{ cursor: [number, number]; altActive: boolean; scrollbackCleared: boolean }> = {},
 ): ScreenMessage {
   const rows: WireRun[][] = new Array<WireRun[]>(height);
   const changed: number[] = [];
@@ -38,6 +38,7 @@ function screenMsg(
     changed,
     cursor: opts.cursor ?? [0, 0],
     altActive: opts.altActive ?? false,
+    scrollbackCleared: opts.scrollbackCleared ?? false,
   };
 }
 
@@ -248,5 +249,79 @@ describe("LineStore", () => {
     s.noteResumeBounds(10, -1); // negative oldest ignored
     s.applyScroll(scrollMsg(5, ["a"]));
     expect(s.hasTrimmedHistory()).toBe(false);
+  });
+
+  it("evicts rows stranded below the window when the screen shrinks", () => {
+    const s = new LineStore();
+    // Tall screen: 5 rows, abs 0-4 all filled.
+    s.applyScreen(screenMsg(0, 5, { 0: "a", 1: "b", 2: "c", 3: "d", 4: "e" }));
+    expect(s.highestIndex()).toBe(4);
+    s.drainChanges();
+    // Terminal resized shorter: window is now 3 rows [0..2]; abs 3-4 are stranded
+    // below the live window (the phantom-blank-tail bug) and must be evicted.
+    s.applyScreen(screenMsg(0, 3, { 0: "a", 1: "b", 2: "c" }));
+    expect(s.highestIndex()).toBe(2);
+    expect(s.getLine(3)).toBeUndefined();
+    expect(s.getLine(4)).toBeUndefined();
+    const ch = s.drainChanges();
+    expect(ch.evictedLines).toContain(3);
+    expect(ch.evictedLines).toContain(4);
+    expect(lineTexts(s)).toEqual([
+      { abs: 0, text: "a" },
+      { abs: 1, text: "b" },
+      { abs: 2, text: "c" },
+    ]);
+  });
+
+  it("keeps history above the window but drops phantom rows below it on shrink", () => {
+    const s = new LineStore();
+    // Tall screen filling abs 0-5.
+    s.applyScreen(
+      screenMsg(0, 6, { 0: "banner", 1: "b1", 2: "b2", 3: "b3", 4: "in", 5: "border" }),
+    );
+    expect(s.highestIndex()).toBe(5);
+    s.drainChanges();
+    // Shrink: window scrolls to base 2, height 3 -> [2..4]. abs 5 is stranded
+    // below the window; abs 0-1 remain as history above it.
+    s.applyScreen(screenMsg(2, 3, { 0: "b2", 1: "b3", 2: "in" }));
+    expect(s.highestIndex()).toBe(4); // window bottom, not the stale 5
+    expect(s.oldestIndex()).toBe(0); // history above the window is retained
+    expect(s.getLine(5)).toBeUndefined();
+  });
+
+  it("does not evict on a normal same-height redraw (no spurious tail eviction)", () => {
+    const s = new LineStore();
+    s.applyScreen(screenMsg(0, 3, { 0: "a", 1: "b", 2: "c" }));
+    s.drainChanges();
+    // Same window, one row changes: nothing below the window bottom to evict.
+    s.applyScreen(screenMsg(0, 3, { 2: "C" }));
+    expect(s.highestIndex()).toBe(2);
+    const ch = s.drainChanges();
+    expect(ch.evictedLines).toEqual([]);
+  });
+
+  it("drops scrollback history below base when a frame sets scrollbackCleared (ED3)", () => {
+    const s = new LineStore();
+    // History (abs 0-4) plus a live window at base 5 (abs 5-7).
+    s.applyScroll(scrollMsg(0, ["h0", "h1", "h2", "h3", "h4"]));
+    s.applyScreen(screenMsg(5, 3, { 0: "a", 1: "b", 2: "c" }));
+    expect(s.oldestIndex()).toBe(0);
+    expect(s.highestIndex()).toBe(7);
+    s.drainChanges();
+    // ED3 repaint: same window at base 5 with scrollbackCleared — the history
+    // (abs 0-4) is dropped, the window (abs 5-7) is kept and refreshed.
+    s.applyScreen(screenMsg(5, 3, { 0: "A", 1: "b", 2: "c" }, { scrollbackCleared: true }));
+    expect(s.oldestIndex()).toBe(5);
+    expect(s.highestIndex()).toBe(7);
+    expect(s.getLine(0)).toBeUndefined();
+    expect(s.getLine(4)).toBeUndefined();
+    const ch = s.drainChanges();
+    expect(ch.evictedLines).toContain(0);
+    expect(ch.evictedLines).toContain(4);
+    expect(lineTexts(s)).toEqual([
+      { abs: 5, text: "A" },
+      { abs: 6, text: "b" },
+      { abs: 7, text: "c" },
+    ]);
   });
 });

@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -40,8 +41,12 @@ func TestDECRQSS_SGRAllAttributesPresent(t *testing.T) {
 		t.Fatalf("response format: %q", got)
 	}
 	params := got[len("\x1bP1$r") : len(got)-len("m\x1b\\")]
+	// Split into the actual ';'-separated SGR tokens and check membership, not
+	// substring: a naive strings.Contains(params, "3") would false-match the "3"
+	// inside "53" (overline) and never catch a dropped italic (3).
+	tokens := strings.Split(params, ";")
 	for _, want := range []string{"1", "2", "3", "4", "5", "7", "8", "9", "53"} {
-		if !strings.Contains(params, want) {
+		if !slices.Contains(tokens, want) {
 			t.Errorf("missing attribute %q in %q", want, params)
 		}
 	}
@@ -98,10 +103,45 @@ func TestDECRQSS_DECSCUSRStyles(t *testing.T) {
 	}
 }
 
+// TestDECRQSS_DECSCA verifies the character-protection status query (" q)
+// reflects the current DECSCA attribute.
+func TestDECRQSS_DECSCA(t *testing.T) {
+	s := New(24, 80)
+	// Default: not protected -> Ps 0.
+	s.Write([]byte("\x1bP$q\"q\x1b\\"))
+	if got, want := string(s.Response), "\x1bP1$r0\"q\x1b\\"; got != want {
+		t.Errorf("DECRQSS DECSCA default = %q, want %q", got, want)
+	}
+	// After DECSCA marks cells protected -> Ps 1.
+	s.Response = nil
+	s.Write([]byte("\x1b[1\"q"))        // DECSCA: protect
+	s.Write([]byte("\x1bP$q\"q\x1b\\")) // DECRQSS DECSCA
+	if got, want := string(s.Response), "\x1bP1$r1\"q\x1b\\"; got != want {
+		t.Errorf("DECRQSS DECSCA after protect = %q, want %q", got, want)
+	}
+}
+
+// TestDECRQSS_DECSCL verifies the conformance-level query (" p) reports the
+// tracked level (default 65 = VT500 level 5) and reflects a DECSCL set.
+func TestDECRQSS_DECSCL(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1bP$q\"p\x1b\\"))
+	if got, want := string(s.Response), "\x1bP1$r65;1\"p\x1b\\"; got != want {
+		t.Errorf("DECRQSS DECSCL (default) = %q, want %q", got, want)
+	}
+	// After DECSCL sets level 4 (63), the query reports it back.
+	s.Response = nil
+	s.Write([]byte("\x1b[63;1\"p"))
+	s.Write([]byte("\x1bP$q\"p\x1b\\"))
+	if got, want := string(s.Response), "\x1bP1$r63;1\"p\x1b\\"; got != want {
+		t.Errorf("DECRQSS DECSCL (after set 63) = %q, want %q", got, want)
+	}
+}
+
 // TestDECRQSS_UnsupportedQueries verifies every unrecognized or malformed query
 // returns the invalid-status response (0$r).
 func TestDECRQSS_UnsupportedQueries(t *testing.T) {
-	bad := []string{"z", "Z", "\"p", "\"q", "$}", "!p", "mm", "rr", " qq", "123", "", strings.Repeat("x", 200)}
+	bad := []string{"z", "Z", "!p", "mm", "rr", " qq", "123", "", strings.Repeat("x", 200)}
 	want := "\x1bP0$r\x1b\\"
 	for _, q := range bad {
 		t.Run(q, func(t *testing.T) {
@@ -149,6 +189,10 @@ func TestUnknownDCSNotBuffered(t *testing.T) {
 	s.Write([]byte("\x1b\\"))
 	if s.pState != stGround {
 		t.Errorf("state after unknown DCS ST = %d, want Ground", s.pState)
+	}
+	// Observable outcome: an unknown DCS never replies.
+	if len(s.Response) != 0 {
+		t.Errorf("unknown DCS produced a response %q, want none", s.Response)
 	}
 }
 
@@ -205,5 +249,34 @@ func TestDCSAbortedBySUB(t *testing.T) {
 	}
 	if len(s.Response) != 0 {
 		t.Errorf("SUB in DCS produced response: %q", s.Response)
+	}
+}
+
+// TestXTGETTCAP verifies XTGETTCAP (DCS + q <hexname> ST): the color-count
+// capability ("Co"/"colors") is answered with the hex-encoded value 256 in the
+// valid form (DCS 1 + r name=value ST), while every other terminfo name is
+// reported invalid (DCS 0 + r name ST) so the app falls back to its terminfo
+// database. Names and the "256" value are hex per the XTGETTCAP spec: "Co" =
+// 436F, "colors" = 636F6C6F7273, "TN" = 544E, "256" = 323536.
+func TestXTGETTCAP(t *testing.T) {
+	cases := []struct {
+		name string
+		hex  string // hex-encoded capability name(s) sent in the query
+		want string
+	}{
+		{"Co color count", "436F", "\x1bP1+r436F=323536\x1b\\"},
+		{"colors alias", "636F6C6F7273", "\x1bP1+r636F6C6F7273=323536\x1b\\"},
+		{"unknown TN invalid", "544E", "\x1bP0+r544E\x1b\\"},
+		// A multi-name query answers each capability in order.
+		{"mixed Co;TN", "436F;544E", "\x1bP1+r436F=323536\x1b\\\x1bP0+r544E\x1b\\"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(24, 80)
+			s.Write([]byte("\x1bP+q" + tc.hex + "\x1b\\"))
+			if got := string(s.Response); got != tc.want {
+				t.Errorf("XTGETTCAP %q = %q, want %q", tc.hex, got, tc.want)
+			}
+		})
 	}
 }

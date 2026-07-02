@@ -2,24 +2,34 @@
 //
 // Supported:
 //   - OSC 0 ; Pt BEL/ST — Set icon name and window title to Pt
-//   - OSC 1 ; Pt BEL/ST — Set icon name to Pt (treated same as title)
 //   - OSC 2 ; Pt BEL/ST — Set window title to Pt
 //   - OSC 8 ; params ; URI BEL/ST — Set/clear hyperlink (URI empty = clear)
+//   - OSC 10/11/12 ; ? BEL/ST — Query default fg/bg/cursor color (answered
+//     from the configured Theme; see WithTheme. SET updates the slot; OSC 11x
+//     resets it back to the Theme default.)
 //
 // Out-of-scope (buffered then ignored):
-//   - OSC 4  (Change Color Number)
+//   - OSC 1  (Set icon name only — ignored so it can't clobber the title)
+//   - OSC 4  (Change Color Number) / 104 (reset)
 //   - OSC 7  (Current directory)
-//   - OSC 10 (Set foreground color)
-//   - OSC 11 (Set background color)
+//   - OSC 10/11/12 SET (would need to propagate to the client renderer)
 //   - OSC 52 (Clipboard manipulation)
+//   - OSC 133 (shell integration), OSC 9/777 (notifications)
 //
 // The OSC payload format is: <numeric-id> ; <string-data>
 // The numeric prefix is parsed as decimal digits up to the first ';'.
 package vt
 
-import "strings"
+import (
+	"encoding/base64"
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 // dispatchOsc processes the buffered OSC payload and resets the buffer.
+//
+//nolint:gocyclo // flat dispatch over the OSC command ids
 func (s *Screen) dispatchOsc() {
 	payload := s.oscBuf
 	s.oscBuf = s.oscBuf[:0]
@@ -43,18 +53,331 @@ func (s *Screen) dispatchOsc() {
 	}
 
 	switch id {
-	case 0, 1, 2:
-		// OSC 0: set icon name + title; OSC 1: icon name; OSC 2: title.
-		// We treat all three as setting the title (icon name is not
-		// separately exposed — matches xterm.js behavior).
+	case 0:
+		// OSC 0 sets both the icon name and the window title.
 		s.Title = data
+		s.iconTitle = data
+	case 2:
+		// OSC 2 sets the window title only.
+		s.Title = data
+	case 1:
+		// OSC 1 sets the icon name only. Tracked separately from the window
+		// title so XTWINOPS 20 (report icon label) round-trips; it is not sent
+		// to the client (which shows the window title).
+		s.iconTitle = data
 	case 8:
 		// OSC 8 ; params ; URI — set/clear hyperlink.
 		// Format: "params;URI" where params is key=value pairs separated
 		// by ':' (the 'id=' param is parsed but not used). Empty URI clears.
 		s.handleOsc8(data)
+	case 4:
+		// OSC 4 — set/query a palette color (index 0-255) or a special color
+		// (index 256+). Resolved server-side (colorToWire), so an override
+		// reaches the client through the normal RGB runs.
+		s.handleOscPalette(data)
+	case 5:
+		// OSC 5 — set/query a special color by number k (bold/underline/blink/
+		// reverse/italic), the OSC 4 index 256+k under a shorter addressing.
+		s.handleOscSpecialColor(data)
+	case 10, 11, 12, 13, 14, 15, 16, 17, 18, 19:
+		// Set or query a dynamic color (default fg/bg/cursor/mouse/highlight/…).
+		// Both set and query round-trip through dynColors; see handleOscColor.
+		s.handleOscColor(id, data)
+	case 52:
+		// OSC 52 — clipboard. SET only (kiro-cli uses this to copy); the query
+		// form is denied (letting a remote app read the clipboard is a
+		// data-exfiltration risk most terminals disable).
+		s.handleOsc52(data)
+	case 104:
+		// OSC 104 — reset one or all OSC 4 palette overrides.
+		s.handleOscPaletteReset(data)
+	case 105:
+		// OSC 105 — reset one or all special colors (set via OSC 5 / OSC 4 256+).
+		s.handleSpecialColorReset(data)
+	case 110, 111, 112, 113, 114, 115, 116, 117, 118, 119:
+		// Reset a dynamic color (OSC 11x resets OSC 1x, i.e. slot id-100) back
+		// to its theme default by dropping any stored override.
+		if s.dynColors != nil {
+			delete(s.dynColors, id-100)
+		}
 	default:
-		// Unknown/out-of-scope OSC: consumed and ignored.
+		// Unknown/out-of-scope OSC (7, 9, 133, ...): consumed, ignored.
+	}
+}
+
+// handleOscPalette implements OSC 4: one or more "index ; spec" pairs. A spec
+// of "?" queries the current color (answered as OSC 4 ; index ; rgb:.. ST); any
+// other spec sets an override for that palette index. A set marks the palette
+// changed so the handler forces a repaint (already-drawn cells re-resolve).
+func (s *Screen) handleOscPalette(data string) {
+	parts := strings.Split(data, ";")
+	for i := 0; i+1 < len(parts); i += 2 {
+		idx, err := strconv.Atoi(parts[i])
+		if err != nil || idx < 0 || idx > maxSpecialColorIndex {
+			continue
+		}
+		spec := parts[i+1]
+		// Indices 256+ address the special colors (bold/underline/etc.), which
+		// don't drive rendering here — they only round-trip through set/query.
+		if idx >= specialColorBase {
+			s.setOrQuerySpecialColor(4, idx, idx, spec)
+			continue
+		}
+		if spec == "?" {
+			rgb := s.colorToWire(Color{Type: 2, Val: uint8(idx)})
+			r, g, b := rgbChannels(rgb)
+			s.Response = fmt.Appendf(s.Response, "\x1b]4;%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
+				idx, r, r, g, g, b, b)
+			continue
+		}
+		rgb, ok := parseXColor(spec)
+		if !ok {
+			continue
+		}
+		if s.paletteOverride == nil {
+			s.paletteOverride = make(map[uint8]int32)
+		}
+		s.paletteOverride[uint8(idx)] = rgb
+		s.PaletteChanged = true
+	}
+}
+
+// Special colors (xterm OSC 5 / OSC 4 index >= 256) are the bold, underline,
+// blink, reverse, and italic color registers. They live above the 256-color
+// palette; the engine tracks them only for the OSC set/query round-trip (they
+// don't affect rendering, which follows the client theme).
+const (
+	specialColorBase     = 256
+	maxSpecialColorIndex = 263 // 8 registers: base .. base+7
+)
+
+// handleOscSpecialColor implements OSC 5: each "k ; spec" pair addresses special
+// color k (== OSC 4 index 256+k). A "?" spec queries; any other sets.
+func (s *Screen) handleOscSpecialColor(data string) {
+	parts := strings.Split(data, ";")
+	for i := 0; i+1 < len(parts); i += 2 {
+		k, err := strconv.Atoi(parts[i])
+		if err != nil || k < 0 || k > maxSpecialColorIndex-specialColorBase {
+			continue
+		}
+		s.setOrQuerySpecialColor(5, k, specialColorBase+k, parts[i+1])
+	}
+}
+
+// setOrQuerySpecialColor sets (or, for spec=="?", reports) special color at the
+// given internal index. num is the number echoed in the reply and osc is the
+// OSC id to echo (4 or 5), so the same register is addressable either way.
+func (s *Screen) setOrQuerySpecialColor(osc, num, idx int, spec string) {
+	if spec == "?" {
+		r, g, b := rgbChannels(s.specialColorRGB(idx))
+		s.Response = fmt.Appendf(s.Response, "\x1b]%d;%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
+			osc, num, r, r, g, g, b, b)
+		return
+	}
+	rgb, ok := parseXColor(spec)
+	if !ok {
+		return
+	}
+	if s.specialColors == nil {
+		s.specialColors = make(map[int]int32)
+	}
+	s.specialColors[idx] = rgb
+}
+
+// specialColorRGB returns the override RGB for a special-color index, or black
+// (the unset default) when none is set.
+func (s *Screen) specialColorRGB(idx int) int32 {
+	if c, ok := s.specialColors[idx]; ok {
+		return c
+	}
+	return 0
+}
+
+// rgbChannels splits a packed 0xRRGGBB color into its 8-bit red, green, and
+// blue components.
+func rgbChannels(rgb int32) (r, g, b byte) {
+	return byte(rgb >> 16), byte(rgb >> 8), byte(rgb) //nolint:gosec // the low 24 bits are an RGB triple
+}
+
+// handleSpecialColorReset implements OSC 105: with no data reset every special
+// color, else reset the listed ones (OSC 5 numbering).
+func (s *Screen) handleSpecialColorReset(data string) {
+	if s.specialColors == nil {
+		return
+	}
+	if data == "" {
+		s.specialColors = nil
+		return
+	}
+	for p := range strings.SplitSeq(data, ";") {
+		k, err := strconv.Atoi(p)
+		if err != nil || k < 0 || k > maxSpecialColorIndex-specialColorBase {
+			continue
+		}
+		delete(s.specialColors, specialColorBase+k)
+	}
+}
+
+// handleOscPaletteReset implements OSC 104: with no data reset the whole
+// palette, else reset the listed indices. Only marks the palette changed if an
+// override was actually removed.
+func (s *Screen) handleOscPaletteReset(data string) {
+	if s.paletteOverride == nil {
+		return
+	}
+	if data == "" {
+		s.paletteOverride = nil
+		s.PaletteChanged = true
+		return
+	}
+	for p := range strings.SplitSeq(data, ";") {
+		idx, err := strconv.Atoi(p)
+		if err != nil || idx < 0 || idx > 255 {
+			continue
+		}
+		if _, ok := s.paletteOverride[uint8(idx)]; ok {
+			delete(s.paletteOverride, uint8(idx))
+			s.PaletteChanged = true
+		}
+	}
+}
+
+// handleOsc52 implements OSC 52 clipboard SET. Payload is "<targets>;<data>"
+// where data is base64 (set) or "?" (query). SET only: the decoded text is
+// surfaced via PendingClipboard for the handler to push to the browser
+// clipboard. The query form is denied (clipboard read is an exfiltration risk).
+func (s *Screen) handleOsc52(data string) {
+	_, payload, ok := strings.Cut(data, ";")
+	if !ok || payload == "" || payload == "?" {
+		return
+	}
+	decoded, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(payload)
+	}
+	if err != nil || len(decoded) == 0 {
+		return
+	}
+	s.PendingClipboard = decoded
+}
+
+// parseXColor parses an X11 color spec into 0xRRGGBB. Supports the two forms
+// terminals emit: "rgb:h/h/h" (1-4 hex digits per channel, scaled to 8-bit)
+// and "#RGB" / "#RRGGBB" / "#RRRGGGBBB" / "#RRRRGGGGBBBB".
+//
+//nolint:gocognit // two flat prefix-keyed parse branches (rgb: and #hex)
+func parseXColor(spec string) (int32, bool) {
+	switch {
+	case strings.HasPrefix(spec, "rgb:"):
+		comps := strings.Split(spec[4:], "/")
+		if len(comps) != 3 {
+			return 0, false
+		}
+		var out int32
+		for _, cstr := range comps {
+			v, ok := scaleHexTo8(cstr)
+			if !ok {
+				return 0, false
+			}
+			out = out<<8 | int32(v)
+		}
+		return out, true
+	case strings.HasPrefix(spec, "#"):
+		// X11 "#" form: each channel's digits are the HIGH-order bits of a
+		// 16-bit value (left-justified), NOT proportionally scaled. #f -> 0xf000
+		// -> 0xf0; #fff and #f000 also -> 0xf0. (Contrast rgb:, which scales.)
+		h := spec[1:]
+		if h == "" || len(h) > 12 || len(h)%3 != 0 {
+			return 0, false
+		}
+		n := len(h) / 3
+		var out int32
+		for c := range 3 {
+			v, ok := leftJustifyHexTo8(h[c*n : c*n+n])
+			if !ok {
+				return 0, false
+			}
+			out = out<<8 | int32(v)
+		}
+		return out, true
+	}
+	return 0, false
+}
+
+// leftJustifyHexTo8 parses a 1-4 digit hex component the X11 "#" way: the value
+// is placed in the high bits of a 16-bit field, and the top 8 bits are taken.
+func leftJustifyHexTo8(h string) (uint8, bool) {
+	if len(h) < 1 || len(h) > 4 {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(h, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	v16 := v << (16 - 4*uint(len(h)))
+	return uint8((v16 >> 8) & 0xff), true
+}
+
+// scaleHexTo8 parses a 1-4 digit hex component and scales it to 8-bit: an
+// n-digit value V represents V/(16^n - 1) of full scale.
+func scaleHexTo8(h string) (uint8, bool) {
+	if len(h) < 1 || len(h) > 4 {
+		return 0, false
+	}
+	v, err := strconv.ParseUint(h, 16, 32)
+	if err != nil {
+		return 0, false
+	}
+	maxv := uint64(1)<<(4*len(h)) - 1
+	scaled := (v*255 + maxv/2) / maxv
+	return uint8(scaled), true // #nosec G115 -- scaled <= 255
+}
+
+// handleOscColor answers OSC 10/11/12 default-color queries. Only the query
+// form (Pt == "?") is handled: setting the default fg/bg/cursor color would
+// need to propagate to the client renderer, which this VT does not do, so a
+// set is ignored. Answering the query from the configured Theme keeps apps
+// that probe the background for light/dark detection (or block waiting for a
+// reply) from stalling or guessing the wrong theme.
+func (s *Screen) handleOscColor(id int, data string) {
+	// One or more specs; each advances to the next dynamic-color slot (xterm:
+	// OSC 10 with N specs sets colors 10, 11, …). "?" queries the slot's color.
+	for i, spec := range strings.Split(data, ";") {
+		slot := id + i
+		if slot > 19 {
+			break
+		}
+		if spec == "?" {
+			r, g, b := rgbChannels(s.dynColor(slot))
+			// xterm reports 16-bit-per-channel; duplicate each 8-bit value.
+			s.Response = fmt.Appendf(s.Response, "\x1b]%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
+				slot, r, r, g, g, b, b)
+			continue
+		}
+		rgb, ok := parseXColor(spec)
+		if !ok {
+			continue
+		}
+		if s.dynColors == nil {
+			s.dynColors = make(map[int]int32)
+		}
+		s.dynColors[slot] = rgb
+	}
+}
+
+// dynColor returns the current OSC 10-19 color for a slot, falling back to the
+// configured theme default when no override is set.
+func (s *Screen) dynColor(slot int) int32 {
+	if c, ok := s.dynColors[slot]; ok {
+		return c
+	}
+	switch slot {
+	case 11, 14, 16, 17: // background, mouse-bg, Tektronix-bg, highlight-bg
+		return s.theme.Background
+	case 12: // text cursor color
+		return s.theme.Cursor
+	default: // 10 fg, 13 mouse-fg, 15/18 Tek, 19 highlight-fg
+		return s.theme.Foreground
 	}
 }
 

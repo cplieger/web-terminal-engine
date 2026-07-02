@@ -7,6 +7,9 @@
 //   - OSC 4 / 104 — set/query and reset palette colors (index 0-255)
 //   - OSC 5 / 105 — set/query and reset the special colors (bold/underline/…)
 //   - OSC 8 ; params ; URI BEL/ST — Set/clear hyperlink (URI empty = clear)
+//   - OSC 9 ; Pt BEL/ST — desktop notification: Pt is captured into
+//     Notification for the status layer; the ConEmu progress form
+//     (OSC 9 ; Ps ; ...) is ignored
 //   - OSC 10-19 ; spec|? BEL/ST — set/query the dynamic colors (default
 //     fg/bg/cursor/…), answered from the configured Theme; see WithTheme
 //   - OSC 52 ; Pc ; Pd — clipboard: SET pushes to the browser clipboard and
@@ -16,7 +19,7 @@
 //
 // Out-of-scope (buffered then ignored):
 //   - OSC 7  (Current directory)
-//   - OSC 133 (shell integration), OSC 9/777 (notifications)
+//   - OSC 133 (shell integration), OSC 777 (notifications)
 //   - X11 Xcms color-space specs in OSC 4/5/10-19 (CIE*/rgbi/TekHVC)
 //
 // The OSC payload format is: <numeric-id> ; <string-data>
@@ -112,6 +115,11 @@ func (s *Screen) dispatchOsc() {
 		// Set or query a dynamic color (default fg/bg/cursor/mouse/highlight/…).
 		// Both set and query round-trip through dynColors; see handleOscColor.
 		s.handleOscColor(id, data)
+	case 9:
+		// OSC 9 — desktop notification. Pt is captured into Notification for the
+		// status layer; the ConEmu progress form (OSC 9 ; Ps) is rejected. See
+		// handleOsc9.
+		s.handleOsc9(data)
 	case 52:
 		// OSC 52 — clipboard. SET only (kiro-cli uses this to copy); the query
 		// form is denied (letting a remote app read the clipboard is a
@@ -130,8 +138,73 @@ func (s *Screen) dispatchOsc() {
 			delete(s.dynColors, id-100)
 		}
 	default:
-		// Unknown/out-of-scope OSC (7, 9, 133, ...): consumed, ignored.
+		// Unknown/out-of-scope OSC (7, 133, 777, ...): consumed, ignored.
 	}
+}
+
+// maxNotificationLen caps a captured OSC 9 notification message (in runes) so a
+// hostile or runaway program cannot grow the stored string without bound.
+const maxNotificationLen = 256
+
+// handleOsc9 captures an OSC 9 desktop-notification message
+// (ESC ] 9 ; <text> ST) into Notification for the status layer to read. Two
+// guards keep it useful and safe: the ConEmu progress form
+// (OSC 9 ; Ps ; ... where the first field is numeric, e.g. "4;50") is rejected
+// so a progress update is not mistaken for a notification, and the text is
+// stripped of control bytes and length-clamped because it is attacker-influenced
+// terminal output. The engine stays generic: it stores whatever text arrives and
+// does not interpret it. Mapping a message to a session status (kiro-cli's
+// "Response complete" / "Permission required") is the consumer's job, not the
+// VT's, so no application strings are hard-coded here.
+func (s *Screen) handleOsc9(data string) {
+	if data == "" {
+		return
+	}
+	// ConEmu progress form: OSC 9 ; Ps ; ... The first ';'-delimited field
+	// being purely numeric marks a ConEmu subcommand (progress is 9;4), not a
+	// human-readable notification.
+	if head, _, hasSep := strings.Cut(data, ";"); hasSep && isAllDigits(head) {
+		return
+	}
+	msg := sanitizeNotification(data)
+	if msg == "" {
+		return
+	}
+	s.Notification = msg
+	s.NotificationSeq++
+}
+
+// isAllDigits reports whether s is non-empty and every byte is an ASCII digit.
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := range len(s) {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// sanitizeNotification strips C0/C1 control runes (including newlines) from an
+// OSC 9 message and clamps it to maxNotificationLen runes, so the stored text is
+// safe to place in a struct field, a log line, or a status event.
+func sanitizeNotification(data string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range data {
+		if n >= maxNotificationLen {
+			break
+		}
+		// Drop C0 (0x00-0x1F, DEL 0x7F) and C1 (0x80-0x9F) control runes.
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 // handleOscPalette implements OSC 4: one or more "index ; spec" pairs. A spec

@@ -1,6 +1,9 @@
 package vt
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestOSC2SetsTitleBEL(t *testing.T) {
 	s := New(24, 80)
@@ -156,5 +159,82 @@ func TestOSCUnhandledIdLeavesTitle(t *testing.T) {
 	s.Write([]byte("\x1b]9;iTerm-only notification\x07")) // OSC 9 is unhandled here
 	if s.Title != keep {
 		t.Errorf("unhandled OSC 9: Title = %q, want %q (unchanged)", s.Title, keep)
+	}
+}
+
+func TestOSC9CapturesNotificationST(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]9;Response complete\x1b\\"))
+	if s.Notification != "Response complete" {
+		t.Fatalf("Notification = %q, want %q", s.Notification, "Response complete")
+	}
+	if s.NotificationSeq != 1 {
+		t.Fatalf("NotificationSeq = %d, want 1", s.NotificationSeq)
+	}
+}
+
+func TestOSC9CapturesNotificationBEL(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]9;Permission required\x07"))
+	if s.Notification != "Permission required" {
+		t.Fatalf("Notification = %q, want %q", s.Notification, "Permission required")
+	}
+}
+
+// A repeated identical message must still advance the sequence so the status
+// layer detects the new edge (two "Permission required" in a row are two events).
+func TestOSC9SeqAdvancesOnRepeat(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]9;Permission required\x07"))
+	s.Write([]byte("\x1b]9;Permission required\x07"))
+	if s.NotificationSeq != 2 {
+		t.Fatalf("NotificationSeq = %d, want 2", s.NotificationSeq)
+	}
+}
+
+// The ConEmu progress form (OSC 9 ; Ps ; ...) must not be captured as a
+// notification; kiro-cli itself emits OSC 9 ; 4 for progress.
+func TestOSC9RejectsConEmuProgress(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]9;4;50\x07"))
+	if s.Notification != "" || s.NotificationSeq != 0 {
+		t.Fatalf("ConEmu progress captured: Notification=%q seq=%d", s.Notification, s.NotificationSeq)
+	}
+}
+
+func TestOSC9EmptyIgnored(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]9;\x07"))
+	if s.Notification != "" || s.NotificationSeq != 0 {
+		t.Fatalf("empty OSC 9 captured: Notification=%q seq=%d", s.Notification, s.NotificationSeq)
+	}
+}
+
+func TestSanitizeNotification(t *testing.T) {
+	// C0 (tab, newline), DEL (0x7f) stripped; printable kept.
+	if got := sanitizeNotification("done\tnow\x7f\n!"); got != "donenow!" {
+		t.Fatalf("sanitizeNotification = %q, want %q", got, "donenow!")
+	}
+	// Clamped to maxNotificationLen runes.
+	long := strings.Repeat("x", maxNotificationLen+50)
+	if got := len([]rune(sanitizeNotification(long))); got != maxNotificationLen {
+		t.Fatalf("clamp: rune length = %d, want %d", got, maxNotificationLen)
+	}
+	if got := sanitizeNotification(""); got != "" {
+		t.Fatalf("empty sanitizeNotification = %q, want empty", got)
+	}
+}
+
+func TestIsAllDigits(t *testing.T) {
+	cases := []struct {
+		in   string
+		want bool
+	}{
+		{"4", true}, {"123", true}, {"", false}, {"4a", false}, {"a", false}, {"1.5", false},
+	}
+	for _, tc := range cases {
+		if got := isAllDigits(tc.in); got != tc.want {
+			t.Errorf("isAllDigits(%q) = %v, want %v", tc.in, got, tc.want)
+		}
 	}
 }

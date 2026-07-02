@@ -33,6 +33,7 @@ export async function bundleEngine(): Promise<string> {
   const result = await esbuild.build({
     stdin: {
       contents: `export * as render from "./src/render.js";
+export * as modes from "./src/modes.js";
 export { decodeWireBinary } from "./src/wire-binary.js";`,
       resolveDir: webDir,
       loader: "ts",
@@ -114,4 +115,37 @@ export function centerColor(png: PNG, rect: Rect): { r: number; g: number; b: nu
 /** decodePng parses a screenshot buffer into a PNG for pixel sampling. */
 export function decodePng(buf: Buffer): PNG {
   return PNG.sync.read(buf);
+}
+
+function lumAt(png: PNG, i: number): number {
+  return (
+    0.299 * (png.data[i] ?? 0) + 0.587 * (png.data[i + 1] ?? 0) + 0.114 * (png.data[i + 2] ?? 0)
+  );
+}
+
+/**
+ * pixelDiffFraction returns the fraction of pixels whose luminance differs by
+ * more than a threshold between two equal-region rects — used to prove two
+ * glyphs render as visually DISTINCT shapes (not the same blob).
+ */
+export function pixelDiffFraction(png: PNG, a: Rect, b: Rect): number {
+  const w = Math.min(Math.round(a.width), Math.round(b.width));
+  const h = Math.min(Math.round(a.height), Math.round(b.height));
+  const ax = Math.round(a.x);
+  const ay = Math.round(a.y);
+  const bx = Math.round(b.x);
+  const by = Math.round(b.y);
+  let diff = 0;
+  let n = 0;
+  for (let dy = 0; dy < h; dy++) {
+    for (let dx = 0; dx < w; dx++) {
+      const la = lumAt(png, ((ay + dy) * png.width + (ax + dx)) * 4);
+      const lb = lumAt(png, ((by + dy) * png.width + (bx + dx)) * 4);
+      if (Math.abs(la - lb) > 24) {
+        diff++;
+      }
+      n++;
+    }
+  }
+  return n > 0 ? diff / n : 0;
 }

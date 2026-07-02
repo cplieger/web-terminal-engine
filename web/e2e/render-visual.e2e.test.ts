@@ -19,6 +19,7 @@ import {
   avgLuminance,
   centerColor,
   decodePng,
+  pixelDiffFraction,
   type Rect,
 } from "./e2e-harness.js";
 
@@ -29,6 +30,7 @@ const UNDERLINE = 4;
 const INVERSE = 8;
 const DIM = 32;
 const HIDDEN = 64;
+const BLINK = 128;
 const RED = 0xff0000;
 const GREEN = 0x00ff00;
 const BLUE = 0x0000ff;
@@ -251,6 +253,137 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     const afterClear = avgLuminance(decodePng(await page.screenshot()), rowRect);
     expect(afterClear, "cleared row paints no ink").toBeLessThan(2);
   });
+
+  test("glyph fidelity: distinct glyphs paint distinct, correctly-shaped ink", async ({ page }) => {
+    // Each glyph in its own cell. Light text on dark bg, so more ink -> higher
+    // luminance. This proves the renderer actually draws each codepoint as a
+    // distinct, correctly-positioned shape (not the same blob for everything).
+    const rows = [
+      [
+        run(" "), // 0: blank
+        run("A"), // 1: letter
+        run("B"), // 2: different letter
+        run("\u2588"), // 3: FULL BLOCK — fills the cell
+        run("\u2500"), // 4: HORIZONTAL line — mid row
+        run("\u2502"), // 5: VERTICAL line — mid column
+        run("."), // 6: period — sparse, low
+        run(" ".repeat(6)),
+      ],
+      [run(" ".repeat(13))],
+    ];
+    await renderMsg(page, screenMsg(rows, [1, 0]));
+    const c = await page.evaluate(() => {
+      const out = document.getElementById("out")!;
+      const r = (col: number): Rect => {
+        const b = (out.children[0]!.children[col] as HTMLElement).getBoundingClientRect();
+        return { x: b.x, y: b.y, width: b.width, height: b.height };
+      };
+      return {
+        space: r(0),
+        a: r(1),
+        b: r(2),
+        block: r(3),
+        hline: r(4),
+        vline: r(5),
+        period: r(6),
+      };
+    });
+    const png = decodePng(await page.screenshot());
+    const ink = (rect: Rect): number => avgLuminance(png, rect);
+
+    // A blank cell has essentially no ink; a full block is nearly saturated.
+    expect(ink(c.space), "space paints ~nothing").toBeLessThan(3);
+    expect(ink(c.block), "full block is far more ink than a letter").toBeGreaterThan(ink(c.a) + 40);
+    // A letter has real ink, more than a sparse period, more than a space.
+    expect(ink(c.a)).toBeGreaterThan(ink(c.period));
+    expect(ink(c.period)).toBeGreaterThan(ink(c.space));
+    // Distinct glyphs render distinctly: 'A' and 'B' differ across many pixels.
+    expect(pixelDiffFraction(png, c.a, c.b), "A and B are visually distinct").toBeGreaterThan(0.05);
+
+    // Box-drawing glyphs land in the right place: the horizontal line's ink is
+    // concentrated in the middle ROW, the vertical line's in the middle COLUMN.
+    const midRow = (r: Rect): Rect => ({
+      x: r.x,
+      y: r.y + r.height * 0.4,
+      width: r.width,
+      height: r.height * 0.2,
+    });
+    const topRow = (r: Rect): Rect => ({ x: r.x, y: r.y, width: r.width, height: r.height * 0.2 });
+    const midCol = (r: Rect): Rect => ({
+      x: r.x + r.width * 0.4,
+      y: r.y,
+      width: r.width * 0.2,
+      height: r.height,
+    });
+    const leftCol = (r: Rect): Rect => ({ x: r.x, y: r.y, width: r.width * 0.2, height: r.height });
+    expect(ink(midRow(c.hline)), "─ ink is mid-row").toBeGreaterThan(ink(topRow(c.hline)) + 8);
+    expect(ink(midCol(c.vline)), "│ ink is mid-column").toBeGreaterThan(ink(leftCol(c.vline)) + 8);
+  });
+
+  test("blink (SGR 5): the engine's term-blink class drives an opacity animation", async ({
+    page,
+  }) => {
+    // The engine ships no CSS — render.ts only ADDS the .term-blink class to a
+    // blink cell (its class contract, also asserted in the all-codes dump). The
+    // keyframes are the consumer's (web-terminal-ui). We inject the standard
+    // blink CSS a consumer provides and verify end to end that the engine put the
+    // class on the right element and that it actually animates opacity.
+    await renderMsg(page, screenMsg([[run("M", { a: BLINK })], [run(" ".repeat(8))]], [1, 0]));
+    await page.addStyleTag({
+      content:
+        "@keyframes wte-blink { 50% { opacity: 0 } } .term-blink { animation: wte-blink 1s step-end infinite }",
+    });
+    const g = await page.evaluate(() => {
+      const el = document.querySelector<HTMLElement>(".term-blink");
+      if (!el) {
+        return { found: false, animName: "", op0: 1, op1: 1 };
+      }
+      const anims = el.getAnimations();
+      const animName = getComputedStyle(el).animationName;
+      let op0 = 1;
+      let op1 = 1;
+      if (anims.length > 0) {
+        anims[0]!.currentTime = 0;
+        op0 = parseFloat(getComputedStyle(el).opacity);
+        anims[0]!.currentTime = 500; // mid-cycle of the 1s animation
+        op1 = parseFloat(getComputedStyle(el).opacity);
+      }
+      return { found: true, animName, op0, op1 };
+    });
+    expect(g.found, "engine adds .term-blink to the blink cell").toBe(true);
+    expect(g.animName, ".term-blink is animated").not.toBe("none");
+    // Opacity differs across the animation cycle => the cell actually blinks.
+    expect(Math.abs(g.op0 - g.op1), "opacity animates between phases").toBeGreaterThan(0.5);
+  });
+
+  test("reverse video (DECSCNM ?5): toggling the engine's class inverts the screen", async ({
+    page,
+  }) => {
+    // render.ts toggles .term-reverse-video on the wrapper from the DEC mode-5
+    // state (its contract, asserted in conformance.test.ts). The color inversion
+    // itself is the consumer's CSS; inject the representative rule and verify the
+    // toggle actually inverts the painted luminance of a text region.
+    await renderMsg(page, screenMsg([[run("HELLO WORLD MMMM")], [run(" ".repeat(20))]], [1, 0]));
+    await page.addStyleTag({ content: ".term-reverse-video { filter: invert(1) }" });
+    const rect = await page.evaluate(() => {
+      const b = (
+        document.getElementById("out")!.children[0]!.children[0] as HTMLElement
+      ).getBoundingClientRect();
+      return { x: b.x, y: b.y, width: b.width, height: b.height };
+    });
+    const normal = avgLuminance(decodePng(await page.screenshot()), rect);
+    // Turn DEC mode 5 (reverse video) on and let the engine apply its class.
+    await page.evaluate(() => {
+      WTE.modes.setModes(true, false, false, false, 0, false, true, false);
+      WTE.render.updateReverseVideo();
+    });
+    const reversed = avgLuminance(decodePng(await page.screenshot()), rect);
+    // Light-text-on-dark (low mean) must invert to dark-text-on-light (high mean).
+    expect(normal, "normal text region is mostly dark").toBeLessThan(80);
+    expect(reversed, "reverse-video inverts to a mostly-light region").toBeGreaterThan(
+      normal + 100,
+    );
+  });
 });
 
 // WTE is the esbuild IIFE global injected via addScriptTag.
@@ -259,5 +392,18 @@ declare const WTE: {
     init: (opts: { output: unknown; termWrap: unknown; onCursorMove?: () => void }) => void;
     updateFontMetrics: () => void;
     handleScreen: (msg: unknown) => void;
+    updateReverseVideo: () => void;
+  };
+  modes: {
+    setModes: (
+      bracketed: boolean,
+      appCursor: boolean,
+      mouseSGR: boolean,
+      focus: boolean,
+      mouseMode: number,
+      appKeypad: boolean,
+      reverse: boolean,
+      pixels: boolean,
+    ) => void;
   };
 };

@@ -43,7 +43,12 @@ export default [
       sourceType: "module",
       parserOptions: {
         projectService: {
-          allowDefaultProject: ["*.test.ts", "*.property.test.ts", "fc-strict-setup.ts"],
+          allowDefaultProject: [
+            "*.test.ts",
+            "*.property.test.ts",
+            "fc-strict-setup.ts",
+            "e2e/e2e-harness.ts",
+          ],
           maximumDefaultProjectFileMatchCount_THIS_WILL_SLOW_DOWN_LINTING: 20,
         },
         tsconfigRootDir: import.meta.dirname,

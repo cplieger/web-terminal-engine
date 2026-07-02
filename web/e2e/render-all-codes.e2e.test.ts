@@ -17,61 +17,8 @@
 // Fresh headless Chromium per the chromium-sidecar steering doc (the shared
 // sidecar is debug-only). Out of the vitest battery; run `npm run test:e2e`.
 import { test, expect } from "@playwright/test";
-import * as esbuild from "esbuild";
-import * as fs from "node:fs";
-import * as path from "node:path";
-import { fileURLToPath } from "node:url";
 import { standard256, rgb } from "../src/test-helpers/spec-colors.js";
-
-const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const goldenDir = path.resolve(webDir, "..", "render-golden");
-
-// esbuild resolves ESM `.js` import specifiers to their `.ts` sources so
-// render.ts (which imports "./store.js" etc.) bundles for the browser.
-const jsToTs = {
-  name: "js-to-ts",
-  setup(build: esbuild.PluginBuild) {
-    build.onResolve({ filter: /\.js$/ }, (args) => {
-      if (!args.path.startsWith(".")) {
-        return null;
-      }
-      const tsPath = path.resolve(args.resolveDir, args.path.replace(/\.js$/, ".ts"));
-      return fs.existsSync(tsPath) ? { path: tsPath } : null;
-    });
-  },
-};
-
-// Bundle the real renderer AND the real wire decoder into one IIFE global so the
-// page decodes the engine's actual bytes and renders them with production code.
-async function bundleEngine(): Promise<string> {
-  const result = await esbuild.build({
-    stdin: {
-      contents: `export * as render from "./src/render.js";
-export { decodeWireBinary } from "./src/wire-binary.js";`,
-      resolveDir: webDir,
-      loader: "ts",
-    },
-    bundle: true,
-    format: "iife",
-    globalName: "WTE",
-    write: false,
-    plugins: [jsToTs],
-  });
-  return result.outputFiles[0]!.text;
-}
-
-// The harness mirrors web-terminal-ui's default CSS vars so inverse-on-default
-// resolves to concrete colors the computed-style dump can read: --text #dddee1
-// (rgb(221,222,225)), --bg #000000 (rgb(0,0,0)).
-const HARNESS = `<!doctype html><html><head><meta charset="utf-8"><style>
-  :root { --bg: #000000; --text: #dddee1; }
-  html, body { margin: 0; padding: 0; background: var(--bg); }
-  #wrap { font: 16px/1.25 "DejaVu Sans Mono", "Liberation Mono", monospace;
-          color: var(--text); background: var(--bg); padding: 4px; width: 400px; }
-  #out { white-space: pre; }
-</style></head><body>
-  <div id="wrap"><div id="out"></div></div>
-</body></html>`;
+import { bundleEngine, HARNESS, readGolden, frameBytesArray } from "./e2e-harness.js";
 
 // One row's dumped computed style (the styled first span carrying the glyph).
 interface CellDump {
@@ -114,9 +61,9 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
   test("every SGR display code renders to its spec computed style", async ({ page }) => {
     const bundle = await bundleEngine();
     const manifest = JSON.parse(
-      fs.readFileSync(path.join(goldenDir, "all-codes.manifest.json"), "utf8"),
+      readGolden("all-codes.manifest.json").toString("utf8"),
     ) as ManifestEntry[];
-    const frameBytes = Array.from(fs.readFileSync(path.join(goldenDir, "all-codes.bin")));
+    const frameBytes = frameBytesArray("all-codes.bin");
 
     await page.setContent(HARNESS);
     await page.addScriptTag({ content: bundle });

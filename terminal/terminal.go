@@ -261,6 +261,26 @@ func (h *Handler) Title() string {
 	return h.screen.Title
 }
 
+// Exited reports whether the child process has exited. Non-blocking and
+// race-free (procExitCh is closed exactly once, by the process monitor). False
+// for a handler whose process was never started.
+func (h *Handler) Exited() bool {
+	select {
+	case <-h.procExitCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// StartEager starts the child process now at a default size, rather than lazily
+// on the first client message. A session manager calls this at Create time so a
+// new session's process (and its activity signal) exist from creation; the first
+// client attach still sends the real resize. Idempotent.
+func (h *Handler) StartEager() error {
+	return h.ensureStarted(0, 0)
+}
+
 // exitAwareCloseCode returns statusProcessExited (4001) when the child process
 // has exited (procExitCh is closed), otherwise a normal closure. The
 // non-blocking receive is race-free: channel operations synchronize and a

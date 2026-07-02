@@ -44,6 +44,12 @@ const (
 	defaultRows   = 30
 	flushInterval = 50 * time.Millisecond
 
+	// statusProcessExited (4001) is the WebSocket close code the terminal WS
+	// uses when the child process exits, so a client can tell a dead session
+	// (the tab should close) apart from a transient disconnect (reconnect).
+	// 4001 is in the private application close-code range (4000-4999).
+	statusProcessExited websocket.StatusCode = 4001
+
 	// maxScrollLinesPerFrame bounds the lines packed into one scroll frame so the wire
 	// num_lines (a uint16) can never be exceeded by the payload and a large drained burst
 	// (a fast child can produce far more than 65535 lines in one 50ms flush) is split into
@@ -177,6 +183,7 @@ type Handler struct {
 	scrollback               *scrollbackRing
 	cancel                   context.CancelFunc
 	ptmx                     *os.File
+	procExitCh               chan struct{}
 	pendingClipboard         []byte
 	command                  []string
 	cfg                      handlerConfig
@@ -213,6 +220,7 @@ func NewHandler(command []string, opts ...Option) *Handler {
 		builder:    &flushFrameBuilder{},
 		scrollback: newScrollbackRing(cfg.scrollbackCapacity),
 		bootEpoch:  time.Now().UnixNano(),
+		procExitCh: make(chan struct{}),
 	}
 }
 
@@ -240,6 +248,45 @@ func (h *Handler) Shutdown() {
 	}
 	if h.ptmx != nil {
 		_ = h.ptmx.Close() // best-effort during shutdown
+	}
+}
+
+// Title returns the current window title (set by the process via OSC 0/2), for
+// a session manager or UI to label the session. Empty until the process sets a
+// title. Safe for concurrent use; read under the same lock that guards the VT
+// screen.
+func (h *Handler) Title() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.screen.Title
+}
+
+// exitAwareCloseCode returns statusProcessExited (4001) when the child process
+// has exited (procExitCh is closed), otherwise a normal closure. The
+// non-blocking receive is race-free: channel operations synchronize and a
+// closed channel is always ready.
+func (h *Handler) exitAwareCloseCode() websocket.StatusCode {
+	select {
+	case <-h.procExitCh:
+		return statusProcessExited
+	default:
+		return websocket.StatusNormalClosure
+	}
+}
+
+// closeOnProcExit closes the client WS with statusProcessExited (4001) when the
+// child process exits, so the client can tell "process ended" (terminal, close
+// the tab) from a transient drop (reconnect). Canceling the read's context
+// instead would make coder/websocket fail the connection abnormally (1006)
+// rather than send a clean 4001, so this closes the socket directly;
+// coder/websocket permits Close concurrent with the read loop's Read. It also
+// returns when the client leaves (ctx done), so it never leaks; if the process
+// already exited, procExitCh is closed and it closes immediately.
+func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn) {
+	select {
+	case <-ctx.Done():
+	case <-h.procExitCh:
+		ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
 	}
 }
 
@@ -305,6 +352,10 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		if h.cfg.onProcessExit != nil {
 			h.cfg.onProcessExit(werr)
 		}
+		// Broadcast process exit so attached WS clients close with
+		// statusProcessExited (4001) rather than a normal closure. Closed
+		// exactly once: this monitor goroutine runs once per handler.
+		close(h.procExitCh)
 		cancel() // stop readLoop/flushLoop on child exit
 	}()
 	return nil
@@ -543,7 +594,7 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	defer func() {
 		h.registry.Remove(ws)
-		ws.Close(websocket.StatusNormalClosure, "") // #nosec G104 -- best-effort
+		ws.Close(h.exitAwareCloseCode(), "") // #nosec G104 -- best-effort
 	}()
 
 	// Cancellable context tied to the client's request — pingLoop
@@ -553,6 +604,11 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
 	go pingLoop(ctx, cancel, ws, h.cfg.logger)
+
+	// Close promptly with 4001 when the child process exits, so the client can
+	// distinguish "process ended" from a transient drop (see closeOnProcExit
+	// and exitAwareCloseCode).
+	go h.closeOnProcExit(ctx, ws)
 
 	// Read input from this client and write to the shared PTY.
 	for {

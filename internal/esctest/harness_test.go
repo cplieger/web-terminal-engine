@@ -32,11 +32,26 @@ func TestConformance(t *testing.T) {
 		}
 	}
 
+	// Maximum strictness: enable xtermWinopsEnabled so the tests gated behind
+	// optionRequired(XTERM_WINOPS_ENABLED) — OSC 52 selection query, the
+	// Set/Reset-Title-Mode hex/UTF-8 tests, and DECNCSM — become must-pass
+	// rather than skipped-as-option-missing. ESCTEST_OPTIONS overrides the set
+	// (space/comma separated); "none" disables all options.
+	opts := []string{"xtermWinopsEnabled"}
+	if v := os.Getenv("ESCTEST_OPTIONS"); v != "" {
+		if v == "none" {
+			opts = nil
+		} else {
+			opts = strings.FieldsFunc(v, func(r rune) bool { return r == ',' || r == ' ' })
+		}
+	}
+
 	res, err := Run(t.Context(), &Options{
 		Dir:        dir,
 		Timeout:    750 * time.Millisecond,
 		Include:    os.Getenv("ESCTEST_INCLUDE"),
 		MaxVTLevel: level,
+		Options:    opts,
 	})
 	if err != nil {
 		t.Fatalf("esctest harness failed to run: %v", err)

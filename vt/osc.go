@@ -2,19 +2,22 @@
 //
 // Supported:
 //   - OSC 0 ; Pt BEL/ST — Set icon name and window title to Pt
+//   - OSC 1 ; Pt BEL/ST — Set icon name only (tracked separately from title)
 //   - OSC 2 ; Pt BEL/ST — Set window title to Pt
+//   - OSC 4 / 104 — set/query and reset palette colors (index 0-255)
+//   - OSC 5 / 105 — set/query and reset the special colors (bold/underline/…)
 //   - OSC 8 ; params ; URI BEL/ST — Set/clear hyperlink (URI empty = clear)
-//   - OSC 10/11/12 ; ? BEL/ST — Query default fg/bg/cursor color (answered
-//     from the configured Theme; see WithTheme. SET updates the slot; OSC 11x
-//     resets it back to the Theme default.)
+//   - OSC 10-19 ; spec|? BEL/ST — set/query the dynamic colors (default
+//     fg/bg/cursor/…), answered from the configured Theme; see WithTheme
+//   - OSC 52 ; Pc ; Pd — clipboard: SET pushes to the browser clipboard and
+//     retains the session selection; QUERY reports it back (only when
+//     AllowScreenReport is enabled — see handleOsc52)
+//   - OSC 110-119 — reset a dynamic color to its Theme default
 //
 // Out-of-scope (buffered then ignored):
-//   - OSC 1  (Set icon name only — ignored so it can't clobber the title)
-//   - OSC 4  (Change Color Number) / 104 (reset)
 //   - OSC 7  (Current directory)
-//   - OSC 10/11/12 SET (would need to propagate to the client renderer)
-//   - OSC 52 (Clipboard manipulation)
 //   - OSC 133 (shell integration), OSC 9/777 (notifications)
+//   - X11 Xcms color-space specs in OSC 4/5/10-19 (CIE*/rgbi/TekHVC)
 //
 // The OSC payload format is: <numeric-id> ; <string-data>
 // The numeric prefix is parsed as decimal digits up to the first ';'.
@@ -22,10 +25,35 @@ package vt
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
 )
+
+// decodeTitle applies the XTSMTITLE set-mode to an incoming OSC 0/1/2 title
+// payload: when set-hex (mode 0) is active the payload is a hex-encoded byte
+// string (xterm), decoded here; otherwise it is used verbatim. Invalid hex
+// falls back to the raw string so a malformed sequence can't blank the title.
+func (s *Screen) decodeTitle(data string) string {
+	if !s.titleSetHex {
+		return data
+	}
+	if b, err := hex.DecodeString(data); err == nil {
+		return string(b)
+	}
+	return data
+}
+
+// encodeTitle applies the XTSMTITLE query-mode to a title reported by XTWINOPS
+// 20/21: when query-hex (mode 1) is active the label is hex-encoded (xterm);
+// otherwise it is reported verbatim.
+func (s *Screen) encodeTitle(title string) string {
+	if s.titleQueryHex {
+		return hex.EncodeToString([]byte(title))
+	}
+	return title
+}
 
 // dispatchOsc processes the buffered OSC payload and resets the buffer.
 //
@@ -55,16 +83,17 @@ func (s *Screen) dispatchOsc() {
 	switch id {
 	case 0:
 		// OSC 0 sets both the icon name and the window title.
-		s.Title = data
-		s.iconTitle = data
+		title := s.decodeTitle(data)
+		s.Title = title
+		s.iconTitle = title
 	case 2:
 		// OSC 2 sets the window title only.
-		s.Title = data
+		s.Title = s.decodeTitle(data)
 	case 1:
 		// OSC 1 sets the icon name only. Tracked separately from the window
 		// title so XTWINOPS 20 (report icon label) round-trips; it is not sent
 		// to the client (which shows the window title).
-		s.iconTitle = data
+		s.iconTitle = s.decodeTitle(data)
 	case 8:
 		// OSC 8 ; params ; URI — set/clear hyperlink.
 		// Format: "params;URI" where params is key=value pairs separated
@@ -242,23 +271,71 @@ func (s *Screen) handleOscPaletteReset(data string) {
 	}
 }
 
-// handleOsc52 implements OSC 52 clipboard SET. Payload is "<targets>;<data>"
-// where data is base64 (set) or "?" (query). SET only: the decoded text is
-// surfaced via PendingClipboard for the handler to push to the browser
-// clipboard. The query form is denied (clipboard read is an exfiltration risk).
+// handleOsc52 implements OSC 52 clipboard manipulation. Payload is
+// "<targets>;<data>" where data is base64 (set), "?" (query), or neither
+// (clear). On SET the decoded text is surfaced via PendingClipboard for the
+// handler to push to the browser clipboard, and retained as the session
+// selection buffer. On QUERY the retained buffer is reported back base64-
+// encoded — but only when AllowScreenReport is enabled, the same gate used for
+// DECRQCRA: the reply is injected into the PTY as input, and clipboard
+// read-back is a data-exfiltration vector, so production leaves it off (a
+// query is then silently ignored, xterm's behavior with allowWindowOps off).
+// The reported buffer is only ever what an in-session OSC 52 SET wrote; the vt
+// has no access to the real OS clipboard.
 func (s *Screen) handleOsc52(data string) {
-	_, payload, ok := strings.Cut(data, ";")
-	if !ok || payload == "" || payload == "?" {
+	targets, payload, ok := strings.Cut(data, ";")
+	if !ok {
 		return
 	}
-	decoded, err := base64.StdEncoding.DecodeString(payload)
-	if err != nil {
-		decoded, err = base64.RawStdEncoding.DecodeString(payload)
-	}
-	if err != nil || len(decoded) == 0 {
+	if payload == "?" {
+		if !s.AllowScreenReport {
+			return
+		}
+		// Reply with the target list the request used; an empty request list
+		// means the configurable primary/clipboard selection, reported as "s0"
+		// (xterm's default), matching the first-selection-found rule.
+		if targets == "" {
+			targets = "s0"
+		}
+		enc := base64.StdEncoding.EncodeToString(s.selectionData)
+		s.Response = fmt.Appendf(s.Response, "\x1b]52;%s;%s\x1b\\", targets, enc)
 		return
 	}
-	s.PendingClipboard = decoded
+	// A base64 payload sets the selection (and pushes it to the browser
+	// clipboard); anything else — an empty or non-base64 payload — clears it,
+	// per xterm's "neither a base64 string nor ?" rule.
+	if decoded, ok := decodeBase64Lenient(payload); ok && len(decoded) > 0 {
+		s.selectionData = decoded
+		s.PendingClipboard = decoded
+		return
+	}
+	s.selectionData = nil
+}
+
+// decodeBase64Lenient decodes an OSC 52 payload, ignoring any bytes outside the
+// base64 alphabet before decoding. This matches xterm (and RFC 2045, which says
+// a decoder must ignore characters not in the alphabet, e.g. the line breaks
+// long base64 is often wrapped at) and tolerates stray bytes such as the
+// trailing quote the esctest harness appends via a repr() quirk. Tries padded
+// StdEncoding first, then unpadded RawStdEncoding.
+func decodeBase64Lenient(payload string) ([]byte, bool) {
+	var b strings.Builder
+	b.Grow(len(payload))
+	for i := range len(payload) {
+		switch c := payload[i]; {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '+', c == '/', c == '=':
+			b.WriteByte(c)
+		}
+	}
+	cleaned := b.String()
+	if decoded, err := base64.StdEncoding.DecodeString(cleaned); err == nil {
+		return decoded, true
+	}
+	if decoded, err := base64.RawStdEncoding.DecodeString(strings.TrimRight(cleaned, "=")); err == nil {
+		return decoded, true
+	}
+	return nil, false
 }
 
 // parseXColor parses an X11 color spec into 0xRRGGBB. Supports the two forms

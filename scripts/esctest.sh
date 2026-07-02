@@ -11,8 +11,10 @@
 #   bash scripts/esctest.sh                 # run the conformance gate
 #   bash scripts/esctest.sh -v              # verbose (list every FAIL)
 #   ESCTEST_INCLUDE='CUPTests' bash scripts/esctest.sh -v   # one test class
+#   ESCTEST_OPTIONS='none' bash scripts/esctest.sh          # drop the strictness opts
 #
-# The gate passes when the failing set exactly matches
+# The gate runs at maximum strictness by default (--options xtermWinopsEnabled;
+# see internal/esctest/harness_test.go). It passes when the failing set matches
 # internal/esctest/known_failures.txt (the allowlist of intentional
 # deviations). To reseed that allowlist after a deliberate change, run with
 # ESCTEST_LOGCOPY set and regenerate from the FAIL lines.

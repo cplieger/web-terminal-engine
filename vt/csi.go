@@ -54,8 +54,12 @@ func (s *Screen) dispatchCSI(final byte) {
 		s.deleteChars(s.paramVal(0, 1))
 	case 'S': // SU — scroll up
 		s.scrollUp(s.paramVal(0, 1))
-	case 'T', '^': // SD — scroll down
-		s.scrollDown(s.paramVal(0, 1))
+	case 'T', '^': // SD — scroll down. CSI > Pm T is XTRMTITLE (reset title modes).
+		if final == 'T' && s.privateMarker == '>' {
+			s.setTitleModes(false)
+		} else {
+			s.scrollDown(s.paramVal(0, 1))
+		}
 	case 'X': // ECH — erase characters
 		s.eraseChars(s.paramVal(0, 1))
 	case 'I': // CHT — cursor forward tabulation
@@ -126,8 +130,12 @@ func (s *Screen) dispatchCSI(final byte) {
 		s.applyModes(true)
 	case 'l':
 		s.applyModes(false)
-	case 't': // window manipulation
-		s.windowManipulation()
+	case 't': // window manipulation. CSI > Pm t is XTSMTITLE (set title modes).
+		if s.privateMarker == '>' {
+			s.setTitleModes(true)
+		} else {
+			s.windowManipulation()
+		}
 	case 'n': // DSR — device status report
 		s.deviceStatusReport()
 	default:
@@ -762,9 +770,9 @@ func (s *Screen) windowManipulation() {
 	case 19: // report screen size in characters (no separate window chrome here)
 		s.Response = fmt.Appendf(s.Response, "\x1b[9;%d;%dt", s.Height, s.Width)
 	case 20: // report icon label: OSC L <icon> ST
-		s.Response = fmt.Appendf(s.Response, "\x1b]L%s\x1b\\", s.iconTitle)
+		s.Response = fmt.Appendf(s.Response, "\x1b]L%s\x1b\\", s.encodeTitle(s.iconTitle))
 	case 21: // report window title: OSC l <title> ST
-		s.Response = fmt.Appendf(s.Response, "\x1b]l%s\x1b\\", s.Title)
+		s.Response = fmt.Appendf(s.Response, "\x1b]l%s\x1b\\", s.encodeTitle(s.Title))
 	case 22: // push icon and/or window title onto the respective stack
 		s.pushTitle(s.paramVal(1, 0))
 	case 23: // pop icon and/or window title from the respective stack
@@ -775,6 +783,34 @@ func (s *Screen) windowManipulation() {
 		// tracked only (for the DECRQSS "t" report), not applied as a resize.
 		if s.paramVal(0, 0) >= 24 {
 			s.linesPerPage = s.paramVal(0, 0)
+		}
+	}
+}
+
+// setTitleModes implements XTSMTITLE (CSI > Pm t, set=true) and XTRMTITLE
+// (CSI > Pm T, set=false): each parameter toggles one title-mode feature.
+//
+//	0 = set window/icon labels using hexadecimal
+//	1 = query window/icon labels using hexadecimal
+//	2 = set window/icon labels using UTF-8
+//	3 = query window/icon labels using UTF-8
+//
+// Only the hex features change behavior: the engine's titles are always UTF-8,
+// so the UTF-8 features (2, 3) are accepted as no-ops. With no parameters both
+// controls reset every feature to the compiled-in default (all off), matching
+// xterm.
+func (s *Screen) setTitleModes(set bool) {
+	if s.paramCount() == 0 {
+		s.titleSetHex = false
+		s.titleQueryHex = false
+		return
+	}
+	for i := range s.paramCount() {
+		switch s.paramVal(i, 0) {
+		case 0: // set-hex
+			s.titleSetHex = set
+		case 1: // query-hex
+			s.titleQueryHex = set
 		}
 	}
 }
@@ -923,7 +959,7 @@ func (s *Screen) setMode(mode int) {
 	case 25:
 		s.CursorHidden = false
 	case 40:
-		s.allow80To132 = true // Allow80To132 — gates DECCOLM's side effects
+		s.allow80To132 = true // Allow80To132 — gates only the (declined) DECCOLM resize
 	case 41:
 		s.moreFix = true // more(1) fix — TAB honors a pending wrap
 	case 45:
@@ -1077,17 +1113,18 @@ func (s *Screen) xtRestoreModes() {
 	}
 }
 
-// setColumnMode performs the DECCOLM (?3) column-mode side effects. The engine
-// declines the 80<->132 resize (the browser viewport owns the width), so this
-// is a no-op unless Allow80To132 (?40) is enabled — matching xterm, where
-// DECCOLM does nothing without that mode. When enabled it applies DECCOLM's
-// documented side effects: reset the scroll region and left/right margins, home
-// the cursor, and erase the screen. The erase is suppressed only when DECNCSM
-// (?95) is set at conformance level 5 (DECNCSM is a VT level-5 feature).
+// setColumnMode performs the DECCOLM (?3) column-mode side effects. Only the
+// 80<->132 RESIZE is gated on Allow80To132 (?40), and the engine declines it
+// regardless (the browser viewport owns the width). The other documented side
+// effects — reset the scroll region and left/right margins, home the cursor,
+// and erase the screen — happen on every column-mode change, independent of
+// ?40: DEC terminals have no Allow80To132 gate (an xterm safety resource for
+// the X-window resize), and the xterm-maintained esctest suite asserts the
+// clear even when ?40 is unset (test_DECSET_DECNCSM). The erase is suppressed
+// only when DECNCSM (?95) is set at conformance level 5 (a VT level-5 feature);
+// the cursor-home and margin reset still happen, per DECNCSM's definition
+// (it suppresses the clear alone).
 func (s *Screen) setColumnMode() {
-	if !s.allow80To132 {
-		return
-	}
 	s.scrollTop = 0
 	s.scrollBottom = s.Height - 1
 	s.LRMarginMode = false

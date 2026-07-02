@@ -40,6 +40,14 @@ type Options struct {
 	Python string
 	// Include is a regexp restricting which tests run (esctest --include; default ".*").
 	Include string
+	// Options are esctest --options flags (e.g. "xtermWinopsEnabled"). Enabling
+	// xtermWinopsEnabled is the maximum-strictness setting: it turns the tests
+	// gated behind optionRequired(XTERM_WINOPS_ENABLED) — OSC 52 selection
+	// query, the Set/Reset-Title-Mode hex/UTF-8 tests, and DECNCSM — from
+	// "expected to fail (option missing)" into MUST-PASS. Do NOT add
+	// disableWideChars (it would force the 8-bit C1 control tests, which are
+	// incompatible with a UTF-8 terminal, into hard failures).
+	Options []string
 	// Timeout is how long esctest waits for each query response (default 1s).
 	Timeout time.Duration
 	// Rows, Cols size the PTY and the screen. esctest resets to 25x80 per test
@@ -163,7 +171,7 @@ func applyDefaults(o *Options) {
 // --no-print-logs keeps the trailing log dump out of the PTY (the logfile still
 // gets it); --v=2 (LOG_INFO) puts per-test pass/fail + the summary in the log.
 func esctestArgs(script, logPath string, o *Options) []string {
-	return []string{
+	args := []string{
 		script,
 		"--expected-terminal=xterm",
 		fmt.Sprintf("--max-vt-level=%d", o.MaxVTLevel),
@@ -174,6 +182,13 @@ func esctestArgs(script, logPath string, o *Options) []string {
 		"--v=2",
 		"--include=" + o.Include,
 	}
+	// esctest's --options takes nargs="+", so the flag is followed by each
+	// option token as a separate argument.
+	if len(o.Options) > 0 {
+		args = append(args, "--options")
+		args = append(args, o.Options...)
+	}
+	return args
 }
 
 // pump feeds the child's escape output into the screen and writes the screen's

@@ -145,8 +145,12 @@ func (s *Screen) decModeStatus(mode int) int {
 		return boolToModeStatus(s.ReverseWrap)
 	case 66: // DECNKM (application keypad)
 		return boolToModeStatus(s.AppKeypad)
+	case 40: // Allow80To132 (gates the DECCOLM 80<->132 resize, which is declined)
+		return boolToModeStatus(s.allow80To132)
 	case 69: // DECLRMM (left/right margin mode)
 		return boolToModeStatus(s.LRMarginMode)
+	case 95: // DECNCSM (no clear on column-mode change)
+		return boolToModeStatus(s.noClearOnColumn)
 	case 47, 1047, 1049: // Alt screen
 		return boolToModeStatus(s.InAltScreen)
 	case 1000, 1002, 1003: // Mouse modes

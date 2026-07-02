@@ -36,6 +36,7 @@ type Screen struct {
 	Drained          [][]WireRun
 	Cells            [][]Cell
 	PendingClipboard []byte
+	selectionData    []byte
 	Response         []byte
 	titleStack       []titleEntry
 	altScreenState
@@ -60,6 +61,8 @@ type Screen struct {
 	charsetState
 	OriginMode        bool
 	noClearOnColumn   bool
+	titleSetHex       bool
+	titleQueryHex     bool
 	CursorBlink       bool
 	AutoWrap          bool
 	CursorStyle       uint8

@@ -407,6 +407,11 @@ func (s *Screen) dispatchEsc(b byte) {
 		s.CursorStyle = 0
 		s.ReverseVideo = false
 		s.tabStops = nil
+		// RIS resets the XTSMTITLE title modes to their default (all off).
+		// DECSTR (soft reset) deliberately leaves them untouched, matching
+		// xterm, so this lives in the RIS handler rather than softReset.
+		s.titleSetHex = false
+		s.titleQueryHex = false
 	}
 }
 

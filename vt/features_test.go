@@ -69,7 +69,10 @@ func TestOSC52ClipboardSet(t *testing.T) {
 	}
 }
 
-// OSC 52 GET ("?") is denied: no clipboard event, no response.
+// OSC 52 GET ("?") is denied by default (AllowScreenReport off): no clipboard
+// event, no response. The read-back is gated behind AllowScreenReport (the
+// DECRQCRA inject-vector precedent); see TestOSC52QueryRoundTrip for the
+// enabled path.
 func TestOSC52QueryDenied(t *testing.T) {
 	s := New(2, 10)
 	s.Write([]byte("\x1b]52;c;?\x07"))
@@ -238,5 +241,195 @@ func TestDECRQCRAGatedOff(t *testing.T) {
 	s.Write([]byte("\x1b[1;0;1;1;1;1*y"))
 	if len(s.Response) != 0 {
 		t.Errorf("DECRQCRA with AllowScreenReport off should not respond, got %q", s.Response)
+	}
+}
+
+// --- OSC 52 clipboard query (gated behind AllowScreenReport) ---
+
+// With AllowScreenReport enabled, an OSC 52 query round-trips the session
+// selection back as base64. An empty request target list is reported as "s0"
+// (xterm's default), matching esctest's ManipulateSelectionData contract.
+func TestOSC52QueryRoundTrip(t *testing.T) {
+	s := New(2, 10)
+	s.AllowScreenReport = true
+	s.Write([]byte("\x1b]52;;dGVzdGluZyAxMjM=\x07")) // set, empty target, base64("testing 123")
+	if got := string(s.PendingClipboard); got != "testing 123" {
+		t.Fatalf("OSC 52 set: PendingClipboard = %q, want %q", got, "testing 123")
+	}
+	s.Response = nil
+	s.Write([]byte("\x1b]52;;?\x07")) // query, empty target
+	if got, want := string(s.Response), "\x1b]52;s0;dGVzdGluZyAxMjM=\x1b\\"; got != want {
+		t.Errorf("OSC 52 query = %q, want %q", got, want)
+	}
+}
+
+// The query reply echoes an explicit request target list (e.g. "p" for primary).
+func TestOSC52QueryEchoesTarget(t *testing.T) {
+	s := New(2, 10)
+	s.AllowScreenReport = true
+	s.Write([]byte("\x1b]52;p;aGk=\x07")) // set primary = base64("hi")
+	s.Response = nil
+	s.Write([]byte("\x1b]52;p;?\x07"))
+	if got, want := string(s.Response), "\x1b]52;p;aGk=\x1b\\"; got != want {
+		t.Errorf("OSC 52 query (target p) = %q, want %q", got, want)
+	}
+}
+
+// An empty OSC 52 payload clears the selection, so a later query reports empty.
+func TestOSC52ClearEmptiesSelection(t *testing.T) {
+	s := New(2, 10)
+	s.AllowScreenReport = true
+	s.Write([]byte("\x1b]52;c;aGk=\x07")) // set
+	s.Write([]byte("\x1b]52;c;\x07"))     // empty payload clears
+	s.Response = nil
+	s.Write([]byte("\x1b]52;c;?\x07"))
+	if got, want := string(s.Response), "\x1b]52;c;\x1b\\"; got != want {
+		t.Errorf("OSC 52 query after clear = %q, want %q", got, want)
+	}
+}
+
+// The OSC 52 base64 decode is lenient: esctest's harness appends a stray "'"
+// (a repr() quirk in strip_binary) that a strict decoder rejects. The selection
+// must still round-trip.
+func TestOSC52LenientDecodeTolerantOfStrayByte(t *testing.T) {
+	s := New(2, 10)
+	s.AllowScreenReport = true
+	s.Write([]byte("\x1b]52;;dGVzdGluZyAxMjM='\x07")) // trailing quote, as esctest sends
+	s.Response = nil
+	s.Write([]byte("\x1b]52;;?\x07"))
+	if got, want := string(s.Response), "\x1b]52;s0;dGVzdGluZyAxMjM=\x1b\\"; got != want {
+		t.Errorf("OSC 52 query after stray-byte set = %q, want %q", got, want)
+	}
+}
+
+func TestDecodeBase64Lenient(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{"padded", "dGVzdA==", "test", true},
+		{"unpadded", "dGVzdA", "test", true},
+		{"trailing_quote", "dGVzdA=='", "test", true},    // esctest strip_binary quirk
+		{"embedded_newline", "dGVz\ndA==", "test", true}, // RFC 2045 line break
+		{"only_stray", "!!!", "", true},                  // filters to empty (valid empty decode)
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := decodeBase64Lenient(c.in)
+			if ok != c.ok {
+				t.Fatalf("decodeBase64Lenient(%q) ok = %v, want %v", c.in, ok, c.ok)
+			}
+			if string(got) != c.want {
+				t.Errorf("decodeBase64Lenient(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+// --- DECNCSM (?95, no clear on column-mode change) ---
+
+// DECRQM reports the tracked set/reset state of DECNCSM. New() is level 5, so
+// the mode is recognized. (Before this, ?95$p reported 0 "not recognized".)
+func TestDECNCSMDECRQM(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b[?95h")) // DECSET DECNCSM
+	if !s.noClearOnColumn {
+		t.Fatal("?95h did not set noClearOnColumn")
+	}
+	s.Response = nil
+	s.Write([]byte("\x1b[?95$p"))
+	if got, want := string(s.Response), "\x1b[?95;1$y"; got != want {
+		t.Errorf("DECRQM ?95 (set) = %q, want %q", got, want)
+	}
+	s.Write([]byte("\x1b[?95l")) // DECRESET
+	s.Response = nil
+	s.Write([]byte("\x1b[?95$p"))
+	if got, want := string(s.Response), "\x1b[?95;2$y"; got != want {
+		t.Errorf("DECRQM ?95 (reset) = %q, want %q", got, want)
+	}
+}
+
+// DECCOLM performs its documented clear+home side effect even without
+// Allow80To132 (only the declined 80<->132 resize is gated on ?40). The width
+// must stay put (the browser owns it).
+func TestDECCOLMClearsWithoutAllow80(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("X"))        // 'X' at (0,0)
+	s.Write([]byte("\x1b[?3h")) // DECSET DECCOLM, no Allow80To132
+	if got := s.RowString(0); got != "" {
+		t.Errorf("DECCOLM should clear the screen without Allow80To132; row 0 = %q, want empty", got)
+	}
+	if s.Width != 80 {
+		t.Errorf("DECCOLM must not resize (browser owns width); Width = %d, want 80", s.Width)
+	}
+}
+
+// With DECNCSM set at level 5, a DECCOLM column-mode change does NOT clear.
+func TestDECNCSMSuppressesClear(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b[?95h")) // DECNCSM on (New() is level 5)
+	s.Write([]byte("X"))
+	s.Write([]byte("\x1b[?3h")) // DECCOLM
+	if got := s.RowString(0); got != "X" {
+		t.Errorf("DECNCSM should suppress the DECCOLM clear; row 0 = %q, want X", got)
+	}
+}
+
+// Allow80To132 (?40) is tracked and reported by DECRQM.
+func TestAllow80To132DECRQM(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b[?40h"))
+	s.Response = nil
+	s.Write([]byte("\x1b[?40$p"))
+	if got, want := string(s.Response), "\x1b[?40;1$y"; got != want {
+		t.Errorf("DECRQM ?40 (set) = %q, want %q", got, want)
+	}
+}
+
+// --- Set/Reset Title Modes (XTSMTITLE / XTRMTITLE) ---
+
+// With set-hex (mode 0) on, an OSC 0/1/2 title payload is a hex byte string.
+func TestTitleSetHexDecodes(t *testing.T) {
+	s := New(2, 10)
+	s.Write([]byte("\x1b[>0t"))        // XTSMTITLE set-hex
+	s.Write([]byte("\x1b]2;6162\x07")) // "6162" == hex "ab"
+	if s.Title != "ab" {
+		t.Errorf("set-hex title = %q, want ab", s.Title)
+	}
+}
+
+// With query-hex (mode 1) on, the WINOP 21 title report is hex-encoded.
+func TestTitleQueryHexEncodes(t *testing.T) {
+	s := New(2, 10)
+	s.Write([]byte("\x1b]2;ab\x07")) // title "ab" (set-hex off)
+	s.Write([]byte("\x1b[>1t"))      // XTSMTITLE query-hex
+	s.Response = nil
+	s.Write([]byte("\x1b[21t")) // WINOP 21 report window title
+	if got, want := string(s.Response), "\x1b]l6162\x1b\\"; got != want {
+		t.Errorf("query-hex report = %q, want %q", got, want)
+	}
+}
+
+// XTRMTITLE (CSI > Pm T) disables the listed title-mode features.
+func TestTitleModesResetByXTRMTITLE(t *testing.T) {
+	s := New(2, 10)
+	s.Write([]byte("\x1b[>0;1t"))      // set-hex + query-hex on
+	s.Write([]byte("\x1b[>0;1T"))      // XTRMTITLE reset both
+	s.Write([]byte("\x1b]2;6162\x07")) // literal now (set-hex off)
+	if s.Title != "6162" {
+		t.Errorf("after XTRMTITLE the title should be literal: got %q, want 6162", s.Title)
+	}
+}
+
+// RIS resets the title modes to their default (all off); DECSTR leaves them.
+func TestTitleModesResetByRIS(t *testing.T) {
+	s := New(2, 10)
+	s.Write([]byte("\x1b[>0t"))        // set-hex on
+	s.Write([]byte("\x1bc"))           // RIS
+	s.Write([]byte("\x1b]2;6162\x07")) // literal after RIS
+	if s.Title != "6162" {
+		t.Errorf("RIS should reset title modes: got %q, want 6162", s.Title)
 	}
 }

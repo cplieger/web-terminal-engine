@@ -4,12 +4,20 @@
 # The gate errors if a listed test starts passing (stale) or an unlisted test
 # fails (regression), so this file is the conformance contract.
 #
-# Run against esctest2 at the pin in scripts/esctest.sh, --max-vt-level=5,
-# --expected-terminal=xterm. Current tally: 493 pass, 41 esctest-known-bugs,
-# 34 allowlisted below. Every allowlisted test is a deliberate deviation, not a
-# TODO; the rationale for each category is inline. All 34 are genuinely
-# inapplicable to a browser terminal (X11 color-management, a program-driven
-# window/size the browser owns, or a self-contradictory legacy edge case).
+# Run against esctest2 at the pin in scripts/esctest.sh, at MAXIMUM STRICTNESS:
+# --max-vt-level=5, --expected-terminal=xterm, --options xtermWinopsEnabled.
+# The xtermWinopsEnabled option turns the tests gated behind
+# optionRequired(XTERM_WINOPS_ENABLED) — OSC 52 selection query, the
+# Set/Reset-Title-Mode hex/UTF-8 tests, and DECNCSM — from skipped-as-option-
+# missing into must-pass; the engine implements all of them, so they pass.
+# (disableWideChars is deliberately NOT enabled: it would force the 8-bit C1
+# control tests, incompatible with a UTF-8 terminal, into hard failures.)
+#
+# Current tally: 498 pass, 36 esctest-known-bugs, 34 allowlisted below. Every
+# allowlisted test is a deliberate deviation, not a TODO; the rationale for each
+# category is inline. All 34 are genuinely inapplicable to a browser terminal
+# (X11 color-management, a program-driven window/size the browser owns, or a
+# self-contradictory legacy edge case).
 #
 # Categories:
 #   [xcms]    X11 Xcms color-space specs (CIE*/rgbi/TekHVC) — see below

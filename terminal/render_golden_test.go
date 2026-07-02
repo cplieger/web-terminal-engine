@@ -119,8 +119,8 @@ func buildAllCodesMatrix() (seqs []string, manifest []allCodesEntry) {
 		manifest = append(manifest, allCodesEntry{Row: len(seqs), Kind: kind, Code: code, R: r, G: g, B: b})
 		seqs = append(seqs, seq)
 	}
-	// Text attributes.
-	for _, code := range []int{1, 2, 3, 4, 5, 7, 8, 9, 21, 53} {
+	// Text attributes (6 = rapid blink, which the engine aliases to blink).
+	for _, code := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 21, 53} {
 		add("attr", code, 0, 0, 0, fmt.Sprintf("\x1b[%dmX\x1b[0m", code))
 	}
 	// Basic 16 foreground (30-37 normal, 90-97 bright).
@@ -147,6 +147,27 @@ func buildAllCodesMatrix() (seqs []string, manifest []allCodesEntry) {
 	for _, c := range [][3]int{{0, 255, 0}, {255, 0, 255}} {
 		add("ulColor", 0, c[0], c[1], c[2], fmt.Sprintf("\x1b[4;58;2;%d;%d;%dmX\x1b[0m", c[0], c[1], c[2]))
 	}
+	// Attribute-OFF codes: prove the OFF SGR actually CLEARS the ON attribute
+	// end to end (a stuck-on attribute must fail). Each row writes an ON glyph
+	// "A" then an OFF glyph "B"; the TS side asserts A carries the attribute and
+	// B does NOT. Pairs per ECMA-48 / ANSI: 22 cancels bold(1) + faint(2), 23
+	// italic(3), 24 underline(4), 25 blink(5), 27 inverse(7), 28 conceal(8), 29
+	// strike(9), 55 overline(53).
+	onFor := map[int]int{22: 1, 23: 3, 24: 4, 25: 5, 27: 7, 28: 8, 29: 9, 55: 53}
+	for _, off := range []int{22, 23, 24, 25, 27, 28, 29, 55} {
+		add("attrOff", off, 0, 0, 0, fmt.Sprintf("\x1b[%dmA\x1b[%dmB\x1b[0m", onFor[off], off))
+	}
+	// Default-color codes: prove the channel reverts to the terminal default.
+	// Row writes a set-color glyph "A" then a default glyph "B"; the TS side
+	// asserts B took the default (default fg = theme text color, default bg =
+	// transparent, default underline color = currentColor). 39 fg, 49 bg, 59 ul.
+	add("defaultColor", 39, 0, 0, 0, "\x1b[31mA\x1b[39mB\x1b[0m")
+	add("defaultColor", 49, 0, 0, 0, "\x1b[41mA\x1b[49mB\x1b[0m")
+	add("defaultColor", 59, 0, 0, 0, "\x1b[4;58;2;0;255;0mA\x1b[59mB\x1b[0m")
+	// Underline sub-parameters (SGR 4:x colon form): 4:2 double underline (single
+	// glyph X); 4:0 underline off (ON glyph "A" then OFF glyph "B").
+	add("ulStyle", 2, 0, 0, 0, "\x1b[4:2mX\x1b[0m")
+	add("ulStyle", 0, 0, 0, 0, "\x1b[4mA\x1b[4:0mB\x1b[0m")
 	return seqs, manifest
 }
 
@@ -271,6 +292,111 @@ var behaviorScenarios = []struct {
 	// RI (reverse index) at the top row scrolls the screen down; the bottom line
 	// leaves the screen and a blank line appears at the top.
 	{"reverse_index_scroll_down", "\x1b[1;1HR0\x1b[2;1HR1\x1b[3;1HR2\x1b[4;1HR3\x1b[1;1H\x1bM", []string{"", "R0", "R1", "R2"}},
+
+	// --- Cursor movement: each positions the cursor, moves it, then writes "X";
+	// the resulting cell shows where it landed (a spec-check of the engine's
+	// motion AND of the wire->DOM cell mapping in a real browser). ---
+	// CUU (CSI A): up 2 rows (row4 -> row2).
+	{"cursor_up_cuu", "\x1b[4;1H\x1b[2AX", []string{"", "X", "", ""}},
+	// CUD (CSI B): down 2 rows (row1 -> row3).
+	{"cursor_down_cud", "\x1b[1;1H\x1b[2BX", []string{"", "", "X", ""}},
+	// CUF (CSI C): forward 3 columns (col1 -> col4).
+	{"cursor_forward_cuf", "\x1b[1;1H\x1b[3CX", []string{"   X", "", "", ""}},
+	// CUB (CSI D): back 4 columns (col8 -> col4).
+	{"cursor_back_cub", "\x1b[1;8H\x1b[4DX", []string{"   X", "", "", ""}},
+	// CHA (CSI G): cursor to absolute column 5.
+	{"cursor_col_absolute_cha", "\x1b[1;1H\x1b[5GX", []string{"    X", "", "", ""}},
+	// HPA (CSI `): horizontal position absolute, column 6.
+	{"cursor_hpa", "\x1b[1;1H\x1b[6\x60X", []string{"     X", "", "", ""}},
+	// HPR (CSI a): horizontal position relative +3 (col1 -> col4).
+	{"cursor_hpr", "\x1b[1;1H\x1b[3aX", []string{"   X", "", "", ""}},
+	// VPA (CSI d): vertical position absolute row3, keeping column 3.
+	{"cursor_vpa", "\x1b[1;3H\x1b[3dX", []string{"", "", "  X", ""}},
+	// VPR (CSI e): vertical position relative +2 (row1 -> row3), keeping column.
+	{"cursor_vpr", "\x1b[1;1H\x1b[2eX", []string{"", "", "X", ""}},
+	// CNL (CSI E): cursor next line x2, to column 1 (row1 -> row3).
+	{"cursor_next_line_cnl", "\x1b[1;5H\x1b[2EX", []string{"", "", "X", ""}},
+	// CPL (CSI F): cursor previous line x2, to column 1 (row4 -> row2).
+	{"cursor_prev_line_cpl", "\x1b[4;5H\x1b[2FX", []string{"", "X", "", ""}},
+	// CHT (CSI I): cursor forward tabulation from col1 -> right margin (col8;
+	// col9 is the next default stop, clamped to the last column).
+	{"cursor_forward_tab_cht", "\x1b[1;1H\x1b[IX", []string{"       X", "", "", ""}},
+	// CBT (CSI Z): cursor backward tabulation from col8 -> col1.
+	{"cursor_back_tab_cbt", "\x1b[1;8H\x1b[ZX", []string{"X", "", "", ""}},
+
+	// --- Index / next-line (ESC D / ESC E); RI is above as reverse_index. ---
+	// IND (ESC D): index down one line (row2 -> row3), keeping column.
+	{"index_ind", "\x1b[2;1H\x1bDX", []string{"", "", "X", ""}},
+	// NEL (ESC E): next line — down one row and to column 1 (row2 col5 -> row3).
+	{"next_line_nel", "\x1b[2;5H\x1bEX", []string{"", "", "X", ""}},
+
+	// --- Scroll region contents up/down (CSI S / CSI T) ---
+	// SU 2: contents move up 2 rows; R2,R3 remain, two blank rows at the bottom.
+	{"scroll_up_su", "\x1b[1;1HR0\x1b[2;1HR1\x1b[3;1HR2\x1b[4;1HR3\x1b[2S", []string{"R2", "R3", "", ""}},
+	// SD 2: contents move down 2 rows; two blank rows at top, R0,R1 at bottom.
+	{"scroll_down_sd", "\x1b[1;1HR0\x1b[2;1HR1\x1b[3;1HR2\x1b[4;1HR3\x1b[2T", []string{"", "", "R0", "R1"}},
+
+	// --- REP (CSI b): repeat the last printed glyph. "X" + REP 5 => 6 X, then Y. ---
+	{"repeat_rep", "X\x1b[5bY", []string{"XXXXXXY", "", "", ""}},
+
+	// --- Tab stops (ESC H = HTS set, HT advance, CSI g = TBC clear) ---
+	// HTS sets a stop at col4; HT from col1 then lands on it.
+	{"set_tab_hts", "\x1b[1;4H\x1bH\x1b[1;1H\tX", []string{"   X", "", "", ""}},
+	// TBC 3 clears every stop; HT from col1 then runs to the right margin (col8).
+	{"clear_tabs_tbc", "\x1b[1;1H\x1b[3g\tX", []string{"       X", "", "", ""}},
+
+	// --- Save / restore cursor (ESC 7 = DECSC, ESC 8 = DECRC) ---
+	// Save at (2,3), move away to write Z, restore, then write X at the saved spot.
+	{"save_restore_cursor_decsc", "\x1b[2;3H\x1b7\x1b[4;7HZ\x1b8X", []string{"", "  X", "", "      Z"}},
+
+	// --- DECALN (ESC # 8): screen-alignment test fills every cell with 'E'. ---
+	{"screen_alignment_decaln", "\x1b#8", []string{"EEEEEEEE", "EEEEEEEE", "EEEEEEEE", "EEEEEEEE"}},
+
+	// --- DECSTBM (CSI Pt;Pb r): a scroll region confines LF scrolling. Region
+	// rows 2-3; an LF at the bottom margin scrolls only those rows, leaving the
+	// rows outside the region untouched, then "X" writes at the freed bottom row.
+	{"scroll_region_decstbm", "\x1b[1;1HR0\x1b[2;1HR1\x1b[3;1HR2\x1b[4;1HR3\x1b[2;3r\x1b[3;1H\nX", []string{"R0", "R2", "X", "R3"}},
+
+	// --- Origin mode + left/right margins (?69h + CSI Pl;Pr s + ?6h): CUP (1,1)
+	// is relative to the top/left margin. Region rows2-3, cols3-6, origin on =>
+	// (1,1) maps to (row2, col3). ---
+	{"origin_mode_margins", "\x1b[2;3r\x1b[?69h\x1b[3;6s\x1b[?6h\x1b[1;1HX", []string{"", "  X", "", ""}},
+
+	// --- Rectangular-area editing (DEC) ---
+	// DECFRA (CSI Pch;Pt;Pl;Pb;Pr $ x): fill rows2-3 x cols3-5 with 'X' (88).
+	{"fill_rect_decfra", "\x1b[88;2;3;3;5$x", []string{"", "  XXX", "  XXX", ""}},
+	// DECERA (CSI Pt;Pl;Pb;Pr $ z): fill the screen with 'E' (DECALN), then erase
+	// rows2-3 x cols3-5 back to blanks.
+	{"erase_rect_decera", "\x1b#8\x1b[2;3;3;5$z", []string{"EEEEEEEE", "EE   EEE", "EE   EEE", "EEEEEEEE"}},
+	// DECCRA (CSI Pts;Pls;Pbs;Prs;Pps;Ptd;Pld;Ppd $ v): copy rows1 cols1-2 ("AB")
+	// to row3 col1.
+	{"copy_rect_deccra", "\x1b[1;1HAB\x1b[1;1;1;2;1;3;1;1$v", []string{"AB", "", "AB", ""}},
+
+	// --- Column shift + insert/delete (SL/SR, DECIC/DECDC) ---
+	// SL (CSI Ps SP @): shift the whole region left 2 columns (A,B fall off).
+	{"shift_left_sl", "\x1b[1;1HABCDEFGH\x1b[2 @", []string{"CDEFGH", "", "", ""}},
+	// SR (CSI Ps SP A): shift the whole region right 2 columns (G,H fall off).
+	{"shift_right_sr", "\x1b[1;1HABCDEFGH\x1b[2 A", []string{"  ABCDEF", "", "", ""}},
+	// DECIC (CSI Ps ' }): insert 2 blank columns at the cursor column across the
+	// region, pushing the rest of each row right.
+	{"insert_col_decic", "\x1b[1;1HAAAAAAAA\x1b[2;1HBBBBBBBB\x1b[1;3H\x1b[2'}", []string{"AA  AAAA", "BB  BBBB", "", ""}},
+	// DECDC (CSI Ps ' ~): delete 2 columns at the cursor column across the region,
+	// pulling the rest of each row left.
+	{"delete_col_decdc", "\x1b[1;1HAAAAAAAA\x1b[2;1HBBBBBBBB\x1b[1;3H\x1b[2'~", []string{"AAAAAA", "BBBBBB", "", ""}},
+
+	// --- Back / forward index (ESC 6 / ESC 9): move one column; away from a
+	// margin this is a plain move. ---
+	// DECBI from col4 (not at the left margin) -> col3.
+	{"back_index_decbi", "\x1b[1;4H\x1b6X", []string{"  X", "", "", ""}},
+	// DECFI from col4 (not at the right margin) -> col5.
+	{"forward_index_decfi", "\x1b[1;4H\x1b9X", []string{"    X", "", "", ""}},
+
+	// --- Selective erase (DECSCA marks cells protected; DECSED/DECSEL spare
+	// them). "AB" is protected (DECSCA 1), "CD" is not (DECSCA 0). ---
+	// DECSED (CSI ? Ps J): selectively erase the display, sparing protected "AB".
+	{"selective_erase_display_decsed", "\x1b[1;1H\x1b[1\"qAB\x1b[0\"qCD\x1b[?2J", []string{"AB", "", "", ""}},
+	// DECSEL (CSI ? Ps K): selectively erase the line, sparing protected "AB".
+	{"selective_erase_line_decsel", "\x1b[1;1H\x1b[1\"qAB\x1b[0\"qCD\x1b[1;1H\x1b[?2K", []string{"AB", "", "", ""}},
 }
 
 // behaviorEntry is one scenario's manifest record. Frame marshals to base64

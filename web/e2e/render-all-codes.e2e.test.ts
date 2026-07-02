@@ -17,7 +17,7 @@
 // Fresh headless Chromium per the chromium-sidecar steering doc (the shared
 // sidecar is debug-only). Out of the vitest battery; run `npm run test:e2e`.
 import { test, expect } from "@playwright/test";
-import { standard256, rgb } from "../src/test-helpers/spec-colors.js";
+import { standard256, rgb, vga16 } from "../src/test-helpers/spec-colors.js";
 import { bundleEngine, HARNESS, readGolden, frameBytesArray } from "./e2e-harness.js";
 
 // One row's dumped computed style (the styled first span carrying the glyph).
@@ -84,21 +84,14 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
     // render.ts batches DOM writes; let the flush complete before dumping.
     await page.waitForTimeout(250);
 
-    // Dump the computed style of each row's first NON-BLANK span (the styled
-    // glyph "X"; the blank fill after it carries default style).
-    const dumps = await page.evaluate((): CellDump[] => {
+    // Dump the computed style of every NON-BLANK span per row, in DOM order.
+    // Single-glyph rows use span [0]; the on->off rows (attrOff / defaultColor /
+    // ulStyle 4:0) use [0] (the ON/set glyph) and [1] (the OFF/default glyph).
+    const dumps = await page.evaluate((): CellDump[][] => {
       const out = document.getElementById("out")!;
-      const result: CellDump[] = [];
-      // Row order is preserved so result[i] corresponds to manifest row i.
-      for (const rowEl of Array.from(out.children)) {
-        const spans = Array.from(rowEl.children) as HTMLElement[];
-        const span = spans.find((s) => (s.textContent ?? "").trim().length > 0) ?? spans[0];
-        if (!span) {
-          result.push(null as unknown as CellDump);
-          continue;
-        }
+      const dumpSpan = (span: HTMLElement): CellDump => {
         const cs = getComputedStyle(span);
-        result.push({
+        return {
           color: cs.color,
           backgroundColor: cs.backgroundColor,
           fontWeight: cs.fontWeight,
@@ -109,9 +102,14 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
           opacity: cs.opacity,
           visibility: cs.visibility,
           className: span.className,
-        });
-      }
-      return result;
+        };
+      };
+      // Row order is preserved so result[i] corresponds to manifest row i.
+      return Array.from(out.children).map((rowEl) =>
+        (Array.from(rowEl.children) as HTMLElement[])
+          .filter((s) => (s.textContent ?? "").trim().length > 0)
+          .map(dumpSpan),
+      );
     });
 
     // --- Per-code spec analysis. expect.soft so a single run reports EVERY
@@ -121,7 +119,8 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
     const basicBg = new Map<number, number>(); // SGR code -> 0xRRGGBB
 
     for (const e of manifest) {
-      const d = dumps[e.row];
+      const spans = dumps[e.row] ?? [];
+      const d = spans[0];
       const at = `row ${e.row} ${e.kind} code=${e.code}`;
       expect(d, `${at}: must render a styled span`).toBeTruthy();
       if (!d) {
@@ -130,6 +129,25 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
       switch (e.kind) {
         case "attr":
           checkAttr(e.code, d, at);
+          break;
+        case "attrOff": {
+          const off = spans[1];
+          expect(off, `${at}: OFF glyph must render`).toBeTruthy();
+          if (off) {
+            checkAttrOff(e.code, d, off, at);
+          }
+          break;
+        }
+        case "defaultColor": {
+          const def = spans[1];
+          expect(def, `${at}: default glyph must render`).toBeTruthy();
+          if (def) {
+            checkDefaultColor(e.code, d, def, at);
+          }
+          break;
+        }
+        case "ulStyle":
+          checkUlStyle(e.code, spans, at);
           break;
         case "basicFg": {
           const got = parseRGB(d.color);
@@ -192,15 +210,23 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
       }
     }
 
-    // --- Palette consistency (ANSI: SGR 30+n / 90+n, SGR 38;5;n<16, and the
-    // background SGR 40+n / 100+n all address the SAME 16 palette slots, so they
-    // must render identical RGB). This pins internal consistency without pinning
-    // the terminal-defined RGB choice. ---
+    // --- Basic-16 palette. SPEC: the engine's default palette is the published
+    // VGA/ANSI 4-bit palette (spec-colors.ts `vga16`, derived independently of
+    // wire.go), so pin each slot to its exact RGB — fg 30-37 / 90-97 and bg
+    // 40-47 / 100-107. This is the strong assertion a consistency-only check
+    // was missing (16 distinct-but-wrong colors used to pass). Then re-assert
+    // the ANSI consistency: SGR 38;5;n (n<16) addresses the SAME slot as 3n/9n. ---
     for (let n = 0; n < 8; n++) {
+      expect.soft(hexOrUndef(basicFg.get(30 + n)), `SGR 3${n} fg == VGA[${n}]`).toBe(hexStr(vga16[n]!));
+      expect
+        .soft(hexOrUndef(basicFg.get(90 + n)), `SGR 9${n} fg == VGA[${8 + n}]`)
+        .toBe(hexStr(vga16[8 + n]!));
+      expect.soft(hexOrUndef(basicBg.get(40 + n)), `SGR 4${n} bg == VGA[${n}]`).toBe(hexStr(vga16[n]!));
+      expect
+        .soft(hexOrUndef(basicBg.get(100 + n)), `SGR 10${n} bg == VGA[${8 + n}]`)
+        .toBe(hexStr(vga16[8 + n]!));
       assertSameSlot(basicFg.get(30 + n), idx256Fg.get(n), `SGR 3${n} == SGR 38;5;${n}`);
       assertSameSlot(basicFg.get(90 + n), idx256Fg.get(8 + n), `SGR 9${n} == SGR 38;5;${8 + n}`);
-      assertSameSlot(basicBg.get(40 + n), basicFg.get(30 + n), `SGR 4${n} bg == SGR 3${n} fg`);
-      assertSameSlot(basicBg.get(100 + n), basicFg.get(90 + n), `SGR 10${n} bg == SGR 9${n} fg`);
     }
     // The 16 base colors must be mutually distinct (a collapsed palette is a bug).
     const distinct = new Set([...basicFg.values()]);
@@ -218,6 +244,108 @@ function assertSameSlot(a: number | undefined, b: number | undefined, why: strin
   expect.soft(b, `${why}: right slot must render`).not.toBeUndefined();
   if (a !== undefined && b !== undefined) {
     expect.soft(hexStr(a), `${why}: same palette slot must render identical RGB`).toBe(hexStr(b));
+  }
+}
+
+function hexOrUndef(v: number | undefined): string | undefined {
+  return v === undefined ? undefined : hexStr(v);
+}
+
+// isTransparent reports whether a computed background-color is the default
+// (unset) transparent value chromium reports as "rgba(0, 0, 0, 0)".
+function isTransparent(s: string): boolean {
+  return s === "transparent" || /^rgba\(\s*0,\s*0,\s*0,\s*0\s*\)$/.test(s);
+}
+
+// The harness theme (e2e-harness HARNESS): default text #dddee1, default bg #000.
+const DEFAULT_FG = 0xdddee1;
+const DEFAULT_BG_INVERSE_TEXT = 0x000000; // inverse-on-defaults paints text as --bg
+
+// checkAttrOff asserts the OFF SGR code CLEARED the attribute: the ON glyph
+// carries it, the OFF glyph does not. offCode is the SGR that turns it off.
+function checkAttrOff(offCode: number, on: CellDump, off: CellDump, at: string): void {
+  switch (offCode) {
+    case 22: // cancels bold (and faint)
+      expect.soft(Number(on.fontWeight), `${at}: ON is bold`).toBeGreaterThanOrEqual(700);
+      expect.soft(Number(off.fontWeight), `${at}: 22 clears bold`).toBeLessThan(700);
+      break;
+    case 23: // not italic
+      expect.soft(on.fontStyle, `${at}: ON is italic`).toBe("italic");
+      expect.soft(off.fontStyle, `${at}: 23 clears italic`).toBe("normal");
+      break;
+    case 24: // not underlined
+      expect.soft(on.textDecorationLine, `${at}: ON underlined`).toContain("underline");
+      expect.soft(off.textDecorationLine, `${at}: 24 clears underline`).not.toContain("underline");
+      break;
+    case 25: // not blinking
+      expect.soft(on.className, `${at}: ON blinks`).toContain("term-blink");
+      expect.soft(off.className, `${at}: 25 clears blink`).not.toContain("term-blink");
+      break;
+    case 27: // not inverse — ON paints text as --bg; OFF restores the default fg
+      expect.soft(parseRGB(on.color), `${at}: ON inverse text = bg`).toBe(DEFAULT_BG_INVERSE_TEXT);
+      expect.soft(parseRGB(off.color), `${at}: 27 restores default fg`).toBe(DEFAULT_FG);
+      break;
+    case 28: // reveal (not concealed)
+      expect.soft(on.visibility, `${at}: ON hidden`).toBe("hidden");
+      expect.soft(off.visibility, `${at}: 28 reveals`).toBe("visible");
+      break;
+    case 29: // not crossed out
+      expect.soft(on.textDecorationLine, `${at}: ON struck`).toContain("line-through");
+      expect.soft(off.textDecorationLine, `${at}: 29 clears strike`).not.toContain("line-through");
+      break;
+    case 55: // not overlined
+      expect.soft(on.textDecorationLine, `${at}: ON overlined`).toContain("overline");
+      expect.soft(off.textDecorationLine, `${at}: 55 clears overline`).not.toContain("overline");
+      break;
+    default:
+      throw new Error(`unhandled attrOff code ${offCode}`);
+  }
+}
+
+// checkDefaultColor asserts the channel reverts to its terminal default: the
+// set glyph carries the explicit color, the default glyph reverts.
+function checkDefaultColor(code: number, set: CellDump, def: CellDump, at: string): void {
+  switch (code) {
+    case 39: // default fg = theme text color
+      expect.soft(parseRGBOrNull(set.color), `${at}: set glyph fg is red`).toBe(vga16[1]!);
+      expect.soft(parseRGBOrNull(def.color), `${at}: 39 restores default fg`).toBe(DEFAULT_FG);
+      break;
+    case 49: // default bg = transparent (unset)
+      expect.soft(parseRGBOrNull(set.backgroundColor), `${at}: set glyph bg is red`).toBe(vga16[1]!);
+      expect.soft(isTransparent(def.backgroundColor), `${at}: 49 restores transparent bg`).toBe(true);
+      break;
+    case 59: // default underline color = currentColor (the glyph's own text color)
+      expect.soft(parseRGBOrNull(set.textDecorationColor), `${at}: set ul color green`).toBe(
+        rgb(0, 255, 0),
+      );
+      expect.soft(def.textDecorationColor, `${at}: 59 reverts ul color to text color`).toBe(def.color);
+      break;
+    default:
+      throw new Error(`unhandled defaultColor code ${code}`);
+  }
+}
+
+// checkUlStyle asserts the SGR 4:x colon sub-parameters: 4:2 renders a double
+// underline (single glyph); 4:0 clears an underline (ON glyph then OFF glyph).
+function checkUlStyle(code: number, spans: CellDump[], at: string): void {
+  if (code === 2) {
+    const d = spans[0];
+    expect(d, `${at}: 4:2 must render`).toBeTruthy();
+    if (d) {
+      expect.soft(d.textDecorationLine, `${at}: 4:2 is an underline`).toContain("underline");
+      expect.soft(d.textDecorationStyle, `${at}: 4:2 is a double underline`).toBe("double");
+    }
+    return;
+  }
+  const on = spans[0];
+  const off = spans[1];
+  expect(on, `${at}: 4 ON glyph`).toBeTruthy();
+  expect(off, `${at}: 4:0 OFF glyph`).toBeTruthy();
+  if (on) {
+    expect.soft(on.textDecorationLine, `${at}: 4 sets underline`).toContain("underline");
+  }
+  if (off) {
+    expect.soft(off.textDecorationLine, `${at}: 4:0 clears underline`).not.toContain("underline");
   }
 }
 
@@ -239,6 +367,7 @@ function checkAttr(code: number, d: CellDump, at: string): void {
       expect.soft(d.textDecorationLine, `${at}: underline`).toContain("underline");
       break;
     case 5: // blink
+    case 6: // rapid blink — the engine aliases it to blink (same class)
       expect.soft(d.className, `${at}: blink must add the blink class`).toContain("term-blink");
       break;
     case 7: // inverse over defaults: fg<->bg swap => text bg-on-fg

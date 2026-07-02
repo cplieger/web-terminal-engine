@@ -9,11 +9,15 @@
 //   - Truecolor: SGR 38;2;R;G;B / 48;2;R;G;B is literally the RGB triple
 //     (ITU / ISO-6429 direct-color).
 //   - The 16 base colors (indices 0-15, SGR 30-37 / 90-97) are TERMINAL-DEFINED
-//     (xterm, VGA, and Windows consoles all differ). They are a palette CHOICE,
-//     not a universal spec, so this module does NOT pin them — the conformance
-//     tests treat the engine's basic16 palette as a documented choice and only
-//     assert internal consistency (distinct, plausible colors), never a
-//     "correct" RGB.
+//     in the abstract (xterm, VGA, and Windows consoles all pick different RGB).
+//     They are a palette CHOICE, not a universal spec. This engine's documented
+//     choice is the classic VGA / ANSI 4-bit text palette (the "VGA" column of
+//     the ANSI-escape-code standard table), so `vga16` below pins those exact
+//     values from that published palette — independently of the engine's
+//     `wire.go` `basic16RGB`. The conformance test asserts the engine's default
+//     basic-16 EQUALS this published palette (a regression or an unintended
+//     palette change is a finding), and additionally that the 16 slots are
+//     mutually distinct and addressed consistently across SGR forms.
 
 /**
  * cube256 returns the standard RGB for an xterm 256-color CUBE index (16-231).
@@ -65,6 +69,34 @@ export function standard256(index: number): number {
 export function rgb(r: number, g: number, b: number): number {
   return (r << 16) | (g << 8) | b;
 }
+
+/**
+ * vga16 is the classic VGA / ANSI 4-bit text palette — the RGB the base 16
+ * colors (SGR 30-37 normal, 90-97 bright; and 40-47 / 100-107 as background)
+ * resolve to. Index 0-7 are the normal colors, 8-15 the bright variants. These
+ * are the widely-published "VGA" values (e.g. the VGA column of the ANSI
+ * escape-code color table); authored here from that palette, NOT read from the
+ * engine's wire.go. The engine documents this exact palette as its default, so
+ * the conformance test pins each slot to `vga16[i]`; a drift is a finding.
+ */
+export const vga16: readonly number[] = [
+  0x000000, // 0  black
+  0xaa0000, // 1  red
+  0x00aa00, // 2  green
+  0xaa5500, // 3  yellow/brown
+  0x0000aa, // 4  blue
+  0xaa00aa, // 5  magenta
+  0x00aaaa, // 6  cyan
+  0xaaaaaa, // 7  white/gray
+  0x555555, // 8  bright black
+  0xff5555, // 9  bright red
+  0x55ff55, // 10 bright green
+  0xffff55, // 11 bright yellow
+  0x5555ff, // 12 bright blue
+  0xff55ff, // 13 bright magenta
+  0x55ffff, // 14 bright cyan
+  0xffffff, // 15 bright white
+];
 
 /** hex formats a 0xRRGGBB value as the CSS "#rrggbb" the DOM tiers assert against. */
 export function hex(value: number): string {

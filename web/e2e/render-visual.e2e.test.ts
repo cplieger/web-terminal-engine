@@ -41,11 +41,21 @@ interface WireRun {
   b: number;
   a: number;
   uc: number;
+  u?: string; // OSC 8 hyperlink URI
 }
 function run(t: string, opts: Partial<WireRun> = {}): WireRun {
-  return { t, f: opts.f ?? -1, b: opts.b ?? -1, a: opts.a ?? 0, uc: opts.uc ?? -1 };
+  const r: WireRun = { t, f: opts.f ?? -1, b: opts.b ?? -1, a: opts.a ?? 0, uc: opts.uc ?? -1 };
+  if (opts.u !== undefined) {
+    r.u = opts.u;
+  }
+  return r;
 }
-function screenMsg(rows: WireRun[][], cursor: [number, number], cursorHidden = true): unknown {
+function screenMsg(
+  rows: WireRun[][],
+  cursor: [number, number],
+  cursorHidden = true,
+  cursorStyle = 0,
+): unknown {
   return {
     type: "screen",
     base: 0,
@@ -53,6 +63,20 @@ function screenMsg(rows: WireRun[][], cursor: [number, number], cursorHidden = t
     cursor,
     changed: rows.map((_, i) => i),
     cursorHidden,
+    cursorStyle,
+    cursorBlink: false,
+  };
+}
+// altMsg builds an alternate-screen frame (ephemeral grid, no history).
+function altMsg(rows: WireRun[][], cursor: [number, number]): unknown {
+  return {
+    type: "screen",
+    base: 0,
+    rows,
+    cursor,
+    changed: rows.map((_, i) => i),
+    altActive: true,
+    cursorHidden: true,
     cursorStyle: 0,
     cursorBlink: false,
   };
@@ -383,6 +407,94 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     expect(reversed, "reverse-video inverts to a mostly-light region").toBeGreaterThan(
       normal + 100,
     );
+  });
+
+  test("alt screen (?1049): entering shows the alt grid, exiting restores the main buffer", async ({
+    page,
+  }) => {
+    const readGrid = (): string[] => {
+      const out = document.getElementById("out")!;
+      return Array.from(out.children).map((r) =>
+        (r.textContent ?? "").replace(/\u00a0/g, " ").replace(/[ ]+$/, ""),
+      );
+    };
+    const mainRows = [
+      [run("MAIN-A")],
+      [run("MAIN-B")],
+      [run(" ".repeat(8))],
+      [run(" ".repeat(8))],
+    ];
+    // Main buffer content.
+    await renderMsg(page, screenMsg(mainRows, [3, 0]));
+    const main = await page.evaluate(readGrid);
+    expect(main.slice(0, 2), "main buffer shows main content").toEqual(["MAIN-A", "MAIN-B"]);
+
+    // Enter the alternate screen: an ephemeral grid with different content that
+    // must NOT disturb the retained main buffer.
+    await page.evaluate(
+      (m) => WTE.render.handleScreen(m),
+      altMsg([[run("ALT-1")], [run("ALT-2")], [run(" ".repeat(8))], [run(" ".repeat(8))]], [0, 0]),
+    );
+    await page.waitForTimeout(150);
+    const alt = await page.evaluate(readGrid);
+    expect(alt.slice(0, 2), "alt screen shows the ephemeral alt grid").toEqual(["ALT-1", "ALT-2"]);
+
+    // Exit the alternate screen: a normal frame restores the main buffer.
+    await page.evaluate((m) => WTE.render.handleScreen(m), screenMsg(mainRows, [3, 0]));
+    await page.waitForTimeout(150);
+    const restored = await page.evaluate(readGrid);
+    expect(restored.slice(0, 2), "exiting alt restores the main buffer").toEqual([
+      "MAIN-A",
+      "MAIN-B",
+    ]);
+  });
+
+  test("cursor styles (DECSCUSR): block / underline / bar map to distinct cursor classes", async ({
+    page,
+  }) => {
+    // A visible cursor at column 2 of "ABCDEFGH"; the DECSCUSR style value drives
+    // the class render.ts puts on the cursor span (block 0-2, underline 3-4, bar
+    // 5-6). The shape CSS is the consumer's; the CLASS is the engine's contract.
+    const cases: readonly [number, string][] = [
+      [2, "term-cursor"], // steady block
+      [4, "term-cursor-underline"], // steady underline
+      [6, "term-cursor-bar"], // steady bar
+    ];
+    for (const [style, cls] of cases) {
+      await renderMsg(
+        page,
+        screenMsg([[run("ABCDEFGH")], [run(" ".repeat(8))]], [0, 2], false, style),
+      );
+      const info = await page.evaluate(() => {
+        const cur = document.querySelector<HTMLElement>(
+          ".term-cursor, .term-cursor-underline, .term-cursor-bar",
+        );
+        return { cls: cur?.className ?? null, text: cur?.textContent ?? null };
+      });
+      expect(info.cls, `DECSCUSR ${style} cursor class`).toBe(cls);
+      expect(info.text, `DECSCUSR ${style} cursor sits on column 2 ("C")`).toBe("C");
+    }
+  });
+
+  test("OSC 8 hyperlink: a run carrying a URI renders as a real anchor", async ({ page }) => {
+    await renderMsg(
+      page,
+      screenMsg([[run("LINK", { u: "https://example.com/x" })], [run(" ".repeat(8))]], [1, 0]),
+    );
+    const a = await page.evaluate(() => {
+      const anchor = document.getElementById("out")!.querySelector("a");
+      return anchor
+        ? {
+            href: anchor.getAttribute("href"),
+            text: anchor.textContent,
+            target: anchor.getAttribute("target"),
+          }
+        : null;
+    });
+    expect(a, "an anchor element is rendered").not.toBeNull();
+    expect(a?.href, "href is the OSC 8 URI").toBe("https://example.com/x");
+    expect(a?.text, "the anchor wraps the run text").toBe("LINK");
+    expect(a?.target, "the link opens in a new tab").toBe("_blank");
   });
 });
 

@@ -14,7 +14,7 @@
 // vt screen tracks both bracketed paste (?2004) and DECCKM (?1) and
 // emits a modes frame whenever they change.
 
-import { isApplicationCursor, isApplicationKeypad, isBracketedPaste } from "./modes.js";
+import { isApplicationCursor, isBracketedPaste } from "./modes.js";
 
 /** Result of mapping a keyboard event. */
 export type KeyboardResult =
@@ -22,6 +22,18 @@ export type KeyboardResult =
   | { kind: "scroll-up" } // Shift+PageUp — handled locally
   | { kind: "scroll-down" } // Shift+PageDown — handled locally
   | { kind: "ignore" }; // Modifier-only press, etc.
+
+/**
+ * KeyboardModes is the mode state `mapKeyboardEvent` reads: DECCKM (application
+ * cursor keys) and DECKPAM (application keypad). Passed explicitly so the shared
+ * input maps against the active tab's modes and so the mapping is testable
+ * without mutating global state. The `modes` module namespace satisfies this
+ * structurally; a tabbed shell passes its active session's modes.
+ */
+export interface KeyboardModes {
+  isApplicationCursor: () => boolean;
+  isApplicationKeypad: () => boolean;
+}
 
 const ESC = "\x1b";
 const DEL = "\x7f";
@@ -42,11 +54,11 @@ function modifiersDigit(ev: KeyboardEvent): number {
 // When the application has set DECCKM, the modifier-less form switches
 // from CSI to SS3 (ESC O letter); modifier-bearing forms stay on CSI
 // because they have no SS3 equivalent.
-function csiLetter(letter: string, ev: KeyboardEvent): string {
+function csiLetter(letter: string, ev: KeyboardEvent, modes: KeyboardModes): string {
   const m = modifiersDigit(ev);
   if (m === 1) {
     if (
-      isApplicationCursor() &&
+      modes.isApplicationCursor() &&
       (letter === "A" ||
         letter === "B" ||
         letter === "C" ||
@@ -123,8 +135,12 @@ const KEYPAD_SS3: Record<string, string | undefined> = {
  * Caller is responsible for ev.preventDefault() when the result is
  * "send" or "scroll-*"; we don't call it here so the function stays
  * pure and testable.
+ *
+ * `modes` supplies the active session's DECCKM/DECKPAM state; pass the `modes`
+ * module namespace for the single-terminal case or the active tab's modes in a
+ * tabbed shell.
  */
-export function mapKeyboardEvent(ev: KeyboardEvent): KeyboardResult {
+export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): KeyboardResult {
   // Modifier-only presses (Shift, Ctrl, Alt, Meta) — no-op.
   if (ev.key === "Shift" || ev.key === "Control" || ev.key === "Alt" || ev.key === "Meta") {
     return { kind: "ignore" };
@@ -139,7 +155,7 @@ export function mapKeyboardEvent(ev: KeyboardEvent): KeyboardResult {
   // We detect numpad keys via ev.code (Numpad0-9, NumpadDecimal,
   // NumpadSubtract, NumpadAdd, NumpadMultiply, NumpadDivide, NumpadEnter).
   if (
-    isApplicationKeypad() &&
+    modes.isApplicationKeypad() &&
     !ev.ctrlKey &&
     !ev.altKey &&
     !ev.metaKey &&
@@ -175,15 +191,15 @@ export function mapKeyboardEvent(ev: KeyboardEvent): KeyboardResult {
   // Cursor keys — CSI form with optional modifiers (CSI 1;{m}{letter}).
   const arrow = ARROW_LETTER[ev.key];
   if (arrow !== undefined) {
-    return { kind: "send", bytes: csiLetter(arrow, ev) };
+    return { kind: "send", bytes: csiLetter(arrow, ev, modes) };
   }
 
   // Home / End — CSI {H,F} with optional modifiers.
   if (ev.key === "Home") {
-    return { kind: "send", bytes: csiLetter("H", ev) };
+    return { kind: "send", bytes: csiLetter("H", ev, modes) };
   }
   if (ev.key === "End") {
-    return { kind: "send", bytes: csiLetter("F", ev) };
+    return { kind: "send", bytes: csiLetter("F", ev, modes) };
   }
 
   // Insert / Delete / PageUp / PageDown (no Shift) — CSI tilde forms.

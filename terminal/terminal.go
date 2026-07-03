@@ -188,6 +188,7 @@ type Handler struct {
 	command                  []string
 	cfg                      handlerConfig
 	bootEpoch                int64
+	lastActivity             atomic.Int64
 	mu                       sync.Mutex
 	started                  atomic.Bool
 	resized                  bool
@@ -271,6 +272,27 @@ func (h *Handler) Exited() bool {
 	default:
 		return false
 	}
+}
+
+// LastActivity returns the time of the most recent PTY output, or the zero time
+// if the process has produced nothing yet. The status stream uses it to derive
+// working (recent output) vs idle (quiescent). Lock-free.
+func (h *Handler) LastActivity() time.Time {
+	ns := h.lastActivity.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
+
+// Notification returns the last OSC 9 notification message and its sequence
+// number (vt.Screen.NotificationSeq). A reader detects a fresh notification when
+// the sequence advances, even if the message text repeats. Safe for concurrent
+// use.
+func (h *Handler) Notification() (msg string, seq uint64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.screen.Notification, h.screen.NotificationSeq
 }
 
 // StartEager starts the child process now at a default size, rather than lazily
@@ -403,6 +425,7 @@ func (h *Handler) readLoop(ctx context.Context) {
 // any query response back outside the lock so a slow write never stalls
 // goroutines waiting on h.mu.
 func (h *Handler) handlePTYData(data []byte) {
+	h.lastActivity.Store(time.Now().UnixNano())
 	var resp []byte
 	h.mu.Lock()
 	h.screen.Write(data) //nolint:errcheck // screen.Write always returns nil

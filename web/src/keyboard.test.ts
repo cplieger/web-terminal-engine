@@ -30,11 +30,15 @@ import {
   bindMobileToolbar,
   bracketTextForPaste,
   ctrlByteFor,
-  mapKeyboardEvent,
+  mapKeyboardEvent as mapKeyboardEventRaw,
   prepareTextForTerminal,
   type KeyboardResult,
 } from "./keyboard.js";
 import * as modes from "./modes.js";
+
+// These tests drive the module-singleton modes (set via modes.setModes in
+// beforeEach), so bind it here; mapKeyboardEvent now takes modes explicitly.
+const mapKeyboardEvent = (e: KeyboardEvent): KeyboardResult => mapKeyboardEventRaw(e, modes);
 
 // ---------------------------------------------------------------------------
 // Helpers

@@ -20,8 +20,12 @@
 // compliance with licensing restrictions.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { mapKeyboardEvent, type KeyboardResult } from "./keyboard.js";
+import { mapKeyboardEvent as mapKeyboardEventRaw, type KeyboardResult } from "./keyboard.js";
 import * as modes from "./modes.js";
+
+// These tests drive the module-singleton modes (set via modes.setModes in
+// beforeEach), so bind it here; mapKeyboardEvent now takes modes explicitly.
+const mapKeyboardEvent = (e: KeyboardEvent): KeyboardResult => mapKeyboardEventRaw(e, modes);
 
 function ev(init: KeyboardEventInit & { key: string; code: string }): KeyboardEvent {
   return new KeyboardEvent("keydown", init);

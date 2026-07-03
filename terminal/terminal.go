@@ -96,6 +96,7 @@ type handlerConfig struct {
 	workDir            string
 	env                []string
 	scrollbackCapacity int
+	keepUnfocused      bool
 }
 
 // WithWorkDir sets the working directory for the spawned process.
@@ -136,6 +137,20 @@ func WithAcceptOptions(o *websocket.AcceptOptions) Option {
 // WithOnProcessExit registers a callback invoked when the child process exits.
 func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
+}
+
+// WithKeepUnfocused makes the server hold the child process in the "unfocused"
+// state for DEC 1004 focus reporting: whenever the process enables focus
+// reporting (CSI ?1004h), the server writes a focus-out (ESC [ O) to its PTY,
+// and it never writes a focus-in. A process that gates behavior on focus (for
+// example kiro-cli, which only emits its OSC 9 turn/permission notifications
+// while it believes it is unfocused) then keeps emitting, so the session
+// manager's status classifier can observe those notifications. Off by default:
+// a generic terminal wants real focus reporting (vim, etc.), so only a consumer
+// that relies on the unfocused-notifier behavior enables it. The browser client
+// is expected to emit no focus bytes of its own under this model.
+func WithKeepUnfocused() Option {
+	return func(c *handlerConfig) { c.keepUnfocused = true }
 }
 
 // WithTheme sets the default foreground, background, and cursor colors the
@@ -194,6 +209,7 @@ type Handler struct {
 	resized                  bool
 	scrollbackClearedPending bool
 	paletteChangedPending    bool
+	lastFocusReporting       bool
 }
 
 // NewHandler returns a terminal handler. command is the argv to spawn
@@ -421,6 +437,28 @@ func (h *Handler) readLoop(ctx context.Context) {
 	}
 }
 
+// focusOutSeq is the DEC 1004 focus-out report (ESC [ O). Written to the PTY
+// under WithKeepUnfocused when the process enables focus reporting.
+var focusOutSeq = []byte("\x1b[O")
+
+// focusOutOnEnable returns focusOutSeq when WithKeepUnfocused is set and focus
+// reporting just rose from disabled to enabled since the last call, else nil. It
+// updates the tracked last state, so it fires once per enable edge (a process
+// that toggles 1004 off then on is re-pinned to unfocused). The caller holds
+// h.mu and writes the returned bytes to the PTY outside the lock.
+func (h *Handler) focusOutOnEnable() []byte {
+	if !h.cfg.keepUnfocused {
+		return nil
+	}
+	now := h.screen.FocusReporting
+	rising := now && !h.lastFocusReporting
+	h.lastFocusReporting = now
+	if rising {
+		return focusOutSeq
+	}
+	return nil
+}
+
 // handlePTYData feeds raw PTY output to the screen under h.mu and writes
 // any query response back outside the lock so a slow write never stalls
 // goroutines waiting on h.mu.
@@ -451,6 +489,11 @@ func (h *Handler) handlePTYData(data []byte) {
 	if len(h.screen.Response) > 0 {
 		resp = h.screen.Response
 		h.screen.Response = nil
+	}
+	// Keep-unfocused: if the process just enabled focus reporting, pin it to
+	// unfocused so a focus-gated notifier keeps emitting (see WithKeepUnfocused).
+	if fo := h.focusOutOnEnable(); fo != nil {
+		resp = append(resp, fo...)
 	}
 	h.mu.Unlock()
 	if len(resp) > 0 {

@@ -8,3 +8,11 @@ export * as connection from "./connection.js";
 export { decodeWireBinary } from "./wire-binary.js";
 export { controlFrame, CONTROL_FRAME_PREFIX } from "./wire.js";
 export { wsURL } from "./wsurl.js";
+export { connectStatusStream } from "./status-stream.js";
+export type {
+  SessionStatus,
+  StatusStream,
+  StatusStreamCallbacks,
+  EventSourceFactory,
+  EventSourceLike,
+} from "./status-stream.js";

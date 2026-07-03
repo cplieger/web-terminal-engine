@@ -3,10 +3,11 @@ package terminal
 // The status stream (Server-Sent Events at /api/sessions/events) drives each
 // tab's activity indicator. A single sweep recomputes every session's status on
 // a fixed interval and pushes only changes to subscribers, which debounces the
-// working/idle flap for free. Status derives from process liveness and output
-// activity (Tier 1: working/idle/exited); a consumer's classifier maps an OSC 9
-// notification to a latched needs-input state (Tier 2). One stream serves all
-// tabs (not one per tab) to stay under the browser's per-origin connection cap.
+// working/idle flap for free. Status derives from process liveness, OSC 9;4
+// progress, and output activity (working/idle/exited); a consumer's classifier
+// maps an OSC 9 notification to a latched needs-input or done state (Tier 2).
+// One stream serves all tabs (not one per tab) to stay under the browser's
+// per-origin connection cap.
 
 import (
 	"context"
@@ -21,11 +22,10 @@ const (
 	// statusSweepInterval is how often per-session status is recomputed.
 	statusSweepInterval = 250 * time.Millisecond
 	// workingWindow marks a session working when it produced output within it.
+	// This is the fallback only for a program that does not report OSC 9;4
+	// progress; a progress-reporting program (kiro-cli) drives working from
+	// progress instead, so the user typing at the prompt does not read as work.
 	workingWindow = 750 * time.Millisecond
-	// inputResumeGuard: an input latch clears only once output resumes at least
-	// this long after the notification, so the prompt's own output (which
-	// precedes the notification) does not immediately clear the latch.
-	inputResumeGuard = 400 * time.Millisecond
 	// subscriberBuffer bounds a subscriber's pending events; a subscriber that
 	// falls this far behind is dropped rather than blocking the sweep.
 	subscriberBuffer = 64
@@ -47,12 +47,11 @@ type statusEvent struct {
 
 // statusTracker holds the per-session state the status computation needs beyond
 // the handler: the last emitted status/title (to detect changes), the last
-// notification sequence classified, and the latched needs-input state.
+// notification sequence classified, and the latched needs-input/done state.
 type statusTracker struct {
-	latchAt    time.Time
 	lastStatus string
 	lastTitle  string
-	latched    string // "" or StatusInput
+	latched    string // "", StatusInput, or StatusDone
 	notifSeen  uint64
 }
 
@@ -106,36 +105,47 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 }
 
 // computeStatus derives a session's status. Callers hold m.mu (it reads the
-// handler and mutates the tracker's latch state). exited wins; otherwise output
-// activity gives working/idle, and a classified OSC 9 notification latches
-// input until the turn resumes (output after the prompt) or a done message
-// clears it.
+// handler and mutates the tracker's latch state). Precedence: exited, then
+// working (OSC 9;4 progress active), then a latched notification state
+// (needs-input or done), then the output-activity fallback for a program that
+// reports no progress, then idle (the default / new-session state).
 func (m *SessionManager) computeStatus(h *Handler, tr *statusTracker, now time.Time) string {
 	if h.Exited() {
 		return StatusExited
 	}
-	m.applyNotification(h, tr, now)
-	last := h.LastActivity()
-	base := StatusIdle
-	if !last.IsZero() && now.Sub(last) < workingWindow {
-		base = StatusWorking
+	m.applyNotification(h, tr)
+	// A progress-reporting program (kiro-cli) drives working from its OSC 9;4
+	// progress: an active state (1 value, 3 indeterminate) means the agent is
+	// working. Progress is emitted only while the agent runs, so it does not
+	// flare on the user typing at the prompt the way raw output activity would.
+	// A new working phase supersedes a prior done/needs-input latch.
+	prog := h.Progress()
+	if prog == 1 || prog == 3 {
+		tr.latched = ""
+		return StatusWorking
 	}
-	if tr.latched == StatusInput {
-		// The turn has resumed once output arrives after the prompt (the prompt
-		// itself precedes the notification, so guard against clearing on it).
-		if last.After(tr.latchAt.Add(inputResumeGuard)) {
-			tr.latched = ""
-		} else {
-			return StatusInput
+	// A latched notification state (needs-input or done) persists through the
+	// quiet gap after the turn until the next working phase clears it.
+	if tr.latched != "" {
+		return tr.latched
+	}
+	// Fallback for a program that never reports progress (a plain shell under
+	// web-terminal-server, prog == -1): recent output means working, else idle.
+	// A progress-reporting program at rest (prog >= 0) with no latch stays idle,
+	// the default / new-session state.
+	if prog < 0 {
+		if last := h.LastActivity(); !last.IsZero() && now.Sub(last) < workingWindow {
+			return StatusWorking
 		}
 	}
-	return base
+	return StatusIdle
 }
 
-// applyNotification updates the tracker's input latch from a new OSC 9
-// notification via the consumer's classifier, if any. A classified input
-// latches; any other classified message clears the latch.
-func (m *SessionManager) applyNotification(h *Handler, tr *statusTracker, now time.Time) {
+// applyNotification updates the tracker's latch from a new OSC 9 notification
+// via the consumer's classifier, if any. The classified state (StatusInput or
+// StatusDone) is latched; it persists until the next working phase clears it
+// (see computeStatus). An unclassified message leaves the latch unchanged.
+func (m *SessionManager) applyNotification(h *Handler, tr *statusTracker) {
 	if m.classifier == nil {
 		return
 	}
@@ -144,15 +154,8 @@ func (m *SessionManager) applyNotification(h *Handler, tr *statusTracker, now ti
 		return
 	}
 	tr.notifSeen = seq
-	cls, ok := m.classifier(msg)
-	if !ok {
-		return
-	}
-	if cls == StatusInput {
-		tr.latched = StatusInput
-		tr.latchAt = now
-	} else {
-		tr.latched = ""
+	if cls, ok := m.classifier(msg); ok {
+		tr.latched = cls
 	}
 }
 

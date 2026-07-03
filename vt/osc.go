@@ -8,8 +8,9 @@
 //   - OSC 5 / 105 — set/query and reset the special colors (bold/underline/…)
 //   - OSC 8 ; params ; URI BEL/ST — Set/clear hyperlink (URI empty = clear)
 //   - OSC 9 ; Pt BEL/ST — desktop notification: Pt is captured into
-//     Notification for the status layer; the ConEmu progress form
-//     (OSC 9 ; Ps ; ...) is ignored
+//     Notification for the status layer. The ConEmu subcommand form
+//     (OSC 9 ; Ps ; ...) is not a notification; subcommand 4 (progress) is
+//     captured into Progress, any other numeric subcommand is ignored
 //   - OSC 10-19 ; spec|? BEL/ST — set/query the dynamic colors (default
 //     fg/bg/cursor/…), answered from the configured Theme; see WithTheme
 //   - OSC 52 ; Pc ; Pd — clipboard: SET pushes to the browser clipboard and
@@ -116,9 +117,9 @@ func (s *Screen) dispatchOsc() {
 		// Both set and query round-trip through dynColors; see handleOscColor.
 		s.handleOscColor(id, data)
 	case 9:
-		// OSC 9 — desktop notification. Pt is captured into Notification for the
-		// status layer; the ConEmu progress form (OSC 9 ; Ps) is rejected. See
-		// handleOsc9.
+		// OSC 9 — desktop notification (Pt captured into Notification) or a
+		// ConEmu subcommand (numeric first field); subcommand 4 is progress,
+		// captured into Progress. See handleOsc9.
 		s.handleOsc9(data)
 	case 52:
 		// OSC 52 — clipboard. SET only (kiro-cli uses this to copy); the query
@@ -146,24 +147,27 @@ func (s *Screen) dispatchOsc() {
 // hostile or runaway program cannot grow the stored string without bound.
 const maxNotificationLen = 256
 
-// handleOsc9 captures an OSC 9 desktop-notification message
-// (ESC ] 9 ; <text> ST) into Notification for the status layer to read. Two
-// guards keep it useful and safe: the ConEmu progress form
-// (OSC 9 ; Ps ; ... where the first field is numeric, e.g. "4;50") is rejected
-// so a progress update is not mistaken for a notification, and the text is
+// handleOsc9 handles the two OSC 9 forms. A human-readable message
+// (ESC ] 9 ; <text> ST) is captured into Notification for the status layer,
 // stripped of control bytes and length-clamped because it is attacker-influenced
-// terminal output. The engine stays generic: it stores whatever text arrives and
-// does not interpret it. Mapping a message to a session status (kiro-cli's
-// "Response complete" / "Permission required") is the consumer's job, not the
-// VT's, so no application strings are hard-coded here.
+// terminal output. The ConEmu subcommand form (OSC 9 ; Ps ; ... where the first
+// field is numeric) is not a notification: subcommand 4 is progress reporting
+// (OSC 9 ; 4 ; st [; pr]), captured into Progress so the status layer can derive
+// a working state, and any other numeric subcommand is ignored. The engine stays
+// generic: it stores whatever notification text arrives and does not interpret
+// it. Mapping a message to a session status (kiro-cli's "Response complete" /
+// "Permission required") is the consumer's job, so no application strings are
+// hard-coded here.
 func (s *Screen) handleOsc9(data string) {
 	if data == "" {
 		return
 	}
-	// ConEmu progress form: OSC 9 ; Ps ; ... The first ';'-delimited field
-	// being purely numeric marks a ConEmu subcommand (progress is 9;4), not a
-	// human-readable notification.
-	if head, _, hasSep := strings.Cut(data, ";"); hasSep && isAllDigits(head) {
+	// A purely numeric first ';'-delimited field marks a ConEmu subcommand, not
+	// a human-readable notification. Subcommand 4 is progress; capture it.
+	if head, rest, hasSep := strings.Cut(data, ";"); hasSep && isAllDigits(head) {
+		if head == "4" {
+			s.setProgress(rest)
+		}
 		return
 	}
 	msg := sanitizeNotification(data)
@@ -172,6 +176,19 @@ func (s *Screen) handleOsc9(data string) {
 	}
 	s.Notification = msg
 	s.NotificationSeq++
+}
+
+// setProgress records a ConEmu OSC 9;4 progress state from its payload ("st" or
+// "st;pr"). st is 0 (off), 1 (value), 2 (error), 3 (indeterminate), or 4
+// (paused); the optional pr percentage is not used. An unparseable or
+// out-of-range state is ignored, leaving Progress unchanged.
+func (s *Screen) setProgress(rest string) {
+	stField, _, _ := strings.Cut(rest, ";")
+	st, err := strconv.Atoi(stField)
+	if err != nil || st < 0 || st > 4 {
+		return
+	}
+	s.Progress = st
 }
 
 // isAllDigits reports whether s is non-empty and every byte is an ASCII digit.

@@ -192,13 +192,49 @@ func TestOSC9SeqAdvancesOnRepeat(t *testing.T) {
 	}
 }
 
-// The ConEmu progress form (OSC 9 ; Ps ; ...) must not be captured as a
-// notification; kiro-cli itself emits OSC 9 ; 4 for progress.
-func TestOSC9RejectsConEmuProgress(t *testing.T) {
+// TestOSC9ConEmuProgress verifies the ConEmu progress subcommand (OSC 9 ; 4 ; st)
+// is captured into Progress, not into Notification. kiro-cli emits it while the
+// agent works, which the status layer maps to a working indicator.
+func TestOSC9ConEmuProgress(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]9;4;50\x07"))
+	if s.Progress != -1 {
+		t.Fatalf("initial Progress = %d, want -1 (none seen)", s.Progress)
+	}
+	// Indeterminate progress (state 3): agent working.
+	s.Write([]byte("\x1b]9;4;3\x07"))
+	if s.Progress != 3 {
+		t.Fatalf("after 9;4;3, Progress = %d, want 3", s.Progress)
+	}
 	if s.Notification != "" || s.NotificationSeq != 0 {
-		t.Fatalf("ConEmu progress captured: Notification=%q seq=%d", s.Notification, s.NotificationSeq)
+		t.Fatalf("ConEmu progress captured as notification: %q seq=%d", s.Notification, s.NotificationSeq)
+	}
+	// A state with a percentage field (state 4, 100%): only the state is kept.
+	s.Write([]byte("\x1b]9;4;4;100\x07"))
+	if s.Progress != 4 {
+		t.Fatalf("after 9;4;4;100, Progress = %d, want 4", s.Progress)
+	}
+	// Cleared (state 0).
+	s.Write([]byte("\x1b]9;4;0\x07"))
+	if s.Progress != 0 {
+		t.Fatalf("after 9;4;0, Progress = %d, want 0", s.Progress)
+	}
+	// An out-of-range state is ignored (Progress unchanged).
+	s.Write([]byte("\x1b]9;4;9\x07"))
+	if s.Progress != 0 {
+		t.Fatalf("after out-of-range 9;4;9, Progress = %d, want 0 (unchanged)", s.Progress)
+	}
+}
+
+// TestOSC9NonProgressSubcommandIgnored verifies a numeric OSC 9 subcommand other
+// than 4 is neither captured as a notification nor as a progress update.
+func TestOSC9NonProgressSubcommandIgnored(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]9;1;hello\x07"))
+	if s.Notification != "" || s.NotificationSeq != 0 {
+		t.Fatalf("numeric subcommand captured as notification: %q", s.Notification)
+	}
+	if s.Progress != -1 {
+		t.Fatalf("non-progress subcommand set Progress = %d, want -1", s.Progress)
 	}
 }
 

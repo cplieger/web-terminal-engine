@@ -55,7 +55,9 @@ type ManagerOption func(*managerConfig)
 
 type managerConfig struct {
 	logger      *slog.Logger
+	classifier  func(string) (string, bool)
 	maxSessions int
+	maxSubs     int
 	idleWindow  time.Duration
 }
 
@@ -81,6 +83,23 @@ func WithManagerLogger(l *slog.Logger) ManagerOption {
 	return func(c *managerConfig) { c.logger = l }
 }
 
+// WithStatusClassifier maps an OSC 9 notification message to a session status
+// (return ok=false to ignore a message). This keeps the engine generic: vibecli
+// maps kiro-cli's "Permission required" to input and "Response complete" to
+// idle, while a plain shell server sets no classifier and gets working/idle from
+// output activity only. A classified input status latches (persists while the
+// process waits) until the turn resumes or a done message clears it.
+func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
+	return func(c *managerConfig) { c.classifier = fn }
+}
+
+// WithMaxSubscribers caps concurrent status-stream (SSE) subscribers, bounding
+// subscriber goroutines and buffers independently of the session cap. Zero
+// selects a built-in default.
+func WithMaxSubscribers(n int) ManagerOption {
+	return func(c *managerConfig) { c.maxSubs = n }
+}
+
 type session struct {
 	createdAt time.Time
 	handler   *Handler
@@ -94,11 +113,17 @@ type SessionManager struct {
 	factory       func(id string) *Handler
 	logger        *slog.Logger
 	sessions      map[string]*session
+	trackers      map[string]*statusTracker
+	subs          map[chan statusEvent]struct{}
+	classifier    func(string) (string, bool)
 	reaperCancel  context.CancelFunc
+	sweepCancel   context.CancelFunc
 	idleSince     time.Time
 	mu            sync.Mutex
+	subsMu        sync.Mutex
 	idleWindow    time.Duration
 	maxSessions   int
+	maxSubs       int
 	activeClients int
 	created       uint64
 	closed        uint64
@@ -123,15 +148,28 @@ func NewSessionManager(factory func(id string) *Handler, opts ...ManagerOption) 
 		factory:     factory,
 		logger:      cfg.logger,
 		sessions:    make(map[string]*session),
+		trackers:    make(map[string]*statusTracker),
+		subs:        make(map[chan statusEvent]struct{}),
+		classifier:  cfg.classifier,
 		idleSince:   time.Now(),
 		idleWindow:  cfg.idleWindow,
 		maxSessions: cfg.maxSessions,
+		maxSubs:     cfg.maxSubs,
+	}
+	if m.maxSubs <= 0 {
+		m.maxSubs = defaultMaxSubscribers
 	}
 	if m.idleWindow > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
 		m.reaperCancel = cancel
 		go m.reapLoop(ctx)
 	}
+	// The status sweep computes per-session status and pushes changes to
+	// subscribers. It runs regardless of subscribers (cheap, a near-no-op when
+	// there are none) so status is current the instant a client subscribes.
+	sctx, scancel := context.WithCancel(context.Background())
+	m.sweepCancel = scancel
+	go m.sweepLoop(sctx)
 	return m
 }
 
@@ -208,6 +246,10 @@ func (m *SessionManager) Shutdown() {
 	if m.reaperCancel != nil {
 		m.reaperCancel()
 		m.reaperCancel = nil
+	}
+	if m.sweepCancel != nil {
+		m.sweepCancel()
+		m.sweepCancel = nil
 	}
 	victims := make([]*session, 0, len(m.sessions))
 	for _, s := range m.sessions {

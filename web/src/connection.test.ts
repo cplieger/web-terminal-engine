@@ -14,7 +14,16 @@
 // does before creating the replacement sock).
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
-import { connect, generateSessionId, init, reconnectNow } from "./connection.js";
+import {
+  connect,
+  disconnect,
+  forgetSession,
+  generateSessionId,
+  init,
+  reconnectNow,
+  sendBinary,
+  setSession,
+} from "./connection.js";
 import type { ServerMessage } from "./types.js";
 
 interface MockWS {
@@ -334,6 +343,164 @@ describe("connection: wake reconnect resumes from the held index (bug 2)", () =>
     // because the pong reset the clock, the socket is kept.
     vi.advanceTimersByTime(11_000);
     expect(first.closed).toBe(false);
+    expect(allMockWebSockets.length).toBe(1);
+  });
+});
+
+describe("connection: per-session resume state (tab switch)", () => {
+  // The reconnect-on-switch model runs N server sessions but one live socket,
+  // swapped on switch. Each session owns its resume state (outbox, byte
+  // counters, boot-epoch), so a switch must not replay one tab's unacked bytes
+  // onto another or fire a false server-restart reset (design sections 5, 8, 18).
+  let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
+  let onServerRestart: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    onMessage = vi.fn<(msg: ServerMessage) => void>();
+    onServerRestart = vi.fn();
+    init({
+      onMessage,
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose: () => {
+        /* no-op */
+      },
+      onServerRestart,
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+  });
+
+  afterEach(() => {
+    disconnect(); // drop the live socket so state doesn't leak into later tests
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function resumeAckFrame(fields: {
+    received: number;
+    serverEpoch?: number;
+    committed?: number;
+    oldestIndex?: number;
+  }): string {
+    return JSON.stringify({ type: "resumeAck", ...fields });
+  }
+
+  // The non-control (raw input) frames a socket was asked to send.
+  function rawInputSends(sock: MockWS): unknown[] {
+    const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return calls.map((c) => c[0]).filter((arg) => decodeControlFrame(arg) === null);
+  }
+
+  // Module state (the `sessions` map, activeId, managed) persists across tests
+  // in this file (vitest isolate:false), so each test uses its own session ids
+  // to stay isolated rather than relying on a reset that the module does not
+  // expose.
+
+  it("routes the socket to ?session=<id> and resumes with that id", () => {
+    setSession("route-A");
+    const sock = allMockWebSockets[0]!;
+    expect(sock.url).toContain("session=route-A");
+
+    sock.fireOpen();
+    const resume = controlFramesSent(sock).find((m) => m.type === "resume");
+    expect(resume).toBeDefined();
+    expect(resume!.sessionId).toBe("route-A");
+    expect(resume!.sentBytes).toBe(0);
+  });
+
+  it("does not replay session A's unacked bytes onto session B after a switch", () => {
+    setSession("noreplay-A");
+    const a = allMockWebSockets[0]!;
+    a.fireOpen();
+    // Type into A while connected: the bytes go out on A and into A's outbox.
+    sendBinary(new Uint8Array([104, 105])); // "hi"
+    expect(rawInputSends(a).length).toBe(1);
+
+    // Switch to B. A's socket is torn down; B connects fresh.
+    setSession("noreplay-B");
+    const b = allMockWebSockets[1]!;
+    expect(b).not.toBe(a);
+    b.fireOpen();
+
+    // B resumes with ITS OWN counters (0 sent), and its socket never receives
+    // A's queued input — no cross-tab replay.
+    const resumeB = controlFramesSent(b).find((m) => m.type === "resume");
+    expect(resumeB!.sessionId).toBe("noreplay-B");
+    expect(resumeB!.sentBytes).toBe(0);
+    expect(rawInputSends(b).length).toBe(0);
+  });
+
+  it("replays a session's own unacked outbox when switched back to it", () => {
+    setSession("own-A");
+    const a1 = allMockWebSockets[0]!;
+    a1.fireOpen();
+    sendBinary(new Uint8Array([120])); // "x" into A, unacked (no resumeAck)
+
+    setSession("own-B"); // leave A with an unacked byte
+    allMockWebSockets[1]!.fireOpen();
+
+    setSession("own-A"); // back to A: its outbox must replay on the fresh socket
+    const a2 = allMockWebSockets[2]!;
+    expect(a2).not.toBe(a1);
+    a2.fireOpen();
+    a2.fireMessage(resumeAckFrame({ received: 0 })); // server acked nothing yet
+    // The unacked "x" is retransmitted on A's new socket.
+    expect(rawInputSends(a2).length).toBe(1);
+    const resumeA = controlFramesSent(a2).find((m) => m.type === "resume");
+    expect(resumeA!.sentBytes).toBe(1);
+  });
+
+  it("compares each session's boot-epoch only against its own (no false restart on switch)", () => {
+    setSession("epoch-A");
+    const a = allMockWebSockets[0]!;
+    a.fireOpen();
+    a.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+
+    // B is a different session with a different process epoch. Switching to it
+    // must not read A's epoch and declare a restart.
+    setSession("epoch-B");
+    const b = allMockWebSockets[1]!;
+    b.fireOpen();
+    b.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 222 }));
+    expect(onServerRestart).not.toHaveBeenCalled();
+
+    // Back to A: A's epoch is unchanged (111), so still no restart.
+    setSession("epoch-A");
+    const a2 = allMockWebSockets[2]!;
+    a2.fireOpen();
+    a2.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+    expect(onServerRestart).not.toHaveBeenCalled();
+  });
+
+  it("still fires a server-restart reset when the SAME session's boot-epoch changes", () => {
+    setSession("restart-A");
+    const a1 = allMockWebSockets[0]!;
+    a1.fireOpen();
+    a1.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+
+    // A reconnects and the server reports a different epoch: A's process was
+    // replaced. That is a genuine restart for this session.
+    reconnectNow();
+    const a2 = allMockWebSockets[1]!;
+    a2.fireOpen();
+    a2.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 999 }));
+    expect(onServerRestart).toHaveBeenCalledTimes(1);
+  });
+
+  it("forgetSession drops the active session and tears down its socket", () => {
+    setSession("forget-A");
+    const a = allMockWebSockets[0]!;
+    a.fireOpen();
+    expect(a.closed).toBe(false);
+
+    forgetSession("forget-A");
+    expect(a.closed).toBe(true);
+    // No reconnect is scheduled for a forgotten session.
+    vi.advanceTimersByTime(20_000);
     expect(allMockWebSockets.length).toBe(1);
   });
 });

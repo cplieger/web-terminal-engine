@@ -41,13 +41,14 @@ type SessionInfo struct {
 }
 
 // Session status values. The manager computes working/idle/exited from process
-// liveness and (in the status stream) output activity; a consumer's classifier
-// may refine idle into needs-input from the OSC 9 notification.
+// liveness, OSC 9;4 progress, and output activity; a consumer's classifier maps
+// an OSC 9 notification to a latched needs-input or done state.
 const (
-	StatusWorking = "working"
-	StatusIdle    = "idle"
-	StatusInput   = "input"
-	StatusExited  = "exited"
+	StatusWorking = "working" // agent working (OSC 9;4 progress active) or recent output
+	StatusIdle    = "idle"    // at rest with no turn yet (the default / new-session state)
+	StatusInput   = "input"   // blocked awaiting user action (latched from a notification)
+	StatusDone    = "done"    // a turn completed (latched from a notification; cleared on next working)
+	StatusExited  = "exited"  // the process has exited
 )
 
 // ManagerOption configures a SessionManager.

@@ -11,13 +11,13 @@ import (
 )
 
 // inputClassifier maps the two kiro-cli notification strings the way vibecli
-// will, for exercising the latched needs-input state machine.
+// does, for exercising the latched needs-input/done state machine.
 func inputClassifier(msg string) (string, bool) {
 	switch msg {
 	case "Permission required":
 		return StatusInput, true
 	case "Response complete":
-		return StatusIdle, true
+		return StatusDone, true
 	}
 	return "", false
 }
@@ -34,8 +34,8 @@ func handlerOf(t *testing.T, m *SessionManager, id string) *Handler {
 }
 
 // TestComputeStatusLatchesInput verifies a classified needs-input notification
-// latches input and persists (the process is blocked, so no output), then the
-// latch clears once output resumes after the prompt (the turn continued).
+// latches input and persists (the process is blocked, so no progress and no
+// output), then an active progress signal (the turn resuming) clears it.
 func TestComputeStatusLatchesInput(t *testing.T) {
 	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
 	t.Cleanup(m.Shutdown)
@@ -51,21 +51,21 @@ func TestComputeStatusLatchesInput(t *testing.T) {
 	if st := m.computeStatus(h, tr, time.Now()); st != StatusInput {
 		t.Fatalf("after notification, status = %q, want %q", st, StatusInput)
 	}
-	// No resume output: the latch persists.
+	// No resume: the latch persists across sweeps.
 	if st := m.computeStatus(h, tr, time.Now()); st != StatusInput {
 		t.Fatalf("latch did not persist, status = %q, want %q", st, StatusInput)
 	}
-	// Turn resumes: with the latch set in the past, new output clears it.
-	tr.latchAt = time.Now().Add(-time.Second)
-	h.handlePTYData([]byte("continuing..."))
+	// The turn resumes: an active progress signal (OSC 9;4;3) clears the latch
+	// and reports working.
+	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
 	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
-		t.Fatalf("after resume, status = %q, want %q", st, StatusWorking)
+		t.Fatalf("after resume progress, status = %q, want %q", st, StatusWorking)
 	}
 }
 
-// TestComputeStatusDoneClearsLatch verifies a classified done notification
-// ("Response complete") clears an input latch.
-func TestComputeStatusDoneClearsLatch(t *testing.T) {
+// TestComputeStatusDoneSupersedesInput verifies a classified done notification
+// ("Response complete") replaces an input latch with the done state.
+func TestComputeStatusDoneSupersedesInput(t *testing.T) {
 	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
 	t.Cleanup(m.Shutdown)
 	id, err := m.Create()
@@ -80,8 +80,82 @@ func TestComputeStatusDoneClearsLatch(t *testing.T) {
 		t.Fatalf("precondition: status = %q, want %q", st, StatusInput)
 	}
 	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st == StatusInput {
-		t.Fatalf("done did not clear the input latch; status = %q", st)
+	if st := m.computeStatus(h, tr, time.Now()); st != StatusDone {
+		t.Fatalf("done did not supersede input latch; status = %q, want %q", st, StatusDone)
+	}
+}
+
+// TestComputeStatusWorkingFromProgress verifies an active OSC 9;4 progress state
+// (3 indeterminate) reports working, and clearing it (0) drops to idle when
+// nothing is latched.
+func TestComputeStatusWorkingFromProgress(t *testing.T) {
+	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
+	t.Cleanup(m.Shutdown)
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := handlerOf(t, m, id)
+	tr := &statusTracker{}
+
+	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
+	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
+		t.Fatalf("progress 3: status = %q, want %q", st, StatusWorking)
+	}
+	h.handlePTYData([]byte("\x1b]9;4;0\x07"))
+	if st := m.computeStatus(h, tr, time.Now()); st != StatusIdle {
+		t.Fatalf("progress 0 with no latch: status = %q, want %q", st, StatusIdle)
+	}
+}
+
+// TestComputeStatusDoneLatchPersistsThenClears verifies "Response complete"
+// latches done through the quiet gap, and the next working progress clears it.
+func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
+	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
+	t.Cleanup(m.Shutdown)
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := handlerOf(t, m, id)
+	tr := &statusTracker{}
+
+	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
+	if st := m.computeStatus(h, tr, time.Now()); st != StatusDone {
+		t.Fatalf("after done notification: status = %q, want %q", st, StatusDone)
+	}
+	// Persists across a quiet sweep (no progress, no output-driven flip).
+	if st := m.computeStatus(h, tr, time.Now()); st != StatusDone {
+		t.Fatalf("done latch did not persist: status = %q, want %q", st, StatusDone)
+	}
+	// Next turn starts working, clearing the done latch.
+	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
+	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
+		t.Fatalf("next working phase: status = %q, want %q", st, StatusWorking)
+	}
+}
+
+// TestComputeStatusFallbackOutputActivity verifies a program that never reports
+// OSC 9;4 progress (prog == -1) still derives working from recent output, so a
+// plain shell under web-terminal-server keeps a working indicator, then goes
+// idle once quiescent.
+func TestComputeStatusFallbackOutputActivity(t *testing.T) {
+	m := NewSessionManager(catFactory) // no classifier: a generic shell
+	t.Cleanup(m.Shutdown)
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := handlerOf(t, m, id)
+	tr := &statusTracker{}
+
+	h.handlePTYData([]byte("some output"))
+	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
+		t.Fatalf("recent output (no progress): status = %q, want %q", st, StatusWorking)
+	}
+	// Well past the working window, with no progress signal, it goes idle.
+	if st := m.computeStatus(h, tr, time.Now().Add(2*workingWindow)); st != StatusIdle {
+		t.Fatalf("quiescent (no progress): status = %q, want %q", st, StatusIdle)
 	}
 }
 

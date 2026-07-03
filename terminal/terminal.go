@@ -311,6 +311,18 @@ func (h *Handler) Notification() (msg string, seq uint64) {
 	return h.screen.Notification, h.screen.NotificationSeq
 }
 
+// Progress returns the session's last ConEmu OSC 9;4 progress state: -1 when
+// none has been seen (the process never reported progress), else the state
+// (0 off, 1 value, 2 error, 3 indeterminate, 4 paused). The status stream maps
+// an active state (1 or 3) to working, so a progress-reporting program (kiro-cli
+// while the agent works) drives the working indicator without relying on raw
+// output activity. Safe for concurrent use.
+func (h *Handler) Progress() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.screen.Progress
+}
+
 // StartEager starts the child process now at a default size, rather than lazily
 // on the first client message. A session manager calls this at Create time so a
 // new session's process (and its activity signal) exist from creation; the first

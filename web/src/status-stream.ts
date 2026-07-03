@@ -9,7 +9,7 @@
  *  mirrors the server's status event. */
 export interface SessionStatus {
   readonly id: string;
-  readonly status: "working" | "idle" | "input" | "exited";
+  readonly status: "working" | "idle" | "input" | "done" | "exited";
   readonly title: string;
   readonly createdAt: string;
   /** true when the session is gone (closed or reaped); the consumer drops it. */

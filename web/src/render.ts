@@ -110,7 +110,11 @@ function measureCellWidth(): number {
 let output: HTMLElement;
 let termWrap: HTMLElement;
 
-const store = new LineStore();
+// The store the renderer reflects. Module-private by default (a consumer that
+// never calls bind() gets one implicit store, the original single-terminal
+// behavior). The tabs feature keeps one LineStore per tab and calls bind() on
+// switch to point the renderer at the active tab's cache (design section 6).
+let store = new LineStore();
 // abs index -> its row element. The DOM children of `output` are these
 // elements, kept in ascending data-abs order.
 const rowEls = new Map<number, HTMLDivElement>();
@@ -212,6 +216,69 @@ export function resetScreen(): void {
  */
 export function resetScrollback(): void {
   store.reset();
+  scheduleFlush();
+}
+
+/**
+ * Bind the renderer to a different store and rebuild the surface from it. The
+ * tabs feature calls this on every switch to point the one renderer at the
+ * active tab's cached LineStore (design sections 5, 6, 8). The DOM is wiped and
+ * repainted viewport-first from the new store; this is local, so the last-known
+ * screen paints without a network round-trip.
+ */
+export function bind(next: LineStore): void {
+  store = next;
+  rebuild();
+}
+
+/**
+ * The store the renderer is currently bound to. Exposed so the shell can feed
+ * decoded frames into the active tab's store and read its resume bounds.
+ */
+export function boundStore(): LineStore {
+  return store;
+}
+
+/**
+ * Wipe the DOM and rebuild it from the current store, viewport-first and
+ * budgeted. The live window (what the user sees) builds first, then scrollback
+ * from newest to oldest so rows adjacent to the viewport fill in before deep
+ * history; the existing per-frame budget spreads a large backlog across frames
+ * so the switch never janks. Used by bind(); also safe to call directly to
+ * force a full repaint of the current store.
+ */
+export function rebuild(): void {
+  output.replaceChildren();
+  rowEls.clear();
+  renderQueue.clear();
+  trimMarkerEl = null;
+  cursorAbs = -1;
+  altRendered = false;
+  prevCursorCol = -1;
+  prevCursorHidden = false;
+  prevCursorStyleVal = -1;
+  // Alt screen paints from the ephemeral grid in the flush, so it needs no
+  // absolute-index queueing here.
+  if (!store.isAlt()) {
+    const oldest = store.oldestIndex();
+    const highest = store.highestIndex();
+    if (highest >= 0) {
+      const winStart = Math.max(store.getWindow().base, oldest);
+      // Live window first (viewport), ascending.
+      for (let abs = winStart; abs <= highest; abs++) {
+        if (store.getLine(abs) !== undefined) {
+          renderQueue.add(abs);
+        }
+      }
+      // Then scrollback, newest to oldest, so rows nearest the viewport fill in
+      // before deep history.
+      for (let abs = winStart - 1; abs >= oldest; abs--) {
+        if (store.getLine(abs) !== undefined) {
+          renderQueue.add(abs);
+        }
+      }
+    }
+  }
   scheduleFlush();
 }
 

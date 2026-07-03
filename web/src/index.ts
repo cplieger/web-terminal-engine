@@ -1,4 +1,6 @@
 export * from "./types.js";
+export { LineStore } from "./store.js";
+export type { WindowState, StoreChanges } from "./store.js";
 export * as render from "./render.js";
 export * as keyboard from "./keyboard.js";
 export * as scroll from "./scroll.js";

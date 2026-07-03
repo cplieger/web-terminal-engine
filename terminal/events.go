@@ -216,11 +216,17 @@ func (m *SessionManager) snapshot() []statusEvent {
 // dropped; the stream is capped by WithMaxSubscribers.
 func (m *SessionManager) EventsHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		flusher, ok := w.(http.Flusher)
-		if !ok {
+		// Flush through a ResponseController so the stream works behind
+		// middleware that wraps the ResponseWriter (an access log, security
+		// headers): unlike a direct w.(http.Flusher) assertion, it follows the
+		// Unwrap chain. Probe support up front with the same chain walk so we can
+		// 500 before committing a status — a probe Flush() before the headers are
+		// written would implicitly send a 200 and drop the SSE headers below.
+		if !supportsFlush(w) {
 			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 			return
 		}
+		rc := http.NewResponseController(w)
 		// Subscribe before the snapshot so a change during the snapshot is
 		// queued (delivered after it) rather than missed.
 		ch, ok := m.subscribe()
@@ -238,9 +244,28 @@ func (m *SessionManager) EventsHandler() http.Handler {
 				return
 			}
 		}
-		flusher.Flush()
-		streamEvents(r.Context(), w, flusher, ch)
+		_ = rc.Flush()
+		streamEvents(r.Context(), w, rc, ch)
 	})
+}
+
+// supportsFlush reports whether w, or any ResponseWriter it unwraps to, supports
+// flushing. It walks the Unwrap chain the way http.ResponseController does, so
+// the SSE stream works behind a ResponseWriter-wrapping middleware whose wrapper
+// implements Unwrap() (e.g. an access-log recorder). It is an upfront probe
+// because a real Flush() before the headers are written would implicitly commit
+// a 200 and drop the event-stream headers.
+func supportsFlush(w http.ResponseWriter) bool {
+	for {
+		if _, ok := w.(http.Flusher); ok {
+			return true
+		}
+		u, ok := w.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return false
+		}
+		w = u.Unwrap()
+	}
 }
 
 // writeSSEHeaders sets the SSE response headers and the 200 status.
@@ -256,7 +281,7 @@ func writeSSEHeaders(w http.ResponseWriter) {
 // streamEvents forwards status events and periodic keepalives to one subscriber
 // until the client disconnects (ctx done) or the subscriber is dropped (channel
 // closed by the hub for falling behind).
-func streamEvents(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, ch <-chan statusEvent) {
+func streamEvents(ctx context.Context, w http.ResponseWriter, rc *http.ResponseController, ch <-chan statusEvent) {
 	keep := time.NewTicker(sseKeepAlive)
 	defer keep.Stop()
 	for {
@@ -264,20 +289,33 @@ func streamEvents(ctx context.Context, w http.ResponseWriter, flusher http.Flush
 		case <-ctx.Done():
 			return
 		case <-keep.C:
-			if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+			if !writeKeepAlive(w, rc) {
 				return
 			}
-			flusher.Flush()
 		case ev, ok := <-ch:
-			if !ok {
+			if !ok || !writeSSEFlush(w, rc, &ev) {
 				return
 			}
-			if !writeSSE(w, &ev) {
-				return
-			}
-			flusher.Flush()
 		}
 	}
+}
+
+// writeKeepAlive emits an SSE keepalive comment and flushes, returning false if
+// the client connection is gone (so the stream loop exits).
+func writeKeepAlive(w http.ResponseWriter, rc *http.ResponseController) bool {
+	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
+		return false
+	}
+	return rc.Flush() == nil
+}
+
+// writeSSEFlush writes one event frame and flushes, returning false if the
+// client connection is gone.
+func writeSSEFlush(w http.ResponseWriter, rc *http.ResponseController, ev *statusEvent) bool {
+	if !writeSSE(w, ev) {
+		return false
+	}
+	return rc.Flush() == nil
 }
 
 // writeSSE writes one event as an SSE data frame. Returns false if the client

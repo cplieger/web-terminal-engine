@@ -91,7 +91,12 @@ describe("render.bind / rebuild (per-tab store swap)", () => {
   it("rebuilds viewport-first: the live-window row paints in the first frame", async () => {
     const s = new LineStore();
     const N = 700; // > MAX_ROWS_PER_FRAME (300)
-    s.applyScroll(scrollMsg(0, Array.from({ length: N }, (_, i) => `h${i}`)));
+    s.applyScroll(
+      scrollMsg(
+        0,
+        Array.from({ length: N }, (_, i) => `h${i}`),
+      ),
+    );
     s.applyScreen(screenMsg(N, [row("LIVE")], [0]));
 
     render.bind(s);

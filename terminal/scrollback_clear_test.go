@@ -3,7 +3,7 @@ package terminal
 import (
 	"testing"
 
-	"github.com/cplieger/web-terminal-engine/vt"
+	"github.com/cplieger/web-terminal-engine/v2/vt"
 )
 
 // TestED3ClearsScrollbackRing verifies that ED3 (CSI 3 J) emitted by the child

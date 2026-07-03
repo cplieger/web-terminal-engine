@@ -6,7 +6,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"github.com/cplieger/web-terminal-engine/vt"
+	"github.com/cplieger/web-terminal-engine/v2/vt"
 )
 
 // assertWireBytes compares a produced wire frame against a hand-laid expected

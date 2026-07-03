@@ -7,7 +7,7 @@ import (
 	"testing"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal-engine/vt"
+	"github.com/cplieger/web-terminal-engine/v2/vt"
 )
 
 // Functional-options API: verify NewHandler applies defaults, each WithX

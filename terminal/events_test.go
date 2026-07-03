@@ -173,3 +173,80 @@ func TestEventsHandlerSubscriberCap(t *testing.T) {
 		t.Fatalf("sub2 status = %d, want 503", resp2.StatusCode)
 	}
 }
+
+// unwrapOnlyWriter mimics an access-log middleware wrapper (web-terminal-server's
+// statusWriter, vibecli's statusRecorder): it exposes the underlying
+// ResponseWriter via Unwrap but does NOT itself implement http.Flusher
+// (embedding the ResponseWriter interface does not promote Flush). It pins that
+// EventsHandler finds the flusher through the Unwrap chain rather than a direct
+// type assertion, which is what makes SSE work behind middleware.
+type unwrapOnlyWriter struct {
+	http.ResponseWriter
+}
+
+func (u unwrapOnlyWriter) Unwrap() http.ResponseWriter { return u.ResponseWriter }
+
+// noFlushWriter is a bare ResponseWriter that supports neither Flush nor Unwrap.
+type noFlushWriter struct{}
+
+func (noFlushWriter) Header() http.Header         { return http.Header{} }
+func (noFlushWriter) Write(b []byte) (int, error) { return len(b), nil }
+func (noFlushWriter) WriteHeader(int)             {}
+
+// TestSupportsFlush pins the Unwrap-chain walk: a direct flusher is supported, a
+// wrapper that only implements Unwrap to a flusher is supported (the case a
+// direct w.(http.Flusher) assertion misses), and a writer with neither is not.
+func TestSupportsFlush(t *testing.T) {
+	rec := httptest.NewRecorder() // implements http.Flusher directly
+	if !supportsFlush(rec) {
+		t.Error("httptest.ResponseRecorder should support flush directly")
+	}
+	if !supportsFlush(unwrapOnlyWriter{rec}) {
+		t.Error("a wrapper that Unwraps to a flusher must be reported as supporting flush")
+	}
+	if supportsFlush(noFlushWriter{}) {
+		t.Error("a writer with neither Flush nor Unwrap must not be reported as supporting flush")
+	}
+}
+
+// TestEventsHandlerFlushesBehindMiddleware is the regression guard for the SSE
+// status stream served behind a ResponseWriter-wrapping middleware. The engine
+// wraps every request in an access-log recorder that implements Unwrap but not
+// Flush; a direct w.(http.Flusher) assertion would fail there and 500. This
+// serves EventsHandler behind exactly such a wrapper and asserts the stream
+// opens (200 + text/event-stream) and delivers the initial sync.
+func TestEventsHandlerFlushesBehindMiddleware(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	wrapped := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.EventsHandler().ServeHTTP(unwrapOnlyWriter{w}, r)
+	})
+	srv := httptest.NewServer(wrapped)
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (a direct flusher assertion would 500 here)", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); ct != "text/event-stream" {
+		t.Fatalf("Content-Type = %q, want text/event-stream", ct)
+	}
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		if line := sc.Text(); strings.HasPrefix(line, "data:") && strings.Contains(line, id) {
+			return // stream flushed the initial sync through the middleware
+		}
+	}
+	t.Fatalf("SSE stream delivered no data behind middleware (scan err: %v)", sc.Err())
+}

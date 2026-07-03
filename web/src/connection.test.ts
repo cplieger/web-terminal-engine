@@ -353,14 +353,14 @@ describe("connection: per-session resume state (tab switch)", () => {
   // counters, boot-epoch), so a switch must not replay one tab's unacked bytes
   // onto another or fire a false server-restart reset (design sections 5, 8, 18).
   let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
-  let onServerRestart: ReturnType<typeof vi.fn>;
+  let onServerRestart: ReturnType<typeof vi.fn<() => void>>;
 
   beforeEach(() => {
     allMockWebSockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
     onMessage = vi.fn<(msg: ServerMessage) => void>();
-    onServerRestart = vi.fn();
+    onServerRestart = vi.fn<() => void>();
     init({
       onMessage,
       onOpen: () => {

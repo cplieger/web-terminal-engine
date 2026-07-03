@@ -16,11 +16,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 
-import {
-  connectStatusStream,
-  type EventSourceLike,
-  type SessionStatus,
-} from "./status-stream.js";
+import { connectStatusStream, type EventSourceLike, type SessionStatus } from "./status-stream.js";
 
 // FakeEventSource records registered listeners and lets a test dispatch events
 // synchronously. It mirrors only the surface connectStatusStream uses.

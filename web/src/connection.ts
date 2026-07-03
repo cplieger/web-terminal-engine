@@ -40,20 +40,58 @@ let lastSentCols = 0;
 let lastSentRows = 0;
 let wsPath = "/ws";
 
-// Resume-protocol state. sessionId persists across iOS tab-suspend/reload
-// via sessionStorage. Without this persistence, an iOS Safari tab unload
-// (which Safari does aggressively when the user backgrounds the tab) and
-// subsequent reconstruction from history triggers a fresh JS module load
-// → new sessionId → server treats it as a new session → resumeAck.received
-// returns 0 → applyAck(0) doesn't trim the outbox → retransmitOutbox sends
-// every queued chunk again, causing the duplicate-message-resend bug.
+// --- Per-session resume state (the switching cache's connection half) ---
+//
+// Each server session carries its own reliable-input accounting: an outbox of
+// unacked bytes, byte counters, and the last server boot-epoch it saw. Scoping
+// this per session (rather than one module-global set) is what lets a tab switch
+// reconnect to a different session without replaying the previous tab's unacked
+// bytes onto it and without firing a false server-restart reset, because each
+// session's epoch is compared only against its own bootEpoch (design section 8).
+interface ResumeState {
+  id: string; // server session id: both the routing id (?session=) and the resume id
+  bytesSent: number; // total bytes ever passed to sendBinary for this session
+  bytesAcked: number; // confirmed by server inputAck/resumeAck
+  outbox: Uint8Array[]; // unacked chunks (sum of lengths = bytesSent - bytesAcked)
+  outboxBytes: number; // running sum of outbox chunk lengths; keeps applyAck O(n) not O(n²)
+  lastServerEpoch: number | null; // process-start nanos last seen for this session
+}
+
+const sessions = new Map<string, ResumeState>();
+// The session the live socket currently serves. null until the first connect or
+// setSession; the unmanaged single-terminal path lazily creates a default
+// session with a sessionStorage-backed id.
+let activeId: string | null = null;
+// managed = a consumer selected sessions explicitly via setSession, so the WS URL
+// carries ?session=<id>. Unmanaged keeps the bare wsPath and a sessionStorage id,
+// preserving the original single-terminal behavior and its iOS-resume semantics
+// (sessionStorage survives iOS tab-suspend/BFCache, so an unmanaged reload
+// resumes rather than orphaning its outbox). A tabbed shell is managed; it
+// rebuilds tabs from GET /api/sessions on reload (section 17), so it needs no
+// client-side id persistence.
+let managed = false;
+
 const SESSION_ID_KEY = "vterm-session-id";
-const sessionId = loadOrCreateSessionId();
-let bytesSent = 0; // total bytes ever passed to sendBinary
-let bytesAcked = 0; // confirmed by server inputAck/resumeAck
-const outbox: Uint8Array[] = []; // chunks of unacked bytes (sum = bytesSent - bytesAcked)
-let outboxBytes = 0; // running sum of outbox chunk lengths; keeps applyAck O(n) instead of O(n²)
-let lastServerEpoch: number | null = null; // process-start nanos of the last connected server
+
+function newResumeState(id: string): ResumeState {
+  return { id, bytesSent: 0, bytesAcked: 0, outbox: [], outboxBytes: 0, lastServerEpoch: null };
+}
+
+function ensureState(id: string): ResumeState {
+  let s = sessions.get(id);
+  if (s === undefined) {
+    s = newResumeState(id);
+    sessions.set(id, s);
+  }
+  return s;
+}
+
+// activeState returns the ResumeState the live socket serves, lazily creating
+// the default (unmanaged) session from a sessionStorage-backed id on first use.
+function activeState(): ResumeState {
+  activeId ??= loadOrCreateSessionId();
+  return ensureState(activeId);
+}
 
 // --- Client-side liveness (bug 2 defense-in-depth) ---
 //
@@ -181,17 +219,18 @@ export function init(callbacks: Callbacks): void {
  * buffer reuse.
  */
 export function sendBinary(data: Uint8Array): boolean {
-  if (outboxBytes + data.length > MAX_OUTBOX_BYTES) {
+  const st = activeState();
+  if (st.outboxBytes + data.length > MAX_OUTBOX_BYTES) {
     cb?.onOutboxFull?.();
     return false;
   }
-  // Always go through the outbox. Bytes leave it only when the server
-  // explicitly acks them — guarantees correct retransmission after a
+  // Always go through the active session's outbox. Bytes leave it only when the
+  // server explicitly acks them — guarantees correct retransmission after a
   // network blip even if ws.send() reported success.
   const copy = new Uint8Array(data); // defensive copy (caller may reuse buffer)
-  outbox.push(copy);
-  outboxBytes += copy.length;
-  bytesSent += copy.length;
+  st.outbox.push(copy);
+  st.outboxBytes += copy.length;
+  st.bytesSent += copy.length;
   if (connState.status === "connected") {
     connState.sock.send(copy.buffer.slice(copy.byteOffset, copy.byteOffset + copy.byteLength));
   }
@@ -218,40 +257,37 @@ export function sendResize(): void {
   sendControl({ type: "resize", cols, rows });
 }
 
-// applyAck drops chunks from the front of the outbox until the
-// running total of unacked bytes matches (bytesSent - newAck). Runs
-// in O(chunks_dropped) by tracking outboxBytes incrementally rather
-// than re-summing on every loop iteration.
-function applyAck(received: number): void {
-  if (received <= bytesAcked) {
+// applyAck drops chunks from the front of the session's outbox until the
+// running total of unacked bytes matches (bytesSent - newAck). Runs in
+// O(chunks_dropped) by tracking outboxBytes incrementally rather than
+// re-summing on every loop iteration.
+function applyAck(st: ResumeState, received: number): void {
+  if (received <= st.bytesAcked) {
     return;
   }
-  bytesAcked = Math.min(received, bytesSent);
-  const targetUnacked = bytesSent - bytesAcked;
-  while (outbox.length > 0 && outboxBytes > targetUnacked) {
+  st.bytesAcked = Math.min(received, st.bytesSent);
+  const targetUnacked = st.bytesSent - st.bytesAcked;
+  while (st.outbox.length > 0 && st.outboxBytes > targetUnacked) {
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- length checked above
-    const head = outbox[0]!;
-    const dropFromHead = outboxBytes - targetUnacked;
+    const head = st.outbox[0]!;
+    const dropFromHead = st.outboxBytes - targetUnacked;
     if (head.length <= dropFromHead) {
-      outbox.shift();
-      outboxBytes -= head.length;
+      st.outbox.shift();
+      st.outboxBytes -= head.length;
     } else {
-      outbox[0] = head.subarray(dropFromHead);
-      outboxBytes -= dropFromHead;
+      st.outbox[0] = head.subarray(dropFromHead);
+      st.outboxBytes -= dropFromHead;
       break;
     }
   }
 }
 
-// On reconnect, after sending the resume control message and getting
-// resumeAck, replay anything still in the outbox. The server has
-// adjusted bytesAcked already — only unacked bytes remain.
-function retransmitOutbox(): void {
-  if (connState.status !== "connected") {
-    return;
-  }
-  for (const chunk of outbox) {
-    connState.sock.send(
+// On reconnect, after sending the resume control message and getting resumeAck,
+// replay anything still in the session's outbox over its (now open) socket. The
+// server has adjusted bytesAcked already — only unacked bytes remain.
+function retransmitOutbox(sock: WebSocket, st: ResumeState): void {
+  for (const chunk of st.outbox) {
+    sock.send(
       chunk.buffer.slice(chunk.byteOffset, chunk.byteOffset + chunk.byteLength) as ArrayBuffer,
     );
   }
@@ -330,17 +366,11 @@ function heartbeatTick(): void {
   }
 }
 
-export function reconnectNow(): void {
-  // Unconditional teardown. On iOS wake (visibilitychange + pageshow), the
-  // socket frequently reads OPEN/"connected" for a while but is actually a
-  // zombie — the OS froze it during sleep and frames printed meanwhile never
-  // arrive. The old early-return on "connected" trusted that stale state and
-  // skipped the reconnect, which is exactly why content printed during sleep
-  // stayed missing until a manual refresh (bug 2). So we never trust the
-  // current state on a wake: abort + close whatever socket exists and
-  // reconnect. The resume protocol (by absolute index) then backfills exactly
-  // the missed lines, so a reconnect over a still-healthy socket is a cheap,
-  // duplicate-free no-op rather than a risk.
+// teardown aborts and closes the live socket (if any) and stops the heartbeat
+// and any scheduled reconnect, leaving the module disconnected. It never touches
+// per-session resume state, so a later connect() resumes cleanly. Shared by
+// reconnectNow (reconnects after) and disconnect/forgetSession (do not).
+function teardown(): void {
   if (connState.status === "connecting" || connState.status === "connected") {
     // Abort BEFORE close: aborting detaches all listeners on the existing
     // sock, so frames arriving between close() and the close handshake aren't
@@ -355,7 +385,62 @@ export function reconnectNow(): void {
   stopHeartbeat();
   cancelScheduledReconnect();
   connState = { status: "disconnected" };
+}
+
+export function reconnectNow(): void {
+  // Unconditional teardown. On iOS wake (visibilitychange + pageshow), the
+  // socket frequently reads OPEN/"connected" for a while but is actually a
+  // zombie — the OS froze it during sleep and frames printed meanwhile never
+  // arrive. The old early-return on "connected" trusted that stale state and
+  // skipped the reconnect, which is exactly why content printed during sleep
+  // stayed missing until a manual refresh (bug 2). So we never trust the
+  // current state on a wake: abort + close whatever socket exists and
+  // reconnect. The resume protocol (by absolute index) then backfills exactly
+  // the missed lines, so a reconnect over a still-healthy socket is a cheap,
+  // duplicate-free no-op rather than a risk.
+  teardown();
   connect();
+}
+
+/**
+ * setSession switches the live socket to a different server session, keeping
+ * every session's resume state intact (design section 5, the switch). The
+ * current socket is torn down (its outbox and byte counters preserved for a
+ * later switch back) and a fresh socket connects to `id` with its own resume
+ * state, sending `?session=id`. Calling this marks the module "managed": the WS
+ * URL then carries the session id. A no-op when `id` is already the active,
+ * connected session.
+ */
+export function setSession(id: string): void {
+  managed = true;
+  ensureState(id);
+  if (id === activeId && (connState.status === "connected" || connState.status === "connecting")) {
+    return; // already serving this session
+  }
+  activeId = id;
+  reconnectNow();
+}
+
+/**
+ * forgetSession drops a session's resume state (on tab close, design section 17).
+ * If it was the active session, the live socket is torn down without
+ * reconnecting; the shell then selects another tab via setSession.
+ */
+export function forgetSession(id: string): void {
+  sessions.delete(id);
+  if (id === activeId) {
+    activeId = null;
+    teardown();
+  }
+}
+
+/**
+ * disconnect tears down the live socket without reconnecting. Per-session resume
+ * state is kept, so a later setSession/connect resumes cleanly. Used when the
+ * shell has no active tab to show (e.g. the last tab closed).
+ */
+export function disconnect(): void {
+  teardown();
 }
 
 export function connect(): void {
@@ -384,7 +469,18 @@ export function connect(): void {
 
   cb?.onConnecting?.();
 
-  const sock = new WebSocket(wsURL(location.protocol, location.host, wsPath));
+  // The resume state this socket serves, captured for the socket's lifetime.
+  // A switch aborts this socket's listeners, so even a late frame is handled
+  // against the session it was opened for, never whoever is active now.
+  const st = activeState();
+  let url = wsURL(location.protocol, location.host, wsPath);
+  if (managed) {
+    // Route the socket to this session (SessionManager's WebSocketHandler
+    // dispatches on ?session=). The unmanaged single-terminal path keeps the
+    // bare wsPath, matching resume purely by the resume frame's sessionId.
+    url += (url.includes("?") ? "&" : "?") + "session=" + encodeURIComponent(st.id);
+  }
+  const sock = new WebSocket(url);
   sock.binaryType = "arraybuffer";
 
   // One AbortController governs the lifetime of THIS sock's listeners.
@@ -427,8 +523,8 @@ export function connect(): void {
       sock.send(
         controlFrame({
           type: "resume",
-          sessionId,
-          sentBytes: bytesSent,
+          sessionId: st.id,
+          sentBytes: st.bytesSent,
           // Highest absolute line index the client holds (-1 if none). The
           // server replays everything after it, so lines printed while the
           // device slept are backfilled exactly on wake (bug 2), with no
@@ -499,14 +595,14 @@ export function connect(): void {
       // of the previous boot's input). Reset state and notify the UI.
       const epoch = msg.serverEpoch;
       if (epoch !== undefined && epoch !== 0) {
-        if (lastServerEpoch !== null && lastServerEpoch !== epoch) {
-          bytesSent = 0;
-          bytesAcked = 0;
-          outbox.length = 0;
-          outboxBytes = 0;
+        if (st.lastServerEpoch !== null && st.lastServerEpoch !== epoch) {
+          st.bytesSent = 0;
+          st.bytesAcked = 0;
+          st.outbox.length = 0;
+          st.outboxBytes = 0;
           cb?.onServerRestart?.();
         }
-        lastServerEpoch = epoch;
+        st.lastServerEpoch = epoch;
       }
       // Resync guard 8.2.2: hand the server's retained-history bounds to the
       // consumer so it can surface a trim marker when history the client was
@@ -525,16 +621,16 @@ export function connect(): void {
       // since the last successful ack is irrecoverable but at least
       // not duplicated. Skip this branch when bytesSent = 0 (genuine
       // first-connect; received=0 is correct).
-      if (msg.received === 0 && bytesAcked > 0) {
-        bytesSent = 0;
-        bytesAcked = 0;
-        outbox.length = 0;
-        outboxBytes = 0;
+      if (msg.received === 0 && st.bytesAcked > 0) {
+        st.bytesSent = 0;
+        st.bytesAcked = 0;
+        st.outbox.length = 0;
+        st.outboxBytes = 0;
         cb?.onServerRestart?.();
         return;
       }
-      applyAck(msg.received);
-      retransmitOutbox();
+      applyAck(st, msg.received);
+      retransmitOutbox(sock, st);
       return;
     }
     if (msg.type === "modes") {
@@ -549,7 +645,7 @@ export function connect(): void {
         msg.mousePixels,
       );
       if (typeof msg.inputAck === "number") {
-        applyAck(msg.inputAck);
+        applyAck(st, msg.inputAck);
       }
       // Notify the UI so it can react to mode changes (e.g. clear
       // scrollback on alt-screen entry — handled by the caller).
@@ -557,7 +653,7 @@ export function connect(): void {
       return;
     }
     if (typeof msg.inputAck === "number") {
-      applyAck(msg.inputAck);
+      applyAck(st, msg.inputAck);
     }
     cb?.onMessage(msg);
   }

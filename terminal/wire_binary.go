@@ -62,7 +62,7 @@ import (
 	"encoding/binary"
 	"unicode/utf8"
 
-	"github.com/cplieger/web-terminal-engine/vt"
+	"github.com/cplieger/web-terminal-engine/v2/vt"
 )
 
 const (

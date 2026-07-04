@@ -186,8 +186,11 @@ func TestNewHandler_EmptyCommand(t *testing.T) {
 	}
 }
 
-// TestNewHandler_ENVInjection verifies TERM and COLORTERM are injected into
-// the spawned process environment at spawn time (not stored in cfg.env).
+// TestNewHandler_ENVInjection verifies the advertised terminal identity — TERM,
+// COLORTERM, and TERM_PROGRAM(+_VERSION) — is injected into the spawned process
+// environment at spawn time (not stored in cfg.env). TERM_PROGRAM=iTerm.app
+// (>= 3.6.6) is the identity that unlocks OSC 9;4 progress for kiro-cli + Claude
+// Code and DEC 2026 synchronized output; see ensureStarted.
 func TestNewHandler_ENVInjection(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"))
 	if err := h.ensureStarted(80, 24); err != nil {
@@ -195,13 +198,17 @@ func TestNewHandler_ENVInjection(t *testing.T) {
 	}
 	defer h.Shutdown()
 
-	var hasTerm, hasColorterm bool
+	var hasTerm, hasColorterm, hasTermProgram, hasTermProgramVersion bool
 	for _, e := range h.cmd.Env {
-		if strings.HasPrefix(e, "TERM=xterm-256color") {
+		switch {
+		case strings.HasPrefix(e, "TERM=xterm-256color"):
 			hasTerm = true
-		}
-		if strings.HasPrefix(e, "COLORTERM=truecolor") {
+		case strings.HasPrefix(e, "COLORTERM=truecolor"):
 			hasColorterm = true
+		case strings.HasPrefix(e, "TERM_PROGRAM=iTerm.app"):
+			hasTermProgram = true
+		case strings.HasPrefix(e, "TERM_PROGRAM_VERSION="):
+			hasTermProgramVersion = true
 		}
 	}
 	if !hasTerm {
@@ -209,6 +216,12 @@ func TestNewHandler_ENVInjection(t *testing.T) {
 	}
 	if !hasColorterm {
 		t.Fatal("COLORTERM=truecolor not found in cmd.Env")
+	}
+	if !hasTermProgram {
+		t.Fatal("TERM_PROGRAM=iTerm.app not found in cmd.Env")
+	}
+	if !hasTermProgramVersion {
+		t.Fatal("TERM_PROGRAM_VERSION not found in cmd.Env")
 	}
 }
 

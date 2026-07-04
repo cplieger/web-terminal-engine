@@ -376,9 +376,21 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	}
 	cmd := exec.CommandContext(context.Background(), h.command[0], h.command[1:]...) // #nosec G204
 	cmd.Dir = h.cfg.workDir
+	// Advertise a capable, well-known terminal identity so apps enable their
+	// full feature set. TERM/COLORTERM unlock 256-color + truecolor. TERM_PROGRAM
+	// iTerm.app (>= 3.6.6) is the single identity that unlocks OSC 9;4 progress
+	// for BOTH kiro-cli (allowlists iTerm.app/WezTerm/Windows Terminal) and
+	// Claude Code (iTerm.app >= 3.6.6), plus DEC 2026 synchronized output — all
+	// of which this engine implements. Capabilities it does NOT implement (inline
+	// images, the kitty keyboard protocol) are consumed silently and never
+	// mis-rendered, so over-claiming degrades gracefully rather than corrupting
+	// the screen. h.cfg.env is appended last so a consumer's WithEnv can override
+	// any of these (last value wins).
 	env := append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
+		"TERM_PROGRAM=iTerm.app",
+		"TERM_PROGRAM_VERSION=3.6.6",
 	)
 	env = append(env, h.cfg.env...)
 	cmd.Env = env

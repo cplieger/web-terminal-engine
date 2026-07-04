@@ -14,6 +14,12 @@ export interface SessionStatus {
   readonly createdAt: string;
   /** true when the session is gone (closed or reaped); the consumer drops it. */
   readonly removed?: boolean;
+  /** true once the session has emitted a genuine activity signal — OSC 9;4
+   *  progress (kiro-cli, Claude Code, …) or a classified OSC 9 notification.
+   *  Sticky for the session's life. Consumers reveal the per-tab activity dot
+   *  only when this is set; a program that emits no OSC 9 signal (a plain shell)
+   *  keeps its tab dot hidden. */
+  readonly reportsActivity?: boolean;
 }
 
 /** StatusStreamCallbacks are the consumer's hooks. Declared as function-typed

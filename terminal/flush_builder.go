@@ -24,6 +24,7 @@ type flushFrameBuilder struct {
 	prevCurRow      int
 	prevCurCol      int
 	prevMouseMode   uint16
+	prevKbdFlags    uint8
 	prevMouseSGR    bool
 	prevMousePixels bool
 	prevAppCursor   bool
@@ -187,7 +188,8 @@ func (b *flushFrameBuilder) modesStable(screen *vt.Screen) bool {
 		screen.FocusReporting == b.prevFocusReport &&
 		screen.MouseMode == b.prevMouseMode &&
 		screen.AppKeypad == b.prevAppKeypad &&
-		screen.ReverseVideo == b.prevReverseVid
+		screen.ReverseVideo == b.prevReverseVid &&
+		screen.KeyboardFlags() == b.prevKbdFlags
 }
 
 // buildModesPayload returns an encoded modes frame if any mode changed,
@@ -204,8 +206,9 @@ func (b *flushFrameBuilder) buildModesPayload(screen *vt.Screen) []byte {
 	b.prevMouseMode = screen.MouseMode
 	b.prevAppKeypad = screen.AppKeypad
 	b.prevReverseVid = screen.ReverseVideo
+	b.prevKbdFlags = screen.KeyboardFlags()
 	b.modesAnnounced = true
-	return encodeModesMsg(b.prevBracketed, b.prevAppCursor, b.prevMouseSGR, b.prevFocusReport, b.prevAppKeypad, b.prevReverseVid, b.prevMousePixels, b.prevMouseMode)
+	return encodeModesMsg(b.prevBracketed, b.prevAppCursor, b.prevMouseSGR, b.prevFocusReport, b.prevAppKeypad, b.prevReverseVid, b.prevMousePixels, b.prevMouseMode, b.prevKbdFlags)
 }
 
 // titleStable reports whether the screen's title matches the last

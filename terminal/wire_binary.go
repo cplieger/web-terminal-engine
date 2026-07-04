@@ -83,7 +83,13 @@ const (
 	// change surfaces in the logs rather than mis-decoding silently. Bump on
 	// any breaking change to a frame layout or control-message shape. Mirrors
 	// WIRE_PROTOCOL_VERSION in web/src/wire-binary.ts.
-	wireProtocolVersion = 2
+	//
+	// v3: the modes frame gained a trailing kbdFlags byte (kitty keyboard
+	// protocol). The change is decoder-tolerant both ways (an older client
+	// ignores the extra byte; a newer client defaults kbdFlags to 0 for an
+	// older server's shorter frame), but a version mismatch still warns so a
+	// stale bundle that predates kitty support surfaces in the logs.
+	wireProtocolVersion = 3
 
 	// wireAckOffset is the byte offset of the inputAck field in
 	// every server→client frame. Used by withClientAck to patch the
@@ -201,8 +207,12 @@ func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64
 //	     bit 5: reverse video (DECSCNM, DEC ?5h) enabled
 //	     bit 6: SGR-pixels mouse (DEC ?1016h) enabled
 //	[2B] mouseMode (uint16): 0=off, 1000=normal, 1002=button-event, 1003=any-event
-func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo, mousePixels bool, mouseMode uint16) []byte {
-	buf := make([]byte, 0, 12)
+//	[1B] kbdFlags (uint8): kitty keyboard progressive-enhancement flags
+//	     (bit0 disambiguate, bit1 event-types, bit2 alternate-keys; 0 = legacy).
+//	     Added in wire protocol v3; a client decoding a pre-v3 frame defaults it
+//	     to 0.
+func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo, mousePixels bool, mouseMode uint16, kbdFlags uint8) []byte {
+	buf := make([]byte, 0, 13)
 	buf = append(buf, wireMsgModes)
 	// inputAck placeholder (0); withClientAck patches the real per-client value at wireAckOffset.
 	buf = binary.LittleEndian.AppendUint64(buf, 0)
@@ -230,6 +240,7 @@ func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, app
 	}
 	buf = append(buf, flags)
 	buf = binary.LittleEndian.AppendUint16(buf, mouseMode)
+	buf = append(buf, kbdFlags)
 	return buf
 }
 

@@ -399,6 +399,11 @@ func (s *Screen) dispatchEsc(b byte) {
 		s.InAltScreen = false
 		s.savedMainCells = nil
 		s.altCells = nil
+		// RIS clears the kitty keyboard-protocol flags/stacks for both screens
+		// (a hard reset returns keyboard reporting to legacy). DECSTR leaves them
+		// untouched — the protocol is managed by its own CSI-u push/pop.
+		s.mainKbd = kbdProtocol{}
+		s.altKbd = kbdProtocol{}
 		s.specialColors = nil
 		s.BracketedPaste = false
 		s.AppCursorKeys = false

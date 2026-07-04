@@ -643,6 +643,7 @@ export function connect(): void {
         msg.applicationKeypad,
         msg.reverseVideo,
         msg.mousePixels,
+        msg.keyboardFlags,
       );
       if (typeof msg.inputAck === "number") {
         applyAck(st, msg.inputAck);

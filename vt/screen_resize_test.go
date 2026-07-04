@@ -2,18 +2,57 @@ package vt
 
 import "testing"
 
-// TestResizeGrowsAtTop verifies that growing the screen height inserts
-// new empty rows at the TOP of the buffer rather than appending them
-// at the bottom. Existing content keeps its position relative to the
-// cursor (which moves down by the grow amount), and fresh empty space
-// shows up where xterm/iTerm/Terminal.app would put it: above the
-// content, in scrollback territory. The previous append-at-bottom
-// behaviour left empty rows BELOW the cursor, where they remained
-// visible until the host application's SIGWINCH-driven redraw filled them — the
-// "black gap between content and the input bar after iPhone → iPad
-// switch" symptom that motivated this change.
-func TestResizeGrowsAtTop(t *testing.T) {
+// TestResizeGrowsAtBottomNormalScreen verifies that growing the height of a
+// NORMAL screen (a line-oriented shell, not the alt-screen) appends the new
+// empty rows at the BOTTOM and leaves existing output — and the cursor —
+// anchored at the TOP, the way xterm/iTerm/Terminal.app show a shell. This is
+// what keeps a fresh bash prompt at the top of the page: the PTY starts at
+// defaultRows and the first client resize grows it, so prepending at the top
+// here would strand the prompt in the middle with blank rows above it.
+func TestResizeGrowsAtBottomNormalScreen(t *testing.T) {
 	s := New(5, 10)
+	// Mark the original content so we can locate it after resize.
+	for x := range s.Width {
+		s.Cells[0][x].Ch = 'A'
+		s.Cells[4][x].Ch = 'E'
+	}
+	s.curY = 4 // cursor on the last row
+
+	s.Resize(10, 10)
+
+	if s.Height != 10 {
+		t.Fatalf("Height = %d, want 10", s.Height)
+	}
+	// Original content stays put: row 0 and row 4 are unchanged.
+	if s.Cells[0][0].Ch != 'A' {
+		t.Errorf("expected 'A' to stay at row 0 col 0 after grow, got %q", s.Cells[0][0].Ch)
+	}
+	if s.Cells[4][0].Ch != 'E' {
+		t.Errorf("expected 'E' to stay at row 4 col 0 after grow, got %q", s.Cells[4][0].Ch)
+	}
+	// Cursor stays on its row (no downward shift on a normal-screen grow).
+	if s.curY != 4 {
+		t.Errorf("curY = %d, want 4 (unchanged on a normal-screen grow)", s.curY)
+	}
+	// Newly-appended rows at the bottom should be empty.
+	for y := 5; y < 10; y++ {
+		for x := range s.Width {
+			if s.Cells[y][x].Ch != 0 && s.Cells[y][x].Ch != ' ' {
+				t.Errorf("row %d col %d should be empty, got %q", y, x, s.Cells[y][x].Ch)
+			}
+		}
+	}
+}
+
+// TestResizeGrowsAtTopAltScreen verifies that growing the height while in the
+// ALT screen (a full-screen TUI like kiro-cli) prepends the new rows at the TOP
+// and moves the cursor down with the content, so the existing screen stays
+// pinned to the bottom until the app's SIGWINCH-driven redraw lands. This is
+// the "black gap between content and the input bar after an iPhone → iPad
+// switch" fix, and it must survive the normal-screen change above.
+func TestResizeGrowsAtTopAltScreen(t *testing.T) {
+	s := New(5, 10)
+	s.InAltScreen = true
 	// Mark the original content so we can locate it after resize.
 	for x := range s.Width {
 		s.Cells[0][x].Ch = 'A'
@@ -28,10 +67,10 @@ func TestResizeGrowsAtTop(t *testing.T) {
 	}
 	// Original row 0 should now be at row 5, original row 4 at row 9.
 	if s.Cells[5][0].Ch != 'A' {
-		t.Errorf("expected 'A' at row 5 col 0 after grow, got %q", s.Cells[5][0].Ch)
+		t.Errorf("expected 'A' at row 5 col 0 after alt-screen grow, got %q", s.Cells[5][0].Ch)
 	}
 	if s.Cells[9][0].Ch != 'E' {
-		t.Errorf("expected 'E' at row 9 col 0 after grow, got %q", s.Cells[9][0].Ch)
+		t.Errorf("expected 'E' at row 9 col 0 after alt-screen grow, got %q", s.Cells[9][0].Ch)
 	}
 	// Cursor should have moved down by the grow amount.
 	if s.curY != 9 {

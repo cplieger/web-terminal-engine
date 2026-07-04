@@ -33,8 +33,9 @@ func goldenFrames() map[string][]byte {
 		"scroll": encodeScrollMsg(0, 50, [][]vt.WireRun{row("h0"), row("h1")}),
 		// resumeAck: ack=7, epoch, committed=200, oldest=10.
 		"resumeack": encodeResumeAck(7, 1234567890, 200, 10),
-		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002.
-		"modes": encodeModesMsg(true, false, true, false, false, true, false, 1002),
+		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002,
+		// kitty disambiguate flag (1).
+		"modes": encodeModesMsg(true, false, true, false, false, true, false, 1002, 1),
 		"title": encodeTitleMsg(0, "hello world"),
 		"pong":  encodePongMsg(),
 	}

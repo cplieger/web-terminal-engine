@@ -600,7 +600,7 @@ func TestDispatchFrame_modesPayloadIsWritten(t *testing.T) {
 
 	frame := &flushFrame{
 		clients:      map[*websocket.Conn]uint64{server: 0},
-		modesPayload: encodeModesMsg(true, false, false, false, false, false, false, 0),
+		modesPayload: encodeModesMsg(true, false, false, false, false, false, false, 0, 0),
 		screenHeight: 1,
 	}
 	h.dispatchFrame(frame)

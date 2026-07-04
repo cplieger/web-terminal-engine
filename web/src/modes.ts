@@ -23,6 +23,9 @@ let mouseSGR = false;
 let mousePixels = false; // DEC 1016: report pixel coords instead of cell coords
 let focusReporting = false;
 let reverseVideo = false;
+// Kitty keyboard progressive-enhancement flags (bit0 disambiguate, bit1
+// event-types, bit2 alternate-keys). 0 = protocol disabled (legacy encoding).
+let keyboardFlags = 0;
 
 /**
  * Update the cached mode state. Called by the consumer whenever the server
@@ -38,6 +41,7 @@ export function setModes(
   appKeypad?: boolean,
   revVideo?: boolean,
   mPixels?: boolean,
+  kbdFlags?: number,
 ): void {
   bracketedPaste = bracketed;
   applicationCursor = appCursor;
@@ -58,6 +62,9 @@ export function setModes(
   }
   if (mPixels !== undefined) {
     mousePixels = mPixels;
+  }
+  if (kbdFlags !== undefined) {
+    keyboardFlags = kbdFlags;
   }
 }
 
@@ -103,4 +110,14 @@ export function isApplicationKeypad(): boolean {
 /** True when the server has DEC 5 (reverse video / DECSCNM) enabled. */
 export function isReverseVideo(): boolean {
   return reverseVideo;
+}
+
+/**
+ * Kitty keyboard progressive-enhancement flags currently in effect (bit0
+ * disambiguate, bit1 report-event-types, bit2 report-alternate-keys). 0 means
+ * the protocol is disabled and keys use legacy encoding. Read by keyboard.ts to
+ * choose between legacy and kitty CSI-u encoding.
+ */
+export function getKeyboardFlags(): number {
+  return keyboardFlags;
 }

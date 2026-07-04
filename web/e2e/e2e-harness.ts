@@ -34,6 +34,7 @@ export async function bundleEngine(): Promise<string> {
     stdin: {
       contents: `export * as render from "./src/render.js";
 export * as modes from "./src/modes.js";
+export * as keyboard from "./src/keyboard.js";
 export { decodeWireBinary } from "./src/wire-binary.js";`,
       resolveDir: webDir,
       loader: "ts",

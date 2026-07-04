@@ -81,9 +81,15 @@ npm install
 npm run typecheck        # tsgo -p tsconfig.json
 npm run typecheck:tests  # tsgo -p tsconfig.test.json
 npm test                 # vitest --run
+npm run test:e2e         # Playwright (real-browser render + keyboard); needs `npx playwright install chromium` once
 npx eslint .             # strict typed linting
 npx prettier --check .   # format check (printWidth 100)
 ```
+
+The `e2e/` suite (Playwright, `*.e2e.test.ts`) runs the real modules in headless
+chromium: display conformance against the Go-generated `render-golden` fixtures,
+and the keyboard encoder against real browser key events. It is separate from the
+happy-dom unit tests under `src/`.
 
 ESLint uses the strictest typed-linting preset
 (`strictTypeChecked` + `stylisticTypeChecked`); `tsconfig.json` is equally

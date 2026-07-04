@@ -34,23 +34,25 @@ func TestXTQMODKEYS_NotTreatedAsSGR(t *testing.T) {
 	}
 }
 
-// The kitty keyboard query (CSI ? u) must not move the cursor (it was being
-// routed to restoreCursor) and must NOT be answered (advertising kitty support
-// would break input encoding).
-func TestKittyKeyboardQuery_NoOpNoReply(t *testing.T) {
+// The kitty keyboard query (CSI ? u) must not move the cursor (the marker form
+// must not be routed to restoreCursor) and now answers with the current flags
+// (CSI ? flags u) — the terminal implements the protocol and syncs the flags to
+// the client, so advertising support is correct.
+func TestKittyKeyboardQuery_ReportsFlags(t *testing.T) {
 	s := New(10, 20)
 	s.Write([]byte("\x1b[5;7H")) // cursor to row 4, col 6 (0-based)
 	s.Write([]byte("\x1b[?u"))   // kitty flags query
 	if row, col := s.CursorPos(); row != 4 || col != 6 {
 		t.Errorf("CSI ?u moved cursor to %d,%d, want 4,6", row, col)
 	}
-	if len(s.Response) != 0 {
-		t.Errorf("CSI ?u produced a response %q, want none (must not advertise kitty support)", s.Response)
+	if got, want := string(s.Response), "\x1b[?0u"; got != want {
+		t.Errorf("CSI ?u = %q, want %q (flags 0 initially)", got, want)
 	}
 }
 
-// CSI ? u variants (push/pop/set) are also no-ops.
-func TestKittyKeyboardVariants_NoOp(t *testing.T) {
+// CSI ? u push/pop/set change flag state but must not move the cursor and must
+// not emit a reply (only the query replies).
+func TestKittyKeyboardVariants_NoCursorMoveNoReply(t *testing.T) {
 	for _, seq := range []string{"\x1b[>1u", "\x1b[<1u", "\x1b[=1;1u"} {
 		s := New(10, 20)
 		s.Write([]byte("\x1b[3;3H"))
@@ -59,7 +61,7 @@ func TestKittyKeyboardVariants_NoOp(t *testing.T) {
 			t.Errorf("%q moved cursor to %d,%d, want 2,2", seq, row, col)
 		}
 		if len(s.Response) != 0 {
-			t.Errorf("%q produced a response %q, want none", seq, s.Response)
+			t.Errorf("%q produced a response %q, want none (only the query replies)", seq, s.Response)
 		}
 	}
 }

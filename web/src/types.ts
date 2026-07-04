@@ -133,6 +133,13 @@ export interface ModesMessage {
   mousePixels: boolean;
   /** Mouse tracking: 0=off, 1000=normal, 1002=button-event, 1003=any-event. */
   mouseMode: number;
+  /**
+   * Kitty keyboard progressive-enhancement flags (bit0 disambiguate, bit1
+   * report-event-types, bit2 report-alternate-keys); 0 means the protocol is
+   * disabled and keys use legacy encoding. The keyboard encoder emits kitty
+   * CSI-u sequences for the set flags.
+   */
+  keyboardFlags: number;
   /** Server-confirmed bytesReceived for the input ACK protocol. */
   inputAck?: number;
 }

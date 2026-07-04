@@ -14,7 +14,7 @@
 // vt screen tracks both bracketed paste (?2004) and DECCKM (?1) and
 // emits a modes frame whenever they change.
 
-import { isApplicationCursor, isBracketedPaste } from "./modes.js";
+import { getKeyboardFlags, isApplicationCursor, isBracketedPaste } from "./modes.js";
 
 /** Result of mapping a keyboard event. */
 export type KeyboardResult =
@@ -25,14 +25,21 @@ export type KeyboardResult =
 
 /**
  * KeyboardModes is the mode state `mapKeyboardEvent` reads: DECCKM (application
- * cursor keys) and DECKPAM (application keypad). Passed explicitly so the shared
- * input maps against the active tab's modes and so the mapping is testable
- * without mutating global state. The `modes` module namespace satisfies this
- * structurally; a tabbed shell passes its active session's modes.
+ * cursor keys), DECKPAM (application keypad), and the kitty keyboard
+ * progressive-enhancement flags. Passed explicitly so the shared input maps
+ * against the active tab's modes and so the mapping is testable without mutating
+ * global state. The `modes` module namespace satisfies this structurally; a
+ * tabbed shell passes its active session's modes.
  */
 export interface KeyboardModes {
   isApplicationCursor: () => boolean;
   isApplicationKeypad: () => boolean;
+  /**
+   * Active kitty keyboard flags (bit0 disambiguate; higher bits reserved). When
+   * the disambiguate bit is set, non-text keys are encoded as kitty CSI-u
+   * sequences instead of the legacy encodings.
+   */
+  getKeyboardFlags: () => number;
 }
 
 const ESC = "\x1b";
@@ -126,6 +133,214 @@ const KEYPAD_SS3: Record<string, string | undefined> = {
   Enter: "M",
 };
 
+// -- Kitty keyboard protocol (progressive enhancement) ----------------------
+// When the server reports an active kitty flag (modes.getKeyboardFlags), keys
+// that do NOT produce text are encoded per the kitty protocol instead of the
+// legacy encodings, so an app that enabled the protocol (e.g. Codex via
+// crossterm) gets unambiguous key events. We honor the disambiguate flag (0x1)
+// — report-event-types (0x2) / report-alternate-keys (0x4) / report-all (0x8) /
+// text (0x10) are masked off server-side, so the CSI ?u query reports only 0x1
+// and the encoder never has to emit them.
+//
+// Under disambiguate, text-producing keys still flow through the hidden
+// textarea as text (this encoder returns "ignore" for them), matching both the
+// spec (text keys stay text under 0x1) and our IME/composition model. Only
+// Escape, ctrl/alt/meta combinations, and functional keys are re-encoded.
+
+/** Kitty progressive-enhancement flag bits (mirror vt/kitty.go). */
+const KITTY_DISAMBIGUATE = 1;
+
+// Functional keys encoded as CSI 1;{mod}{letter} (the 1;{mod} is omitted when
+// unmodified). Under kitty these use the CSI form (legacy uses SS3 for F1-F4)
+// and even under DECCKM. F3 is deliberately absent — it has no letter form in
+// the kitty table (CSI R collides with the Cursor Position Report), so it goes
+// in KITTY_TILDE as 13 instead. Do not add F3 here.
+const KITTY_LETTER: Record<string, string | undefined> = {
+  ArrowUp: "A",
+  ArrowDown: "B",
+  ArrowRight: "C",
+  ArrowLeft: "D",
+  Home: "H",
+  End: "F",
+  F1: "P",
+  F2: "Q",
+  F4: "S",
+};
+// Functional keys encoded as CSI {num};{mod}~ (the ;{mod} omitted when unmodified).
+const KITTY_TILDE: Record<string, number | undefined> = {
+  Insert: 2,
+  Delete: 3,
+  PageUp: 5,
+  PageDown: 6,
+  F3: 13, // no letter form — CSI R conflicts with the cursor-position report
+  F5: 15,
+  F6: 17,
+  F7: 18,
+  F8: 19,
+  F9: 20,
+  F10: 21,
+  F11: 23,
+  F12: 24,
+};
+
+// US-layout base (unshifted) codepoints for the non-alphanumeric physical keys,
+// keyed by ev.code. Used so a ctrl/alt+shift+symbol event reports the UNSHIFTED
+// key code the spec mandates (e.g. Ctrl+Shift+; is CSI 59;6u using ';'=59, not
+// ':'=58). Letters/digits are handled separately from ev.code; other keys fall
+// back to the case-folded ev.key.
+const KITTY_CODE_BASE: Record<string, number | undefined> = {
+  Semicolon: 59, // ;
+  Equal: 61, // =
+  Comma: 44, // ,
+  Minus: 45, // -
+  Period: 46, // .
+  Slash: 47, // /
+  Backquote: 96, // `
+  BracketLeft: 91, // [
+  Backslash: 92, // \
+  BracketRight: 93, // ]
+  Quote: 39, // '
+};
+
+// Keypad NON-TEXT keys under disambiguate, keyed by ev.key (the key's current
+// function — NumLock flips a numpad key between its text digit, which stays text
+// under 0x1, and these navigation functions). ev.code identifies it as a keypad
+// key. Per the spec these get dedicated KP_* codes (57414-57427) so an app can
+// tell them apart from the main navigation keys. NumpadEnter is included as
+// KP_ENTER (57414) — it is a distinct key, NOT the legacy-byte main Enter.
+// KP_BEGIN (Numpad5, NumLock off -> "Clear") is emitted as 57427 in the `u`
+// form: both kitty and crossterm decode `CSI 57427 u`, whereas the spec's
+// alternate `CSI E` letter form is kitty-only (crossterm/ratatui can't parse it).
+// The KP_ DIGIT/operator codes (57399-57416) are deliberately absent — they are
+// a report-all (0x8) feature; under 0x1 a NumLock-on numpad digit is plain text.
+const KITTY_KEYPAD: Record<string, number | undefined> = {
+  ArrowLeft: 57417, // KP_LEFT
+  ArrowRight: 57418, // KP_RIGHT
+  ArrowUp: 57419, // KP_UP
+  ArrowDown: 57420, // KP_DOWN
+  PageUp: 57421, // KP_PAGE_UP
+  PageDown: 57422, // KP_PAGE_DOWN
+  Home: 57423, // KP_HOME
+  End: 57424, // KP_END
+  Insert: 57425, // KP_INSERT
+  Delete: 57426, // KP_DELETE
+  Clear: 57427, // KP_BEGIN
+  Enter: 57414, // KP_ENTER
+};
+
+/** CSI 1;{mod}{letter}, omitting `1;{mod}` when there are no modifiers. */
+function kittyLetterSeq(letter: string, ev: KeyboardEvent): string {
+  const m = modifiersDigit(ev);
+  return m === 1 ? `${ESC}[${letter}` : `${ESC}[1;${m}${letter}`;
+}
+/** CSI {num};{mod}~, omitting `;{mod}` when there are no modifiers. */
+function kittyTildeSeq(num: number, ev: KeyboardEvent): string {
+  const m = modifiersDigit(ev);
+  return m === 1 ? `${ESC}[${num}~` : `${ESC}[${num};${m}~`;
+}
+/** CSI {num};{mod}u, omitting `;{mod}` when there are no modifiers. */
+function kittyUSeq(num: number, ev: KeyboardEvent): string {
+  const m = modifiersDigit(ev);
+  return m === 1 ? `${ESC}[${num}u` : `${ESC}[${num};${m}u`;
+}
+
+/** True when any modifier (ctrl / alt / meta / shift) is held. */
+function anyModifier(ev: KeyboardEvent): boolean {
+  return ev.ctrlKey || ev.altKey || ev.metaKey || ev.shiftKey;
+}
+
+/**
+ * The kitty "unicode-key-code": the UNSHIFTED (lower-case / base-layout)
+ * codepoint of the key. Letters and digits are read from ev.code (the physical
+ * key), so a composed Alt/Option character on macOS still maps to its base key;
+ * other single-character keys fall back to the case-folded ev.key.
+ */
+function kittyKeyCodepoint(ev: KeyboardEvent): number {
+  const code = ev.code;
+  if (code.length === 4 && code.startsWith("Key")) {
+    return code.charCodeAt(3) + 32; // "KeyA".."KeyZ" -> 'a'..'z'
+  }
+  if (code.length === 6 && code.startsWith("Digit")) {
+    return code.charCodeAt(5); // "Digit0".."Digit9" -> '0'..'9'
+  }
+  const base = KITTY_CODE_BASE[code];
+  if (base !== undefined) {
+    return base; // symbol key -> unshifted base codepoint (spec: use the un-shifted key)
+  }
+  const k = ev.key;
+  return k.length === 1 ? (k.toLowerCase().codePointAt(0) ?? 0) : 0;
+}
+
+/**
+ * Encode a keydown under the kitty disambiguate flag (0x1). Returns "ignore"
+ * for text-producing keys so the hidden textarea still handles typing/IME.
+ * Called only when the flag is active; the modifier-only and local-scroll cases
+ * are handled by the shared preamble in mapKeyboardEvent (which skips its
+ * application-keypad SS3 branch under this flag, so keypad keys reach here).
+ */
+function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
+  const key = ev.key;
+
+  // Keypad NON-TEXT keys (NumLock-off navigation + NumpadEnter) get dedicated
+  // KP_* codes so an app can distinguish them from the main keys. Detected by
+  // ev.code (Numpad*); the specific code is chosen by ev.key. Text keypad keys
+  // (NumLock-on digits/operators) are NOT intercepted — they fall through to the
+  // printable path below (text when unmodified; the ASCII-codepoint CSI-u form
+  // when a ctrl/alt/meta modifier suppresses the text), because KP_ digit codes
+  // are a report-all (0x8) feature we don't honor.
+  if (ev.code.startsWith("Numpad")) {
+    const kp = KITTY_KEYPAD[key];
+    if (kp !== undefined) {
+      return { kind: "send", bytes: kittyUSeq(kp, ev) };
+    }
+  }
+
+  const letter = KITTY_LETTER[key];
+  if (letter !== undefined) {
+    return { kind: "send", bytes: kittyLetterSeq(letter, ev) };
+  }
+  const tnum = KITTY_TILDE[key];
+  if (tnum !== undefined) {
+    return { kind: "send", bytes: kittyTildeSeq(tnum, ev) };
+  }
+
+  // Enter / Tab / Backspace keep their legacy bytes when UNMODIFIED (so a user
+  // can still type `reset` if a program leaves the mode on after crashing);
+  // with modifiers they take the disambiguated CSI-u form.
+  if (key === "Enter") {
+    return { kind: "send", bytes: anyModifier(ev) ? kittyUSeq(13, ev) : "\r" };
+  }
+  if (key === "Tab") {
+    return { kind: "send", bytes: anyModifier(ev) ? kittyUSeq(9, ev) : "\t" };
+  }
+  if (key === "Backspace") {
+    return { kind: "send", bytes: anyModifier(ev) ? kittyUSeq(127, ev) : DEL };
+  }
+  if (key === "Escape") {
+    return { kind: "send", bytes: kittyUSeq(27, ev) };
+  }
+
+  // Single-character keys: text stays text (deferred to the textarea) UNLESS a
+  // ctrl/alt/meta modifier is held, in which case the legacy encoding is
+  // ambiguous (Ctrl+I == Tab, Alt+x == ESC x, …) so we send the CSI-u form with
+  // the unshifted codepoint.
+  if (key.length === 1) {
+    if (ev.ctrlKey || ev.altKey || ev.metaKey) {
+      const cp = kittyKeyCodepoint(ev);
+      if (cp > 0) {
+        return { kind: "send", bytes: kittyUSeq(cp, ev) };
+      }
+    }
+    return { kind: "ignore" };
+  }
+  return { kind: "ignore" };
+}
+
+/** True when the kitty disambiguate flag is active in the global mode state. */
+function kittyDisambiguateActive(): boolean {
+  return (getKeyboardFlags() & KITTY_DISAMBIGUATE) !== 0;
+}
+
 /**
  * mapKeyboardEvent converts a KeyboardEvent into the terminal action
  * to take. Returns "ignore" when the event is purely a modifier press
@@ -156,6 +371,7 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
   // NumpadSubtract, NumpadAdd, NumpadMultiply, NumpadDivide, NumpadEnter).
   if (
     modes.isApplicationKeypad() &&
+    (modes.getKeyboardFlags() & KITTY_DISAMBIGUATE) === 0 &&
     !ev.ctrlKey &&
     !ev.altKey &&
     !ev.metaKey &&
@@ -186,6 +402,15 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
   }
   if (ev.key === "PageDown" && ev.shiftKey && !ev.ctrlKey && !ev.altKey && !ev.metaKey) {
     return { kind: "scroll-down" };
+  }
+
+  // Kitty keyboard protocol: once the app enables the disambiguate flag, encode
+  // non-text keys as CSI-u sequences (Esc, ctrl/alt combos, functional keys);
+  // text keys still defer to the textarea. Placed after the shared preamble
+  // (modifier-only, application keypad, local scroll) so those behave
+  // identically in both modes.
+  if ((modes.getKeyboardFlags() & KITTY_DISAMBIGUATE) !== 0) {
+    return encodeKittyDisambiguate(ev);
   }
 
   // Cursor keys — CSI form with optional modifiers (CSI 1;{m}{letter}).
@@ -555,6 +780,11 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
   }
 
   function arrowSeq(letter: "A" | "B" | "C" | "D"): string {
+    // Under kitty disambiguate, arrows use the CSI form regardless of DECCKM
+    // (the protocol supersedes cursor-key mode). Otherwise DECCKM chooses SS3.
+    if (kittyDisambiguateActive()) {
+      return `${ESC}[${letter}`;
+    }
     return isApplicationCursor() ? `${ESC}O${letter}` : `${ESC}[${letter}`;
   }
 
@@ -619,7 +849,9 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
   on(escBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
-    opts.send(ESC);
+    // Under kitty disambiguate, Escape is CSI 27 u (so the app never has to
+    // disambiguate a lone ESC byte from the start of an escape sequence).
+    opts.send(kittyDisambiguateActive() ? `${ESC}[27u` : ESC);
   });
 
   function applyStickyCtrl(text: string): string {
@@ -627,8 +859,16 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
       return text;
     }
     if (text.length === 1) {
-      const ctrl = ctrlByteFor(text);
       setCtrlArmed(false);
+      // Under kitty disambiguate, Ctrl+char is the CSI-u form (ctrl modifier =
+      // 5) with the unshifted codepoint, matching the physical-keyboard path.
+      if (kittyDisambiguateActive()) {
+        const cp = text.toLowerCase().codePointAt(0);
+        if (cp !== undefined) {
+          return `${ESC}[${cp};5u`;
+        }
+      }
+      const ctrl = ctrlByteFor(text);
       return ctrl ?? text;
     }
     // Multi-char input (paste, IME commit) — applying Ctrl to a string

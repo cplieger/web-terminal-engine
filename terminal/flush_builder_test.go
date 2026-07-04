@@ -301,3 +301,40 @@ func TestBuild_bellOnlyStillEmitsFrame(t *testing.T) {
 		t.Errorf("bell-only frame changed=%v missing cursor row %d (needed so the screen payload, and its bell bit, is emitted)", frame.changed, curRow)
 	}
 }
+
+// TestBuildModesPayload_kittyKeyboardFlag closes the flag->wire loop: enabling
+// the kitty disambiguate flag on the screen (CSI > 1 u) must make
+// buildModesPayload emit a modes frame whose trailing kbdFlags byte is 1, and an
+// unchanged flag afterwards must be suppressed. (The wire->client half is proven
+// by the cross-language golden test.)
+func TestBuildModesPayload_kittyKeyboardFlag(t *testing.T) {
+	screen := vt.New(5, 20)
+	b := &flushFrameBuilder{}
+
+	// First announce (modes not yet announced) -> emits; kbdFlags byte (index
+	// 12 = type1 + ack8 + flags1 + mouseMode2) starts at 0.
+	first := b.buildModesPayload(screen)
+	if len(first) < 13 {
+		t.Fatalf("first buildModesPayload = %d bytes, want >= 13 (incl. kbdFlags)", len(first))
+	}
+	if first[12] != 0 {
+		t.Errorf("initial kbdFlags byte = %d, want 0", first[12])
+	}
+
+	// App enables the disambiguate flag; the next payload carries kbdFlags = 1.
+	if _, err := screen.Write([]byte("\x1b[>1u")); err != nil {
+		t.Fatalf("screen write: %v", err)
+	}
+	changed := b.buildModesPayload(screen)
+	if len(changed) < 13 {
+		t.Fatalf("after CSI >1u buildModesPayload = %d bytes, want a frame", len(changed))
+	}
+	if changed[12] != 1 {
+		t.Errorf("kbdFlags byte after CSI >1u = %d, want 1", changed[12])
+	}
+
+	// Unchanged -> suppressed (nil).
+	if got := b.buildModesPayload(screen); got != nil {
+		t.Errorf("unchanged buildModesPayload = %d bytes, want nil (suppressed)", len(got))
+	}
+}

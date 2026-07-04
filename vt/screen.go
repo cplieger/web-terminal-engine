@@ -44,6 +44,11 @@ type Screen struct {
 	selectionData    []byte
 	Response         []byte
 	titleStack       []titleEntry
+	// mainKbd/altKbd hold the kitty keyboard-protocol flags and push/pop stack
+	// for the main and alternate screens respectively (see kitty.go). They are
+	// independent per the spec; activeKbd() selects by InAltScreen.
+	mainKbd kbdProtocol
+	altKbd  kbdProtocol
 	altScreenState
 	ParserState
 	CursorState
@@ -262,18 +267,28 @@ func (s *Screen) Resize(rows, cols int) {
 }
 
 // resizeHeight adjusts the buffer to the new row count, preserving content.
-// When growing it prepends empty rows at the TOP rather than appending at the
-// bottom. xterm/iTerm/Terminal.app all behave this way: existing content keeps
-// its position relative to the cursor (which moves down toward the new bottom),
-// and fresh empty space appears above (in scrollback territory).
+// The grow behaviour is mode-aware, because a full-screen app and a
+// line-oriented shell want opposite things:
 //
-// The previous append-at-bottom behaviour put empty rows BELOW the cursor,
-// where they remained visible until the host application's SIGWINCH-driven
-// redraw filled them — a window the user sees as a "black gap between content
-// and the input bar" on iPhone → iPad device switches. Combined with the
-// client's trim of trailing empty rows in render.ts, this makes the gap
-// impossible regardless of whether the host's repaint happens immediately.
-// Shrinking drops rows from the bottom.
+//   - Alt-screen (a TUI like kiro-cli, vim, htop): prepend empty rows at the
+//     TOP and move the cursor down with the content, so the existing screen
+//     stays pinned to the bottom until the app's SIGWINCH-driven repaint lands.
+//     Appending BELOW the cursor instead left empty rows visible until the
+//     repaint — the "black gap between content and the input bar" seen on an
+//     iPhone → iPad device switch. Combined with the client's trim of trailing
+//     empty rows in render.ts, this keeps that gap impossible.
+//
+//   - Normal screen (a shell like bash/sh): append empty rows at the BOTTOM and
+//     leave the cursor on its row, so existing output stays anchored at the TOP
+//     the way xterm/iTerm/Terminal.app show a shell. A shell does not repaint
+//     its scrollback on SIGWINCH, so prepending at the top would strand the
+//     prompt in the middle of the screen with a band of blank rows above it
+//     (the reported "shell shows in the middle of the page" bug): the PTY
+//     starts at defaultRows and the first client resize grows it, so the very
+//     first prompt would otherwise land mid-screen. The client trims the
+//     trailing rows we add here, so there is no bottom gap in this mode either.
+//
+// Shrinking drops rows from the bottom in both modes.
 func (s *Screen) resizeHeight(rows int) {
 	if rows > s.Height {
 		grow := rows - s.Height
@@ -281,11 +296,17 @@ func (s *Screen) resizeHeight(rows int) {
 		for i := range newRows {
 			newRows[i] = makeRow(s.Width, Color{})
 		}
-		s.Cells = append(newRows, s.Cells...)
+		if s.InAltScreen {
+			// Keep the alt-screen content pinned to the bottom; the app
+			// repaints on the SIGWINCH that follows.
+			s.Cells = append(newRows, s.Cells...)
+			s.curY += grow
+		} else {
+			// Keep the shell's output anchored at the top; the cursor stays on
+			// its row and the trailing blanks are trimmed client-side.
+			s.Cells = append(s.Cells, newRows...)
+		}
 		s.Height = rows
-		// Cursor stays at the same content row (which is now further
-		// down in the new larger buffer).
-		s.curY += grow
 	}
 	if rows < s.Height {
 		s.Cells = s.Cells[:rows]

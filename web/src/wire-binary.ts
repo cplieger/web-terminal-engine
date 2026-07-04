@@ -29,8 +29,12 @@ const MSG_CLIPBOARD = 6;
  * (e.g. a stale cached bundle after a breaking change) and warn rather than
  * silently mis-decode. Bump on any breaking change to the binary frame layout
  * or control-message shape. Mirrors `wireProtocolVersion` in wire_binary.go.
+ *
+ * v3: the modes frame gained a trailing kbdFlags byte (kitty keyboard
+ * protocol). Decoding is tolerant of a pre-v3 server (kbdFlags defaults to 0
+ * when the byte is absent), so the bump only drives the mismatch warning.
  */
-export const WIRE_PROTOCOL_VERSION = 2;
+export const WIRE_PROTOCOL_VERSION = 3;
 const MODE_FLAG_BRACKETED_PASTE = 1;
 const MODE_FLAG_APP_CURSOR_KEYS = 2;
 const MODE_FLAG_MOUSE_SGR = 4;
@@ -220,6 +224,10 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
   if (msgType === MSG_MODES) {
     const flags = c.u8();
     const mouseMode = c.u16();
+    // kbdFlags (kitty keyboard protocol) was appended in wire protocol v3.
+    // Read it only if the frame carries it, so a pre-v3 server's shorter frame
+    // decodes with the protocol disabled rather than reading past the buffer.
+    const keyboardFlags = c.off < c.bytes.length ? c.u8() : 0;
     const msg: ModesMessage = {
       type: "modes",
       bracketedPaste: (flags & MODE_FLAG_BRACKETED_PASTE) !== 0,
@@ -230,6 +238,7 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
       reverseVideo: (flags & MODE_FLAG_REVERSE_VIDEO) !== 0,
       mousePixels: (flags & MODE_FLAG_MOUSE_PIXELS) !== 0,
       mouseMode,
+      keyboardFlags,
       inputAck,
     };
     return msg;

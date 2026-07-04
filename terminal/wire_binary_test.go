@@ -154,7 +154,7 @@ func TestEncodeModesMsg_eachFlagSetsItsBit(t *testing.T) {
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			a := c.args
-			buf := encodeModesMsg(a[0], a[1], a[2], a[3], a[4], a[5], false, 0)
+			buf := encodeModesMsg(a[0], a[1], a[2], a[3], a[4], a[5], false, 0, 0)
 			if len(buf) < 12 {
 				t.Fatalf("encodeModesMsg returned %d bytes, want >= 12", len(buf))
 			}
@@ -322,12 +322,12 @@ func TestEncodeClipboardMsg(t *testing.T) {
 // (asserted as the literal bit position, not the modeFlagMousePixels constant).
 func TestEncodeModesMsgMousePixelsFlag(t *testing.T) {
 	const mousePixelsBit = byte(1 << 6) // wire_binary.go modes layout: bit 6
-	buf := encodeModesMsg(false, false, false, false, false, false, true, 0)
+	buf := encodeModesMsg(false, false, false, false, false, false, true, 0, 0)
 	if buf[9]&mousePixelsBit == 0 {
 		t.Errorf("mousePixels flag not set: flags = %08b", buf[9])
 	}
 	// And absent when the param is false.
-	buf2 := encodeModesMsg(false, false, false, false, false, false, false, 0)
+	buf2 := encodeModesMsg(false, false, false, false, false, false, false, 0, 0)
 	if buf2[9]&mousePixelsBit != 0 {
 		t.Errorf("mousePixels flag set when false: flags = %08b", buf2[9])
 	}

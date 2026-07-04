@@ -110,14 +110,22 @@ func (s *Screen) dispatchCSI(final byte) {
 		case '?':
 			s.xtSaveModes()
 		}
-	case 'u': // SCORC — restore cursor. CSI ? u / > u / < u / = u are the
-		// kitty keyboard protocol (query/push/pop/set). We don't implement it;
-		// consume as a no-op and, critically, send NO reply — advertising kitty
-		// support (e.g. answering CSI ? 0 u) would make apps switch to kitty key
-		// encoding the client doesn't produce, breaking input. Silence makes the
-		// app fall back to legacy encoding, which works.
-		if s.privateMarker == 0 {
+	case 'u': // Plain CSI u is SCORC (restore cursor). The private-marker forms
+		// are the kitty keyboard protocol — query (?), push (>), pop (<) and set
+		// (=) the progressive-enhancement flags. The flags are synced to the
+		// client, whose key encoder produces the matching kitty CSI-u sequences,
+		// so advertising support here is safe. See kitty.go.
+		switch s.privateMarker {
+		case 0:
 			s.restoreCursor()
+		case '?': // query current flags -> CSI ? flags u
+			s.reportKeyboardFlags()
+		case '>': // push flags (default 0)
+			s.pushKeyboardFlags(s.paramVal(0, 0))
+		case '<': // pop n entries (default 1)
+			s.popKeyboardFlags(s.paramVal(0, 1))
+		case '=': // set flags with mode (default mode 1)
+			s.setKeyboardFlags(s.paramVal(0, 0), s.paramVal(1, 1))
 		}
 	case 'q': // XTVERSION (CSI > q) — report a generic terminal name so probing
 		// apps get an answer instead of stalling. Kept intentionally generic (no

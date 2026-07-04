@@ -69,6 +69,7 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     expect(m.mouseSGR).toBe(true);
     expect(m.reverseVideo).toBe(true);
     expect(m.mouseMode).toBe(1002);
+    expect(m.keyboardFlags).toBe(1);
   });
 
   it("decodes the title frame", () => {

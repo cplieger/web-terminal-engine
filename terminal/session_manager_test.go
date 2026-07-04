@@ -55,21 +55,6 @@ func TestSessionManagerCreateListClose(t *testing.T) {
 	}
 }
 
-func TestSessionManagerMaxSessions(t *testing.T) {
-	m := NewSessionManager(catFactory, WithMaxSessions(2))
-	t.Cleanup(m.Shutdown)
-
-	if _, err := m.Create(); err != nil {
-		t.Fatalf("Create 1: %v", err)
-	}
-	if _, err := m.Create(); err != nil {
-		t.Fatalf("Create 2: %v", err)
-	}
-	if _, err := m.Create(); err != ErrTooManySessions {
-		t.Fatalf("Create 3 err = %v, want ErrTooManySessions", err)
-	}
-}
-
 // TestSessionManagerReaperOwnershipKeyed is the N4 regression guard: the reaper
 // keys on client presence, not on a per-session socket, so a socketless session
 // is NOT reaped while any client is connected, and all sessions are reaped only
@@ -113,7 +98,7 @@ func (m *SessionManager) forceIdleSince(ts time.Time) {
 }
 
 func TestSessionManagerREST(t *testing.T) {
-	m := NewSessionManager(catFactory, WithMaxSessions(1))
+	m := NewSessionManager(catFactory)
 	t.Cleanup(m.Shutdown)
 	srv := httptest.NewServer(m.RESTHandler())
 	t.Cleanup(srv.Close)
@@ -131,16 +116,6 @@ func TestSessionManagerREST(t *testing.T) {
 	resp.Body.Close()
 	if created.ID == "" {
 		t.Fatal("POST returned empty id")
-	}
-
-	// At the cap, a second POST is 429.
-	resp2, err := http.Post(srv.URL+"/api/sessions", "application/json", nil)
-	if err != nil {
-		t.Fatalf("POST 2: %v", err)
-	}
-	resp2.Body.Close()
-	if resp2.StatusCode != http.StatusTooManyRequests {
-		t.Fatalf("POST at cap status = %d, want 429", resp2.StatusCode)
 	}
 
 	// GET lists the created session.

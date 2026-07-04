@@ -48,17 +48,17 @@ func TestComputeStatusLatchesInput(t *testing.T) {
 
 	// A prompt followed by a needs-input notification: latched input.
 	h.handlePTYData([]byte("Allow? \x1b]9;Permission required\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusInput {
+	if st := m.computeStatus(h, tr); st != StatusInput {
 		t.Fatalf("after notification, status = %q, want %q", st, StatusInput)
 	}
 	// No resume: the latch persists across sweeps.
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusInput {
+	if st := m.computeStatus(h, tr); st != StatusInput {
 		t.Fatalf("latch did not persist, status = %q, want %q", st, StatusInput)
 	}
 	// The turn resumes: an active progress signal (OSC 9;4;3) clears the latch
 	// and reports working.
 	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
+	if st := m.computeStatus(h, tr); st != StatusWorking {
 		t.Fatalf("after resume progress, status = %q, want %q", st, StatusWorking)
 	}
 }
@@ -76,11 +76,11 @@ func TestComputeStatusDoneSupersedesInput(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("\x1b]9;Permission required\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusInput {
+	if st := m.computeStatus(h, tr); st != StatusInput {
 		t.Fatalf("precondition: status = %q, want %q", st, StatusInput)
 	}
 	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusDone {
+	if st := m.computeStatus(h, tr); st != StatusDone {
 		t.Fatalf("done did not supersede input latch; status = %q, want %q", st, StatusDone)
 	}
 }
@@ -99,11 +99,11 @@ func TestComputeStatusWorkingFromProgress(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
+	if st := m.computeStatus(h, tr); st != StatusWorking {
 		t.Fatalf("progress 3: status = %q, want %q", st, StatusWorking)
 	}
 	h.handlePTYData([]byte("\x1b]9;4;0\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusIdle {
+	if st := m.computeStatus(h, tr); st != StatusIdle {
 		t.Fatalf("progress 0 with no latch: status = %q, want %q", st, StatusIdle)
 	}
 }
@@ -121,25 +121,26 @@ func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusDone {
+	if st := m.computeStatus(h, tr); st != StatusDone {
 		t.Fatalf("after done notification: status = %q, want %q", st, StatusDone)
 	}
 	// Persists across a quiet sweep (no progress, no output-driven flip).
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusDone {
+	if st := m.computeStatus(h, tr); st != StatusDone {
 		t.Fatalf("done latch did not persist: status = %q, want %q", st, StatusDone)
 	}
 	// Next turn starts working, clearing the done latch.
 	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
+	if st := m.computeStatus(h, tr); st != StatusWorking {
 		t.Fatalf("next working phase: status = %q, want %q", st, StatusWorking)
 	}
 }
 
-// TestComputeStatusFallbackOutputActivity verifies a program that never reports
-// OSC 9;4 progress (prog == -1) still derives working from recent output, so a
-// plain shell under web-terminal-server keeps a working indicator, then goes
-// idle once quiescent.
-func TestComputeStatusFallbackOutputActivity(t *testing.T) {
+// TestComputeStatusNoWorkingFromOutput verifies a program that never reports
+// OSC 9;4 progress stays idle even while producing output: working now comes
+// ONLY from OSC 9;4, so a plain shell under web-terminal-server never flaps to
+// working merely because it (or the user typing at the prompt) produced bytes.
+// The reveal gate then keeps such a session's tab dot hidden.
+func TestComputeStatusNoWorkingFromOutput(t *testing.T) {
 	m := NewSessionManager(catFactory) // no classifier: a generic shell
 	t.Cleanup(m.Shutdown)
 	id, err := m.Create()
@@ -150,12 +151,44 @@ func TestComputeStatusFallbackOutputActivity(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("some output"))
-	if st := m.computeStatus(h, tr, time.Now()); st != StatusWorking {
-		t.Fatalf("recent output (no progress): status = %q, want %q", st, StatusWorking)
+	if st := m.computeStatus(h, tr); st != StatusIdle {
+		t.Fatalf("output with no OSC 9;4 progress: status = %q, want %q (no output-activity fallback)", st, StatusIdle)
 	}
-	// Well past the working window, with no progress signal, it goes idle.
-	if st := m.computeStatus(h, tr, time.Now().Add(2*workingWindow)); st != StatusIdle {
-		t.Fatalf("quiescent (no progress): status = %q, want %q", st, StatusIdle)
+}
+
+// TestReportsActivitySticky verifies the reportsActivity flag the client uses to
+// reveal the per-tab activity dot: false until an OSC 9;4 signal appears, then
+// sticky true even after the progress is cleared (Progress stays >= 0), so the
+// dot stays revealed while the session idles rather than flickering away.
+func TestReportsActivitySticky(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := handlerOf(t, m, id)
+
+	reports := func() bool {
+		for _, info := range m.List() {
+			if info.ID == id {
+				return info.ReportsActivity
+			}
+		}
+		t.Fatalf("session %s not in List()", id)
+		return false
+	}
+
+	if reports() {
+		t.Fatalf("fresh session (no OSC 9;4) reportsActivity = true, want false")
+	}
+	h.handlePTYData([]byte("\x1b]9;4;3\x07")) // active progress
+	if !reports() {
+		t.Fatalf("after OSC 9;4;3 reportsActivity = false, want true")
+	}
+	h.handlePTYData([]byte("\x1b]9;4;0\x07")) // clear progress
+	if !reports() {
+		t.Fatalf("after clearing progress reportsActivity = false, want true (sticky: Progress stays >= 0)")
 	}
 }
 
@@ -175,7 +208,7 @@ func TestComputeStatusExited(t *testing.T) {
 	for !h.Exited() && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if st := m.computeStatus(h, &statusTracker{}, time.Now()); st != StatusExited {
+	if st := m.computeStatus(h, &statusTracker{}); st != StatusExited {
 		t.Fatalf("status = %q, want %q", st, StatusExited)
 	}
 }

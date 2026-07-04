@@ -21,11 +21,6 @@ const (
 	defaultMaxSubscribers = 32
 	// statusSweepInterval is how often per-session status is recomputed.
 	statusSweepInterval = 250 * time.Millisecond
-	// workingWindow marks a session working when it produced output within it.
-	// This is the fallback only for a program that does not report OSC 9;4
-	// progress; a progress-reporting program (kiro-cli) drives working from
-	// progress instead, so the user typing at the prompt does not read as work.
-	workingWindow = 750 * time.Millisecond
 	// subscriberBuffer bounds a subscriber's pending events; a subscriber that
 	// falls this far behind is dropped rather than blocking the sweep.
 	subscriberBuffer = 64
@@ -38,21 +33,23 @@ const (
 // title. Removed=true signals the session is gone (closed or reaped) so the
 // client drops the tab.
 type statusEvent struct {
-	CreatedAt time.Time `json:"createdAt"`
-	ID        string    `json:"id"`
-	Status    string    `json:"status"`
-	Title     string    `json:"title"`
-	Removed   bool      `json:"removed,omitempty"`
+	CreatedAt       time.Time `json:"createdAt"`
+	ID              string    `json:"id"`
+	Status          string    `json:"status"`
+	Title           string    `json:"title"`
+	Removed         bool      `json:"removed,omitempty"`
+	ReportsActivity bool      `json:"reportsActivity"`
 }
 
 // statusTracker holds the per-session state the status computation needs beyond
 // the handler: the last emitted status/title (to detect changes), the last
 // notification sequence classified, and the latched needs-input/done state.
 type statusTracker struct {
-	lastStatus string
-	lastTitle  string
-	latched    string // "", StatusInput, or StatusDone
-	notifSeen  uint64
+	lastStatus  string
+	lastTitle   string
+	latched     string // "", StatusInput, or StatusDone
+	notifSeen   uint64
+	lastReports bool // last emitted reportsActivity (to detect a false->true flip)
 }
 
 func (m *SessionManager) sweepLoop(ctx context.Context) {
@@ -75,7 +72,6 @@ func (m *SessionManager) sweepLoop(ctx context.Context) {
 // sweep, plus removed events for sessions that vanished. Broadcasting happens
 // outside the lock (see sweepLoop).
 func (m *SessionManager) diffStatuses() []statusEvent {
-	now := time.Now()
 	var events []statusEvent
 	m.mu.Lock()
 	seen := make(map[string]struct{}, len(m.sessions))
@@ -86,18 +82,24 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 			tr = &statusTracker{}
 			m.trackers[id] = tr
 		}
-		status := m.computeStatus(s.handler, tr, now)
+		status := m.computeStatus(s.handler, tr)
 		title := s.handler.Title()
-		if status != tr.lastStatus || title != tr.lastTitle {
+		// reportsActivity is sticky: Progress() stays >= 0 once any OSC 9;4 has
+		// been seen (state 0 is "cleared", not "never seen" = -1), and a latched
+		// notification is the other genuine OSC 9 signal. The client reveals the
+		// tab's activity dot only when this is set.
+		reports := s.handler.Progress() >= 0 || tr.latched != ""
+		if status != tr.lastStatus || title != tr.lastTitle || reports != tr.lastReports {
 			tr.lastStatus = status
 			tr.lastTitle = title
-			events = append(events, statusEvent{ID: id, Status: status, Title: title, CreatedAt: s.createdAt})
+			tr.lastReports = reports
+			events = append(events, statusEvent{ID: id, Status: status, Title: title, CreatedAt: s.createdAt, ReportsActivity: reports})
 		}
 	}
 	for id, tr := range m.trackers {
 		if _, ok := seen[id]; !ok {
 			delete(m.trackers, id)
-			events = append(events, statusEvent{ID: id, Status: StatusExited, Title: tr.lastTitle, Removed: true})
+			events = append(events, statusEvent{ID: id, Status: StatusExited, Title: tr.lastTitle, Removed: true, ReportsActivity: tr.lastReports})
 		}
 	}
 	m.mu.Unlock()
@@ -107,18 +109,19 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 // computeStatus derives a session's status. Callers hold m.mu (it reads the
 // handler and mutates the tracker's latch state). Precedence: exited, then
 // working (OSC 9;4 progress active), then a latched notification state
-// (needs-input or done), then the output-activity fallback for a program that
-// reports no progress, then idle (the default / new-session state).
-func (m *SessionManager) computeStatus(h *Handler, tr *statusTracker, now time.Time) string {
+// (needs-input or done), then idle (the default / new-session / at-rest state).
+// Working comes ONLY from OSC 9;4 progress — never from raw output activity — so
+// a program that reports no progress never flaps to working merely because the
+// user is typing at its prompt (the reveal gate then keeps its dot hidden).
+func (m *SessionManager) computeStatus(h *Handler, tr *statusTracker) string {
 	if h.Exited() {
 		return StatusExited
 	}
 	m.applyNotification(h, tr)
-	// A progress-reporting program (kiro-cli) drives working from its OSC 9;4
-	// progress: an active state (1 value, 3 indeterminate) means the agent is
-	// working. Progress is emitted only while the agent runs, so it does not
-	// flare on the user typing at the prompt the way raw output activity would.
-	// A new working phase supersedes a prior done/needs-input latch.
+	// A progress-reporting program (kiro-cli, Claude Code) drives working from
+	// its OSC 9;4 progress: an active state (1 value, 3 indeterminate) means the
+	// agent is working. A new working phase supersedes a prior done/needs-input
+	// latch.
 	prog := h.Progress()
 	if prog == 1 || prog == 3 {
 		tr.latched = ""
@@ -128,15 +131,6 @@ func (m *SessionManager) computeStatus(h *Handler, tr *statusTracker, now time.T
 	// quiet gap after the turn until the next working phase clears it.
 	if tr.latched != "" {
 		return tr.latched
-	}
-	// Fallback for a program that never reports progress (a plain shell under
-	// web-terminal-server, prog == -1): recent output means working, else idle.
-	// A progress-reporting program at rest (prog >= 0) with no latch stays idle,
-	// the default / new-session state.
-	if prog < 0 {
-		if last := h.LastActivity(); !last.IsZero() && now.Sub(last) < workingWindow {
-			return StatusWorking
-		}
 	}
 	return StatusIdle
 }
@@ -204,10 +198,12 @@ func (m *SessionManager) snapshot() []statusEvent {
 	out := make([]statusEvent, 0, len(m.sessions))
 	for id, s := range m.sessions {
 		status := statusOf(s.handler)
-		if tr := m.trackers[id]; tr != nil && tr.lastStatus != "" {
+		tr := m.trackers[id]
+		if tr != nil && tr.lastStatus != "" {
 			status = tr.lastStatus
 		}
-		out = append(out, statusEvent{ID: id, Status: status, Title: s.handler.Title(), CreatedAt: s.createdAt})
+		reports := s.handler.Progress() >= 0 || (tr != nil && tr.latched != "")
+		out = append(out, statusEvent{ID: id, Status: status, Title: s.handler.Title(), CreatedAt: s.createdAt, ReportsActivity: reports})
 	}
 	return out
 }

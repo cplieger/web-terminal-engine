@@ -5,8 +5,8 @@ package terminal
 // server. Each session is a *Handler (its own process, VT screen, scrollback,
 // and resume state); sessions run continuously whether or not a client is
 // attached. The manager owns creation, lookup, the crypto-random session id
-// (which is both the routing id in /ws?session=<id> and the resume id), a cap on
-// concurrent sessions, and an ownership-keyed idle reaper.
+// (which is both the routing id in /ws?session=<id> and the resume id), and an
+// ownership-keyed idle reaper.
 //
 // Why N plain PTYs and not a terminal multiplexer: nesting under tmux would mean
 // speaking tmux control mode to get per-session chrome, and a full-screen TUI
@@ -19,7 +19,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -27,17 +26,14 @@ import (
 	"time"
 )
 
-// ErrTooManySessions is returned by Create when the manager is at its
-// MaxSessions cap. Handlers translate it to HTTP 429.
-var ErrTooManySessions = errors.New("terminal: too many sessions")
-
 // SessionInfo is the public description of one session, returned by List and
 // carried on the status stream.
 type SessionInfo struct {
-	CreatedAt time.Time `json:"createdAt"`
-	ID        string    `json:"id"`
-	Title     string    `json:"title"`
-	Status    string    `json:"status"`
+	CreatedAt       time.Time `json:"createdAt"`
+	ID              string    `json:"id"`
+	Title           string    `json:"title"`
+	Status          string    `json:"status"`
+	ReportsActivity bool      `json:"reportsActivity"`
 }
 
 // Session status values. The manager computes working/idle/exited from process
@@ -55,18 +51,10 @@ const (
 type ManagerOption func(*managerConfig)
 
 type managerConfig struct {
-	logger      *slog.Logger
-	classifier  func(string) (string, bool)
-	maxSessions int
-	maxSubs     int
-	idleWindow  time.Duration
-}
-
-// WithMaxSessions caps the number of concurrent sessions; Create returns
-// ErrTooManySessions at the cap. Zero (the default) means unlimited, which is
-// only appropriate behind an authenticated, trusted deployment.
-func WithMaxSessions(n int) ManagerOption {
-	return func(c *managerConfig) { c.maxSessions = n }
+	logger     *slog.Logger
+	classifier func(string) (string, bool)
+	maxSubs    int
+	idleWindow time.Duration
 }
 
 // WithIdleReaper enables the ownership-keyed idle reaper: when no client (WS or
@@ -123,7 +111,6 @@ type SessionManager struct {
 	mu            sync.Mutex
 	subsMu        sync.Mutex
 	idleWindow    time.Duration
-	maxSessions   int
 	maxSubs       int
 	activeClients int
 	created       uint64
@@ -146,16 +133,15 @@ func NewSessionManager(factory func(id string) *Handler, opts ...ManagerOption) 
 		cfg.logger = slog.New(slog.DiscardHandler)
 	}
 	m := &SessionManager{
-		factory:     factory,
-		logger:      cfg.logger,
-		sessions:    make(map[string]*session),
-		trackers:    make(map[string]*statusTracker),
-		subs:        make(map[chan statusEvent]struct{}),
-		classifier:  cfg.classifier,
-		idleSince:   time.Now(),
-		idleWindow:  cfg.idleWindow,
-		maxSessions: cfg.maxSessions,
-		maxSubs:     cfg.maxSubs,
+		factory:    factory,
+		logger:     cfg.logger,
+		sessions:   make(map[string]*session),
+		trackers:   make(map[string]*statusTracker),
+		subs:       make(map[chan statusEvent]struct{}),
+		classifier: cfg.classifier,
+		idleSince:  time.Now(),
+		idleWindow: cfg.idleWindow,
+		maxSubs:    cfg.maxSubs,
 	}
 	if m.maxSubs <= 0 {
 		m.maxSubs = defaultMaxSubscribers
@@ -175,13 +161,9 @@ func NewSessionManager(factory func(id string) *Handler, opts ...ManagerOption) 
 }
 
 // Create starts a new session (eagerly spawning its process at a default size)
-// and returns its id. Returns ErrTooManySessions at the cap.
+// and returns its id.
 func (m *SessionManager) Create() (string, error) {
 	m.mu.Lock()
-	if m.maxSessions > 0 && len(m.sessions) >= m.maxSessions {
-		m.mu.Unlock()
-		return "", ErrTooManySessions
-	}
 	id, err := newSessionID()
 	if err != nil {
 		m.mu.Unlock()
@@ -212,11 +194,15 @@ func (m *SessionManager) List() []SessionInfo {
 	m.mu.Lock()
 	out := make([]SessionInfo, 0, len(m.sessions))
 	for _, s := range m.sessions {
+		// reportsActivity mirrors the status stream: sticky once any OSC 9;4
+		// progress has been seen (Progress() >= 0), or a notification latched.
+		tr := m.trackers[s.id]
 		out = append(out, SessionInfo{
-			ID:        s.id,
-			Title:     s.handler.Title(),
-			Status:    statusOf(s.handler),
-			CreatedAt: s.createdAt,
+			ID:              s.id,
+			Title:           s.handler.Title(),
+			Status:          statusOf(s.handler),
+			CreatedAt:       s.createdAt,
+			ReportsActivity: s.handler.Progress() >= 0 || (tr != nil && tr.latched != ""),
 		})
 	}
 	m.mu.Unlock()
@@ -295,10 +281,6 @@ func (m *SessionManager) RESTHandler() http.Handler {
 
 func (m *SessionManager) handleCreate(w http.ResponseWriter, _ *http.Request) {
 	id, err := m.Create()
-	if errors.Is(err, ErrTooManySessions) {
-		http.Error(w, "too many sessions", http.StatusTooManyRequests)
-		return
-	}
 	if err != nil {
 		m.logger.Error("session: create failed", "error", err)
 		http.Error(w, "create failed", http.StatusInternalServerError)

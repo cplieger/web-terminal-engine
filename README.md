@@ -1,6 +1,6 @@
 # web-terminal-engine
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal-engine.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal-engine)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal-engine/v2.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal-engine/v2)
 [![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-engine)](https://www.npmjs.com/package/@cplieger/web-terminal-engine)
 [![JSR](https://jsr.io/badges/@cplieger/web-terminal-engine)](https://jsr.io/@cplieger/web-terminal-engine)
 [![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/web-terminal-engine)](https://github.com/cplieger/web-terminal-engine/blob/main/go.mod)
@@ -15,7 +15,7 @@ A standalone library that bridges a PTY to a browser WebSocket. The Go packages 
 
 ## Install
 
-Go: `go get github.com/cplieger/web-terminal-engine@latest` — TS: `npx jsr add @cplieger/web-terminal-engine` or `npm i @cplieger/web-terminal-engine`
+Go: `go get github.com/cplieger/web-terminal-engine/v2@latest` — TS: `npx jsr add @cplieger/web-terminal-engine` or `npm i @cplieger/web-terminal-engine`
 
 ## Usage
 
@@ -24,7 +24,7 @@ import (
     "log/slog"
     "net/http"
 
-    "github.com/cplieger/web-terminal-engine/terminal"
+    "github.com/cplieger/web-terminal-engine/v2/terminal"
 )
 
 h := terminal.NewHandler(
@@ -55,7 +55,7 @@ if (msg?.type === "screen") render.handleScreen(msg);
 ### Go packages
 
 - **`vt`** — VT100/VT500 screen buffer: `New(rows, cols)`, `Write([]byte)`, `Resize(rows, cols)`, `RenderRowWire(y)`, `DrainScrollback()`, `CursorPos()`, `HoldFlush()`, `ReleaseFlush()`, `IsFlushHeld()`, `RenderViewport()`, `RowString(y)`. Public fields: `Cells`, `Width`, `Height`, `Title`, `MouseMode`, `InAltScreen`, cursor/mode state.
-- **`terminal`** — WebSocket session handler: `NewHandler(command, ...Option)`, `RegisterRoutes(mux)`, `ServeHTTP(w, r)`, `Shutdown()`. Options: `WithWorkDir`, `WithLogger`, `WithEnv`, `WithScrollbackCapacity`, `WithAcceptOptions`, `WithOnProcessExit`. Handles PTY lifecycle, binary wire protocol, reconnect with scrollback replay, adaptive ping.
+- **`terminal`** — WebSocket session handler: `NewHandler(command, ...Option)`, `RegisterRoutes(mux)`, `ServeHTTP(w, r)`, `Shutdown()`. Options: `WithWorkDir`, `WithLogger`, `WithEnv`, `WithScrollbackCapacity`, `WithAcceptOptions`, `WithOnProcessExit`, `WithKeepUnfocused`, `WithTheme`. Handles PTY lifecycle, binary wire protocol, reconnect with scrollback replay, adaptive ping. `SessionManager` (`NewSessionManager`) fronts N PTY-backed sessions with `WebSocketHandler()` (`/ws?session=<id>`), `RESTHandler()` (`/api/sessions`), and `EventsHandler()` (SSE `/api/sessions/events`); status values working/idle/input/done/exited from a pluggable classifier.
 
 ### TypeScript (`web/` — published as `@cplieger/web-terminal-engine` on NPM and JSR)
 
@@ -66,6 +66,7 @@ if (msg?.type === "screen") render.handleScreen(msg);
 - **`modes`** — DEC private mode state (synced from server's `ModesMessage`): `setModes`, `isBracketedPaste`, `isApplicationCursor`, `getMouseMode`, `isMouseSGR`, `isFocusReporting`, `isApplicationKeypad`, `isReverseVideo`.
 - **`decodeWireBinary(buf)`** — Top-level decoder for binary WebSocket frames; returns a `ServerMessage` or `null` for invalid/truncated frames.
 - **`connection`** — Client → server WebSocket lifecycle: socket ownership, exponential-backoff reconnect, and the resume/inputAck reliability layer (outbox + server-restart detection). `init(callbacks)`, `connect`, `sendBinary`, `sendResize`, `reconnectNow`; `wsPath` callback option defaults to `"/ws"`. Decodes frames and applies `modes.setModes` internally, so consumers only dispatch screen/scroll to `render`. Pairs with the Go `terminal` handler's resume protocol. (`controlFrame` / `wsURL` are also exported for advanced use.)
+- **`connectStatusStream`** and the `SessionStatus` / `StatusStream` types: the SSE client for `/api/sessions/events` that drives per-tab status. `LineStore` and `CONTROL_FRAME_PREFIX` are also exported.
 - **Wire types** — `WireRun`, `ScreenMessage`, `ScrollMessage`, `ModesMessage`, `TitleMessage`, `ResumeAckMessage`, `ServerMessage`, `ControlMessage` re-exported from the package root.
 
 ## Wire Protocol

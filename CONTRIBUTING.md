@@ -16,7 +16,9 @@ Three packages, two languages, one wire contract:
 - **`terminal/`** (Go) — the WebSocket session handler. Bridges a PTY
   (`github.com/creack/pty`) to a browser over `github.com/coder/websocket`,
   driving a `vt` screen and adding reconnect, scrollback replay, adaptive
-  ping, and the resume/inputAck reliability layer.
+  ping, and the resume/inputAck reliability layer. `terminal/` also provides
+  `SessionManager` (`session_manager.go`, `events.go`) for the multi-session
+  `/ws?session=`, `/api/sessions`, and status-SSE surface.
 - **`web/`** (TypeScript, published as `@cplieger/web-terminal-engine`) — the browser
   renderer (`render`), keyboard mapper (`keyboard`), mouse/focus encoder
   (`mouse`), DEC-mode state (`modes`), scroll tracker (`scroll`), socket
@@ -112,7 +114,7 @@ both if you changed the wire format.
 ## Publishing model
 
 Releases are automated (`.github/workflows/release.yaml`). The Go module
-ships as `github.com/cplieger/web-terminal-engine`; the TS package ships to both npm and
+ships as `github.com/cplieger/web-terminal-engine/v2`; the TS package ships to both npm and
 JSR as `@cplieger/web-terminal-engine` from `web/`. Both are versioned in lockstep — the
 wire protocol depends on it. You don't publish manually.
 

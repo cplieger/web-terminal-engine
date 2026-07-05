@@ -135,4 +135,55 @@ describe("OSC 8 hyperlink rendering", () => {
     expect(output.querySelectorAll("a").length).toBe(0);
     expect(output.textContent).toContain("mail me");
   });
+
+  it("distinguishes OSC 8 hyperlinks from auto-detected URLs by class", async () => {
+    // Regression guard for the table-link underline bleed: an OSC 8 hyperlink
+    // may cover a whole padded/bordered region (e.g. a URL wrapping inside a
+    // table cell keeps the link open across cell padding + borders), so it must
+    // carry ONLY `term-link` (the UI underlines it on hover, never persistently).
+    // A heuristically auto-detected bare URL is tightly scoped to the matched
+    // text and cannot bleed, so it additionally gets `term-autolink` (the UI
+    // keeps a persistent underline). Both keep `term-link` so shared styling and
+    // the safe-open attributes still apply.
+    const osc8: WireRun[] = [
+      { t: "click", f: -1, b: -1, a: 0, uc: -1, u: "https://example.com/x" },
+    ];
+    const bare: WireRun[] = [{ t: "see https://example.com/y here", f: -1, b: -1, a: 0, uc: -1 }];
+    await flushFrame(frame({ 0: osc8, 1: bare }, [2, 0]));
+
+    const anchors = [...output.querySelectorAll("a.term-link")] as HTMLAnchorElement[];
+    const osc8Anchors = anchors.filter((a) => !a.classList.contains("term-autolink"));
+    const autoAnchors = anchors.filter((a) => a.classList.contains("term-autolink"));
+
+    expect(osc8Anchors.length).toBe(1);
+    expect(osc8Anchors[0]?.getAttribute("href")).toBe("https://example.com/x");
+    expect(autoAnchors.length).toBe(1);
+    expect(autoAnchors[0]?.getAttribute("href")).toBe("https://example.com/y");
+  });
+
+  it("does not anchor whitespace/border cells an OSC 8 link stayed open across", async () => {
+    // Reproduces a link wrapping inside a table cell: kiro-cli keeps the OSC 8
+    // hyperlink open across the link text, then the trailing cell padding, the
+    // right border `│` and the empty adjacent column — every cell shares the same
+    // URI. Only the run with real text must become an <a>; the decorative runs
+    // must render as plain (non-anchored) spans so the link's underline can only
+    // ever hug the text, never bleed across the cell/row (at rest or on hover).
+    const url = "https://example.com/wrapped";
+    const runs: WireRun[] = [
+      { t: "docs", f: -1, b: -1, a: 0, uc: -1, u: url }, // link text
+      { t: "      ", f: -1, b: -1, a: 0, uc: -1, u: url }, // trailing cell padding
+      { t: "│", f: -1, b: -1, a: 32, uc: -1, u: url }, // right border (dim), same link
+      { t: "        ", f: -1, b: -1, a: 0, uc: -1, u: url }, // empty adjacent column
+    ];
+    await flushFrame(frame({ 0: runs }, [1, 0]));
+
+    const anchors = [...output.querySelectorAll("a.term-link")] as HTMLAnchorElement[];
+    expect(anchors.length).toBe(1);
+    expect(anchors[0]?.textContent).toBe("docs");
+    expect(anchors[0]?.getAttribute("href")).toBe(url);
+    // the border still renders (as plain text) but is NOT inside any anchor
+    expect(output.textContent).toContain("│");
+    const anchoredText = anchors.map((a) => a.textContent ?? "").join("");
+    expect(anchoredText).toBe("docs");
+  });
 });

@@ -346,7 +346,14 @@ function linkifySpans(
       a.href = match[0];
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      a.className = "term-link";
+      // Auto-detected bare URLs are tightly scoped to the matched URL text
+      // (never a padded/bordered region), so `.term-autolink` keeps a persistent
+      // underline for discoverability. OSC 8 hyperlinks (buildRowSpans below) get
+      // only `.term-link`, which the UI underlines on hover — an app can attach a
+      // single OSC 8 link to a whole region (e.g. a URL wrapping inside a table
+      // cell, where the link stays open across the cell padding/borders), and a
+      // persistent underline would then bleed across the cell/row.
+      a.className = "term-link term-autolink";
       a.textContent = match[0];
       // Copy inline styles from the source span
       a.style.cssText = span.style.cssText;
@@ -362,6 +369,29 @@ function linkifySpans(
     }
   }
   return out;
+}
+
+// A hyperlink run is "link text" only if it has at least one glyph that is not
+// whitespace and not a box-drawing (U+2500–U+257F) or block-element
+// (U+2580–U+259F) character. Terminal table structure (borders `│`, padding,
+// empty columns, margins) is made of exactly those, and an app may keep an OSC 8
+// hyperlink open across it while a URL wraps; such decorative runs are not
+// anchored, so the link decoration hugs the actual text instead of bleeding
+// across the cell/row.
+function runHasLinkText(spans: (HTMLSpanElement | HTMLAnchorElement)[]): boolean {
+  for (const s of spans) {
+    for (const ch of s.textContent) {
+      if (/\s/.test(ch)) {
+        continue;
+      }
+      const cp = ch.codePointAt(0) ?? 0;
+      if (cp >= 0x2500 && cp <= 0x259f) {
+        continue;
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 // --- Build row DOM ---
@@ -509,20 +539,33 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
       col++;
     }
     flush();
-    // Wrap spans from this run in an <a> if it has a hyperlink URL.
+    // Wrap this run's spans in an <a> when it has a hyperlink URL — but only if
+    // the run actually contains link *text*. An OSC 8 hyperlink can stay open
+    // across a whole region the app never meant as the clickable "link": a URL
+    // that wraps inside a table cell keeps the link open across the cell padding,
+    // the borders `│` and the empty adjacent column. Anchoring those decorative
+    // cells makes the link's decoration (the underline) bleed across the cell and,
+    // on wrap, the full row. Skip them so the anchor — and its underline, at rest
+    // or on hover — hugs the visible link text (they stay as plain, non-clickable
+    // spans; the wrapped URL's text runs each still carry the full href).
     const href = run.u && /^https?:\/\//i.test(run.u) ? run.u : null;
-    if (href) {
+    const runSpans = out.splice(runStartIdx);
+    if (href && runHasLinkText(runSpans)) {
       const a = document.createElement("a");
       a.href = href;
       a.target = "_blank";
       a.rel = "noopener";
+      // OSC 8 app hyperlink: base `.term-link`. Auto-detected URLs additionally
+      // get `.term-autolink` (see linkifySpans).
       a.className = "term-link";
-      // Move spans from this run into the anchor.
-      const runSpans = out.splice(runStartIdx);
       for (const s of runSpans) {
         a.appendChild(s);
       }
       out.push(a);
+    } else {
+      for (const s of runSpans) {
+        out.push(s);
+      }
     }
   }
   if (cursorAt >= 0 && col <= cursorAt) {

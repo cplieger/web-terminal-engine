@@ -196,3 +196,189 @@ func TestSessionManagerWSAttach(t *testing.T) {
 	}
 	_ = ws.Close(websocket.StatusNormalClosure, "")
 }
+
+// TestSessionManager_ConcurrentCreateCloseList stresses the manager's own
+// mutex, documented "Safe for concurrent use": many goroutines Create,
+// List, Close, and toggle client presence concurrently while the always-on
+// sweepLoop reads the same maps/counters. Run under -race to surface data
+// races on sessions/trackers and the created/closed/reaped counters. The
+// registry and pingStat carry dedicated -race tests; the manager only had
+// incidental sweepLoop coverage. catFactory keeps each PTY alive so Close is
+// the only remover. Uses a done-channel barrier so no new import is needed.
+func TestSessionManager_ConcurrentCreateCloseList(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+
+	const goroutines = 9
+	const iters = 12
+	done := make(chan struct{}, goroutines)
+	for g := range goroutines {
+		go func(id int) {
+			for range iters {
+				switch id % 4 {
+				case 0:
+					if sid, err := m.Create(); err == nil {
+						m.Close(sid)
+					}
+				case 1:
+					_ = m.List()
+				case 3:
+					// Exercise the title-change's mutex-guarded clientTitle write path
+					// concurrently with the always-on sweep's effectiveTitle read.
+					if sid, err := m.Create(); err == nil {
+						m.SetSessionTitle(sid, "concurrent label")
+						m.Close(sid)
+					}
+				default:
+					m.clientConnected()
+					m.clientDisconnected()
+				}
+			}
+			done <- struct{}{}
+		}(g)
+	}
+	for range goroutines {
+		<-done
+	}
+}
+
+// TestSessionManagerSetSessionTitle verifies the client-fallback title: on a
+// known id SetSessionTitle stores the fallback so List() reports it while the
+// OSC title is empty (a fresh session's handler.Title() is empty), an OSC title
+// then wins over the fallback (OSC-first precedence), and an unknown id returns
+// false.
+func TestSessionManagerSetSessionTitle(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	titleOf := func() string {
+		t.Helper()
+		for _, info := range m.List() {
+			if info.ID == id {
+				return info.Title
+			}
+		}
+		t.Fatalf("session %s not in List()", id)
+		return ""
+	}
+	clientTitleOf := func() string {
+		t.Helper()
+		for _, info := range m.List() {
+			if info.ID == id {
+				return info.ClientTitle
+			}
+		}
+		t.Fatalf("session %s not in List()", id)
+		return ""
+	}
+
+	// A fresh session has no client title.
+	if got := clientTitleOf(); got != "" {
+		t.Fatalf("fresh session ClientTitle = %q, want empty", got)
+	}
+
+	// Known id: the fallback is stored and reported while the OSC title is empty.
+	if !m.SetSessionTitle(id, "client label") {
+		t.Fatal("SetSessionTitle(known id) = false, want true")
+	}
+	if got := titleOf(); got != "client label" {
+		t.Fatalf("List Title with empty OSC title = %q, want %q (client fallback)", got, "client label")
+	}
+	if got := clientTitleOf(); got != "client label" {
+		t.Fatalf("List ClientTitle after SetSessionTitle = %q, want %q", got, "client label")
+	}
+
+	// OSC-first: an OSC window title (set via OSC 2, which needs no PTY reply)
+	// wins over the stored client fallback.
+	handlerOf(t, m, id).handlePTYData([]byte("\x1b]2;osc label\x07"))
+	if got := titleOf(); got != "osc label" {
+		t.Fatalf("List Title with OSC title set = %q, want %q (OSC wins)", got, "osc label")
+	}
+	// ClientTitle is the RAW stored label, unaffected by the OSC title: it still
+	// reports "client label" even though the effective Title is now "osc label".
+	if got := clientTitleOf(); got != "client label" {
+		t.Fatalf("List ClientTitle with OSC title set = %q, want %q (raw, OSC does not mask it)", got, "client label")
+	}
+
+	// Unknown id: no session, returns false.
+	if m.SetSessionTitle("nonexistent", "x") {
+		t.Fatal("SetSessionTitle(unknown id) = true, want false")
+	}
+}
+
+// TestSessionManagerSetTitleREST exercises PUT /api/sessions/{id}/title: 204
+// sets the fallback (List then reflects it), 404 for an unknown id, 400 for a
+// body that cannot be decoded.
+func TestSessionManagerSetTitleREST(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	srv := httptest.NewServer(m.RESTHandler())
+	t.Cleanup(srv.Close)
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	put := func(t *testing.T, sessionID, body string) int {
+		t.Helper()
+		req, _ := http.NewRequestWithContext(context.Background(), http.MethodPut,
+			srv.URL+"/api/sessions/"+sessionID+"/title", strings.NewReader(body))
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("PUT: %v", err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	// 204: valid body against a known id.
+	if code := put(t, id, `{"title":"hello"}`); code != http.StatusNoContent {
+		t.Fatalf("PUT known id status = %d, want 204", code)
+	}
+	// List reflects the pushed title (OSC title is empty for a fresh session).
+	found := false
+	for _, info := range m.List() {
+		if info.ID == id {
+			found = true
+			if info.Title != "hello" {
+				t.Fatalf("List Title after PUT = %q, want %q", info.Title, "hello")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("session %s not in List()", id)
+	}
+
+	// 404: valid body against an unknown id (decode succeeds, lookup fails).
+	if code := put(t, "nonexistent", `{"title":"hello"}`); code != http.StatusNotFound {
+		t.Fatalf("PUT unknown id status = %d, want 404", code)
+	}
+
+	// 400: malformed body against a known id (decode fails before lookup).
+	if code := put(t, id, `{bad json`); code != http.StatusBadRequest {
+		t.Fatalf("PUT malformed body status = %d, want 400", code)
+	}
+}
+
+// TestSanitizeTitle verifies the tab-label sanitizer: a >512-rune input is
+// truncated to 512 retained runes, and control characters (< 0x20) and DEL
+// (0x7f) are stripped so a title cannot inject newlines/control into the UI.
+func TestSanitizeTitle(t *testing.T) {
+	// Truncation: 600 plain runes reduce to exactly 512.
+	if got := sanitizeTitle(strings.Repeat("a", 600)); len([]rune(got)) != 512 {
+		t.Fatalf("sanitizeTitle(600 runes) length = %d, want 512", len([]rune(got)))
+	}
+	// A short plain title is unchanged.
+	if got := sanitizeTitle("plain title"); got != "plain title" {
+		t.Fatalf("sanitizeTitle(plain) = %q, want %q", got, "plain title")
+	}
+	// Control characters and DEL are stripped, surrounding runes preserved.
+	if got := sanitizeTitle("a\nb\x1bc\x7fd\te"); got != "abcde" {
+		t.Fatalf("sanitizeTitle(control chars) = %q, want %q", got, "abcde")
+	}
+}

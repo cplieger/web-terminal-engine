@@ -36,7 +36,7 @@ func goldenFrames() map[string][]byte {
 		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002,
 		// kitty disambiguate flag (1).
 		"modes": encodeModesMsg(true, false, true, false, false, true, false, 1002, 1),
-		"title": encodeTitleMsg(0, "hello world"),
+		"title": encodeTitleMsg("hello world"),
 		"pong":  encodePongMsg(),
 	}
 }

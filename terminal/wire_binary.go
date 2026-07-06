@@ -6,7 +6,7 @@
 // endian fixed-width fields; no length-prefixed dictionary keys, no
 // repeated string identifiers.
 //
-//	[1B] msg_type:    0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong
+//	[1B] msg_type:    0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard
 //	[8B] inputAck:    uint64  (server-confirmed bytesReceived for this session)
 //
 //	If msg_type == screen:
@@ -319,13 +319,15 @@ func truncateUTF8(s string, maxBytes int) string {
 // encodeTitleMsg builds a title frame carrying the window title string.
 //
 //	[1B] msg_type = 4 (title)
-//	[8B] inputAck (uint64)
+//	[8B] inputAck (uint64) — 0 placeholder; withClientAck patches the real value at send.
 //	[2B] title_byte_len (uint16)
 //	[NB] title (UTF-8 bytes)
-func encodeTitleMsg(ack uint64, title string) []byte {
+func encodeTitleMsg(title string) []byte {
+	title = truncateUTF8(title, 0xFFFF)
 	buf := make([]byte, 0, 11+len(title))
 	buf = append(buf, wireMsgTitle)
-	buf = binary.LittleEndian.AppendUint64(buf, ack)
+	// inputAck placeholder (0); withClientAck patches the real per-client value at wireAckOffset.
+	buf = binary.LittleEndian.AppendUint64(buf, 0)
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(title)))
 	buf = append(buf, title...)
 	return buf

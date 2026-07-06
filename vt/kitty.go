@@ -100,7 +100,7 @@ func (s *Screen) pushKeyboardFlags(flags int) {
 		k.stack = k.stack[1:] // evict the oldest entry
 	}
 	k.stack = append(k.stack, k.flags)
-	k.flags = uint8(flags) & kbdHonoredMask //nolint:gosec // masked to 0x07
+	k.flags = uint8(flags) & kbdHonoredMask //nolint:gosec // masked to 0x01
 }
 
 // popKeyboardFlags implements CSI < number u: pop n entries, restoring the flags
@@ -127,7 +127,7 @@ func (s *Screen) popKeyboardFlags(n int) {
 // to the honored subset first.
 func (s *Screen) setKeyboardFlags(flags, mode int) {
 	k := s.activeKbd()
-	f := uint8(flags) & kbdHonoredMask //nolint:gosec // masked to 0x07
+	f := uint8(flags) & kbdHonoredMask //nolint:gosec // masked to 0x01
 	switch mode {
 	case 3: // reset the given bits
 		k.flags &^= f

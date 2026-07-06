@@ -65,6 +65,14 @@ const (
 	minResizeCols = 20
 	minResizeRows = 5
 
+	// maxResizeCols/maxResizeRows bound the eagerly-allocated grid. The VT
+	// screen allocates cols*rows Cells, so the winsize field width (0xFFFF)
+	// is not a memory bound: a 65535x65535 resize allocates ~4.3e9 Cells
+	// (>250 GB) and OOMs the host. Cap far above any real display but well
+	// below OOM territory; raise for a genuine ultra-wide layout.
+	maxResizeCols = 1000
+	maxResizeRows = 1000
+
 	ctlTypeResize = "resize"
 	ctlTypeResume = "resume"
 	ctlTypePing   = "ping"
@@ -78,14 +86,6 @@ const (
 
 // Option configures optional behavior of the Handler.
 type Option func(*handlerConfig)
-
-// discardHandler is a slog.Handler that discards all log records.
-type discardHandler struct{}
-
-func (discardHandler) Enabled(context.Context, slog.Level) bool  { return false }
-func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
-func (d discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return d }
-func (d discardHandler) WithGroup(string) slog.Handler           { return d }
 
 // handlerConfig holds optional configuration applied via functional options.
 type handlerConfig struct {
@@ -109,7 +109,7 @@ func WithLogger(l *slog.Logger) Option {
 	return func(c *handlerConfig) {
 		if l == nil {
 			// A nil *slog.Logger panics on method calls; use a discard handler.
-			l = slog.New(discardHandler{})
+			l = slog.New(slog.DiscardHandler)
 		}
 		c.logger = l
 	}
@@ -255,9 +255,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // Shutdown cancels the readLoop and flushLoop goroutines and closes
 // the PTY. Safe to call even if the process was never started.
 func (h *Handler) Shutdown() {
-	if !h.started.Load() {
-		return
-	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.cancel != nil {
@@ -374,7 +371,13 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	if len(h.command) == 0 {
 		return errors.New("terminal: empty command")
 	}
-	cmd := exec.CommandContext(context.Background(), h.command[0], h.command[1:]...) // #nosec G204
+	ctx, cancel := context.WithCancel(context.Background())
+	h.cancel = cancel
+	cmd := exec.CommandContext(ctx, h.command[0], h.command[1:]...) // #nosec G204
+	// Force-kill a child that ignores the PTY-close SIGHUP: Shutdown/reap cancels ctx
+	// (default Cancel = SIGKILL) and WaitDelay bounds the grace so cmd.Wait cannot
+	// block the monitor goroutine forever.
+	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = h.cfg.workDir
 	// Advertise a capable, well-known terminal identity so apps enable their
 	// full feature set. TERM/COLORTERM unlock 256-color + truecolor. TERM_PROGRAM
@@ -413,8 +416,6 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		"pid", cmd.Process.Pid, "command", h.command, "cols", cols, "rows", rows)
 
 	// PTY reader goroutine — feeds VT screen and notifies clients.
-	ctx, cancel := context.WithCancel(context.Background())
-	h.cancel = cancel
 	go h.readLoop(ctx)
 	// Flush ticker — sends screen updates to all clients.
 	go h.flushLoop(ctx)
@@ -424,6 +425,27 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	// exit so flushLoop's ticker does not leak after the process dies.
 	go func() {
 		werr := cmd.Wait() // reap; werr carries the exit status
+		// Guarantee client notification (procExitCh drives the 4001 close) and
+		// loop teardown even if the consumer onProcessExit callback panics; a
+		// callback panic must not crash the server or strand attached clients.
+		// procExitCh is closed exactly once: this monitor runs once per handler.
+		defer func() {
+			// Broadcast process exit so attached WS clients close with
+			// statusProcessExited (4001) rather than a normal closure.
+			close(h.procExitCh)
+			cancel() // stop readLoop/flushLoop on child exit
+			// Free the PTY master fd immediately on natural exit; otherwise an
+			// exited-but-undeleted session holds it until Shutdown/reap (reaper
+			// is off by default). A later Shutdown's second Close is a no-op.
+			h.mu.Lock()
+			if h.ptmx != nil {
+				_ = h.ptmx.Close() // #nosec G104 -- best-effort; child already exited
+			}
+			h.mu.Unlock()
+			if r := recover(); r != nil {
+				h.cfg.logger.Error("terminal: onProcessExit callback panicked", "panic", r)
+			}
+		}()
 		// Symmetric with the "process started" INFO above so operators see the
 		// session lifecycle end and its exit status in the logs, not just the
 		// start. werr is nil on a clean (exit 0) shutdown; a child exiting
@@ -434,11 +456,6 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		if h.cfg.onProcessExit != nil {
 			h.cfg.onProcessExit(werr)
 		}
-		// Broadcast process exit so attached WS clients close with
-		// statusProcessExited (4001) rather than a normal closure. Closed
-		// exactly once: this monitor goroutine runs once per handler.
-		close(h.procExitCh)
-		cancel() // stop readLoop/flushLoop on child exit
 	}()
 	return nil
 }
@@ -573,6 +590,15 @@ func (h *Handler) buildFrame() *flushFrame {
 	}
 	if frame != nil && h.scrollbackClearedPending {
 		frame.scrollbackCleared = true
+		// scrollbackCleared only rides a screen message (dispatchFrame gates the
+		// screen payload on len(changed) > 0). A frame with no changed rows -- a
+		// title- or modes-only change arriving after ED3 -- sets the flag but emits
+		// no screen payload, silently dropping the clear signal (the client keeps
+		// history the server discarded until a resume). Fold the cursor row into
+		// changed so a screen payload carries the flag this frame, mirroring the
+		// bell handling in flush_builder.go. frame came from Build here (the
+		// clipboard-only frame is created later), so frame.rows/curRow are valid.
+		frame.changed = appendRowIfMissing(frame.changed, frame.curRow, len(frame.rows))
 		h.scrollbackClearedPending = false
 	}
 	// OSC 52 clipboard is a one-shot event that can arrive with no screen
@@ -635,9 +661,8 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 			encodeScrollMsg(0, frame.scrollFirstIdx+uint64(i), frame.scrollLines[i:end]))
 	}
 
-	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
 	for ws, ack := range frame.clients {
+		writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		if frame.modesPayload != nil {
 			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.modesPayload, ack)) //nolint:errcheck // best-effort
 		}
@@ -653,16 +678,12 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 		for _, sp := range scrollPayloads {
 			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(sp, ack)) //nolint:errcheck // best-effort
 		}
+		cancel()
 	}
 }
 
 // controlMsg is a JSON control message from the client.
 type controlMsg struct {
-	Type      string `json:"type"`
-	SessionID string `json:"sessionId,omitempty"`
-	SentBytes uint64 `json:"sentBytes,omitempty"`
-	Cols      int    `json:"cols,omitempty"`
-	Rows      int    `json:"rows,omitempty"`
 	// HaveThrough is the highest absolute line index the client already
 	// holds in its store. Sent in resume control messages so the server
 	// replays exactly the lines the client is missing (indices greater
@@ -671,7 +692,12 @@ type controlMsg struct {
 	// eviction) and wants the full retained history. The server clamps
 	// the replay start into the retained range and reports any eviction
 	// gap via the resumeAck bounds.
-	HaveThrough int64 `json:"haveThrough"`
+	HaveThrough *int64 `json:"haveThrough"`
+	Type        string `json:"type"`
+	SessionID   string `json:"sessionId,omitempty"`
+	SentBytes   uint64 `json:"sentBytes,omitempty"`
+	Cols        int    `json:"cols,omitempty"`
+	Rows        int    `json:"rows,omitempty"`
 	// ProtocolVersion is the client's wire-protocol revision (resume only).
 	// 0 = unset (an older client that predates the field). A non-zero value
 	// differing from wireProtocolVersion means the client was built against a
@@ -766,7 +792,13 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 				"client", c.ProtocolVersion, "server", wireProtocolVersion,
 				"hint", "client may be running a stale bundle; a hard refresh should fix it")
 		}
-		h.handleResume(ws, state, c.SessionID, c.HaveThrough)
+		// A nil (omitted) haveThrough means the client holds nothing and wants
+		// full history (-1), not "have line 0" (which would drop index 0).
+		ht := int64(-1)
+		if c.HaveThrough != nil {
+			ht = *c.HaveThrough
+		}
+		h.handleResume(ws, state, c.SessionID, ht)
 		return
 	}
 	if c.Type == ctlTypeResize {
@@ -856,6 +888,17 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	winCursorStyle := h.screen.CursorStyle
 	winCursorHidden := h.screen.CursorHidden
 	winCursorBlink := h.screen.CursorBlink
+	// Snapshot and encode the current DEC private modes and title under h.mu so
+	// the resuming client's input encoding (app-cursor arrows, SGR mouse, etc.)
+	// is correct immediately, rather than defaulting until the next diff-driven
+	// flush (<= flushInterval) re-announces them via builder.Reset. Encode
+	// directly from screen state — do NOT use builder.buildModesPayload, which
+	// mutates the per-Handler builder's shared announce-state and would starve a
+	// concurrently connecting second client of its own modes frame.
+	modesPayload := encodeModesMsg(h.screen.BracketedPaste, h.screen.AppCursorKeys,
+		h.screen.MouseSGR, h.screen.FocusReporting, h.screen.AppKeypad,
+		h.screen.ReverseVideo, h.screen.MousePixels, h.screen.MouseMode, h.screen.KeyboardFlags())
+	titlePayload := encodeTitleMsg(h.screen.Title)
 	h.mu.Unlock()
 
 	// Build the full-repaint changed list (every window row) and encode the
@@ -873,6 +916,14 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	// resumeAck first so the client can trim its outbox and learn the
 	// history bounds (for gap detection) before the replay lands.
 	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest)) //nolint:errcheck // best-effort
+
+	// Resend current modes/title inline (before the window/replay) so input
+	// encoding is correct before the user can type; a fresh tab starts at
+	// default modes and would otherwise misencode arrows/mouse for one flush.
+	ws.Write(ctx, websocket.MessageBinary, withClientAck(modesPayload, ack)) //nolint:errcheck // best-effort
+	if titlePayload != nil {
+		ws.Write(ctx, websocket.MessageBinary, withClientAck(titlePayload, ack)) //nolint:errcheck // best-effort
+	}
 
 	// replayHistory sends the missing committed lines in chunks, each tagged
 	// with its absolute first index so the client applies them idempotently.
@@ -909,11 +960,11 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 // ensureStarted on first connect — dropping the resize would leave the
 // process unstarted until the client sent raw input.
 func (h *Handler) handleResize(cols, rows int) {
-	if cols > 0xFFFF {
-		cols = 0xFFFF
+	if cols > maxResizeCols {
+		cols = maxResizeCols
 	}
-	if rows > 0xFFFF {
-		rows = 0xFFFF
+	if rows > maxResizeRows {
+		rows = maxResizeRows
 	}
 	if cols < minResizeCols {
 		cols = minResizeCols
@@ -944,17 +995,4 @@ func (h *Handler) handleResize(cols, rows int) {
 	h.cfg.logger.Info("terminal: resize received", "rows", rows, "cols", cols)
 	h.resized = true
 	h.builder.Reset()
-}
-
-// runsEqual compares two slices of WireRun for equality.
-func runsEqual(a, b []vt.WireRun) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }

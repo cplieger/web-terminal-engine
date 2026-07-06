@@ -5,12 +5,18 @@
 // (re)open so the consumer can trigger it. Pairs with the Go
 // terminal.SessionManager EventsHandler.
 
+import { nextBackoffDelay } from "./reconnect.js";
+
 /** SessionStatus is one session's current status as carried on the stream. It
  *  mirrors the server's status event. */
 export interface SessionStatus {
   readonly id: string;
   readonly status: "working" | "idle" | "input" | "done" | "exited";
   readonly title: string;
+  /** the raw client-set title (before the OSC fallback baked into `title`); a
+   *  consumer that treats the program's OSC window title as unreliable reads
+   *  this instead of `title`. */
+  readonly clientTitle?: string;
   readonly createdAt: string;
   /** true when the session is gone (closed or reaped); the consumer drops it. */
   readonly removed?: boolean;
@@ -30,7 +36,9 @@ export interface StatusStreamCallbacks {
   /** Called on every (re)open, including auto-reconnects, so the consumer can
    *  resync after a gap (the stream only carries future changes). */
   onOpen?: () => void;
-  /** Called when the stream errors; the EventSource then auto-reconnects. */
+  /** Called when the stream errors. A transient drop is auto-reconnected by
+   *  EventSource; a permanent close (non-2xx / wrong content-type) is
+   *  re-established by this module with capped backoff. */
   onError?: () => void;
 }
 
@@ -39,6 +47,10 @@ export interface StatusStreamCallbacks {
 export interface EventSourceLike {
   addEventListener: (type: string, listener: (event: MessageEvent) => void) => void;
   close: () => void;
+  /** EventSource.readyState: 0 CONNECTING, 1 OPEN, 2 CLOSED. A permanent close
+   *  (non-2xx response / wrong content-type / auth failure) sets CLOSED and
+   *  native auto-reconnect never fires; the module re-establishes on CLOSED. */
+  readonly readyState: number;
 }
 
 /** EventSourceFactory builds an EventSourceLike for a URL. */
@@ -58,6 +70,9 @@ const defaultFactory: EventSourceFactory = (url) => {
     close: () => {
       es.close();
     },
+    get readyState() {
+      return es.readyState;
+    },
   };
 };
 
@@ -68,33 +83,62 @@ export function connectStatusStream(
   cb: StatusStreamCallbacks,
   make: EventSourceFactory = defaultFactory,
 ): StatusStream {
-  const es = make(path);
+  let es: EventSourceLike;
+  let closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  let backoffMs = 500;
   const { onOpen, onError } = cb;
-  if (onOpen) {
+  const open = (): void => {
+    es = make(path);
     es.addEventListener("open", () => {
-      onOpen();
+      backoffMs = 500; // reset backoff on a successful (re)open
+      if (onOpen) {
+        onOpen();
+      }
     });
-  }
-  es.addEventListener("message", (event) => {
-    const raw: unknown = event.data;
-    if (typeof raw !== "string") {
-      return; // non-text frame, ignore
-    }
-    let status: SessionStatus;
-    try {
-      status = JSON.parse(raw) as SessionStatus;
-    } catch {
-      return; // skip a malformed frame, keep the stream
-    }
-    cb.onStatus(status);
-  });
-  if (onError) {
+    es.addEventListener("message", (event) => {
+      const raw: unknown = event.data;
+      if (typeof raw !== "string") {
+        return; // non-text frame, ignore
+      }
+      let status: SessionStatus;
+      try {
+        status = JSON.parse(raw) as SessionStatus;
+      } catch {
+        console.warn("vterm: dropped malformed status-stream frame");
+        return; // skip a malformed frame, keep the stream
+      }
+      cb.onStatus(status);
+    });
     es.addEventListener("error", () => {
-      onError();
+      if (onError) {
+        onError();
+      }
+      // Native EventSource auto-reconnect covers a transient drop but NOT a
+      // permanent close (server restart -> proxy 502/non-2xx, auth 401/403,
+      // wrong content-type), which sets readyState CLOSED and never retries.
+      // Re-establish so per-tab status doesn't freeze until a page reload while
+      // the terminal WS recovers on its own backoff. onOpen fires on the reopen,
+      // so the consumer's resync still runs.
+      if (es.readyState === 2 && !closed && reconnectTimer === undefined) {
+        const step = nextBackoffDelay(backoffMs);
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = undefined;
+          if (!closed) {
+            open();
+          }
+        }, step.scheduledMs);
+        backoffMs = step.nextBaseMs;
+      }
     });
-  }
+  };
+  open();
   return {
     close: () => {
+      closed = true;
+      if (reconnectTimer !== undefined) {
+        clearTimeout(reconnectTimer);
+      }
       es.close();
     },
   };

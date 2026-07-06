@@ -274,3 +274,69 @@ func TestIsAllDigits(t *testing.T) {
 		}
 	}
 }
+
+func TestOSC5SpecialColorSetQueryReset(t *testing.T) {
+	s := New(2, 10)
+	// OSC 5 sets special color 0 to pure green.
+	s.Write([]byte("\x1b]5;0;rgb:00/ff/00\x07"))
+	s.Response = nil
+	// OSC 5 query reports it back, 16-bit-per-channel.
+	s.Write([]byte("\x1b]5;0;?\x07"))
+	if got, want := string(s.Response), "\x1b]5;0;rgb:0000/ffff/0000\x1b\\"; got != want {
+		t.Errorf("OSC 5 query after set = %q, want %q", got, want)
+	}
+	// OSC 105 resets special color 0; the query then reports the unset default (black).
+	s.Write([]byte("\x1b]105;0\x07"))
+	s.Response = nil
+	s.Write([]byte("\x1b]5;0;?\x07"))
+	if got, want := string(s.Response), "\x1b]5;0;rgb:0000/0000/0000\x1b\\"; got != want {
+		t.Errorf("OSC 5 query after OSC 105 reset = %q, want %q", got, want)
+	}
+}
+
+// TestOSC105ResetAllSpecialColors verifies OSC 105 with no index resets EVERY
+// special color, and that a reset on a Screen with none set is a safe no-op
+// (the specialColors==nil guard). The existing OSC 105 test only resets one index.
+func TestOSC105ResetAllSpecialColors(t *testing.T) {
+	s := New(2, 10)
+	// Reset-all on a fresh Screen (nothing set) must be a no-op (nil-guard).
+	s.Write([]byte("\x1b]105\x07"))
+	// Set two special colors, then reset ALL with an empty OSC 105 payload.
+	s.Write([]byte("\x1b]5;0;rgb:00/ff/00\x07")) // special color 0 -> green
+	s.Write([]byte("\x1b]5;1;rgb:ff/00/00\x07")) // special color 1 -> red
+	s.Write([]byte("\x1b]105\x07"))              // reset ALL (no index)
+	s.Response = nil
+	s.Write([]byte("\x1b]5;0;?\x07"))
+	s.Write([]byte("\x1b]5;1;?\x07"))
+	want := "\x1b]5;0;rgb:0000/0000/0000\x1b\\" + "\x1b]5;1;rgb:0000/0000/0000\x1b\\"
+	if got := string(s.Response); got != want {
+		t.Errorf("after OSC 105 reset-all, queries = %q, want both black %q", got, want)
+	}
+}
+
+// TestOSC104ResetAllPalette verifies OSC 104 with no index resets the WHOLE
+// palette (marking PaletteChanged), and that a reset with no override set is a
+// no-op that does NOT mark PaletteChanged (the paletteOverride==nil guard). The
+// existing OSC 104 test only resets one index.
+func TestOSC104ResetAllPalette(t *testing.T) {
+	s := New(2, 10)
+	// Reset with no overrides set: nil-guard early return, nothing marked.
+	s.Write([]byte("\x1b]104\x07"))
+	if s.PaletteChanged {
+		t.Error("OSC 104 reset with no overrides marked PaletteChanged; want unchanged")
+	}
+	// Override two indices, then reset the whole palette with an empty payload.
+	s.Write([]byte("\x1b]4;1;rgb:00/ff/00\x07"))
+	s.Write([]byte("\x1b]4;2;rgb:00/00/ff\x07"))
+	s.PaletteChanged = false
+	s.Write([]byte("\x1b]104\x07")) // reset ALL
+	if !s.PaletteChanged {
+		t.Error("OSC 104 reset-all did not mark PaletteChanged")
+	}
+	// The override is gone: index 1 no longer queries back as the green override.
+	s.Response = nil
+	s.Write([]byte("\x1b]4;1;?\x07"))
+	if got := string(s.Response); got == "\x1b]4;1;rgb:0000/ffff/0000\x1b\\" {
+		t.Errorf("index 1 override survived OSC 104 reset-all: %q", got)
+	}
+}

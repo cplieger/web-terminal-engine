@@ -176,10 +176,10 @@ func TestRegistry_ConcurrentResolveSharedSession(t *testing.T) {
 	wg.Wait()
 }
 
-// TestResolveSession_evictsOldestWhenOverCap pins the maxSessions cap backstop
+// TestResolveSession_evictsOldestWhenOverCap pins the maxResumeSessions cap backstop
 // (CWE-770) that ResolveSession enforces via evictOldestSession: when a new
-// session pushes the retained count past maxSessions, the single oldest-lastSeen
-// entry is evicted (not the newcomer) and the count returns to maxSessions. The
+// session pushes the retained count past maxResumeSessions, the single oldest-lastSeen
+// entry is evicted (not the newcomer) and the count returns to maxResumeSessions. The
 // eviction body (find-oldest loop + delete) was unexercised after extraction
 // into evictOldestSession (only the early-return ran, 22.2% coverage), so a
 // mutant in the `sx.lastSeen.Before(oldest)` comparison or the delete survived.
@@ -192,23 +192,23 @@ func TestResolveSession_evictsOldestWhenOverCap(t *testing.T) {
 	// eviction (not the GC) to be the remover we assert on.
 	const oldestID = "oldest"
 	r.sessions[oldestID] = &sessionState{lastSeen: now.Add(-30 * time.Minute)}
-	// Fill the rest to exactly maxSessions with recent entries. Distinct 2-byte
+	// Fill the rest to exactly maxResumeSessions with recent entries. Distinct 2-byte
 	// keys avoid an fmt/strconv import (none collide with the longer ASCII ids).
-	for i := 1; i < maxSessions; i++ {
+	for i := 1; i < maxResumeSessions; i++ {
 		r.sessions[string([]byte{byte(i), byte(i >> 8)})] = &sessionState{lastSeen: now.Add(-time.Minute)}
 	}
-	if len(r.sessions) != maxSessions {
-		t.Fatalf("setup: %d sessions, want exactly maxSessions=%d", len(r.sessions), maxSessions)
+	if len(r.sessions) != maxResumeSessions {
+		t.Fatalf("setup: %d sessions, want exactly maxResumeSessions=%d", len(r.sessions), maxResumeSessions)
 	}
 
-	// Resolving a new, unknown session id pushes the count to maxSessions+1 and
+	// Resolving a new, unknown session id pushes the count to maxResumeSessions+1 and
 	// triggers the cap eviction.
 	r.ResolveSession(&clientState{}, "newcomer")
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if got := len(r.sessions); got != maxSessions {
-		t.Errorf("after over-cap resolve: %d sessions retained, want %d (cap eviction must drop exactly one)", got, maxSessions)
+	if got := len(r.sessions); got != maxResumeSessions {
+		t.Errorf("after over-cap resolve: %d sessions retained, want %d (cap eviction must drop exactly one)", got, maxResumeSessions)
 	}
 	if _, ok := r.sessions[oldestID]; ok {
 		t.Errorf("cap eviction kept the oldest session %q; want the oldest-lastSeen entry evicted", oldestID)

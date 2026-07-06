@@ -249,35 +249,33 @@ func TestEventsHandlerInitialSync(t *testing.T) {
 	t.Fatalf("initial sync did not include session %s (scan err: %v)", id, sc.Err())
 }
 
-// TestEventsHandlerSubscriberCap verifies the subscriber cap returns 503 once
-// the limit is reached.
+// TestEventsHandlerSubscriberCap verifies the fixed subscriber cap: exactly
+// maxSubscribers concurrent status-stream (SSE) subscribers are admitted, and
+// the next one is rejected with HTTP 503. Driven deterministically — the
+// background sweep is stopped so its broadcasts cannot drop an unread
+// subscriber mid-test, the maxSubscribers slots are filled by driving
+// subscribe() directly (no HTTP, no sleeps), and the over-cap request goes
+// through EventsHandler to assert the real 503. It references the const (not a
+// literal 10) so it tracks maxSubscribers if the cap ever changes.
 func TestEventsHandlerSubscriberCap(t *testing.T) {
-	m := NewSessionManager(catFactory, WithMaxSubscribers(1))
+	m := NewSessionManager(catFactory)
 	t.Cleanup(m.Shutdown)
-	srv := httptest.NewServer(m.EventsHandler())
-	t.Cleanup(srv.Close)
+	m.stopSweep() // deterministic: no background broadcast racing on m.subs
 
-	req1, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, srv.URL, nil)
-	resp1, err := http.DefaultClient.Do(req1)
-	if err != nil {
-		t.Fatalf("sub1: %v", err)
+	// Fill exactly maxSubscribers slots; each must be admitted.
+	for i := range maxSubscribers {
+		if _, ok := m.subscribe(); !ok {
+			t.Fatalf("subscriber %d/%d rejected below the cap; want admitted", i+1, maxSubscribers)
+		}
 	}
-	defer resp1.Body.Close()
-	if resp1.StatusCode != http.StatusOK {
-		t.Fatalf("sub1 status = %d, want 200", resp1.StatusCode)
-	}
-	time.Sleep(30 * time.Millisecond) // let sub1 register
 
-	ctx2, cancel2 := context.WithTimeout(t.Context(), 2*time.Second)
-	defer cancel2()
-	req2, _ := http.NewRequestWithContext(ctx2, http.MethodGet, srv.URL, nil)
-	resp2, err := http.DefaultClient.Do(req2)
-	if err != nil {
-		t.Fatalf("sub2: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("sub2 status = %d, want 503", resp2.StatusCode)
+	// The cap is full (len(subs) == maxSubscribers): the next subscribe is
+	// rejected, and EventsHandler surfaces that as HTTP 503.
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events", nil)
+	m.EventsHandler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("over-cap request status = %d, want %d (too many subscribers)", rec.Code, http.StatusServiceUnavailable)
 	}
 }
 
@@ -356,4 +354,127 @@ func TestEventsHandlerFlushesBehindMiddleware(t *testing.T) {
 		}
 	}
 	t.Fatalf("SSE stream delivered no data behind middleware (scan err: %v)", sc.Err())
+}
+
+// stopSweep cancels the background status sweep so a test can drive
+// diffStatuses deterministically without the 250ms ticker racing on the shared
+// trackers. Safe to call once before the first tick; Shutdown then finds
+// sweepCancel already nil.
+func (m *SessionManager) stopSweep() {
+	m.mu.Lock()
+	if m.sweepCancel != nil {
+		m.sweepCancel()
+		m.sweepCancel = nil
+	}
+	m.mu.Unlock()
+}
+
+// TestDiffStatusesEmitsClientTitleChange verifies the status sweep detects a
+// change to the raw client title even when the OSC-derived effective title,
+// status, and reported activity are all unchanged: a PUT /title on a session
+// whose program already emits an OSC window title moves only clientTitle, and a
+// consumer that reads clientTitle directly must still get that pushed. It also
+// pins that the emitted event carries ClientTitle (the raw label) alongside the
+// unchanged OSC-derived Title.
+func TestDiffStatusesEmitsClientTitleChange(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	// Drive diffStatuses by hand: stop the background sweep (it has not ticked
+	// yet — its first tick is 250ms out) so it cannot race on m.trackers between
+	// the change and the assertion.
+	m.stopSweep()
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// An OSC window title fixes the effective title; a later client-title change
+	// then moves ONLY clientTitle (OSC-first keeps Title == "osc label").
+	handlerOf(t, m, id).handlePTYData([]byte("\x1b]2;osc label\x07"))
+
+	findEvent := func(events []statusEvent) (statusEvent, bool) {
+		t.Helper()
+		for _, ev := range events {
+			if ev.ID == id {
+				return ev, true
+			}
+		}
+		return statusEvent{}, false
+	}
+
+	// First sweep establishes the tracker baseline (Title="osc label",
+	// ClientTitle="").
+	base, ok := findEvent(m.diffStatuses())
+	if !ok {
+		t.Fatalf("baseline sweep emitted no event for session %s", id)
+	}
+	if base.Title != "osc label" || base.ClientTitle != "" {
+		t.Fatalf("baseline event = {Title:%q ClientTitle:%q}, want {\"osc label\", \"\"}", base.Title, base.ClientTitle)
+	}
+
+	// A quiescent sweep (nothing changed) emits nothing for the session, so the
+	// next emit is attributable to the client-title change alone.
+	if ev, ok := findEvent(m.diffStatuses()); ok {
+		t.Fatalf("quiescent sweep unexpectedly emitted an event: %+v", ev)
+	}
+
+	// A client-title-only change: OSC title, status, and activity all unchanged.
+	if !m.SetSessionTitle(id, "msg") {
+		t.Fatal("SetSessionTitle(known id) = false, want true")
+	}
+	ev, ok := findEvent(m.diffStatuses())
+	if !ok {
+		t.Fatal("sweep after client-title-only change emitted no event; the clientTitle change was not detected")
+	}
+	if ev.ClientTitle != "msg" {
+		t.Fatalf("event ClientTitle = %q, want %q", ev.ClientTitle, "msg")
+	}
+	if ev.Title != "osc label" {
+		t.Fatalf("event Title = %q, want %q (OSC-derived title must be unchanged)", ev.Title, "osc label")
+	}
+}
+
+// TestBroadcastDropsSlowSubscriber pins the non-blocking fan-out: a subscriber
+// whose bounded buffer overflows is dropped (removed from m.subs and its channel
+// closed) instead of blocking the sweep. Without the select-default drop in
+// broadcast, the overflowing send would block this goroutine forever.
+func TestBroadcastDropsSlowSubscriber(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	m.stopSweep() // no background sweep broadcasts racing on m.subs
+
+	ch, ok := m.subscribe()
+	if !ok {
+		t.Fatal("subscribe = false, want a fresh subscriber channel")
+	}
+
+	ev := statusEvent{ID: "s", Status: StatusIdle}
+	// Exactly subscriberBuffer sends fill the buffer without overflowing.
+	for range subscriberBuffer {
+		m.broadcast(&ev)
+	}
+	m.subsMu.Lock()
+	_, present := m.subs[ch]
+	m.subsMu.Unlock()
+	if !present {
+		t.Fatal("subscriber dropped before overflow; want still present after exactly subscriberBuffer sends")
+	}
+
+	// One more send overflows: the select default branch drops and closes it.
+	m.broadcast(&ev)
+	m.subsMu.Lock()
+	_, present = m.subs[ch]
+	m.subsMu.Unlock()
+	if present {
+		t.Fatal("subscriber not dropped after buffer overflow; want removed from m.subs")
+	}
+
+	// The dropped channel is closed: drain the buffered events, then a receive
+	// reports closed (the signal the handler goroutine uses to unsubscribe).
+	for range subscriberBuffer {
+		<-ch
+	}
+	if _, ok := <-ch; ok {
+		t.Fatal("channel not closed after drop; want closed once buffered events drained")
+	}
 }

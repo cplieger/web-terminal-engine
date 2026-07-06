@@ -89,9 +89,10 @@ describe("OSC 8 hyperlink rendering", () => {
     // the sequence is authoritative), and resolves to the absolute URL.
     expect(a.getAttribute("href")).toBe("http://example.com");
     expect(a.href).toBe("http://example.com/");
-    // Opened safely: a new context with no window.opener handle back.
+    // Opened safely: a new context with no window.opener handle back, and
+    // no Referer leak of the terminal URL to an attacker-controlled OSC 8 URI.
     expect(a.target).toBe("_blank");
-    expect(a.rel).toBe("noopener");
+    expect(a.rel).toBe("noopener noreferrer");
     expect(a.textContent).toBe("here");
   });
 
@@ -134,5 +135,77 @@ describe("OSC 8 hyperlink rendering", () => {
 
     expect(output.querySelectorAll("a").length).toBe(0);
     expect(output.textContent).toContain("mail me");
+  });
+
+  it("autolinks a bare http(s) URL in plain text with the same safe-open attributes", async () => {
+    // render.ts builds anchors on TWO paths: the OSC 8 `u`-field path
+    // (asserted above) and linkifySpans, which detects a bare URL in the
+    // visible text of a run that carries no `u`. Both must set the
+    // reverse-tabnabbing guards (target=_blank, rel=noopener noreferrer);
+    // the autolinker path is otherwise unasserted -- the safety fuzz file
+    // uses a fixed non-URL text to isolate the OSC 8 gate, and the only
+    // text-path test here uses URL-free text. A regression dropping
+    // rel/target on the autolinker anchor would pass today.
+    const runs: WireRun[] = [{ t: "see https://example.com/x now", f: -1, b: -1, a: 0, uc: -1 }];
+    const msg = frame({ 0: runs }, [0, 0]);
+    await flushFrame(msg);
+    const anchors = output.querySelectorAll("a.term-link");
+    expect(anchors.length).toBe(1);
+    const a = anchors[0] as HTMLAnchorElement;
+    expect(a.getAttribute("href")).toBe("https://example.com/x");
+    expect(a.textContent).toBe("https://example.com/x");
+    expect(a.target).toBe("_blank");
+    expect(a.rel).toBe("noopener noreferrer");
+  });
+
+  it("distinguishes OSC 8 hyperlinks from auto-detected URLs by class", async () => {
+    // Regression guard for the table-link underline bleed: an OSC 8 hyperlink
+    // may cover a whole padded/bordered region (e.g. a URL wrapping inside a
+    // table cell keeps the link open across cell padding + borders), so it must
+    // carry ONLY `term-link` (the UI underlines it on hover, never persistently).
+    // A heuristically auto-detected bare URL is tightly scoped to the matched
+    // text and cannot bleed, so it additionally gets `term-autolink` (the UI
+    // keeps a persistent underline). Both keep `term-link` so shared styling and
+    // the safe-open attributes still apply.
+    const osc8: WireRun[] = [
+      { t: "click", f: -1, b: -1, a: 0, uc: -1, u: "https://example.com/x" },
+    ];
+    const bare: WireRun[] = [{ t: "see https://example.com/y here", f: -1, b: -1, a: 0, uc: -1 }];
+    await flushFrame(frame({ 0: osc8, 1: bare }, [2, 0]));
+
+    const anchors = [...output.querySelectorAll("a.term-link")] as HTMLAnchorElement[];
+    const osc8Anchors = anchors.filter((a) => !a.classList.contains("term-autolink"));
+    const autoAnchors = anchors.filter((a) => a.classList.contains("term-autolink"));
+
+    expect(osc8Anchors.length).toBe(1);
+    expect(osc8Anchors[0]?.getAttribute("href")).toBe("https://example.com/x");
+    expect(autoAnchors.length).toBe(1);
+    expect(autoAnchors[0]?.getAttribute("href")).toBe("https://example.com/y");
+  });
+
+  it("does not anchor whitespace/border cells an OSC 8 link stayed open across", async () => {
+    // Reproduces a link wrapping inside a table cell: kiro-cli keeps the OSC 8
+    // hyperlink open across the link text, then the trailing cell padding, the
+    // right border `│` and the empty adjacent column — every cell shares the same
+    // URI. Only the run with real text must become an <a>; the decorative runs
+    // must render as plain (non-anchored) spans so the link's underline can only
+    // ever hug the text, never bleed across the cell/row (at rest or on hover).
+    const url = "https://example.com/wrapped";
+    const runs: WireRun[] = [
+      { t: "docs", f: -1, b: -1, a: 0, uc: -1, u: url }, // link text
+      { t: "      ", f: -1, b: -1, a: 0, uc: -1, u: url }, // trailing cell padding
+      { t: "│", f: -1, b: -1, a: 32, uc: -1, u: url }, // right border (dim), same link
+      { t: "        ", f: -1, b: -1, a: 0, uc: -1, u: url }, // empty adjacent column
+    ];
+    await flushFrame(frame({ 0: runs }, [1, 0]));
+
+    const anchors = [...output.querySelectorAll("a.term-link")] as HTMLAnchorElement[];
+    expect(anchors.length).toBe(1);
+    expect(anchors[0]?.textContent).toBe("docs");
+    expect(anchors[0]?.getAttribute("href")).toBe(url);
+    // the border still renders (as plain text) but is NOT inside any anchor
+    expect(output.textContent).toContain("│");
+    const anchoredText = anchors.map((a) => a.textContent ?? "").join("");
+    expect(anchoredText).toBe("docs");
   });
 });

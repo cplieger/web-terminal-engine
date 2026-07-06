@@ -168,7 +168,7 @@ func (b *flushFrameBuilder) diffWindow(rows [][]vt.WireRun, base uint64) []int {
 		if prevLen > 0 && abs >= b.prevBase && abs < b.prevBase+prevLen {
 			prev = b.prevRowWires[abs-b.prevBase]
 		}
-		if prev == nil || !runsEqual(prev, row) {
+		if prev == nil || !slices.Equal(prev, row) {
 			changed = append(changed, y)
 		}
 	}
@@ -226,7 +226,7 @@ func (b *flushFrameBuilder) buildTitlePayload(screen *vt.Screen) []byte {
 	}
 	b.prevTitle = curTitle
 	b.titleAnnounced = true
-	return encodeTitleMsg(0, curTitle)
+	return encodeTitleMsg(curTitle)
 }
 
 // trackCursor folds cursor-position changes into changed and updates the

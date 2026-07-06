@@ -275,6 +275,23 @@ func TestOSC52QueryEchoesTarget(t *testing.T) {
 	}
 }
 
+// TestOSC52QueryStripsControlRunesFromTarget verifies the OSC 52 query reply
+// strips C0/C1/DEL from the echoed target list. The reply is injected into the
+// PTY as input, so a CR/LF smuggled into an attacker-set target must not survive
+// into the reply, where it would inject a command line (same hardening as the
+// XTWINOPS title report). The existing TestOSC52QueryEchoesTarget uses a
+// control-free target ("p"), so it does not exercise stripControlRunes here.
+func TestOSC52QueryStripsControlRunesFromTarget(t *testing.T) {
+	s := New(2, 10)
+	s.AllowScreenReport = true
+	s.Write([]byte("\x1b]52;p;aGk=\x07")) // set primary = base64("hi")
+	s.Response = nil
+	s.Write([]byte("\x1b]52;p\r\n;?\x07")) // query; CR/LF smuggled into the target
+	if got, want := string(s.Response), "\x1b]52;p;aGk=\x1b\\"; got != want {
+		t.Errorf("OSC 52 query with CR/LF in target = %q, want %q (control runes stripped)", got, want)
+	}
+}
+
 // An empty OSC 52 payload clears the selection, so a later query reports empty.
 func TestOSC52ClearEmptiesSelection(t *testing.T) {
 	s := New(2, 10)
@@ -400,6 +417,18 @@ func TestTitleSetHexDecodes(t *testing.T) {
 	}
 }
 
+// TestTitleSetHexInvalidFallsBackToRaw verifies decodeTitle's documented
+// contract: with set-hex on, an OSC 0/1/2 payload that is not valid hex falls
+// back to the raw string rather than blanking the title.
+func TestTitleSetHexInvalidFallsBackToRaw(t *testing.T) {
+	s := New(2, 10)
+	s.Write([]byte("\x1b[>0t"))       // XTSMTITLE set-hex on
+	s.Write([]byte("\x1b]2;xyz\x07")) // "xyz" is not valid hex (odd length, non-hex)
+	if s.Title != "xyz" {
+		t.Errorf("set-hex title with invalid hex = %q, want %q (raw fallback, not blanked)", s.Title, "xyz")
+	}
+}
+
 // With query-hex (mode 1) on, the WINOP 21 title report is hex-encoded.
 func TestTitleQueryHexEncodes(t *testing.T) {
 	s := New(2, 10)
@@ -431,5 +460,43 @@ func TestTitleModesResetByRIS(t *testing.T) {
 	s.Write([]byte("\x1b]2;6162\x07")) // literal after RIS
 	if s.Title != "6162" {
 		t.Errorf("RIS should reset title modes: got %q, want 6162", s.Title)
+	}
+}
+
+// TestTitleReportStripsControlRunes verifies XTWINOPS 20/21 title/icon reports
+// strip C0/C1/DEL control runes on the query-hex-off (default, non-hex
+// encodeTitle) path. The report is injected into the PTY as input, so a title
+// carrying embedded CR/LF (smuggled in via set-hex mode, which admits arbitrary
+// bytes) must not echo those bytes back. Covers stripControlRunes and the
+// non-hex encodeTitle branch for both the icon (WINOP 20) and window (WINOP 21)
+// reports.
+func TestTitleReportStripsControlRunes(t *testing.T) {
+	cases := []struct {
+		name, setSeq, report, want string
+	}{
+		{
+			name:   "window title CR/LF stripped (WINOP 21)",
+			setSeq: "\x1b]2;61620d0a63\x07", // hex "ab\r\nc": embedded CR+LF
+			report: "\x1b[21t",
+			want:   "\x1b]labc\x1b\\",
+		},
+		{
+			name:   "icon label NUL/DEL/C1 stripped (WINOP 20)",
+			setSeq: "\x1b]1;69007fc29b6e\x07", // hex "i" NUL DEL U+009B "n"
+			report: "\x1b[20t",
+			want:   "\x1b]Lin\x1b\\",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(2, 10)
+			s.Write([]byte("\x1b[>0t")) // XTSMTITLE set-hex on (admits raw bytes)
+			s.Write([]byte(tc.setSeq))
+			s.Response = nil
+			s.Write([]byte(tc.report)) // query-hex off -> non-hex encodeTitle path
+			if got := string(s.Response); got != tc.want {
+				t.Errorf("%s report = %q, want %q (control runes stripped)", tc.name, got, tc.want)
+			}
+		})
 	}
 }

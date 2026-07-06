@@ -36,9 +36,8 @@ func mkT(act action, next parserState) transition {
 	return transition(uint16(act)<<8 | uint16(next))
 }
 
-func (t transition) act() action                   { return action(t >> 8) }
-func (t transition) next() parserState             { return parserState(t & 0xFF) }
-func mkTStay(act action, s parserState) transition { return mkT(act, s) }
+func (t transition) act() action       { return action(t >> 8) }
+func (t transition) next() parserState { return parserState(t & 0xFF) }
 
 // The tables.
 var (
@@ -88,7 +87,7 @@ func init() {
 		for b := range 256 {
 			if stateTable[si][b] == noTransition {
 				// Fill remaining with ignore-stay
-				stateTable[si][b] = mkTStay(actNone, si)
+				stateTable[si][b] = mkT(actNone, si)
 			}
 		}
 	}

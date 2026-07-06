@@ -88,7 +88,7 @@ func (p *pinger) handlePingFailure(err error, timeout, rtt time.Duration, cancel
 	p.consecFails++
 	if p.consecFails >= maxConsecutiveFailures {
 		srtt, rttvar := p.stat.Stats()
-		p.logger.Error("terminal: ws ping failed; closing connection",
+		p.logger.Warn("terminal: ws ping failed; closing connection",
 			"error", err,
 			"timeout", timeout,
 			"observed_rtt", rtt,

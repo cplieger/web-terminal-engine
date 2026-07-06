@@ -804,15 +804,13 @@ func (s *Screen) windowManipulation() {
 //	3 = query window/icon labels using UTF-8
 //
 // Only the hex features change behavior: the engine's titles are always UTF-8,
-// so the UTF-8 features (2, 3) are accepted as no-ops. With no parameters both
-// controls reset every feature to the compiled-in default (all off), matching
-// xterm.
+// so the UTF-8 features (2, 3) are accepted as no-ops. A bare CSI > t / CSI > T
+// carries the engine's default parameter 0 (paramCount() is never 0 here:
+// parserClear seeds numGroups=1 on CSI entry and finalizeParams only grows the
+// group, never below 1; see parse.go), so it toggles the set-hex feature,
+// consistent with how applySGR and windowManipulation treat a bare CSI as an
+// explicit 0.
 func (s *Screen) setTitleModes(set bool) {
-	if s.paramCount() == 0 {
-		s.titleSetHex = false
-		s.titleQueryHex = false
-		return
-	}
 	for i := range s.paramCount() {
 		switch s.paramVal(i, 0) {
 		case 0: // set-hex

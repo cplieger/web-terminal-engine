@@ -18,7 +18,10 @@ import (
 )
 
 const (
-	defaultMaxSubscribers = 32
+	// maxSubscribers is the fixed ceiling on concurrent status-stream (SSE)
+	// subscribers; it bounds subscriber goroutines/buffers and stops runaway
+	// connections. A few devices per deployment is the expected load.
+	maxSubscribers = 10
 	// statusSweepInterval is how often per-session status is recomputed.
 	statusSweepInterval = 250 * time.Millisecond
 	// subscriberBuffer bounds a subscriber's pending events; a subscriber that
@@ -27,29 +30,41 @@ const (
 	// sseKeepAlive is the idle interval between SSE keepalive comments, so
 	// proxies do not close a quiet stream.
 	sseKeepAlive = 15 * time.Second
+	// sseWriteTimeout bounds each SSE write so a wedged subscriber (client
+	// socket dead but not yet FIN'd) is detected in seconds instead of waiting
+	// for the OS TCP timeout. Mirrors the WS per-client write deadline in
+	// dispatchFrame. 10s is far above a healthy client's sub-ms flush of a
+	// small SSE frame and below the 15s keepalive, so a dead client is caught
+	// before the next keepalive fires; a healthy-but-slow client is unaffected.
+	sseWriteTimeout = 10 * time.Second
 )
 
 // statusEvent is one status-stream message: a session's current status and
 // title. Removed=true signals the session is gone (closed or reaped) so the
 // client drops the tab.
 type statusEvent struct {
-	CreatedAt       time.Time `json:"createdAt"`
-	ID              string    `json:"id"`
-	Status          string    `json:"status"`
-	Title           string    `json:"title"`
-	Removed         bool      `json:"removed,omitempty"`
-	ReportsActivity bool      `json:"reportsActivity"`
+	CreatedAt time.Time `json:"createdAt"`
+	ID        string    `json:"id"`
+	Status    string    `json:"status"`
+	Title     string    `json:"title"` // OSC-first effective title (effectiveTitle)
+	// ClientTitle is the raw stored client title, carried alongside Title so a
+	// consumer can read the pushed label directly (bypassing the OSC-first
+	// fallback in Title). Not carried on a Removed event.
+	ClientTitle     string `json:"clientTitle"`
+	Removed         bool   `json:"removed,omitempty"`
+	ReportsActivity bool   `json:"reportsActivity"`
 }
 
 // statusTracker holds the per-session state the status computation needs beyond
 // the handler: the last emitted status/title (to detect changes), the last
 // notification sequence classified, and the latched needs-input/done state.
 type statusTracker struct {
-	lastStatus  string
-	lastTitle   string
-	latched     string // "", StatusInput, or StatusDone
-	notifSeen   uint64
-	lastReports bool // last emitted reportsActivity (to detect a false->true flip)
+	lastStatus      string
+	lastTitle       string
+	lastClientTitle string // last emitted raw client title (to detect a title-only PUT)
+	latched         string // "", StatusInput, or StatusDone
+	notifSeen       uint64
+	lastReports     bool // last emitted reportsActivity (to detect a false->true flip)
 }
 
 func (m *SessionManager) sweepLoop(ctx context.Context) {
@@ -68,9 +83,10 @@ func (m *SessionManager) sweepLoop(ctx context.Context) {
 }
 
 // diffStatuses recomputes every session's status under the manager lock and
-// returns the events for sessions whose status or title changed since the last
-// sweep, plus removed events for sessions that vanished. Broadcasting happens
-// outside the lock (see sweepLoop).
+// returns the events for sessions whose status, effective title, raw client
+// title, or reported activity changed since the last sweep, plus removed events
+// for sessions that vanished. Broadcasting happens outside the lock (see
+// sweepLoop).
 func (m *SessionManager) diffStatuses() []statusEvent {
 	var events []statusEvent
 	m.mu.Lock()
@@ -83,17 +99,23 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 			m.trackers[id] = tr
 		}
 		status := m.computeStatus(s.handler, tr)
-		title := s.handler.Title()
+		title := effectiveTitle(s)
+		clientTitle := s.clientTitle
 		// reportsActivity is sticky: Progress() stays >= 0 once any OSC 9;4 has
 		// been seen (state 0 is "cleared", not "never seen" = -1), and a latched
 		// notification is the other genuine OSC 9 signal. The client reveals the
 		// tab's activity dot only when this is set.
 		reports := s.handler.Progress() >= 0 || tr.latched != ""
-		if status != tr.lastStatus || title != tr.lastTitle || reports != tr.lastReports {
+		// Emit on a raw client-title change too: a PUT /title can change only the
+		// client title (OSC title and status unchanged), and a consumer reading
+		// clientTitle directly needs that pushed even when the effective title is
+		// unmoved (an OSC title is masking the fallback).
+		if status != tr.lastStatus || title != tr.lastTitle || clientTitle != tr.lastClientTitle || reports != tr.lastReports {
 			tr.lastStatus = status
 			tr.lastTitle = title
+			tr.lastClientTitle = clientTitle
 			tr.lastReports = reports
-			events = append(events, statusEvent{ID: id, Status: status, Title: title, CreatedAt: s.createdAt, ReportsActivity: reports})
+			events = append(events, statusEvent{ID: id, Status: status, Title: title, ClientTitle: clientTitle, CreatedAt: s.createdAt, ReportsActivity: reports})
 		}
 	}
 	for id, tr := range m.trackers {
@@ -162,6 +184,7 @@ func (m *SessionManager) broadcast(ev *statusEvent) {
 			// Subscriber is too far behind; drop it. The hub owns closing the
 			// channel; the handler goroutine sees !ok and unsubscribes (a no-op
 			// once already removed here).
+			m.logger.Warn("terminal: status subscriber dropped (buffer full)", "buffer", subscriberBuffer)
 			delete(m.subs, ch)
 			close(ch)
 		}
@@ -170,9 +193,14 @@ func (m *SessionManager) broadcast(ev *statusEvent) {
 }
 
 func (m *SessionManager) subscribe() (chan statusEvent, bool) {
+	// The subscriber cap is a fixed const (maxSubscribers): a small ceiling that
+	// bounds runaway subscriber goroutines/buffers while leaving safe headroom
+	// for several devices per deployment. The count and the compared ceiling are
+	// both known under subsMu (the lock guarding the subscriber map), so no other
+	// lock is involved.
 	m.subsMu.Lock()
 	defer m.subsMu.Unlock()
-	if len(m.subs) >= m.maxSubs {
+	if len(m.subs) >= maxSubscribers {
 		return nil, false
 	}
 	ch := make(chan statusEvent, subscriberBuffer)
@@ -203,7 +231,7 @@ func (m *SessionManager) snapshot() []statusEvent {
 			status = tr.lastStatus
 		}
 		reports := s.handler.Progress() >= 0 || (tr != nil && tr.latched != "")
-		out = append(out, statusEvent{ID: id, Status: status, Title: s.handler.Title(), CreatedAt: s.createdAt, ReportsActivity: reports})
+		out = append(out, statusEvent{ID: id, Status: status, Title: effectiveTitle(s), ClientTitle: s.clientTitle, CreatedAt: s.createdAt, ReportsActivity: reports})
 	}
 	return out
 }
@@ -212,7 +240,8 @@ func (m *SessionManager) snapshot() []statusEvent {
 // subscriber is counted as a present client (suppressing the idle reaper) and
 // first receives an initial sync of every session's current status, then a
 // stream of changes. A subscriber that falls behind its bounded buffer is
-// dropped; the stream is capped by WithMaxSubscribers.
+// dropped; the number of concurrent subscribers is bounded by the fixed
+// maxSubscribers cap.
 func (m *SessionManager) EventsHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Flush through a ResponseController so the stream works behind
@@ -230,6 +259,7 @@ func (m *SessionManager) EventsHandler() http.Handler {
 		// queued (delivered after it) rather than missed.
 		ch, ok := m.subscribe()
 		if !ok {
+			m.logger.Warn("terminal: status subscriber rejected (at cap)", "max_subscribers", maxSubscribers)
 			http.Error(w, "too many subscribers", http.StatusServiceUnavailable)
 			return
 		}
@@ -238,6 +268,7 @@ func (m *SessionManager) EventsHandler() http.Handler {
 		defer m.clientDisconnected()
 
 		writeSSEHeaders(w)
+		_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) // bound the snapshot burst too
 		for _, ev := range m.snapshot() {
 			if !writeSSE(w, &ev) {
 				return
@@ -302,6 +333,7 @@ func streamEvents(ctx context.Context, w http.ResponseWriter, rc *http.ResponseC
 // writeKeepAlive emits an SSE keepalive comment and flushes, returning false if
 // the client connection is gone (so the stream loop exits).
 func writeKeepAlive(w http.ResponseWriter, rc *http.ResponseController) bool {
+	_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) // unsupported writer degrades to no deadline (prior behavior)
 	if _, err := fmt.Fprint(w, ": keepalive\n\n"); err != nil {
 		return false
 	}
@@ -311,6 +343,7 @@ func writeKeepAlive(w http.ResponseWriter, rc *http.ResponseController) bool {
 // writeSSEFlush writes one event frame and flushes, returning false if the
 // client connection is gone.
 func writeSSEFlush(w http.ResponseWriter, rc *http.ResponseController, ev *statusEvent) bool {
+	_ = rc.SetWriteDeadline(time.Now().Add(sseWriteTimeout)) // unsupported writer degrades to no deadline (prior behavior)
 	if !writeSSE(w, ev) {
 		return false
 	}

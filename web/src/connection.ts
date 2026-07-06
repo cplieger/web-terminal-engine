@@ -257,6 +257,18 @@ export function sendResize(): void {
   sendControl({ type: "resize", cols, rows });
 }
 
+// resetSessionAfterRestart clears a session's reliable-input accounting and
+// notifies the UI. Called when the server's boot epoch changes (restart) or when
+// the server no longer recognizes the session (received=0 with prior acks) -- both
+// invalidate the local bytesSent/bytesAcked/outbox state.
+function resetSessionAfterRestart(st: ResumeState): void {
+  st.bytesSent = 0;
+  st.bytesAcked = 0;
+  st.outbox.length = 0;
+  st.outboxBytes = 0;
+  cb?.onServerRestart?.();
+}
+
 // applyAck drops chunks from the front of the session's outbox until the
 // running total of unacked bytes matches (bytesSent - newAck). Runs in
 // O(chunks_dropped) by tracking outboxBytes incrementally rather than
@@ -491,7 +503,19 @@ export function connect(): void {
   //   removed atomically and can't fire again.
   const connectAbort = new AbortController();
   const timeoutId = setTimeout(() => {
+    // Aborting detaches every listener registered with connectAbort.signal
+    // (abort algorithms run BEFORE the abort event fires), INCLUDING the
+    // "close" listener that normally schedules the reconnect. A connect that
+    // never opens (SYN dropped by a firewall / an overloaded server) would
+    // otherwise leave connState pinned at "connecting" with no auto-retry.
+    // Drive the reconnect explicitly, mirroring the close handler.
     connectAbort.abort();
+    if (connState.status === "connecting" && connState.sock === sock) {
+      stopHeartbeat();
+      connState = { status: "disconnected" };
+      cb?.onClose();
+      scheduleReconnect();
+    }
   }, 10_000);
   connectAbort.signal.addEventListener("abort", () => {
     clearTimeout(timeoutId);
@@ -560,16 +584,35 @@ export function connect(): void {
       // even decode it. A malformed frame that decodes to null still counts.
       markActivity();
       if (ev.data instanceof ArrayBuffer) {
-        handleDecoded(decodeWireBinary(ev.data));
+        try {
+          handleDecoded(decodeWireBinary(ev.data));
+        } catch (err) {
+          // Mirror the Blob branch below: a throw here (a consumer onMessage
+          // callback, or the documented re-throw of a non-RangeError from
+          // decodeWireBinary) is logged with engine context instead of
+          // surfacing as a bare uncaught exception, so field observability is
+          // the same across ArrayBuffer (non-iOS) and Blob (iOS Safari) frames.
+          console.error("vterm: dropped binary frame", err);
+        }
         return;
       }
       if (ev.data instanceof Blob) {
         const blob = ev.data;
-        blobChain = blobChain.then(() =>
-          blob.arrayBuffer().then((ab) => {
+        blobChain = blobChain
+          .then(() => blob.arrayBuffer())
+          .then((ab) => {
             handleDecoded(decodeWireBinary(ab));
-          }),
-        );
+          })
+          .catch((err: unknown) => {
+            // A throw here (typically a consumer onMessage callback) must NOT
+            // poison the chain: without this catch blobChain stays rejected and
+            // every later Blob frame's .then is skipped, silently dropping all
+            // binary frames until reconnect. iOS Safari delivers binary WS
+            // frames as Blob, and markActivity() already ran on arrival, so the
+            // liveness probe never fires -> the tab looks connected but renders
+            // nothing. Log and continue; arrival order is preserved.
+            console.error("vterm: dropped binary (blob) frame", err);
+          });
         return;
       }
       if (typeof ev.data === "string") {
@@ -596,11 +639,7 @@ export function connect(): void {
       const epoch = msg.serverEpoch;
       if (epoch !== undefined && epoch !== 0) {
         if (st.lastServerEpoch !== null && st.lastServerEpoch !== epoch) {
-          st.bytesSent = 0;
-          st.bytesAcked = 0;
-          st.outbox.length = 0;
-          st.outboxBytes = 0;
-          cb?.onServerRestart?.();
+          resetSessionAfterRestart(st);
         }
         st.lastServerEpoch = epoch;
       }
@@ -622,11 +661,7 @@ export function connect(): void {
       // not duplicated. Skip this branch when bytesSent = 0 (genuine
       // first-connect; received=0 is correct).
       if (msg.received === 0 && st.bytesAcked > 0) {
-        st.bytesSent = 0;
-        st.bytesAcked = 0;
-        st.outbox.length = 0;
-        st.outboxBytes = 0;
-        cb?.onServerRestart?.();
+        resetSessionAfterRestart(st);
         return;
       }
       applyAck(st, msg.received);

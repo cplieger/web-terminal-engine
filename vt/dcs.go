@@ -58,6 +58,13 @@ func (s *Screen) dcsUnhook() {
 func (s *Screen) handleXTGetTcap(query []byte) {
 	for _, part := range splitSemis(string(query)) {
 		name := decodeHexString(part)
+		if name == "" {
+			// Malformed (non-hex) capability name. XTGETTCAP names are hex
+			// per the spec, so echoing the raw bytes back would inject
+			// attacker-controlled control runes (CR/LF) into the PTY as
+			// input. Skip it.
+			continue
+		}
 		if name == "Co" || name == "colors" {
 			// Reply value is the hex encoding of the decimal string "256".
 			s.Response = fmt.Appendf(s.Response, "\x1bP1+r%s=%s\x1b\\", part, encodeHexString("256"))

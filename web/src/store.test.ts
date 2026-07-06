@@ -145,6 +145,30 @@ describe("LineStore", () => {
     ]);
   });
 
+  it("forEachLine iterates retained keys across a huge index gap without an integer walk", () => {
+    // The absolute-index DoS guard (bounded key-scan, not a walk over the
+    // integer range [oldest, highest]) is applied at four sites in store.ts;
+    // only enforceCap's is regression-pinned. forEachLine is the hottest of
+    // the four -- the renderer calls it every frame to order DOM rows -- yet
+    // its only gap test ("skips holes") uses a 3-index gap that a naive
+    // range walk would survive. With both a low block and a far block
+    // retained (no cap eviction), a range-walk regression loops ~1e9 times
+    // and times out; the bounded key-scan yields the four lines in
+    // ascending order instantly.
+    const s = new LineStore(1000); // cap high enough that nothing is evicted
+    s.applyScroll(scrollMsg(0, ["a", "b"]));
+    const far = 1_000_000_000;
+    s.applyScroll(scrollMsg(far, ["y", "z"]));
+    expect(lineTexts(s)).toEqual([
+      { abs: 0, text: "a" },
+      { abs: 1, text: "b" },
+      { abs: far, text: "y" },
+      { abs: far + 1, text: "z" },
+    ]);
+    expect(s.oldestIndex()).toBe(0);
+    expect(s.highestIndex()).toBe(far + 1);
+  });
+
   it("skips holes when iterating (trimmed-history gap shows as a jump in abs)", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, ["a", "b"]));

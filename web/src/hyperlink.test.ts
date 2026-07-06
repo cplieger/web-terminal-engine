@@ -89,9 +89,10 @@ describe("OSC 8 hyperlink rendering", () => {
     // the sequence is authoritative), and resolves to the absolute URL.
     expect(a.getAttribute("href")).toBe("http://example.com");
     expect(a.href).toBe("http://example.com/");
-    // Opened safely: a new context with no window.opener handle back.
+    // Opened safely: a new context with no window.opener handle back, and
+    // no Referer leak of the terminal URL to an attacker-controlled OSC 8 URI.
     expect(a.target).toBe("_blank");
-    expect(a.rel).toBe("noopener");
+    expect(a.rel).toBe("noopener noreferrer");
     expect(a.textContent).toBe("here");
   });
 
@@ -134,6 +135,27 @@ describe("OSC 8 hyperlink rendering", () => {
 
     expect(output.querySelectorAll("a").length).toBe(0);
     expect(output.textContent).toContain("mail me");
+  });
+
+  it("autolinks a bare http(s) URL in plain text with the same safe-open attributes", async () => {
+    // render.ts builds anchors on TWO paths: the OSC 8 `u`-field path
+    // (asserted above) and linkifySpans, which detects a bare URL in the
+    // visible text of a run that carries no `u`. Both must set the
+    // reverse-tabnabbing guards (target=_blank, rel=noopener noreferrer);
+    // the autolinker path is otherwise unasserted -- the safety fuzz file
+    // uses a fixed non-URL text to isolate the OSC 8 gate, and the only
+    // text-path test here uses URL-free text. A regression dropping
+    // rel/target on the autolinker anchor would pass today.
+    const runs: WireRun[] = [{ t: "see https://example.com/x now", f: -1, b: -1, a: 0, uc: -1 }];
+    const msg = frame({ 0: runs }, [0, 0]);
+    await flushFrame(msg);
+    const anchors = output.querySelectorAll("a.term-link");
+    expect(anchors.length).toBe(1);
+    const a = anchors[0] as HTMLAnchorElement;
+    expect(a.getAttribute("href")).toBe("https://example.com/x");
+    expect(a.textContent).toBe("https://example.com/x");
+    expect(a.target).toBe("_blank");
+    expect(a.rel).toBe("noopener noreferrer");
   });
 
   it("distinguishes OSC 8 hyperlinks from auto-detected URLs by class", async () => {

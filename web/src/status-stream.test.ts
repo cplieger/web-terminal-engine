@@ -11,8 +11,13 @@
 //    so the consumer can resync after a gap.
 // 4. onError fires on an "error" event.
 // 5. close() closes the underlying EventSource exactly once.
-// 6. Optional callbacks (onOpen/onError) absent: no listener is registered and
-//    events do not throw.
+// 6. Optional callbacks absent: the module ALWAYS registers both the OPEN
+//    listener (to reset reconnect backoff on every successful reopen) and the
+//    ERROR listener (to drive its own reconnect); only the onOpen callback
+//    inside the open listener is gated. A stray event does not throw.
+// 7. On a permanent close (readyState CLOSED) the module re-establishes the
+//    stream after a capped backoff, fires onOpen on the reopen, and close()
+//    cancels a pending reconnect.
 
 import { describe, it, expect, vi } from "vitest";
 
@@ -23,6 +28,7 @@ import { connectStatusStream, type EventSourceLike, type SessionStatus } from ".
 class FakeEventSource implements EventSourceLike {
   readonly url: string;
   closed = 0;
+  readyState = 0; // 0 CONNECTING, 1 OPEN, 2 CLOSED; a test sets 2 to drive reconnect
   private readonly listeners = new Map<string, ((event: MessageEvent) => void)[]>();
 
   constructor(url: string) {
@@ -128,13 +134,66 @@ describe("connectStatusStream", () => {
     expect(fake.closed).toBe(1);
   });
 
-  it("registers no open/error listener when the callbacks are absent", () => {
+  it("always registers open+error listeners; gates only the onOpen callback", () => {
     const { fake } = mountFake({ onStatus: vi.fn() });
 
-    expect(fake.hasListener("open")).toBe(false);
-    expect(fake.hasListener("error")).toBe(false);
-    // A stray open/error event must not throw with no handler registered.
+    // The open listener is ALWAYS registered so it can reset the reconnect
+    // backoff on every successful (re)open; only the onOpen callback inside it
+    // is gated on the consumer supplying one.
+    expect(fake.hasListener("open")).toBe(true);
+    // The module always listens for errors so it can re-establish a permanent
+    // close even when the consumer supplies no onError callback.
+    expect(fake.hasListener("error")).toBe(true);
+    // A stray open/error event must not throw with no consumer callback set;
+    // readyState stays CONNECTING (0), so no reconnect is scheduled either.
     expect(() => fake.emit("open")).not.toThrow();
     expect(() => fake.emit("error")).not.toThrow();
+  });
+
+  it("re-establishes the stream on a permanent close and cancels reconnect on close()", () => {
+    vi.useFakeTimers();
+    // The reconnect delay is now jittered (base + Math.random()*250, matching
+    // the WS reconnect). Pin Math.random to 0.5 so the first attempt's delay is
+    // exactly 500 + 0.5*250 = 625ms and the test stays deterministic.
+    const randomSpy = vi.spyOn(Math, "random").mockReturnValue(0.5);
+    const onOpen = vi.fn();
+    const fakes: FakeEventSource[] = [];
+    const stream = connectStatusStream(
+      "/api/sessions/events",
+      { onStatus: vi.fn(), onOpen },
+      (url) => {
+        const f = new FakeEventSource(url);
+        fakes.push(f);
+        return f;
+      },
+    );
+
+    // Initial connect opens exactly one source.
+    expect(fakes).toHaveLength(1);
+    fakes[0]!.emit("open");
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    // A permanent close (readyState CLOSED) schedules a reconnect after the
+    // jittered backoff (625ms with Math.random pinned to 0.5).
+    fakes[0]!.readyState = 2;
+    fakes[0]!.emit("error");
+    expect(fakes).toHaveLength(1); // not yet: waits for the backoff delay
+    vi.advanceTimersByTime(625);
+    expect(fakes).toHaveLength(2); // re-established
+
+    // The reopen fires onOpen again so the consumer resyncs after the gap.
+    fakes[1]!.emit("open");
+    expect(onOpen).toHaveBeenCalledTimes(2);
+
+    // close() cancels any pending reconnect and does not reopen.
+    fakes[1]!.readyState = 2;
+    fakes[1]!.emit("error");
+    stream.close();
+    vi.advanceTimersByTime(10_000);
+    expect(fakes).toHaveLength(2);
+    expect(fakes[1]!.closed).toBe(1);
+
+    randomSpy.mockRestore();
+    vi.useRealTimers();
   });
 });

@@ -338,3 +338,44 @@ func TestBuildModesPayload_kittyKeyboardFlag(t *testing.T) {
 		t.Errorf("unchanged buildModesPayload = %d bytes, want nil (suppressed)", len(got))
 	}
 }
+
+// TestReset_reAnnouncesTitleAndModes pins the resume / second-client
+// redelivery contract of flushFrameBuilder.Reset: after the window title and
+// DEC modes have been announced to one client, Reset (called on resize, a new
+// client connect, a resume, or an alt-screen transition) must clear the
+// announced flags so the NEXT Build re-emits both even though the screen state
+// is unchanged. Without it, titleStable/modesStable suppress the re-announce
+// and a resuming or second-tab client keeps a stale title and default modes
+// (breaking mouse/arrow-key input encoding). Reset shows 100% statement
+// coverage only because Build calls it incidentally; no test asserts this
+// effect, so a mutant dropping `b.titleAnnounced = false` or
+// `b.modesAnnounced = false` from Reset survives every other test.
+func TestReset_reAnnouncesTitleAndModes(t *testing.T) {
+	screen := vt.New(5, 20)
+	screen.Title = "session title"
+	b := &flushFrameBuilder{}
+
+	// Announce title and modes to the first client.
+	if got := b.buildTitlePayload(screen); len(got) == 0 {
+		t.Fatal("first buildTitlePayload = empty, want a title frame")
+	}
+	if got := b.buildModesPayload(screen); len(got) == 0 {
+		t.Fatal("first buildModesPayload = empty, want a modes frame")
+	}
+	// Unchanged screen state: both are suppressed.
+	if got := b.buildTitlePayload(screen); got != nil {
+		t.Fatalf("unchanged buildTitlePayload = %d bytes, want nil", len(got))
+	}
+	if got := b.buildModesPayload(screen); got != nil {
+		t.Fatalf("unchanged buildModesPayload = %d bytes, want nil", len(got))
+	}
+
+	// Resume / second client / resize: Reset must force a re-announce of both.
+	b.Reset()
+	if got := b.buildTitlePayload(screen); len(got) == 0 {
+		t.Error("after Reset, buildTitlePayload = empty; a resuming client must be re-sent the current title")
+	}
+	if got := b.buildModesPayload(screen); len(got) == 0 {
+		t.Error("after Reset, buildModesPayload = empty; a resuming client must be re-sent the current DEC modes")
+	}
+}

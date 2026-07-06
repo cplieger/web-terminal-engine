@@ -49,14 +49,30 @@ func (s *Screen) decodeTitle(data string) string {
 	return data
 }
 
-// encodeTitle applies the XTSMTITLE query-mode to a title reported by XTWINOPS
-// 20/21: when query-hex (mode 1) is active the label is hex-encoded (xterm);
-// otherwise it is reported verbatim.
+// encodeTitle applies the XTSMTITLE query-mode to a title reported by
+// XTWINOPS 20/21: when query-hex (mode 1) is active the label is hex-encoded
+// (xterm); otherwise it is reported with C0/C1/DEL control runes stripped.
+// The report is injected into the PTY as input, so echoing an attacker-set
+// title verbatim would let an embedded CR/LF inject a command line.
 func (s *Screen) encodeTitle(title string) string {
 	if s.titleQueryHex {
 		return hex.EncodeToString([]byte(title))
 	}
-	return title
+	return stripControlRunes(title)
+}
+
+// stripControlRunes drops C0 (incl. CR/LF), DEL, and C1 control runes from a
+// string that will be echoed back into the PTY as input.
+func stripControlRunes(t string) string {
+	var b strings.Builder
+	b.Grow(len(t))
+	for _, r := range t {
+		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // dispatchOsc processes the buffered OSC payload and resets the buffer.
@@ -388,7 +404,10 @@ func (s *Screen) handleOsc52(data string) {
 			targets = "s0"
 		}
 		enc := base64.StdEncoding.EncodeToString(s.selectionData)
-		s.Response = fmt.Appendf(s.Response, "\x1b]52;%s;%s\x1b\\", targets, enc)
+		// Strip C0/C1/DEL from the echoed target list: the reply is injected
+		// into the PTY as input, so a CR/LF in an attacker-set target would
+		// inject a command line (same hardening as encodeTitle / XTGETTCAP).
+		s.Response = fmt.Appendf(s.Response, "\x1b]52;%s;%s\x1b\\", stripControlRunes(targets), enc)
 		return
 	}
 	// A base64 payload sets the selection (and pushes it to the browser
@@ -500,10 +519,10 @@ func scaleHexTo8(h string) (uint8, bool) {
 	return uint8(scaled), true // #nosec G115 -- scaled <= 255
 }
 
-// handleOscColor answers OSC 10/11/12 default-color queries. Only the query
-// form (Pt == "?") is handled: setting the default fg/bg/cursor color would
-// need to propagate to the client renderer, which this VT does not do, so a
-// set is ignored. Answering the query from the configured Theme keeps apps
+// handleOscColor handles OSC 10/11/12 default-color set and query. A "?" spec
+// queries the slot; a non-"?" spec is stored in dynColors so a later query (and
+// the OSC 11x reset) round-trips it. A set is NOT propagated to the client
+// renderer, which this VT does not drive. Answering the query from the Theme keeps apps
 // that probe the background for light/dark detection (or block waiting for a
 // reply) from stalling or guessing the wrong theme.
 func (s *Screen) handleOscColor(id int, data string) {

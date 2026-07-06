@@ -280,3 +280,44 @@ func TestXTGETTCAP(t *testing.T) {
 		})
 	}
 }
+
+// TestXTGETTCAPMalformedNameNotEchoed verifies a malformed (non-hex or
+// odd-length) XTGETTCAP capability name is skipped with NO reply, not echoed
+// back. Echoing the raw token would inject attacker-controlled bytes (e.g.
+// CR/LF) into the PTY as input. Covers decodeHexString's error return and
+// handleXTGetTcap's name=="" skip branch, which the valid-hex-only XTGETTCAP
+// test never exercises.
+func TestXTGETTCAPMalformedNameNotEchoed(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1bP+qZZ\x1b\\")) // "ZZ" is not valid hex
+	if len(s.Response) != 0 {
+		t.Errorf("non-hex XTGETTCAP name produced reply %q, want none (skipped, not echoed)", s.Response)
+	}
+	s.Response = nil
+	s.Write([]byte("\x1bP+qabc\x1b\\")) // 3 chars: odd-length hex
+	if len(s.Response) != 0 {
+		t.Errorf("odd-length XTGETTCAP name produced reply %q, want none (skipped, not echoed)", s.Response)
+	}
+}
+
+func TestDECRQSS_AdditionalSelectors(t *testing.T) {
+	cases := []struct {
+		name, query, want string
+	}{
+		{"DECSLRM margins default", "s", "\x1bP1$r1;80s\x1b\\"},
+		{"DECSLPP lines-per-page default", "t", "\x1bP1$r24t\x1b\\"},
+		{"DECSNLS lines-per-screen default", "*|", "\x1bP1$r24*|\x1b\\"},
+		{"DECSACE change-extent default", "*x", "\x1bP1$r0*x\x1b\\"},
+		{"DECSASD active-status-display", "$}", "\x1bP1$r0$}\x1b\\"},
+		{"DECSSDT status-display-type", "$~", "\x1bP1$r0$~\x1b\\"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(24, 80)
+			s.Write([]byte("\x1bP$q" + tc.query + "\x1b\\"))
+			if got := string(s.Response); got != tc.want {
+				t.Errorf("DECRQSS %q = %q, want %q", tc.query, got, tc.want)
+			}
+		})
+	}
+}

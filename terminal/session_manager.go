@@ -22,6 +22,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -29,11 +30,16 @@ import (
 // SessionInfo is the public description of one session, returned by List and
 // carried on the status stream.
 type SessionInfo struct {
-	CreatedAt       time.Time `json:"createdAt"`
-	ID              string    `json:"id"`
-	Title           string    `json:"title"`
-	Status          string    `json:"status"`
-	ReportsActivity bool      `json:"reportsActivity"`
+	CreatedAt time.Time `json:"createdAt"`
+	ID        string    `json:"id"`
+	Title     string    `json:"title"` // OSC-first effective title (effectiveTitle)
+	// ClientTitle is the raw stored client-supplied title, exposed alongside
+	// Title so a consumer can read the pushed label directly (bypassing the
+	// OSC-first fallback baked into Title) — used by an input-title UI that
+	// treats a program's OSC window title as unreliable.
+	ClientTitle     string `json:"clientTitle"`
+	Status          string `json:"status"`
+	ReportsActivity bool   `json:"reportsActivity"`
 }
 
 // Session status values. The manager computes working/idle/exited from process
@@ -53,7 +59,6 @@ type ManagerOption func(*managerConfig)
 type managerConfig struct {
 	logger     *slog.Logger
 	classifier func(string) (string, bool)
-	maxSubs    int
 	idleWindow time.Duration
 }
 
@@ -82,17 +87,28 @@ func WithStatusClassifier(fn func(notification string) (status string, ok bool))
 	return func(c *managerConfig) { c.classifier = fn }
 }
 
-// WithMaxSubscribers caps concurrent status-stream (SSE) subscribers, bounding
-// subscriber goroutines and buffers independently of the session cap. Zero
-// selects a built-in default.
-func WithMaxSubscribers(n int) ManagerOption {
-	return func(c *managerConfig) { c.maxSubs = n }
+// Field order is pointer-scan optimal (govet fieldalignment): the struct ends
+// with string fields, whose trailing length word is a scalar, so the GC's
+// pointer-scan range stops before the tail. Ending with the *Handler pointer
+// instead would extend that range by a word.
+type session struct {
+	createdAt   time.Time
+	handler     *Handler
+	id          string
+	clientTitle string // client-supplied fallback title, used when the OSC title is empty
 }
 
-type session struct {
-	createdAt time.Time
-	handler   *Handler
-	id        string
+// effectiveTitle returns the session's reported title: the live OSC window
+// title from the handler when non-empty, otherwise the stored client-supplied
+// fallback title. This is OSC-first — a program that emits its own window title
+// (an interactive shell) wins, while a program that emits no usable OSC title
+// (kiro-cli under vibecli) falls back to the client-pushed label. Callers MUST
+// hold m.mu because it reads s.clientTitle.
+func effectiveTitle(s *session) string {
+	if t := s.handler.Title(); t != "" {
+		return t
+	}
+	return s.clientTitle
 }
 
 // SessionManager maps session ids to PTY-backed handlers and serves the
@@ -111,7 +127,6 @@ type SessionManager struct {
 	mu            sync.Mutex
 	subsMu        sync.Mutex
 	idleWindow    time.Duration
-	maxSubs       int
 	activeClients int
 	created       uint64
 	closed        uint64
@@ -120,8 +135,9 @@ type SessionManager struct {
 
 // NewSessionManager returns a manager that builds each session's handler with
 // factory (called with the new session id, so the factory can scope the
-// handler's logger and working directory). Options configure the cap, the idle
-// reaper, and the logger.
+// handler's logger and working directory). Options configure the idle reaper,
+// the status classifier, and the logger; concurrent SSE subscribers are bounded
+// internally to a fixed cap (maxSubscribers).
 func NewSessionManager(factory func(id string) *Handler, opts ...ManagerOption) *SessionManager {
 	cfg := managerConfig{logger: slog.Default()}
 	for _, o := range opts {
@@ -141,10 +157,6 @@ func NewSessionManager(factory func(id string) *Handler, opts ...ManagerOption) 
 		classifier: cfg.classifier,
 		idleSince:  time.Now(),
 		idleWindow: cfg.idleWindow,
-		maxSubs:    cfg.maxSubs,
-	}
-	if m.maxSubs <= 0 {
-		m.maxSubs = defaultMaxSubscribers
 	}
 	if m.idleWindow > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
@@ -180,13 +192,26 @@ func (m *SessionManager) Create() (string, error) {
 	}
 
 	m.mu.Lock()
+	// Refresh the idle clock so the reaper cannot reap a session created while the
+	// manager is idle (activeClients == 0) before its first client attaches.
+	m.idleSince = time.Now()
 	m.sessions[id] = &session{id: id, handler: h, createdAt: time.Now()}
 	n := len(m.sessions)
 	m.created++
 	m.mu.Unlock()
 
-	m.logger.Info("session: created", "session", id, "sessions", n)
+	m.logger.Info("session: created", "session", logID(id), "sessions", n)
 	return id, nil
+}
+
+// logID returns a short, correlation-safe prefix of a session id for logs.
+// The full id is a WS routing + resume capability token; logging it in full
+// places a session-access token into aggregated logs (CWE-532).
+func logID(id string) string {
+	if len(id) > 8 {
+		return id[:8] + "\u2026"
+	}
+	return id
 }
 
 // List returns all sessions sorted by creation time.
@@ -199,7 +224,8 @@ func (m *SessionManager) List() []SessionInfo {
 		tr := m.trackers[s.id]
 		out = append(out, SessionInfo{
 			ID:              s.id,
-			Title:           s.handler.Title(),
+			Title:           effectiveTitle(s),
+			ClientTitle:     s.clientTitle,
 			Status:          statusOf(s.handler),
 			CreatedAt:       s.createdAt,
 			ReportsActivity: s.handler.Progress() >= 0 || (tr != nil && tr.latched != ""),
@@ -223,7 +249,23 @@ func (m *SessionManager) Close(id string) bool {
 		return false
 	}
 	s.handler.Shutdown()
-	m.logger.Info("session: closed", "session", id)
+	m.logger.Info("session: closed", "session", logID(id))
+	return true
+}
+
+// SetSessionTitle sets a per-session client-supplied fallback title, shown as
+// the session's reported title whenever its program emits no OSC window title.
+// Returns false if the id is unknown. No explicit broadcast is needed: the
+// 250ms status sweep (diffStatuses) detects the changed effective title and
+// pushes it to subscribers within a tick.
+func (m *SessionManager) SetSessionTitle(id, title string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return false
+	}
+	s.clientTitle = title
 	return true
 }
 
@@ -257,25 +299,29 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 		id := r.URL.Query().Get("session")
 		m.mu.Lock()
 		s, ok := m.sessions[id]
+		if ok {
+			m.activeClients++ // mark present atomically with the lookup
+		}
 		m.mu.Unlock()
 		if !ok {
 			http.Error(w, "unknown session", http.StatusNotFound)
 			return
 		}
-		m.clientConnected()
 		defer m.clientDisconnected()
 		s.handler.ServeHTTP(w, r) // blocks for the WS lifetime
 	})
 }
 
 // RESTHandler serves the session REST API: POST /api/sessions (create),
-// GET /api/sessions (list), DELETE /api/sessions/{id} (close). Mount it for the
-// /api/sessions and /api/sessions/ paths.
+// GET /api/sessions (list), DELETE /api/sessions/{id} (close), and
+// PUT /api/sessions/{id}/title (set the client-fallback title). Mount it for
+// the /api/sessions and /api/sessions/ paths.
 func (m *SessionManager) RESTHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sessions", m.handleCreate)
 	mux.HandleFunc("GET /api/sessions", m.handleList)
 	mux.HandleFunc("DELETE /api/sessions/{id}", m.handleDelete)
+	mux.HandleFunc("PUT /api/sessions/{id}/title", m.handleSetTitle)
 	return mux
 }
 
@@ -301,6 +347,48 @@ func (m *SessionManager) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Error(w, "unknown session", http.StatusNotFound)
+}
+
+// handleSetTitle sets a session's client-fallback title from a JSON body
+// {"title": "..."}. The body is capped at 4 KiB; a body that cannot be decoded
+// is 400, an unknown session id is 404, success is 204. The title is sanitized
+// (bounded to 512 runes, control/DEL stripped) before storage since it is shown
+// as a tab label.
+func (m *SessionManager) handleSetTitle(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	var body struct {
+		Title string `json:"title"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return
+	}
+	if m.SetSessionTitle(r.PathValue("id"), sanitizeTitle(body.Title)) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Error(w, "unknown session", http.StatusNotFound)
+}
+
+// sanitizeTitle bounds and cleans a client-supplied title for use as a tab
+// label: it truncates to at most 512 runes and drops control characters
+// (rune < 0x20) and DEL (0x7f) so a title cannot inject newlines or control
+// sequences into the UI or logs (CWE-117). The 512-rune cap counts retained
+// runes, so the returned string is always at most 512 runes and control-free.
+func sanitizeTitle(s string) string {
+	var b strings.Builder
+	n := 0
+	for _, r := range s {
+		if n >= 512 {
+			break
+		}
+		if r < 0x20 || r == 0x7f {
+			continue
+		}
+		b.WriteRune(r)
+		n++
+	}
+	return b.String()
 }
 
 // clientConnected records that a client (WS or status stream) is present, so
@@ -357,7 +445,7 @@ func (m *SessionManager) maybeReap() {
 	m.mu.Unlock()
 	for _, s := range victims {
 		s.handler.Shutdown()
-		m.logger.Info("session: reaped (no client for idle window)", "session", s.id)
+		m.logger.Info("session: reaped (no client for idle window)", "session", logID(s.id))
 	}
 }
 

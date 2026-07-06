@@ -375,7 +375,11 @@ func (s *Screen) RenderViewport() string {
 				buf.WriteString(sgrSequence(cell.Style))
 			}
 			prev = cell.Style
-			buf.WriteRune(cell.Ch)
+			ch := cell.Ch
+			if ch == 0 { // wide-char spacer cell -> render as a space, matching RowString/reportRectChecksum
+				ch = ' '
+			}
+			buf.WriteRune(ch)
 		}
 		buf.WriteString("\x1b[0m")
 		if y < len(s.Cells)-1 {
@@ -488,7 +492,7 @@ func (s *Screen) put(r rune) {
 		// Place spacer/continuation cell.
 		s.curX++
 		if s.curX < s.Width && s.curY < s.Height {
-			s.Cells[s.curY][s.curX] = Cell{Ch: 0, Style: s.style, Protected: s.curProtected}
+			s.Cells[s.curY][s.curX] = Cell{Ch: 0, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected}
 		}
 	}
 

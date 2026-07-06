@@ -33,7 +33,7 @@ func runeWidth(r rune) int {
 	if r < 0x7F {
 		return 1
 	}
-	if r >= 0x7F && r < 0xA0 {
+	if r < 0xA0 { // DEL (0x7F) + C1 controls (0x80-0x9F); r >= 0x7F guaranteed above
 		return 0
 	}
 	if isZeroWidth(r) {

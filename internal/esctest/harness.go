@@ -21,10 +21,13 @@ package esctest
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,8 +77,21 @@ type Result struct {
 
 var (
 	// esctest logs one such line per failing test.
-	failedRe  = regexp.MustCompile(`\*{3} TEST (\S+) FAILED`)
+	failedRe = regexp.MustCompile(`\*{3} TEST (\S+) FAILED`)
+	// summaryRe is the loose completion oracle: esctest emits a summary line on
+	// every clean run and never on a runner-level crash, so its mere presence
+	// signals the run finished (see Run).
 	summaryRe = regexp.MustCompile(`\*{3} .*passed.*\*{3}`)
+	// summaryCountRe captures esctest's own passed/failed tallies from that same
+	// summary line so crossCheckSummary can compare them against the counts
+	// parseLog scrapes from per-test markers. esctest2 (pinned commit 664be3c)
+	// emits a three-clause summary via RunTests, e.g.
+	// "*** 498 tests passed, 34 known bugs, 0 tests failed ***", and upper-cases
+	// the failed clause to "N TESTS FAILED" whenever any test fails. The pattern
+	// therefore matches case-insensitively and tolerates the interposed
+	// "K known bug(s)," clause while still capturing passed (group 1) and failed
+	// (group 2).
+	summaryCountRe = regexp.MustCompile(`(?i)\*{3}\s+(\d+)\s+tests?\s+passed,\s+(?:\d+\s+known\s+bugs?,\s+)?(\d+)\s+tests?\s+failed\s+\*{3}`)
 )
 
 // Run executes the esctest suite against a fresh vt.Screen and returns the
@@ -125,23 +141,40 @@ func Run(ctx context.Context, opts *Options) (*Result, error) {
 
 	done := make(chan struct{})
 	go func() {
-		pump(ptmx, screen)
+		pump(ptmx, ptmx, screen)
 		close(done)
 	}()
 
-	// esctest exits 0 even when tests fail (it reports via the log), so a Wait
-	// error is only a real problem if we also can't parse a summary.
+	// esctest exits 0 both when tests fail AND when its own top-level runner
+	// aborts (RunTests raises -> main() logs a traceback and still exits 0), so
+	// the exit code cannot signal completion. The summary line is the reliable
+	// completion oracle: esctest emits it on every clean run (even zero matched
+	// tests) and never on a runner-level crash, so gate on the summary alone.
 	waitErr := cmd.Wait()
 	_ = ptmx.Close()
 	<-done
 
-	data, _ := os.ReadFile(logPath)
+	data, readErr := os.ReadFile(logPath)
+	if readErr != nil {
+		return nil, fmt.Errorf("read esctest logfile %s: %w", logPath, readErr)
+	}
 	log := string(data)
-	if !summaryRe.MatchString(log) && waitErr != nil {
-		return nil, fmt.Errorf("esctest did not complete (%w); log tail:\n%s", waitErr, tail(log, 2000))
+	if !summaryRe.MatchString(log) {
+		return nil, fmt.Errorf("esctest did not complete: no summary line in log (wait err: %v); log tail:\n%s", waitErr, tail(log, 2000))
 	}
 
-	return parseLog(log), nil
+	res := parseLog(log)
+	// Cross-check esctest's own summary tallies against the counts parseLog
+	// scraped from per-test markers. A divergence means the scraper is blind to
+	// some result (a test that ERRORED rather than cleanly FAILED, or a renamed
+	// marker), which would otherwise leave the regression gate silently green.
+	// Fail through the same nil,error path as the completion oracle above so
+	// TestConformance/evaluateGate treat a mismatch as a hard failure.
+	if err := crossCheckSummary(log, res); err != nil {
+		return nil, err
+	}
+
+	return res, nil
 }
 
 // applyDefaults fills in the zero-value Options fields in place.
@@ -191,17 +224,20 @@ func esctestArgs(script, logPath string, o *Options) []string {
 	return args
 }
 
-// pump feeds the child's escape output into the screen and writes the screen's
-// query answers back to the child's stdin, until the PTY closes. A single
-// goroutine owns the screen, so no synchronization is needed.
-func pump(ptmx *os.File, screen *vt.Screen) {
+// pump feeds the child's escape output (read from r) into the screen and writes
+// the screen's query answers back to the child's stdin (w), until r reaches EOF
+// or errors. In production r and w are the same PTY master (*os.File, which
+// satisfies both interfaces); the io.Reader/io.Writer seam lets tests drive it
+// over pipes without a live child. A single goroutine owns the screen, so no
+// synchronization is needed.
+func pump(r io.Reader, w io.Writer, screen *vt.Screen) {
 	buf := make([]byte, 8192)
 	for {
-		n, readErr := ptmx.Read(buf)
+		n, readErr := r.Read(buf)
 		if n > 0 {
 			_, _ = screen.Write(buf[:n])
 			if len(screen.Response) > 0 {
-				_, _ = ptmx.Write(screen.Response)
+				_, _ = w.Write(screen.Response)
 				screen.Response = screen.Response[:0]
 			}
 		}
@@ -229,6 +265,33 @@ func parseLog(log string) *Result {
 		}
 	}
 	return res
+}
+
+// crossCheckSummary verifies esctest's own summary tallies match the counts
+// parseLog scraped from per-test markers. parseLog derives Passed by counting
+// "Passed." lines and Failed from "*** TEST x FAILED" markers; esctest's
+// summary ("*** N tests passed, K known bugs, M tests failed ***", with the
+// failed clause upper-cased to "M TESTS FAILED" on any failure) is an
+// independent count of the same outcomes, so the two must agree. When they
+// diverge the per-test scraper is blind to some result — a test that ERRORED
+// instead of cleanly FAILING, or a renamed marker — so this returns an error to
+// fail the gate loudly rather than report a false green. If the summary counts
+// cannot be parsed at all (an unrecognized format), the cross-check is skipped
+// with a warning rather than failed: parseLog's per-test-marker counts remain
+// the authoritative result, so a summary-wording drift must not turn the whole
+// gate red on its own.
+func crossCheckSummary(log string, res *Result) error {
+	m := summaryCountRe.FindStringSubmatch(log)
+	if m == nil {
+		slog.Warn("esctest: could not parse summary counts for cross-check; skipping")
+		return nil
+	}
+	sumPassed, _ := strconv.Atoi(m[1]) // m[1]/m[2] are \d+ captures, so Atoi cannot fail
+	sumFailed, _ := strconv.Atoi(m[2])
+	if sumPassed != res.Passed || sumFailed != len(res.Failed) {
+		return fmt.Errorf("esctest summary/scraped count mismatch: summary=%d passed/%d failed, scraped=%d passed/%d failed (a test errored or a marker wording changed; the per-test scraper is silently blind); log tail:\n%s", sumPassed, sumFailed, res.Passed, len(res.Failed), tail(log, 500))
+	}
+	return nil
 }
 
 func tail(s string, n int) string {

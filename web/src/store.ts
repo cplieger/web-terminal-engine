@@ -151,7 +151,12 @@ export class LineStore {
     if (this.oldest < 0) {
       return;
     }
-    for (let abs = this.oldest; abs <= this.highest; abs++) {
+    // Iterate the retained keys (bounded by maxLines), sorted ascending, not the
+    // integer range [oldest, highest]: a frame whose base jumps far from a
+    // retained index makes that range ~2^53 wide and freezes the tab (the DoS
+    // enforceCap is written to avoid).
+    const keys = [...this.lines.keys()].sort((a, b) => a - b);
+    for (const abs of keys) {
       const runs = this.lines.get(abs);
       if (runs !== undefined) {
         cb(abs, runs);
@@ -316,8 +321,10 @@ export class LineStore {
     if (this.oldest < 0 || this.oldest >= base) {
       return;
     }
-    for (let abs = this.oldest; abs < base; abs++) {
-      if (this.lines.delete(abs)) {
+    // Bounded key-scan (like enforceCap), not an integer walk over [oldest, base).
+    for (const abs of [...this.lines.keys()]) {
+      if (abs < base) {
+        this.lines.delete(abs);
         this.evicted.add(abs);
         this.dirty.delete(abs);
       }
@@ -349,19 +356,21 @@ export class LineStore {
     if (this.highest <= windowBottom) {
       return;
     }
-    for (let abs = windowBottom + 1; abs <= this.highest; abs++) {
-      if (this.lines.delete(abs)) {
+    // Bounded key-scan (like enforceCap), NOT an integer walk over
+    // [windowBottom+1, highest]: a frame whose base drops far below a high
+    // retained index would otherwise loop up to ~2^53 times and freeze the tab.
+    let newHighest = -1;
+    for (const abs of [...this.lines.keys()]) {
+      if (abs > windowBottom) {
+        this.lines.delete(abs);
         this.evicted.add(abs);
         this.dirty.delete(abs);
+      } else if (abs > newHighest) {
+        newHighest = abs;
       }
     }
-    // New highest is the greatest retained index at or below the window bottom.
-    let h = windowBottom;
-    while (h >= this.oldest && !this.lines.has(h)) {
-      h--;
-    }
-    if (h >= this.oldest) {
-      this.highest = h;
+    if (newHighest >= 0) {
+      this.highest = newHighest;
     } else {
       this.highest = -1;
       this.oldest = -1;

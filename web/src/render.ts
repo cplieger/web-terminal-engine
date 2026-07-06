@@ -162,6 +162,22 @@ let defaultSpacing = 0;
 let onCursorMove: (() => void) | null = null;
 let pendingFrame: number | undefined;
 
+// Bounded error-path reschedule (l-f28 / d-u4-1). The drain loop deletes a
+// queued row only AFTER upsertRow succeeds, so a row whose build throws stays
+// queued. flushRender's catch reschedules to finish a partial drain and to
+// retry a transient throw (a font/measureText race), but a row that throws
+// deterministically would otherwise turn catch -> rAF -> throw into a ~60fps
+// busy loop (CPU/battery burn + per-frame console spam) that never stops, even
+// on an idle session. `flushDrainedThisPass` records forward progress (queued
+// rows actually built this pass; reset at each flushRenderInner entry, and
+// visible to the catch because a mid-drain throw leaves it at the count so
+// far). `renderNoProgressStreak` counts consecutive passes that threw with zero
+// progress; once it passes the cap the catch stops rescheduling and lets the
+// next inbound frame retry (the pre-l-f28 behavior for a stuck row).
+let flushDrainedThisPass = 0;
+let renderNoProgressStreak = 0;
+const MAX_RENDER_NO_PROGRESS_RETRIES = 3;
+
 /**
  * Initialize the renderer by attaching it to a pair of DOM elements: the
  * scrollable terminal wrapper and the inner output container that receives
@@ -197,6 +213,8 @@ export function init(opts: {
     cancelAnimationFrame(pendingFrame);
     pendingFrame = undefined;
   }
+  flushDrainedThisPass = 0;
+  renderNoProgressStreak = 0;
   startCursorBlink();
 }
 
@@ -240,6 +258,37 @@ export function boundStore(): LineStore {
 }
 
 /**
+ * Queue every retained line for building, viewport-first: the live window rows
+ * (what the user sees) in ascending order first, then scrollback newest->oldest
+ * so rows adjacent to the viewport fill before deep history. Iterates the
+ * retained key set (forEachLine), NOT the integer range [oldest, highest], so a
+ * sparse store (a frame whose base jumped far from a retained index) never
+ * freezes the drain. Shared by the two wipe-and-rebuild-from-store paths
+ * (rebuild() and the alt-exit branch in flushRenderInner) so both order rows
+ * identically; the per-frame budget then spreads a large backlog across frames
+ * without janking.
+ */
+function queueRowsViewportFirst(): void {
+  const winBase = store.getWindow().base;
+  const inWindow: number[] = [];
+  const belowWindow: number[] = [];
+  store.forEachLine((abs) => {
+    if (abs >= winBase) {
+      inWindow.push(abs);
+    } else {
+      belowWindow.push(abs);
+    }
+  });
+  for (const abs of inWindow) {
+    renderQueue.add(abs);
+  }
+  for (let i = belowWindow.length - 1; i >= 0; i--) {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- index in range
+    renderQueue.add(belowWindow[i]!);
+  }
+}
+
+/**
  * Wipe the DOM and rebuild it from the current store, viewport-first and
  * budgeted. The live window (what the user sees) builds first, then scrollback
  * from newest to oldest so rows adjacent to the viewport fill in before deep
@@ -257,27 +306,13 @@ export function rebuild(): void {
   prevCursorCol = -1;
   prevCursorHidden = false;
   prevCursorStyleVal = -1;
+  // Fresh surface: a stale give-up streak from a prior store must not deny the
+  // rebuilt surface its full transient-retry budget.
+  renderNoProgressStreak = 0;
   // Alt screen paints from the ephemeral grid in the flush, so it needs no
   // absolute-index queueing here.
   if (!store.isAlt()) {
-    const oldest = store.oldestIndex();
-    const highest = store.highestIndex();
-    if (highest >= 0) {
-      const winStart = Math.max(store.getWindow().base, oldest);
-      // Live window first (viewport), ascending.
-      for (let abs = winStart; abs <= highest; abs++) {
-        if (store.getLine(abs) !== undefined) {
-          renderQueue.add(abs);
-        }
-      }
-      // Then scrollback, newest to oldest, so rows nearest the viewport fill in
-      // before deep history.
-      for (let abs = winStart - 1; abs >= oldest; abs--) {
-        if (store.getLine(abs) !== undefined) {
-          renderQueue.add(abs);
-        }
-      }
-    }
+    queueRowsViewportFirst();
   }
   scheduleFlush();
 }
@@ -554,7 +589,7 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
       const a = document.createElement("a");
       a.href = href;
       a.target = "_blank";
-      a.rel = "noopener";
+      a.rel = "noopener noreferrer";
       // OSC 8 app hyperlink: base `.term-link`. Auto-detected URLs additionally
       // get `.term-autolink` (see linkifySpans).
       a.className = "term-link";
@@ -620,14 +655,46 @@ function flushRender(): void {
   pendingFrame = undefined;
   try {
     flushRenderInner();
+    // A clean pass means the error condition (if any) has cleared, so give a
+    // later transient error its full retry budget again. Any backlog reschedule
+    // was already issued from flushRenderInner's own end-of-body.
+    renderNoProgressStreak = 0;
   } catch (err) {
     console.error("vterm: render error", err);
+    // flushRenderInner threw mid-drain, skipping its own end-of-body
+    // "if (renderQueue.size > 0) scheduleFlush()" reschedule, so rows still
+    // queued would strand until the next external scheduleFlush() (a new
+    // frame). Reschedule here to finish the drain and to retry a transient
+    // throw (l-f28) -- but BOUND it. The drain loop deletes a row only after
+    // upsertRow succeeds, so a row that throws deterministically stays queued;
+    // an unconditional catch -> rAF -> throw reschedule is then a ~60fps busy
+    // loop that never stops, even on an idle session. Reschedule while the pass
+    // made forward progress (the backlog is shrinking) or the consecutive
+    // no-progress streak is under the cap (covers a transient font/measureText
+    // race that clears within a frame or two); once passes throw with zero
+    // progress past the cap, stop and let the next inbound frame (drainChanges)
+    // retry -- the pre-l-f28 behavior for a permanently stuck row.
+    if (renderQueue.size === 0) {
+      renderNoProgressStreak = 0;
+    } else if (flushDrainedThisPass > 0) {
+      renderNoProgressStreak = 0;
+      scheduleFlush();
+    } else if (renderNoProgressStreak < MAX_RENDER_NO_PROGRESS_RETRIES) {
+      renderNoProgressStreak++;
+      scheduleFlush();
+    } else {
+      console.error("vterm: giving up render retry after repeated no-progress errors");
+    }
   }
   // Single auto-follow invariant, applied after every DOM mutation.
   stickToBottomIfFollowing();
 }
 
 function flushRenderInner(): void {
+  // Forward-progress accounting for the bounded error-path reschedule. Reset at
+  // entry, incremented per drained row below; a mid-drain throw leaves it at
+  // the count-so-far for flushRender's catch to read.
+  flushDrainedThisPass = 0;
   const ch = store.drainChanges();
 
   if (ch.fullReset) {
@@ -666,13 +733,15 @@ function flushRenderInner(): void {
     return;
   }
   if (altRendered) {
-    // Just exited alt: drop the ephemeral rows and rebuild from the store.
+    // Just exited alt: drop the ephemeral rows and rebuild from the store,
+    // viewport-first (shared with rebuild()) so the visible viewport fills
+    // before deep scrollback on a large-history alt-exit.
     altRendered = false;
     output.replaceChildren();
     rowEls.clear();
     renderQueue.clear();
     trimMarkerEl = null;
-    store.forEachLine((abs) => renderQueue.add(abs));
+    queueRowsViewportFirst();
   }
 
   // Queue this frame's changed rows for building.
@@ -705,14 +774,16 @@ function flushRenderInner(): void {
 
   // Drain up to MAX_ROWS_PER_FRAME queued rows this frame; the rest carry over
   // to the next frame (scheduled below) so one big burst never blocks paint.
-  let built = 0;
+  // flushDrainedThisPass doubles as the per-frame budget counter and the
+  // forward-progress signal the error-path reschedule reads (it was reset to 0
+  // at entry and nothing between there and here touches it).
   for (const abs of renderQueue) {
-    if (built >= MAX_ROWS_PER_FRAME) {
+    if (flushDrainedThisPass >= MAX_ROWS_PER_FRAME) {
       break;
     }
     upsertRow(abs);
     renderQueue.delete(abs);
-    built++;
+    flushDrainedThisPass++;
   }
 
   updateTrimMarker();

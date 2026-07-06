@@ -88,10 +88,9 @@ func TestWithClientAck_shortTemplateLeftUnpatched(t *testing.T) {
 // fixed header size builds a complete, correct frame (the capacity hint must
 // not underflow for long titles).
 func TestEncodeTitleMsg_longTitleBuildsFrame(t *testing.T) {
-	const ack = uint64(0)
 	const title = "abcdefghijklmnop" // 16 bytes (> fixed header)
 
-	got := encodeTitleMsg(ack, title)
+	got := encodeTitleMsg(title)
 
 	want := []byte{
 		0x04,                   // wireMsgTitle
@@ -330,5 +329,57 @@ func TestEncodeModesMsgMousePixelsFlag(t *testing.T) {
 	buf2 := encodeModesMsg(false, false, false, false, false, false, false, 0, 0)
 	if buf2[9]&mousePixelsBit != 0 {
 		t.Errorf("mousePixels flag set when false: flags = %08b", buf2[9])
+	}
+}
+
+// TestAppendRowRuns_multipleRunsInOneRow pins the per-run loop in
+// appendRowRuns for a row carrying MORE THAN ONE run. Every other test,
+// the golden fixtures, and both fuzz targets encode rows of only 0 or 1
+// run, so a mutant that stops the `for _, run := range runs` loop after
+// the first run (or clamps num_runs to 1) survives. Encodes a two-run row
+// via encodeScrollMsg (one appendRowRuns call after a 19-byte header) and
+// walks both runs, asserting every field and that the payload is consumed
+// exactly (no trailing slack).
+func TestAppendRowRuns_multipleRunsInOneRow(t *testing.T) {
+	r0 := vt.WireRun{T: "aa", F: 0x111111, B: 0x222222, A: 3, Uc: 0x333333}
+	r1 := vt.WireRun{T: "bbb", F: 0x444444, B: 0x555555, A: 7, Uc: 0x666666}
+	buf := encodeScrollMsg(0, 0, [][]vt.WireRun{{r0, r1}})
+
+	if got := binary.LittleEndian.Uint16(buf[17:19]); got != 1 {
+		t.Fatalf("num_lines = %d, want 1", got)
+	}
+	off := 19
+	if got := binary.LittleEndian.Uint16(buf[off:]); got != 2 {
+		t.Fatalf("num_runs = %d, want 2 (both runs of a multi-run row must be encoded)", got)
+	}
+	off += 2
+	for i, want := range []vt.WireRun{r0, r1} {
+		tlen := int(binary.LittleEndian.Uint16(buf[off:]))
+		off += 2
+		if got := string(buf[off : off+tlen]); got != want.T {
+			t.Fatalf("run %d text = %q, want %q", i, got, want.T)
+		}
+		off += tlen
+		if got := int32(binary.LittleEndian.Uint32(buf[off:])); got != want.F {
+			t.Errorf("run %d fg = %#x, want %#x", i, got, want.F)
+		}
+		off += 4
+		if got := int32(binary.LittleEndian.Uint32(buf[off:])); got != want.B {
+			t.Errorf("run %d bg = %#x, want %#x", i, got, want.B)
+		}
+		off += 4
+		if got := binary.LittleEndian.Uint16(buf[off:]); got != want.A {
+			t.Errorf("run %d attrs = %d, want %d", i, got, want.A)
+		}
+		off += 2
+		if got := int32(binary.LittleEndian.Uint32(buf[off:])); got != want.Uc {
+			t.Errorf("run %d uc = %#x, want %#x", i, got, want.Uc)
+		}
+		off += 4
+		ulen := int(binary.LittleEndian.Uint16(buf[off:]))
+		off += 2 + ulen
+	}
+	if off != len(buf) {
+		t.Fatalf("trailing bytes: consumed %d of %d", off, len(buf))
 	}
 }

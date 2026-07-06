@@ -8,13 +8,13 @@ import (
 	"github.com/coder/websocket"
 )
 
-// maxSessions caps the number of retained resume sessions. The session
+// maxResumeSessions caps the number of retained resume sessions. The session
 // map is keyed by client-supplied sessionID, so without a cap a client
 // sending many distinct sessionIDs could grow it unbounded (CWE-770)
 // until the 60-minute idle GC reclaims them. The cap is generous enough
 // that legitimate multi-tab reconnects never hit it; only abusive clients
 // do, so there is no behavior change for normal use.
-const maxSessions = 1024
+const maxResumeSessions = 1024
 
 // clientRegistry tracks connected WebSocket clients and their session
 // state. It owns its own mutex so client add/remove and session
@@ -107,7 +107,7 @@ func (r *clientRegistry) gcIdleSessions() {
 		if time.Since(s.lastSeen) > 60*time.Minute {
 			if s.bytesReceived > 0 {
 				r.logger.Info("terminal: gc'd idle session with received bytes",
-					"session_id", id,
+					"session_id", logID(id),
 					"bytes_received", s.bytesReceived,
 					"idle", time.Since(s.lastSeen).Round(time.Second))
 			}
@@ -116,12 +116,12 @@ func (r *clientRegistry) gcIdleSessions() {
 	}
 }
 
-// evictOldestSession caps the retained session count at maxSessions by
+// evictOldestSession caps the retained session count at maxResumeSessions by
 // evicting the oldest-lastSeen entry (backstops the idle GC against a
 // client minting many sessionIDs inside the 60-minute window). The
 // caller MUST hold r.mu.
 func (r *clientRegistry) evictOldestSession() {
-	if len(r.sessions) <= maxSessions {
+	if len(r.sessions) <= maxResumeSessions {
 		return
 	}
 	var oldestID string

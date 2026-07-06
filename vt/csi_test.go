@@ -654,3 +654,22 @@ func TestWindowManipulationReportSize(t *testing.T) {
 		t.Errorf("CSI 99 t (unsupported) wrote %q, want no reply", string(s.Response))
 	}
 }
+
+func TestDECFRA_FillsRectangle(t *testing.T) {
+	s := New(4, 10)
+	// DECFRA (CSI Pch;Pt;Pl;Pb;Pr $ x): fill 'X' (88) into 1-based rows 1..2,
+	// cols 1..3 -> 0-based rows 0..1, cols 0..2.
+	s.Write([]byte("\x1b[88;1;1;2;3$x"))
+	cases := []struct {
+		y, x int
+		ch   rune
+	}{
+		{0, 0, 'X'}, {0, 2, 'X'}, {1, 0, 'X'}, {1, 2, 'X'}, // inside the filled rect
+		{0, 3, ' '}, {2, 0, ' '}, // just outside: right of the rect and below it stay blank
+	}
+	for _, c := range cases {
+		if got := s.Cells[c.y][c.x].Ch; got != c.ch {
+			t.Errorf("DECFRA Cells[%d][%d].Ch = %q, want %q", c.y, c.x, got, c.ch)
+		}
+	}
+}

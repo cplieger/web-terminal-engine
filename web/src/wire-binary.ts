@@ -43,6 +43,12 @@ const MODE_FLAG_APP_KEYPAD = 16;
 const MODE_FLAG_REVERSE_VIDEO = 32;
 const MODE_FLAG_MOUSE_PIXELS = 64;
 
+// Shared across all one-shot decode() calls (no {stream:true} is used here), so
+// a single module-level instance is safe and avoids allocating a fresh
+// TextDecoder per styled run / OSC-8 URI on the hot decode path (a single
+// scroll frame can carry thousands of runs).
+const textDecoder = new TextDecoder();
+
 class Cursor {
   view: DataView;
   bytes: Uint8Array;
@@ -84,7 +90,7 @@ class Cursor {
   utf8(len: number): string {
     const slice = this.bytes.subarray(this.off, this.off + len);
     this.off += len;
-    return new TextDecoder().decode(slice);
+    return textDecoder.decode(slice);
   }
 }
 
@@ -121,6 +127,7 @@ function readRowRuns(c: Cursor): WireRun[] {
  */
 export function decodeWireBinary(buf: ArrayBuffer): ServerMessage | null {
   if (buf.byteLength < 9) {
+    console.warn("vterm: dropped undersized wire frame", buf.byteLength);
     return null;
   }
   try {
@@ -131,6 +138,7 @@ export function decodeWireBinary(buf: ArrayBuffer): ServerMessage | null {
     // the caller skip this frame rather than crashing the decode loop.
     // The next flush will carry a complete snapshot anyway.
     if (err instanceof RangeError) {
+      console.warn("vterm: dropped malformed/truncated wire frame", buf.byteLength);
       return null;
     }
     throw err;
@@ -261,5 +269,6 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     // here — returning null keeps it out of the onMessage path.
     return null;
   }
+  console.warn("vterm: unknown wire message type", msgType);
   return null;
 }

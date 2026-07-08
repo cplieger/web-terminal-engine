@@ -29,6 +29,22 @@ func TestRuneWidth(t *testing.T) {
 		// the toolchain's Unicode version, with SOFT HYPHEN carved back to 1.
 		{"Soft hyphen is width 1 (Cf carve-out)", 0x00AD, 1},
 		{"Post-Unicode-5.0 combining mark U+1AB0", 0x1AB0, 0},
+		// Single-codepoint emoji with default emoji presentation are Wide (2),
+		// matching go-runewidth and modern terminals. Text-presentation symbols
+		// and regional-indicator flags stay width 1 (clustering is out of scope).
+		{"Emoji green circle (reported)", 0x1F7E2, 2},
+		{"Emoji grinning face", 0x1F600, 2},
+		{"Emoji rocket", 0x1F680, 2},
+		{"Emoji party popper", 0x1F389, 2},
+		{"Emoji thumbs up", 0x1F44D, 2},
+		{"Emoji white star (BMP)", 0x2B50, 2},
+		{"Emoji check mark button (BMP)", 0x2705, 2},
+		{"Emoji sparkles (BMP)", 0x2728, 2},
+		{"Emoji hourglass (BMP)", 0x231B, 2},
+		{"Text-presentation snowman stays width 1", 0x2603, 1},
+		{"Text-presentation heart stays width 1", 0x2764, 1},
+		{"Non-emoji dingbat stays width 1", 0x2700, 1},
+		{"Regional indicator (flag) stays width 1", 0x1F1EA, 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -118,5 +134,36 @@ func TestWideCharWireRuns(t *testing.T) {
 	}
 	if runes[2] != 'a' {
 		t.Errorf("rune[2] = %U, want 'a'", runes[2])
+	}
+}
+
+// TestPutWideEmoji verifies a single-codepoint emoji occupies two cells (glyph
+// + spacer) like a CJK wide char — the fix for emoji clipping into the next cell.
+func TestPutWideEmoji(t *testing.T) {
+	s := New(3, 10)
+	s.Write([]byte("🟢")) // U+1F7E2, emoji presentation → 2 cells
+	if s.curX != 2 {
+		t.Fatalf("curX after wide emoji = %d, want 2", s.curX)
+	}
+	if s.Cells[0][0].Ch != 0x1F7E2 {
+		t.Fatalf("cell[0][0] = %U, want U+1F7E2", s.Cells[0][0].Ch)
+	}
+	if s.Cells[0][1].Ch != 0 {
+		t.Fatalf("cell[0][1] = %U, want 0 (spacer)", s.Cells[0][1].Ch)
+	}
+}
+
+// TestEmojiRangesSortedNonOverlapping guards inTable's binary-search invariant:
+// emojiRanges must be ascending, non-overlapping, and each range non-inverted. A
+// transcription slip breaking the ordering would silently misclassify some emoji.
+func TestEmojiRangesSortedNonOverlapping(t *testing.T) {
+	for i, iv := range emojiRanges {
+		if iv.first > iv.last {
+			t.Errorf("emojiRanges[%d] inverted: {%U, %U}", i, iv.first, iv.last)
+		}
+		if i > 0 && iv.first <= emojiRanges[i-1].last {
+			t.Errorf("emojiRanges[%d] {%U, %U} not strictly after emojiRanges[%d] {%U, %U}",
+				i, iv.first, iv.last, i-1, emojiRanges[i-1].first, emojiRanges[i-1].last)
+		}
 	}
 }

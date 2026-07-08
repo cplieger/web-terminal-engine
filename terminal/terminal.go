@@ -44,6 +44,16 @@ const (
 	defaultRows   = 30
 	flushInterval = 50 * time.Millisecond
 
+	// healDebounce is how long the handler waits after a client disconnects
+	// before relaxing the shared screen to the smallest size the remaining
+	// clients need. It absorbs a brief reconnect (iOS wake, network blip): a
+	// client that drops and re-attaches at the same size within the window
+	// causes no grow-then-shrink flap, because the recompute at fire time counts
+	// the re-attached socket. A genuinely departed client is gone well before it
+	// elapses — a clean close is immediate, and an ungraceful drop is already
+	// ping-confirmed (~20-45s) by the time Remove runs.
+	healDebounce = 3 * time.Second
+
 	// statusProcessExited (4001) is the WebSocket close code the terminal WS
 	// uses when the child process exits, so a client can tell a dead session
 	// (the tab should close) apart from a transient disconnect (reconnect).
@@ -179,6 +189,12 @@ type sessionState struct {
 // fields are guarded by the clientRegistry's mutex (registry.mu), not h.mu.
 type clientState struct {
 	session atomic.Pointer[sessionState]
+	// cols/rows are this socket's most recently requested terminal size,
+	// guarded by clientRegistry.mu (NOT by the atomic session pointer). They
+	// feed MinLiveSize so a disconnect can relax the shared screen to the
+	// smallest size the remaining sockets need.
+	cols int
+	rows int
 }
 
 // Handler serves /ws and tracks shared screen state. Multiple WS clients
@@ -199,6 +215,7 @@ type Handler struct {
 	cancel                   context.CancelFunc
 	ptmx                     *os.File
 	procExitCh               chan struct{}
+	healTimer                *time.Timer
 	pendingClipboard         []byte
 	command                  []string
 	cfg                      handlerConfig
@@ -257,6 +274,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Shutdown() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.healTimer != nil {
+		h.healTimer.Stop()
+	}
 	if h.cancel != nil {
 		h.cancel()
 	}
@@ -729,7 +749,8 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Unlock()
 
 	defer func() {
-		h.registry.Remove(ws)
+		dCols, dRows := h.registry.Remove(ws)
+		h.maybeHealSize(dCols, dRows)
 		ws.Close(h.exitAwareCloseCode(), "") // #nosec G104 -- best-effort
 	}()
 
@@ -802,7 +823,7 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 		return
 	}
 	if c.Type == ctlTypeResize {
-		h.handleResize(c.Cols, c.Rows)
+		h.handleResize(state, c.Cols, c.Rows)
 		return
 	}
 	if c.Type == ctlTypePing {
@@ -954,24 +975,24 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	}
 }
 
-// handleResize floors the requested dimensions to a sane minimum and
-// applies the resize. Floored (rather than dropped) so a near-zero
-// reading from an iPad keyboard-slide animation still drives
-// ensureStarted on first connect — dropping the resize would leave the
-// process unstarted until the client sent raw input.
-func (h *Handler) handleResize(cols, rows int) {
-	if cols > maxResizeCols {
-		cols = maxResizeCols
-	}
-	if rows > maxResizeRows {
-		rows = maxResizeRows
-	}
-	if cols < minResizeCols {
-		cols = minResizeCols
-	}
-	if rows < minResizeRows {
-		rows = minResizeRows
-	}
+// clampResize floors the requested dimensions to a sane minimum and caps them
+// at the eager-allocation ceiling. Floored (rather than dropped) so a near-zero
+// reading from an iPad keyboard-slide animation still drives ensureStarted on
+// first connect — dropping the resize would leave the process unstarted until
+// the client sent raw input.
+func clampResize(cols, rows int) (clampedCols, clampedRows int) {
+	clampedCols = min(max(cols, minResizeCols), maxResizeCols)
+	clampedRows = min(max(rows, minResizeRows), maxResizeRows)
+	return clampedCols, clampedRows
+}
+
+// handleResize applies a client's requested size to the shared PTY + screen
+// (last-writer-wins: the most recent resize from any attached client sets the
+// size) and records the clamped size on that client's socket, so a later
+// disconnect can heal the screen to the smallest size the remaining clients
+// need (see maybeHealSize).
+func (h *Handler) handleResize(state *clientState, cols, rows int) {
+	cols, rows = clampResize(cols, rows)
 	// Start the child process on first resize so it knows the correct dimensions
 	// from the start (avoids initial paint at wrong size).
 	if !h.started.Load() {
@@ -980,19 +1001,76 @@ func (h *Handler) handleResize(cols, rows int) {
 			return
 		}
 	}
+	h.registry.RecordSize(state, cols, rows)
+	h.applySize(cols, rows, "resize received")
+}
+
+// applySize resizes the PTY and the shared VT screen and holds flushes over the
+// SIGWINCH redraw window so clients don't see the child's transient
+// cleared-screen state (released by the child's CSI ?2026l or the 1s deadline).
+// Shared by the live resize path and the disconnect heal.
+func (h *Handler) applySize(cols, rows int, reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if !h.started.Load() || h.ptmx == nil {
+		return
+	}
+	// Clamp again so applySize is safe regardless of caller (the heal path
+	// passes MinLiveSize values). Idempotent for the live path, which already
+	// clamped in handleResize.
+	cols, rows = clampResize(cols, rows)
 	if err := pty.Setsize(h.ptmx, &pty.Winsize{
+		// #nosec G115 -- clampResize bounds cols/rows to [minResize, maxResize<=1000], >0, just above; no uint16 overflow. gosec can't see through the helper.
 		Cols: uint16(cols), Rows: uint16(rows),
 	}); err != nil {
 		h.cfg.logger.Debug("terminal: resize", "error", err)
 	}
 	h.screen.Resize(rows, cols)
-	// Hold flushes during the SIGWINCH redraw window so the user
-	// doesn't see the child process's transient cleared-screen state. Either
-	// the child process's CSI ?2026l or the 1s deadline releases the hold.
 	h.screen.HoldFlush(time.Now().Add(time.Second))
-	h.cfg.logger.Info("terminal: resize received", "rows", rows, "cols", cols)
+	h.cfg.logger.Info("terminal: "+reason, "rows", rows, "cols", cols)
 	h.resized = true
 	h.builder.Reset()
+}
+
+// maybeHealSize arms a debounced size recompute when the client that just
+// disconnected was the one dictating the current shared screen size (its last
+// reported size equals the screen's). Only that case can strand a survivor at a
+// departed client's size — e.g. a desktop left clamped to a phone's size after
+// the phone closes its tab. Any other departure is skipped: some other client,
+// or a live resize, still holds the current size, so there is nothing to relax.
+// Debounced via healDebounce so a brief reconnect at the same size is a no-op
+// rather than a grow-then-shrink flap.
+func (h *Handler) maybeHealSize(dCols, dRows int) {
+	if dCols <= 0 || dRows <= 0 {
+		return // the departed client never reported a size
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.started.Load() || dCols != h.screen.Width || dRows != h.screen.Height {
+		return // the departed client was not holding the current size
+	}
+	if h.healTimer != nil {
+		h.healTimer.Stop()
+	}
+	h.healTimer = time.AfterFunc(healDebounce, h.healSize)
+}
+
+// healSize relaxes the shared screen to the smallest size across the clients
+// still connected, so a survivor no longer stays clamped to a departed client's
+// size. Runs from the debounced healTimer. A no-op when no surviving client has
+// a known size, or when the smallest already equals the current screen (e.g.
+// the departed client reconnected within the debounce and re-reported the same
+// size, so it is counted again).
+func (h *Handler) healSize() {
+	cols, rows, ok := h.registry.MinLiveSize()
+	if !ok {
+		return
+	}
+	h.mu.Lock()
+	unchanged := !h.started.Load() || (cols == h.screen.Width && rows == h.screen.Height)
+	h.mu.Unlock()
+	if unchanged {
+		return
+	}
+	h.applySize(cols, rows, "size healed after client departure")
 }

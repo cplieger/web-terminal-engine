@@ -46,11 +46,54 @@ func (r *clientRegistry) Add(ws *websocket.Conn) *clientState {
 	return state
 }
 
-// Remove unregisters a WebSocket connection.
-func (r *clientRegistry) Remove(ws *websocket.Conn) {
+// Remove unregisters a WebSocket connection and returns the terminal size that
+// client had last reported (0, 0 if it never sent a resize). The caller uses it
+// to decide whether the departure should heal the shared screen size (see
+// Handler.maybeHealSize).
+func (r *clientRegistry) Remove(ws *websocket.Conn) (cols, rows int) {
 	r.mu.Lock()
+	if st := r.clients[ws]; st != nil {
+		cols, rows = st.cols, st.rows
+	}
 	delete(r.clients, ws)
 	r.mu.Unlock()
+	return cols, rows
+}
+
+// RecordSize stores a client's most recently requested terminal size on its
+// per-socket state. Per-socket (not per-session) on purpose: in managed mode
+// several devices on the same server session share one sessionState, so only
+// the socket distinguishes their sizes. Guarded by r.mu.
+func (r *clientRegistry) RecordSize(state *clientState, cols, rows int) {
+	r.mu.Lock()
+	state.cols = cols
+	state.rows = rows
+	r.mu.Unlock()
+}
+
+// MinLiveSize returns the smallest cols and smallest rows across all currently
+// connected clients that have reported a size; ok is false when none has. Each
+// dimension is minimized independently so the result fits inside every client's
+// viewport (every attached client can see the whole screen). Guarded by r.mu.
+func (r *clientRegistry) MinLiveSize() (cols, rows int, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, st := range r.clients {
+		if st.cols <= 0 || st.rows <= 0 {
+			continue
+		}
+		if !ok {
+			cols, rows, ok = st.cols, st.rows, true
+			continue
+		}
+		if st.cols < cols {
+			cols = st.cols
+		}
+		if st.rows < rows {
+			rows = st.rows
+		}
+	}
+	return cols, rows, ok
 }
 
 // Snapshot returns a map of connected clients to their session ack

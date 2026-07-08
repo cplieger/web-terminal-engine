@@ -7,6 +7,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // TestResolveSession_GCsIdleSession verifies the opportunistic GC sweep in
@@ -215,5 +217,52 @@ func TestResolveSession_evictsOldestWhenOverCap(t *testing.T) {
 	}
 	if _, ok := r.sessions["newcomer"]; !ok {
 		t.Error("cap eviction removed the just-added newcomer; want the OLDEST entry removed, not the newest")
+	}
+}
+
+// TestMinLiveSize_minsEachDimensionAndSkipsSizeless verifies MinLiveSize
+// returns the per-dimension minimum across connected clients that reported a
+// size, skipping any that never sent one, so the result fits inside every
+// connected client's viewport.
+func TestMinLiveSize_minsEachDimensionAndSkipsSizeless(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+	r.clients[new(websocket.Conn)] = &clientState{cols: 120, rows: 40}
+	r.clients[new(websocket.Conn)] = &clientState{cols: 80, rows: 24}
+	r.clients[new(websocket.Conn)] = &clientState{} // never reported a size -> skipped
+
+	cols, rows, ok := r.MinLiveSize()
+	if !ok || cols != 80 || rows != 24 {
+		t.Errorf("MinLiveSize() = (%d, %d, %v), want (80, 24, true) [min per dimension]", cols, rows, ok)
+	}
+}
+
+// TestMinLiveSize_falseWhenNoSizedClient verifies MinLiveSize reports ok=false
+// when no connected client has a known size, so the heal becomes a no-op.
+func TestMinLiveSize_falseWhenNoSizedClient(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+	r.clients[new(websocket.Conn)] = &clientState{} // connected but no size yet
+	if _, _, ok := r.MinLiveSize(); ok {
+		t.Errorf("MinLiveSize() ok=true with no sized client; want false")
+	}
+}
+
+// TestRemove_returnsDepartedSize verifies Remove returns the size the removed
+// socket had reported (so the caller can decide whether the departure should
+// heal the shared screen) and drops it from the registry.
+func TestRemove_returnsDepartedSize(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+	ws := new(websocket.Conn)
+	st := r.Add(ws)
+	r.RecordSize(st, 100, 30)
+
+	cols, rows := r.Remove(ws)
+	if cols != 100 || rows != 30 {
+		t.Errorf("Remove() = (%d, %d), want (100, 30) [the departed socket's recorded size]", cols, rows)
+	}
+	r.mu.Lock()
+	_, present := r.clients[ws]
+	r.mu.Unlock()
+	if present {
+		t.Errorf("Remove: connection still registered after removal")
 	}
 }

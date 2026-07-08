@@ -420,7 +420,7 @@ func TestHandleResize_colsAboveMinNotFloored(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Shutdown()
 
-	h.handleResize(100, 40)
+	h.handleResize(&clientState{}, 100, 40)
 
 	h.mu.Lock()
 	w := h.screen.Width
@@ -436,7 +436,7 @@ func TestHandleResize_rowsAboveMinNotFloored(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Shutdown()
 
-	h.handleResize(100, 40)
+	h.handleResize(&clientState{}, 100, 40)
 
 	h.mu.Lock()
 	ht := h.screen.Height
@@ -453,7 +453,7 @@ func TestHandleResize_holdsFlushOnSuccessfulStart(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Shutdown()
 
-	h.handleResize(100, 40)
+	h.handleResize(&clientState{}, 100, 40)
 
 	h.mu.Lock()
 	held := h.screen.IsFlushHeld()
@@ -844,7 +844,7 @@ func TestHandleResize_belowMinimumIsFlooredUp(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Shutdown()
 
-	h.handleResize(1, 1)
+	h.handleResize(&clientState{}, 1, 1)
 
 	if !h.started.Load() {
 		t.Fatalf("handleResize(1,1): process not started; a floored resize must still start the child")
@@ -1030,5 +1030,76 @@ func TestHandleResume_frameOrderByAltState(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestHealSize_growsSurvivorAfterBindingClientLeaves verifies the disconnect
+// heal: when the client whose size the shared screen currently holds departs,
+// healSize relaxes the screen to the smallest size the remaining clients need
+// (here the lone desktop), so a survivor is not left clamped to a departed
+// phone's size. healSize is called directly (the debounce timer is a stdlib
+// wrapper over it, exercised via maybeHealSize in the test below).
+func TestHealSize_growsSurvivorAfterBindingClientLeaves(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	defer h.Shutdown()
+
+	phoneConn, deskConn := new(websocket.Conn), new(websocket.Conn)
+	phone := h.registry.Add(phoneConn)
+	desk := h.registry.Add(deskConn)
+
+	// Phone resizes last (last-writer-wins): starts the child at 40x20 and makes
+	// the shared screen 40x20. Desktop's larger size is recorded but not applied.
+	h.handleResize(phone, 40, 20)
+	h.registry.RecordSize(desk, 120, 40)
+
+	h.mu.Lock()
+	w, ht := h.screen.Width, h.screen.Height
+	h.mu.Unlock()
+	if w != 40 || ht != 20 {
+		t.Fatalf("setup: screen = %dx%d, want 40x20 (phone last-wrote)", w, ht)
+	}
+
+	// Phone departs; the desktop is the sole survivor.
+	h.registry.Remove(phoneConn)
+	h.healSize()
+
+	h.mu.Lock()
+	w, ht = h.screen.Width, h.screen.Height
+	h.mu.Unlock()
+	if w != 120 || ht != 40 {
+		t.Errorf("healSize after phone left: screen = %dx%d, want 120x40 (relaxed to the surviving desktop)", w, ht)
+	}
+}
+
+// TestMaybeHealSize_onlyArmsForTheBindingClient verifies the heal is armed only
+// when the departed client was holding the current screen size; a client at a
+// different size leaving arms nothing (some other client / a live resize still
+// holds the current size).
+func TestMaybeHealSize_onlyArmsForTheBindingClient(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	defer h.Shutdown()
+
+	st := h.registry.Add(new(websocket.Conn))
+	h.handleResize(st, 40, 20) // shared screen is now 40x20
+
+	// A non-binding departure (size != current screen) arms nothing.
+	h.maybeHealSize(120, 40)
+	h.mu.Lock()
+	armed := h.healTimer != nil
+	h.mu.Unlock()
+	if armed {
+		t.Errorf("maybeHealSize(120x40) armed a heal, but the screen is 40x20 (departed client was not binding)")
+	}
+
+	// The binding departure (size == current screen) arms the debounced heal.
+	h.maybeHealSize(40, 20)
+	h.mu.Lock()
+	armed = h.healTimer != nil
+	if h.healTimer != nil {
+		h.healTimer.Stop() // don't let it fire during later tests
+	}
+	h.mu.Unlock()
+	if !armed {
+		t.Errorf("maybeHealSize(40x20) did not arm a heal, but the departed client held the current 40x20 screen")
 	}
 }

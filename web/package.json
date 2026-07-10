@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "typecheck": "tsgo -p tsconfig.json",
-    "typecheck:tests": "tsgo -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "typecheck:tests": "tsc -p tsconfig.test.json",
     "test": "vitest --run",
     "test:e2e": "playwright test"
   },
@@ -12,6 +12,7 @@
     "@eslint/js": "10.0.1",
     "@playwright/test": "1.61.1",
     "@types/pngjs": "6.0.5",
+    "@typescript/native": "npm:typescript@7.0.2",
     "@vitest/coverage-v8": "4.1.10",
     "esbuild": "0.28.1",
     "eslint": "10.6.0",
@@ -19,7 +20,7 @@
     "happy-dom": "20.10.6",
     "pngjs": "7.0.0",
     "prettier": "3.9.4",
-    "typescript": "6.0.3",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
     "typescript-eslint": "8.63.0",
     "vitest": "4.1.10"
   },

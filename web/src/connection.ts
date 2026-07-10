@@ -199,7 +199,7 @@ export interface Callbacks {
    *  missing) from a still-loading state. Resync guard 8.2.2. */
   onResumeBounds?(committed: number, oldest: number): void;
   /** Optional WebSocket endpoint path (default "/ws"). vibekit serves
-   *  the shell at "/api/shell/ws"; vibecli at "/ws". */
+   *  the shell at "/api/shell/ws"; web-terminal-kiro at "/ws". */
   wsPath?: string;
 }
 

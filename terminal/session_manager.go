@@ -78,7 +78,7 @@ func WithManagerLogger(l *slog.Logger) ManagerOption {
 }
 
 // WithStatusClassifier maps an OSC 9 notification message to a session status
-// (return ok=false to ignore a message). This keeps the engine generic: vibecli
+// (return ok=false to ignore a message). This keeps the engine generic: web-terminal-kiro
 // maps kiro-cli's "Permission required" to input and "Response complete" to
 // idle, while a plain shell server sets no classifier and gets working/idle from
 // output activity only. A classified input status latches (persists while the
@@ -102,7 +102,7 @@ type session struct {
 // title from the handler when non-empty, otherwise the stored client-supplied
 // fallback title. This is OSC-first — a program that emits its own window title
 // (an interactive shell) wins, while a program that emits no usable OSC title
-// (kiro-cli under vibecli) falls back to the client-pushed label. Callers MUST
+// (kiro-cli under web-terminal-kiro) falls back to the client-pushed label. Callers MUST
 // hold m.mu because it reads s.clientTitle.
 func effectiveTitle(s *session) string {
 	if t := s.handler.Title(); t != "" {

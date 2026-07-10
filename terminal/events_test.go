@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// inputClassifier maps the two kiro-cli notification strings the way vibecli
+// inputClassifier maps the two kiro-cli notification strings the way web-terminal-kiro
 // does, for exercising the latched needs-input/done state machine.
 func inputClassifier(msg string) (string, bool) {
 	switch msg {
@@ -280,7 +280,7 @@ func TestEventsHandlerSubscriberCap(t *testing.T) {
 }
 
 // unwrapOnlyWriter mimics an access-log middleware wrapper (web-terminal-server's
-// statusWriter, vibecli's statusRecorder): it exposes the underlying
+// statusWriter, web-terminal-kiro's statusRecorder): it exposes the underlying
 // ResponseWriter via Unwrap but does NOT itself implement http.Flusher
 // (embedding the ResponseWriter interface does not promote Flush). It pins that
 // EventsHandler finds the flusher through the Unwrap chain rather than a direct

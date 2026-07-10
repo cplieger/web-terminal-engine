@@ -722,7 +722,7 @@ export interface MobileToolbarController {
 /**
  * Wire a mobile / touch toolbar of on-screen keyboard buttons (Ctrl,
  * arrows, Tab, Enter, Esc, plus a collapse toggle) to a vterm send
- * sink. This was duplicated across vibekit and vibecli — same wire
+ * sink. This was duplicated across vibekit and web-terminal-kiro — same wire
  * sequences, same sticky-Ctrl semantics, same DECCKM nuance — so it
  * lives here.
  *

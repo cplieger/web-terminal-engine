@@ -85,6 +85,13 @@ export interface MouseInputHandler {
 
 let handler: MouseInputHandler | null = null;
 let lastButton = -1;
+// True while a Shift-initiated press is in flight. Shift+click/drag is the
+// xterm convention for "bypass application mouse tracking": the gesture is
+// reserved for the browser's native text selection instead of being reported
+// to (and preventDefault-ed away from) the TUI. Tracked from press to release
+// so the move/up of a bypassed drag stay bypassed even if Shift is lifted
+// mid-drag.
+let shiftBypass = false;
 
 /**
  * Initialize the mouse module by attaching pointer/wheel/focus listeners to
@@ -138,6 +145,12 @@ function onMouseDown(e: MouseEvent): void {
   if (mode === 0 || !(isMouseSGR() || isMousePixels()) || !handler) {
     return;
   }
+  if (e.shiftKey) {
+    // Shift+press: leave the whole gesture to the browser (native selection).
+    shiftBypass = true;
+    return;
+  }
+  shiftBypass = false;
   const pos = pixelToCell(e);
   if (!pos) {
     return;
@@ -151,6 +164,11 @@ function onMouseDown(e: MouseEvent): void {
 function onMouseUp(e: MouseEvent): void {
   const mode = getMouseMode();
   if (mode === 0 || !(isMouseSGR() || isMousePixels()) || !handler) {
+    return;
+  }
+  if (shiftBypass) {
+    // Release of a Shift-initiated (native-selection) gesture: report nothing.
+    shiftBypass = false;
     return;
   }
   const pos = pixelToCell(e);
@@ -168,6 +186,9 @@ function onMouseMove(e: MouseEvent): void {
   const mode = getMouseMode();
   if (mode === 0 || !(isMouseSGR() || isMousePixels()) || !handler) {
     return;
+  }
+  if (shiftBypass && e.buttons) {
+    return; // a Shift-initiated drag is a native selection; don't report it
   }
   // mode 1000: no motion events
   // mode 1002: motion only while button held (drag)

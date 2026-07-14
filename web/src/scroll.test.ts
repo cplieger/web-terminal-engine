@@ -2,8 +2,9 @@
 //
 // Brick-4 scroll controller. happy-dom has no real layout, so scrollHeight /
 // clientHeight are overridden to drive the follow/hold state machine
-// deterministically: following is derived purely from scroll position, with a
-// small bottom tolerance, and stickToBottom only pins when following.
+// deterministically: following derives from scroll position plus movement
+// direction (any upward move with content below holds; a shrink-clamp landing
+// at the bottom keeps following), and stickToBottom only pins when following.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import * as scroll from "./scroll.js";
@@ -56,6 +57,55 @@ describe("scroll controller (brick 4)", () => {
     expect(scroll.isUserScrolledUp()).toBe(false);
     scrollTo(el, 669); // distance = 31 (> 24) -> holding
     expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("disengages follow on ANY upward scroll that leaves content below", () => {
+    // Even a few px of upward movement inside the bottom tolerance is user
+    // intent to hold. With a tolerance-only rule this stayed "following" and
+    // the next render pin yanked the user back down (see the streaming test
+    // below for the full race).
+    scrollTo(el, 700); // at the bottom, following
+    scrollTo(el, 694); // 6px up — still within the 24px tolerance
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("a slow upward drag escapes the per-frame pin during heavy streaming", () => {
+    // The streaming fight: each frame the renderer flushes and pins to the
+    // bottom, so a slow drag's per-frame increment restarted from the bottom
+    // and (tolerance-only) never accumulated past 24px — the user was yanked
+    // down every few ms. Direction-based disengage flips holding on the FIRST
+    // upward tick, so the next pin is a no-op.
+    scrollTo(el, 700); // bottom
+    scroll.stickToBottom(); // frame N pin (no-op at the bottom)
+    scrollTo(el, 692); // first drag tick, 8px up
+    scroll.stickToBottom(); // frame N+1 pin must not fight the drag
+    expect(el.scrollTop).toBe(692);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("keeps following when a content shrink clamps scrollTop to the new bottom", () => {
+    // Top-row eviction / a clear shrinks scrollHeight; the browser clamps
+    // scrollTop DOWN to the new maximum — an upward move that is NOT the user
+    // and lands exactly at the bottom. Auto-follow must survive it.
+    let sh = 1000;
+    const el2 = document.createElement("div");
+    let top = 0;
+    Object.defineProperty(el2, "scrollHeight", { get: () => sh, configurable: true });
+    Object.defineProperty(el2, "clientHeight", { get: () => 300, configurable: true });
+    Object.defineProperty(el2, "scrollTop", {
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+      },
+      configurable: true,
+    });
+    scroll.init({ scrollEl: el2 });
+    scrollTo(el2, 700); // at the bottom, following
+    sh = 900; // eviction shrinks the content
+    scrollTo(el2, 600); // the browser's clamp to the new bottom (upward move)
+    expect(scroll.isUserScrolledUp()).toBe(false); // still following
+    scroll.stickToBottom();
+    expect(el2.scrollTop).toBe(600); // already at the (new) bottom, no churn
   });
 
   it("stickToBottom pins to the bottom while following", () => {

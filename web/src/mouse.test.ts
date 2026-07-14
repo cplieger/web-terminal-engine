@@ -197,19 +197,9 @@ describe("button-byte composition via init() event path — press (SGR 1006)", (
   // together"). Coordinates fixed at cell (3,3).
   const cases: BtnCase[] = [
     { name: "left, no modifiers", button: 0, b: 0 },
-    { name: "left + Shift", button: 0, shift: true, b: 0 + SHIFT },
     { name: "left + Ctrl", button: 0, ctrl: true, b: 0 + CTRL },
     { name: "left + Meta/Alt", button: 0, alt: true, b: 0 + META },
-    { name: "left + Shift + Ctrl", button: 0, shift: true, ctrl: true, b: 0 + SHIFT + CTRL },
     { name: "left + Ctrl + Meta/Alt", button: 0, ctrl: true, alt: true, b: 0 + CTRL + META },
-    {
-      name: "left + Shift + Ctrl + Meta/Alt",
-      button: 0,
-      shift: true,
-      ctrl: true,
-      alt: true,
-      b: 0 + SHIFT + CTRL + META,
-    },
     { name: "middle, no modifiers", button: 1, b: 1 },
     { name: "middle + Ctrl", button: 1, ctrl: true, b: 1 + CTRL },
     { name: "right, no modifiers", button: 2, b: 2 },
@@ -254,6 +244,35 @@ describe("button-byte composition via init() event path — drag/motion (SGR 100
     const { term, sent } = setup();
     term.dispatchEvent(makeMouse("mousemove", { buttons, shift, ctrl, alt }));
     expect(sent).toEqual([expectedSGR(b, 3, 3, false)]);
+  });
+});
+
+describe("Shift bypass: Shift+press reserves the gesture for native selection (xterm convention)", () => {
+  it("reports nothing for a Shift-initiated press/drag/release", () => {
+    enableSGR(1002);
+    const { term, sent } = setup();
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, shift: true }));
+    term.dispatchEvent(makeMouse("mousemove", { buttons: 1, shift: true }));
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, shift: true }));
+    expect(sent).toEqual([]);
+  });
+
+  it("keeps the bypass through a drag even if Shift is lifted mid-gesture", () => {
+    enableSGR(1002);
+    const { term, sent } = setup();
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, shift: true }));
+    term.dispatchEvent(makeMouse("mousemove", { buttons: 1 })); // shift already lifted
+    term.dispatchEvent(makeMouse("mouseup", { button: 0 }));
+    expect(sent).toEqual([]);
+  });
+
+  it("resumes normal reporting on the next non-Shift press", () => {
+    enableSGR(1002);
+    const { term, sent } = setup();
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, shift: true }));
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, shift: true }));
+    term.dispatchEvent(makeMouse("mousedown", { button: 0 }));
+    expect(sent).toEqual([expectedSGR(0, 3, 3, false)]);
   });
 });
 

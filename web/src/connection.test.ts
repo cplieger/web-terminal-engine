@@ -43,7 +43,7 @@ interface MockWS {
   // Test helpers:
   fireOpen: () => void;
   fireMessage: (data: ArrayBuffer | Blob | string) => void;
-  fireClose: () => void;
+  fireClose: (code?: number) => void;
 }
 
 const allMockWebSockets: MockWS[] = [];
@@ -96,10 +96,10 @@ function makeMockWebSocket(): typeof WebSocket {
           fn({ data });
         }
       },
-      fireClose(this: MockWS) {
+      fireClose(this: MockWS, code = 1000) {
         this.readyState = 3;
         for (const fn of this.listeners.get("close") ?? []) {
-          fn({});
+          fn({ code });
         }
       },
     } as unknown as MockWS;
@@ -571,5 +571,103 @@ describe("generateSessionId: session token is cryptographically random", () => {
     // crypto present but without either method, e.g. a stripped global.
     vi.stubGlobal("crypto", {});
     expect(() => generateSessionId()).toThrow(/secure RNG/);
+  });
+});
+
+describe("connection: a process-exited close (4001) is definitive, not transient", () => {
+  // The server closes with the application code 4001 (statusProcessExited)
+  // when the session's child process has ended. Reconnecting such a session
+  // can only replay its final screen and earn another 4001, so when the
+  // consumer wires onProcessExit the module must treat the close as an END —
+  // no onClose, no backoff reconnect. Without the callback, the legacy
+  // transient treatment must be preserved bit-for-bit (existing consumers).
+  let onClose: ReturnType<typeof vi.fn<() => void>>;
+  let onProcessExit: ReturnType<typeof vi.fn<() => void>>;
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    onClose = vi.fn<() => void>();
+    onProcessExit = vi.fn<() => void>();
+  });
+
+  afterEach(() => {
+    disconnect(); // drop any live socket so state doesn't leak into later tests
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function initWith(cb: { withProcessExit: boolean }): void {
+    init({
+      onMessage: vi.fn(),
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose,
+      ...(cb.withProcessExit ? { onProcessExit } : {}),
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+  }
+
+  it("routes a 4001 close to onProcessExit and schedules no reconnect", () => {
+    initWith({ withProcessExit: true });
+    setSession("procexit-A");
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+
+    sock.fireClose(4001);
+
+    expect(onProcessExit).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    // No backoff reconnect for a definitive close: even far past the maximum
+    // backoff (8s + jitter), no replacement socket is created.
+    vi.advanceTimersByTime(60_000);
+    expect(allMockWebSockets.length).toBe(1);
+  });
+
+  it("keeps the legacy transient treatment for 4001 when onProcessExit is not wired", () => {
+    initWith({ withProcessExit: false });
+    setSession("procexit-B");
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+
+    sock.fireClose(4001);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // The backoff reconnect fires (500ms initial + <250ms jitter).
+    vi.advanceTimersByTime(10_000);
+    expect(allMockWebSockets.length).toBe(2);
+  });
+
+  it("keeps the transient treatment for a non-4001 close even with onProcessExit wired", () => {
+    initWith({ withProcessExit: true });
+    setSession("procexit-C");
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+
+    sock.fireClose(1006); // abnormal closure: a genuine transient drop
+
+    expect(onProcessExit).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(10_000);
+    expect(allMockWebSockets.length).toBe(2);
+  });
+
+  it("a reconnect explicitly requested after a 4001 still works (re-viewing a dead session)", () => {
+    initWith({ withProcessExit: true });
+    setSession("procexit-D");
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+    sock.fireClose(4001);
+    expect(allMockWebSockets.length).toBe(1);
+
+    // The consumer may still re-attach deliberately (a tab switch back onto
+    // the dead session calls setSession -> reconnectNow): the module must not
+    // have latched anything that blocks an explicit reconnect.
+    reconnectNow();
+    expect(allMockWebSockets.length).toBe(2);
+    const again = allMockWebSockets[1]!;
+    expect(again.url).toContain("session=procexit-D");
   });
 });

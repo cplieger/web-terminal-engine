@@ -337,7 +337,7 @@ func TestHandleControl_resizeStartsProcess(t *testing.T) {
 	defer h.Shutdown()
 
 	payload := mustJSON(t, controlMsg{Type: ctlTypeResize, Cols: 100, Rows: 40})
-	h.handleControl(nil, &clientState{}, payload)
+	h.handleControl(nil, &clientState{}, payload, nil)
 
 	if !h.started.Load() {
 		t.Fatalf("handleControl(valid resize): process not started")
@@ -357,7 +357,7 @@ func TestHandleControl_unknownTypeDoesNotStart(t *testing.T) {
 	defer h.Shutdown()
 
 	payload := mustJSON(t, controlMsg{Type: "bogus"})
-	h.handleControl(nil, &clientState{}, payload)
+	h.handleControl(nil, &clientState{}, payload, nil)
 
 	if h.started.Load() {
 		t.Errorf("handleControl(unknown type): process started; only a resize may start it")
@@ -375,10 +375,14 @@ func TestHandleControl_resumeResolvesSession(t *testing.T) {
 
 	state := &clientState{}
 	payload := mustJSON(t, controlMsg{Type: ctlTypeResume, SessionID: "sid"})
-	h.handleControl(ws, state, payload)
+	resumeServed := false
+	h.handleControl(ws, state, payload, func() { resumeServed = true })
 
 	if state.session.Load() == nil {
 		t.Errorf("handleControl(resume): clientState.session is nil; resume must resolve a session")
+	}
+	if !resumeServed {
+		t.Errorf("handleControl(resume): onResumeServed not invoked; the deferred exited-close would never release")
 	}
 	h.registry.mu.Lock()
 	_, ok := h.registry.sessions["sid"]

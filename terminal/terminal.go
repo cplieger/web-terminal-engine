@@ -60,6 +60,17 @@ const (
 	// 4001 is in the private application close-code range (4000-4999).
 	statusProcessExited websocket.StatusCode = 4001
 
+	// exitedAttachReplayGrace bounds how long a client that attaches to an
+	// ALREADY-exited session may take to complete its resume exchange before
+	// the definitive statusProcessExited close is sent. Without this grace the
+	// close raced (and in practice beat) the resumeAck + final-screen replay,
+	// so a client re-attaching to a dead session received nothing renderable —
+	// it saw only an instant 4001 (or, on clients that treat every close as
+	// transient, an infinite reconnect loop). The client sends resume as its
+	// first frame after open, so the grace only ever runs its full length for
+	// a client that never speaks the resume protocol.
+	exitedAttachReplayGrace = 3 * time.Second
+
 	// maxScrollLinesPerFrame bounds the lines packed into one scroll frame so the wire
 	// num_lines (a uint16) can never be exceeded by the payload and a large drained burst
 	// (a fast child can produce far more than 65535 lines in one 50ms flush) is split into
@@ -367,14 +378,37 @@ func (h *Handler) exitAwareCloseCode() websocket.StatusCode {
 // instead would make coder/websocket fail the connection abnormally (1006)
 // rather than send a clean 4001, so this closes the socket directly;
 // coder/websocket permits Close concurrent with the read loop's Read. It also
-// returns when the client leaves (ctx done), so it never leaks; if the process
-// already exited, procExitCh is closed and it closes immediately.
-func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn) {
+// returns when the client leaves (ctx done), so it never leaks.
+//
+// A client that attaches to an ALREADY-exited session (re-opening a dead tab,
+// or a page reload whose saved session died meanwhile) is given up to
+// exitedAttachReplayGrace to complete its resume exchange first — resumeServed
+// is closed by handleWS once handleResume has synchronously written the
+// resumeAck, modes/title, final screen, and history replay — so the client can
+// render the session's last state before the definitive 4001 lands. Closing
+// immediately (the previous behavior) raced the replay and reliably beat it,
+// leaving the client with nothing but the close. The mid-session exit path
+// (the process dies while the client is attached) keeps the immediate close:
+// that client already holds the screen, and prompt 4001 delivery is the
+// contract.
+func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resumeServed <-chan struct{}) {
+	alreadyExited := h.Exited()
 	select {
 	case <-ctx.Done():
+		return
 	case <-h.procExitCh:
-		ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
 	}
+	if alreadyExited {
+		t := time.NewTimer(exitedAttachReplayGrace)
+		defer t.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-resumeServed:
+		case <-t.C:
+		}
+	}
+	ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
 }
 
 // ensureStarted spawns the process if not already running, sized at
@@ -764,8 +798,13 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Close promptly with 4001 when the child process exits, so the client can
 	// distinguish "process ended" from a transient drop (see closeOnProcExit
-	// and exitAwareCloseCode).
-	go h.closeOnProcExit(ctx, ws)
+	// and exitAwareCloseCode). resumeServed defers that close on an
+	// attach-to-already-exited session until the first resume exchange has been
+	// written, so the client renders the final screen before the 4001.
+	resumeServed := make(chan struct{})
+	var resumeOnce sync.Once
+	markResumeServed := func() { resumeOnce.Do(func() { close(resumeServed) }) }
+	go h.closeOnProcExit(ctx, ws, resumeServed)
 
 	// Read input from this client and write to the shared PTY.
 	for {
@@ -777,7 +816,7 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if msg[0] == 0x00 {
-			h.handleControl(ws, state, msg[1:])
+			h.handleControl(ws, state, msg[1:], markResumeServed)
 			continue
 		}
 		// Ensure process is started (fallback if no resize was sent).
@@ -801,7 +840,12 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload []byte) {
+// handleControl dispatches one client control frame. onResumeServed is invoked
+// after a resume exchange has been fully written to the socket (resumeAck +
+// modes/title + window frame + history replay); handleWS uses it to release the
+// deferred process-exited close for a client that attached to an already-exited
+// session (see closeOnProcExit).
+func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload []byte, onResumeServed func()) {
 	var c controlMsg
 	if err := json.Unmarshal(payload, &c); err != nil {
 		h.cfg.logger.Debug("terminal: bad control frame", "error", err, "bytes", len(payload))
@@ -820,6 +864,9 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 			ht = *c.HaveThrough
 		}
 		h.handleResume(ws, state, c.SessionID, ht)
+		if onResumeServed != nil {
+			onResumeServed()
+		}
 		return
 	}
 	if c.Type == ctlTypeResize {

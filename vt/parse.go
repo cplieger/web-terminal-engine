@@ -395,9 +395,11 @@ func (s *Screen) dispatchEsc(b byte) {
 		s.curY, s.curX = 0, 0
 		s.pendingWrap = false
 		s.Drained = nil
+		s.clearWrapState()
 		s.ScrollbackCleared = true
 		s.InAltScreen = false
 		s.savedMainCells = nil
+		s.savedMainWrapped = nil
 		s.altCells = nil
 		// RIS clears the kitty keyboard-protocol flags/stacks for both screens
 		// (a hard reset returns keyboard reporting to legacy). DECSTR leaves them

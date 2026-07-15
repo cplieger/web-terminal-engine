@@ -379,3 +379,50 @@ func TestReset_reAnnouncesTitleAndModes(t *testing.T) {
 		t.Error("after Reset, buildModesPayload = empty; a resuming client must be re-sent the current DEC modes")
 	}
 }
+
+// TestBuild_WrapExtensionResendsFirstURLRow pins the streaming half of the
+// wrapped-URL autolink fix: when a URL's continuation lands on the next row in
+// a LATER flush (char-by-char echo of a long URL being typed, or any output
+// burst that straddles a flush tick), the FIRST row's rendered runs change —
+// its autolink stamp extends to the longer match — and diffWindow's
+// runs-equality diff must re-send that row even though its CELLS never
+// changed. If this regresses, the first row keeps a truncated href until an
+// unrelated repaint.
+func TestBuild_WrapExtensionResendsFirstURLRow(t *testing.T) {
+	screen := vt.New(10, 20)
+	// Fill row 0 to the wrap edge with the URL head. No wrap has occurred yet.
+	if _, err := screen.Write([]byte("https://ex.com/aaaaa")); err != nil { // exactly 20 cols
+		t.Fatalf("screen write: %v", err)
+	}
+	b := &flushFrameBuilder{}
+	if frame := b.Build(screen, true, noClients, 0); frame == nil {
+		t.Fatalf("baseline Build returned nil")
+	}
+
+	// The continuation arrives in a later tick: the deferred wrap fires, row 1
+	// becomes a soft continuation, and the chain-joined match now extends.
+	if _, err := screen.Write([]byte("bbb")); err != nil {
+		t.Fatalf("screen write 2: %v", err)
+	}
+	frame := b.Build(screen, true, noClients, 0)
+	if frame == nil {
+		t.Fatalf("Build after wrap extension returned nil")
+	}
+	if !slices.Contains(frame.changed, 0) {
+		t.Errorf("row 0 not re-sent after its autolink stamp extended; changed = %v", frame.changed)
+	}
+	if !slices.Contains(frame.changed, 1) {
+		t.Errorf("continuation row 1 missing from changed = %v", frame.changed)
+	}
+	// And the re-sent row 0 must now carry the FULL joined href.
+	full := "https://ex.com/aaaaabbb"
+	var got string
+	for _, r := range frame.rows[0] {
+		if r.A&vt.AttrAutolink != 0 {
+			got = r.U
+		}
+	}
+	if got != full {
+		t.Errorf("row 0 href after extension = %q, want %q", got, full)
+	}
+}

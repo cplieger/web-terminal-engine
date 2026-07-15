@@ -36,10 +36,29 @@ type Screen struct {
 	// <text>), stripped of control bytes and length-clamped. The engine stays
 	// generic and does not interpret the text; a consumer's status classifier
 	// maps it (see NotificationSeq for edge detection).
-	Notification     string
-	tabStops         []bool
-	Drained          [][]WireRun
-	Cells            [][]Cell
+	Notification string
+	tabStops     []bool
+	Drained      [][]WireRun
+	Cells        [][]Cell
+	// wrapped[y] marks row y as a soft-wrap CONTINUATION of row y-1: autowrap
+	// (not a hard newline) carried the text onto it. It is the row-chain
+	// signal the URL autolinker joins rows with (see wire.go stampAutolinks),
+	// the same per-line isWrapped model xterm.js keeps for its link addon.
+	// The flag travels with row IDENTITY: every site that shifts whole rows
+	// (scroll, drain, IL/DL, resize, alt switch) mirrors its move here, and a
+	// row replaced wholesale gets false. In-place content edits (boxed
+	// scrolls, rect fills, partial erases) deliberately leave it: a stale
+	// true only joins text the regex then fails to match — harmless — while
+	// missing a true would break a real wrapped URL. Cleared with history on
+	// ED2/ED3/RIS.
+	wrapped []bool
+	// drainTail retains the text of the most recently drained (scrolled-off)
+	// rows while the row now at the top of the screen still continues them,
+	// so a URL chain that straddles the scrollback boundary can still be
+	// joined when stamping live rows and later drains. nil when the top row
+	// starts its own chain. Bounded to maxAutolinkRows-1 entries. Main screen
+	// only (alt drains are discarded by the flush builder).
+	drainTail        []string
 	PendingClipboard []byte
 	selectionData    []byte
 	Response         []byte
@@ -141,6 +160,9 @@ type CursorState struct {
 // altScreenState holds alt-screen save/restore state. Embedded in Screen.
 type altScreenState struct {
 	savedMainCells [][]Cell
+	// savedMainWrapped mirrors savedMainCells for the per-row soft-wrap
+	// flags, so main-screen wrap chains survive an alt-screen session.
+	savedMainWrapped []bool
 	// altCells is the persistent alternate-screen buffer. It survives across
 	// switches so re-entering via mode 47 shows the prior contents; modes 1047
 	// and 1049 clear it (on exit / on enter respectively). While InAltScreen is
@@ -180,7 +202,7 @@ func DefaultTheme() Theme {
 // New creates a screen buffer of the given dimensions. Optional behavior (e.g.
 // the reported color theme) is configured via functional Option values.
 func New(rows, cols int, opts ...Option) *Screen {
-	s := &Screen{Height: rows, Width: cols, Cells: make([][]Cell, rows), scrollTop: 0, scrollBottom: rows - 1, rightMargin: cols - 1, conformanceLevel: 65, AutoWrap: true, CursorBlink: true, theme: DefaultTheme()}
+	s := &Screen{Height: rows, Width: cols, Cells: make([][]Cell, rows), wrapped: make([]bool, rows), scrollTop: 0, scrollBottom: rows - 1, rightMargin: cols - 1, conformanceLevel: 65, AutoWrap: true, CursorBlink: true, theme: DefaultTheme()}
 	s.singleShft = -1
 	s.Progress = -1 // no OSC 9;4 progress seen yet
 	for i := range s.Cells {
@@ -300,16 +322,19 @@ func (s *Screen) resizeHeight(rows int) {
 			// Keep the alt-screen content pinned to the bottom; the app
 			// repaints on the SIGWINCH that follows.
 			s.Cells = append(newRows, s.Cells...)
+			s.wrapped = append(make([]bool, grow), s.wrapped...)
 			s.curY += grow
 		} else {
 			// Keep the shell's output anchored at the top; the cursor stays on
 			// its row and the trailing blanks are trimmed client-side.
 			s.Cells = append(s.Cells, newRows...)
+			s.wrapped = append(s.wrapped, make([]bool, grow)...)
 		}
 		s.Height = rows
 	}
 	if rows < s.Height {
 		s.Cells = s.Cells[:rows]
+		s.wrapped = s.wrapped[:rows]
 		s.Height = rows
 	}
 }
@@ -389,6 +414,16 @@ func (s *Screen) RenderViewport() string {
 	return buf.String()
 }
 
+// clearWrapState resets every soft-wrap continuation flag and drops the
+// retained cross-boundary chain tail. Called where the screen's content and
+// its relationship to history are severed wholesale (ED2, RIS).
+func (s *Screen) clearWrapState() {
+	for i := range s.wrapped {
+		s.wrapped[i] = false
+	}
+	s.drainTail = nil
+}
+
 // RowString returns the text content of a row (no styling).
 func (s *Screen) RowString(y int) string {
 	if y < 0 || y >= len(s.Cells) {
@@ -465,6 +500,7 @@ func (s *Screen) put(r rune) {
 		s.curX = s.wrapColumn()
 		s.curY++
 		s.scrollIfNeeded()
+		s.markWrapContinuation()
 	}
 
 	// Width-2: if only 1 cell remains before the wrap edge, wrap first.
@@ -473,6 +509,7 @@ func (s *Screen) put(r rune) {
 		s.curX = s.wrapColumn()
 		s.curY++
 		s.scrollIfNeeded()
+		s.markWrapContinuation()
 	}
 
 	// IRM (ANSI insert mode, CSI 4 h): shift the row right by the glyph width
@@ -525,10 +562,48 @@ func (s *Screen) scrollIfNeeded() {
 		s.curY = s.scrollBottom
 	}
 	if s.curY >= s.Height {
-		s.Drained = append(s.Drained, s.cellsToRuns(s.Cells[0]))
+		s.drainTopRow()
 		copy(s.Cells, s.Cells[1:])
 		s.Cells[s.Height-1] = makeRow(s.Width, s.style.BG)
+		copy(s.wrapped, s.wrapped[1:])
+		s.wrapped[s.Height-1] = false
 		s.curY = s.Height - 1
+	}
+}
+
+// markWrapContinuation records that the row the cursor just wrapped ONTO is a
+// soft continuation of the row above it. Called at the two autowrap sites in
+// put(), after any scroll has settled the cursor row. Only a true full-row
+// wrap chains rows for the autolinker; a wrap inside a DECSLRM left/right
+// margin box continues box content, not the row, so it is not recorded.
+func (s *Screen) markWrapContinuation() {
+	if s.leftBound() != 0 || s.rightBound() != s.Width-1 {
+		return
+	}
+	if s.curY >= 0 && s.curY < len(s.wrapped) {
+		s.wrapped[s.curY] = true
+	}
+}
+
+// drainTopRow commits row 0 to the pending scrollback drain (stamping any
+// detected URLs first, chain-joined across the drain boundary) and maintains
+// drainTail: when the row about to become the new top row soft-continues the
+// drained one, the drained row's text is retained so the chain can still be
+// joined; otherwise the retained tail is dropped. Alt-screen drains are
+// discarded by the flush builder, so the tail only tracks the main screen.
+func (s *Screen) drainTopRow() {
+	runs := s.stampAutolinks(0, s.cellsToRuns(s.Cells[0]))
+	s.Drained = append(s.Drained, runs)
+	if s.InAltScreen {
+		return
+	}
+	if len(s.wrapped) > 1 && s.wrapped[1] {
+		s.drainTail = append(s.drainTail, rowMatchText(s.Cells[0]))
+		if len(s.drainTail) > maxAutolinkRows-1 {
+			s.drainTail = s.drainTail[len(s.drainTail)-(maxAutolinkRows-1):]
+		}
+	} else {
+		s.drainTail = nil
 	}
 }
 
@@ -625,6 +700,7 @@ func (s *Screen) enterAltScreen(mode int) {
 		saved[i] = append([]Cell(nil), row...)
 	}
 	s.savedMainCells = saved
+	s.savedMainWrapped = append([]bool(nil), s.wrapped...)
 	s.savedMainCurY = s.curY
 	s.savedMainCurX = s.curX
 	s.savedMainStyle = s.style
@@ -641,6 +717,10 @@ func (s *Screen) enterAltScreen(mode int) {
 		}
 	}
 	s.Cells = s.altCells
+	// The alt session starts with no wrap chains; a mode-47 re-enter reusing
+	// stashed alt CONTENT loses its old chains (a legacy mode, cosmetic only —
+	// a stale-false flag just skips autolink joining).
+	s.wrapped = make([]bool, s.Height)
 	s.scrollTop = 0
 	s.scrollBottom = s.Height - 1
 	if mode == 1049 {
@@ -689,6 +769,12 @@ func (s *Screen) exitAltScreen(mode int) {
 		}
 	}
 	s.Cells = restored
+	// Restore the main screen's wrap flags alongside its cells, padded or
+	// truncated to the current height like the cells above.
+	restoredWrapped := make([]bool, s.Height)
+	copy(restoredWrapped, s.savedMainWrapped)
+	s.wrapped = restoredWrapped
+	s.savedMainWrapped = nil
 	s.style = s.savedMainStyle
 	s.scrollTop = s.savedMainScrollTop
 	s.scrollBottom = s.savedMainScrollBottom

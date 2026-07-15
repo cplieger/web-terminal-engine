@@ -125,6 +125,50 @@ describe("OSC 8 hyperlink rendering", () => {
     expect(a.textContent).toBe("http://example.com/very/long/pa");
   });
 
+  it("renders a server-stamped autolink run (attr bit 1024) with the persistent-underline class", async () => {
+    // The server's wrap-aware autolinker (vt.AttrAutolink) stamps bare URLs
+    // with the full href and bit 1024. Unlike an app OSC 8 link (hover-only
+    // underline), the anchor hugs exactly the URL text, so it keeps the
+    // persistent `.term-autolink` underline — this is what makes the SECOND
+    // line of a wrapped URL visibly a link on a phone.
+    const full = "https://amzn.example/start/#/device?user_code=ABCD-EFGH";
+    const runs: WireRun[] = [
+      { t: "device?user_code=ABCD-EFGH", f: -1, b: -1, a: 1024, uc: -1, u: full },
+    ];
+    const msg = frame({ 0: runs }, [0, 0]);
+    await flushFrame(msg);
+
+    const anchors = output.querySelectorAll("a.term-link.term-autolink");
+    expect(anchors.length).toBe(1);
+    const a = anchors[0] as HTMLAnchorElement;
+    // The tail row's anchor carries the FULL joined href, not the visible
+    // fragment (the truncated-tap bug), and opens safely.
+    expect(a.getAttribute("href")).toBe(full);
+    expect(a.textContent).toBe("device?user_code=ABCD-EFGH");
+    expect(a.target).toBe("_blank");
+    expect(a.rel).toBe("noopener noreferrer");
+  });
+
+  it("renders both rows of a server-stamped wrapped URL as anchors with the same full href", async () => {
+    const full = "https://ex.example/aaaaaaaaaa/bbbbbbbbbb";
+    const row0: WireRun[] = [
+      { t: "Open: ", f: -1, b: -1, a: 0, uc: -1 },
+      { t: "https://ex.example/aaaa", f: -1, b: -1, a: 1024, uc: -1, u: full },
+    ];
+    const row1: WireRun[] = [
+      { t: "aaaaaa/bbbbbbbbbb", f: -1, b: -1, a: 1024, uc: -1, u: full },
+      { t: " done", f: -1, b: -1, a: 0, uc: -1 },
+    ];
+    const msg = frame({ 0: row0, 1: row1 }, [1, 20]);
+    await flushFrame(msg);
+
+    const anchors = [...output.querySelectorAll("a.term-link.term-autolink")];
+    expect(anchors.length).toBe(2);
+    for (const el of anchors) {
+      expect(el.getAttribute("href")).toBe(full);
+    }
+  });
+
   it("does not linkify a non-http(s) OSC 8 scheme (renders as inert text)", async () => {
     // render.ts uses a conservative http/https-only allow-list, so even a
     // benign non-http scheme like mailto: is NOT turned into a live anchor —

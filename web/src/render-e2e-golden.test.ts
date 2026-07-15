@@ -39,7 +39,15 @@ const ROW = {
   underlineColor: 10,
   inverseDefault: 11,
   hyperlink: 12,
+  // The autolink-wrap entry prints a 45-char bare URL on a 40-col screen, so
+  // it occupies TWO rows: the head and the soft-wrapped tail.
+  autolinkWrapHead: 13,
+  autolinkWrapTail: 14,
 } as const;
+
+// The full URL the Go fixture prints for the autolink-wrap rows (see
+// renderGoldenRows in terminal/render_golden_test.go; keep in lockstep).
+const WRAPPED_URL = "https://example.com/wrapped/path/abcdefghijkl";
 
 function loadFixture(): ArrayBuffer {
   const dir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "render-golden");
@@ -121,5 +129,29 @@ describe("cross-language display conformance (real sequences → engine → wire
       HTMLAnchorElement | undefined;
     expect(anchor, "an <a> element must be rendered").toBeDefined();
     expect(anchor!.getAttribute("href")).toBe("https://example.com/x");
+  });
+
+  it("a soft-wrapped bare URL renders BOTH rows as autolink anchors with the full href", () => {
+    // The engine's wrap-aware autolinker stamped both segments server-side;
+    // each row's anchor must carry the COMPLETE URL (a tap on either line
+    // opens the whole link) with the persistent-underline autolink class.
+    for (const row of [ROW.autolinkWrapHead, ROW.autolinkWrapTail]) {
+      const anchor = rowSpans(output, row).find((s) => s.tagName === "A") as
+        HTMLAnchorElement | undefined;
+      expect(anchor, `row ${row} must render an anchor`).toBeDefined();
+      expect(anchor!.getAttribute("href"), `row ${row} href`).toBe(WRAPPED_URL);
+      expect(anchor!.classList.contains("term-autolink"), `row ${row} autolink class`).toBe(true);
+    }
+    // The two visible fragments reassemble the exact URL: nothing is lost or
+    // duplicated at the wrap boundary.
+    const headText = rowSpans(output, ROW.autolinkWrapHead)
+      .filter((s) => s.tagName === "A")
+      .map((s) => s.textContent)
+      .join("");
+    const tailText = rowSpans(output, ROW.autolinkWrapTail)
+      .filter((s) => s.tagName === "A")
+      .map((s) => s.textContent)
+      .join("");
+    expect(headText + tailText).toBe(WRAPPED_URL);
   });
 });

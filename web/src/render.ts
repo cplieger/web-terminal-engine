@@ -590,9 +590,13 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
       a.href = href;
       a.target = "_blank";
       a.rel = "noopener noreferrer";
-      // OSC 8 app hyperlink: base `.term-link`. Auto-detected URLs additionally
-      // get `.term-autolink` (see linkifySpans).
-      a.className = "term-link";
+      // Server-stamped autolink (attr bit 1024, vt.AttrAutolink): a bare URL
+      // the server detected — joined across soft-wrap continuations, so every
+      // row segment carries the FULL href. Styled like the client's own
+      // autolinks (persistent underline; the anchor hugs exactly the URL
+      // text). An app-provided OSC 8 hyperlink keeps the hover-only base
+      // `.term-link` (it may span decorative cells).
+      a.className = (attrs & 1024) !== 0 ? "term-link term-autolink" : "term-link";
       for (const s of runSpans) {
         a.appendChild(s);
       }

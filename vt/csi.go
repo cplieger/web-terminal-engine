@@ -569,6 +569,7 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 		}
 		s.eraseRegionMode(0, 0, s.Height-1, s.Width-1, m)
 		s.Drained = nil
+		s.clearWrapState()
 	case 3:
 		// ED3 — "Erase Saved Lines" (xterm). Clears the scrollback buffer
 		// ONLY; the visible screen is left untouched. The VT has no handle on
@@ -580,6 +581,9 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 		// (not-yet-committed) drain is scrollback-bound, so it is discarded too.
 		s.ScrollbackCleared = true
 		s.Drained = nil
+		// The retained cross-boundary chain tail describes history that no
+		// longer exists; the on-screen flags describe rows that remain.
+		s.drainTail = nil
 	}
 }
 
@@ -1263,8 +1267,10 @@ func (s *Screen) insertLines(n int) {
 		if fullWidth {
 			for y := s.scrollBottom; y > s.curY; y-- {
 				s.Cells[y] = s.Cells[y-1]
+				s.wrapped[y] = s.wrapped[y-1]
 			}
 			s.Cells[s.curY] = makeRow(s.Width, s.style.BG)
+			s.wrapped[s.curY] = false
 			continue
 		}
 		for y := s.scrollBottom; y > s.curY; y-- {
@@ -1289,8 +1295,10 @@ func (s *Screen) deleteLines(n int) {
 		if fullWidth {
 			for y := s.curY; y < s.scrollBottom; y++ {
 				s.Cells[y] = s.Cells[y+1]
+				s.wrapped[y] = s.wrapped[y+1]
 			}
 			s.Cells[s.scrollBottom] = makeRow(s.Width, s.style.BG)
+			s.wrapped[s.scrollBottom] = false
 			continue
 		}
 		for y := s.curY; y < s.scrollBottom; y++ {
@@ -1306,15 +1314,18 @@ func (s *Screen) scrollUpOnce() {
 		// Full-width scroll: move whole rows; only a full-screen scroll drains
 		// to scrollback (partial-height/partial-width content never does).
 		if s.scrollTop == 0 && s.scrollBottom == s.Height-1 {
-			s.Drained = append(s.Drained, s.cellsToRuns(s.Cells[0]))
+			s.drainTopRow()
 		}
 		for y := s.scrollTop; y < s.scrollBottom; y++ {
 			s.Cells[y] = s.Cells[y+1]
+			s.wrapped[y] = s.wrapped[y+1]
 		}
 		s.Cells[s.scrollBottom] = makeRow(s.Width, s.style.BG)
+		s.wrapped[s.scrollBottom] = false
 		return
 	}
 	// Boxed scroll (DECSLRM): shift only [left..right] up within the region.
+	// Cell contents move but row identity does not, so the wrap flags stay.
 	for y := s.scrollTop; y < s.scrollBottom; y++ {
 		copy(s.Cells[y][left:right+1], s.Cells[y+1][left:right+1])
 	}
@@ -1340,11 +1351,14 @@ func (s *Screen) scrollDownOnce() {
 	if left == 0 && right == s.Width-1 {
 		for y := s.scrollBottom; y > s.scrollTop; y-- {
 			s.Cells[y] = s.Cells[y-1]
+			s.wrapped[y] = s.wrapped[y-1]
 		}
 		s.Cells[s.scrollTop] = makeRow(s.Width, s.style.BG)
+		s.wrapped[s.scrollTop] = false
 		return
 	}
 	// Boxed scroll (DECSLRM): shift only [left..right] down within the region.
+	// Cell contents move but row identity does not, so the wrap flags stay.
 	for y := s.scrollBottom; y > s.scrollTop; y-- {
 		copy(s.Cells[y][left:right+1], s.Cells[y-1][left:right+1])
 	}

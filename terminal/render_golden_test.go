@@ -46,6 +46,12 @@ var renderGoldenRows = []struct {
 	{"underline-color", "\x1b[4;58;2;0;255;0mC\x1b[0m"},
 	{"inverse-default", "\x1b[7mV\x1b[0m"},
 	{"hyperlink", "\x1b]8;;https://example.com/x\x1b\\L\x1b]8;;\x1b\\"},
+	// MUST stay last: this bare URL is longer than the 40-col row, so it
+	// SOFT-WRAPS onto the row below (the only entry that occupies two rows).
+	// The server's wrap-aware autolinker must stamp BOTH row segments with the
+	// full URL + the autolink attr bit; the TS tier asserts each row renders an
+	// anchor carrying the complete href (the phone-width wrapped-URL fix).
+	{"autolink-wrap", "https://example.com/wrapped/path/abcdefghijkl"},
 }
 
 func TestRenderGolden(t *testing.T) {

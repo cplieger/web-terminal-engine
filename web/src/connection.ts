@@ -34,6 +34,13 @@ type ConnState =
   | { status: "connected"; sock: WebSocket; abort: AbortController }
   | { status: "reconnecting"; timer: ReturnType<typeof setTimeout>; delayMs: number };
 
+// The server's application close code for "the session's child process has
+// exited" (terminal/terminal.go statusProcessExited). It marks a close as
+// definitive — the session cannot produce output again — as opposed to a
+// transient network drop that the backoff reconnect should heal. Private
+// application range (4000-4999) per RFC 6455.
+const PROCESS_EXITED_CLOSE_CODE = 4001;
+
 let connState: ConnState = { status: "disconnected" };
 let reconnectDelay = INITIAL_DELAY_MS;
 let lastSentCols = 0;
@@ -179,6 +186,18 @@ export interface Callbacks {
   onClose(): void;
   onConnecting?(): void;
   onOutboxFull?(): void;
+  /** Fired instead of onClose when the server closes with the
+   *  process-exited application close code (4001): the session's child
+   *  process has ended, so the close is DEFINITIVE, not a transient drop.
+   *  When this callback is wired, the module does NOT auto-reconnect that
+   *  socket — reconnecting a dead session just replays its final screen and
+   *  earns another 4001 (the endless "Reconnecting…" flash) — and does not
+   *  call onClose for it. The consumer decides what "ended" looks like
+   *  (banner, tab state) and may still reconnect explicitly (setSession /
+   *  reconnectNow) to re-view the final screen. When absent, every close
+   *  keeps the legacy transient treatment (onClose + backoff reconnect), so
+   *  existing consumers are unaffected until they opt in. */
+  onProcessExit?(): void;
   /** Fired when the server's boot-epoch in resumeAck differs from the
    *  one observed on a previous connection — i.e. the server has
    *  restarted. By the time this fires, the connection module has
@@ -696,7 +715,7 @@ export function connect(): void {
 
   sock.addEventListener(
     "close",
-    () => {
+    (ev: CloseEvent) => {
       // Only the active sock's close should drive reconnect logic; an
       // already-superseded sock has been aborted and this listener
       // wouldn't fire (signal removes it). The check stays as a belt-
@@ -709,6 +728,16 @@ export function connect(): void {
       }
       stopHeartbeat();
       connState = { status: "disconnected" };
+      // A process-exited close (4001) is definitive: the child is gone, so a
+      // backoff reconnect can only replay the final screen and collect another
+      // 4001 — an endless, pointless churn that reads as a flapping
+      // "Reconnecting…" banner. Route it to onProcessExit (no reconnect, no
+      // onClose) when the consumer wired it; without the callback, keep the
+      // legacy transient treatment so existing consumers see no change.
+      if (ev.code === PROCESS_EXITED_CLOSE_CODE && cb?.onProcessExit) {
+        cb.onProcessExit();
+        return;
+      }
       cb?.onClose();
       scheduleReconnect();
     },

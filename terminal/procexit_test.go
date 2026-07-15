@@ -2,11 +2,85 @@ package terminal
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 )
+
+// TestExitedAttachServesReplayBefore4001 pins the attach-to-dead-session
+// contract: a client that connects AFTER the child process exited still gets
+// its full resume exchange — resumeAck and the final-screen window frame —
+// before the definitive statusProcessExited (4001) close. Before this grace
+// existed, closeOnProcExit fired the 4001 immediately on attach (procExitCh
+// already closed) and reliably beat handleResume's writes, so a reloading
+// client saw nothing renderable — the wedge behind the "stuck loading screen
+// with an endlessly flashing reconnect" report.
+func TestExitedAttachServesReplayBefore4001(t *testing.T) {
+	h := NewHandler([]string{"/bin/sh", "-c", "echo deadwords; exit 1"}, WithWorkDir("/"))
+	defer h.Shutdown()
+	if err := h.StartEager(); err != nil {
+		t.Fatalf("StartEager: %v", err)
+	}
+	// Wait for the child to have exited so the attach below is genuinely
+	// against a dead session.
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.Exited() {
+		if time.Now().After(deadline) {
+			t.Fatal("child process did not exit within 5s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	//nolint:bodyclose // library contract: Body is nil on success
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws", nil)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer ws.Close(websocket.StatusNormalClosure, "") // #nosec G104 -- best-effort test cleanup
+
+	// Speak the resume protocol like the real client: first frame after open.
+	resume, err := json.Marshal(controlMsg{Type: ctlTypeResume, SessionID: "dead-attach"})
+	if err != nil {
+		t.Fatalf("marshal resume: %v", err)
+	}
+	if err := ws.Write(ctx, websocket.MessageBinary, append([]byte{0x00}, resume...)); err != nil {
+		t.Fatalf("ws write resume: %v", err)
+	}
+
+	// The replay (resumeAck + modes/title + final screen) must arrive BEFORE
+	// the 4001 close: collect frames until the close error, then check both
+	// that frames were delivered and that the close code is 4001.
+	frames := 0
+	var all []byte
+	for {
+		_, data, rerr := ws.Read(ctx)
+		if rerr != nil {
+			if got := websocket.CloseStatus(rerr); got != statusProcessExited {
+				t.Fatalf("close status = %d, want %d (statusProcessExited); read err: %v", got, statusProcessExited, rerr)
+			}
+			break
+		}
+		frames++
+		all = append(all, data...)
+	}
+	if frames == 0 {
+		t.Fatal("no frames before the 4001 close; the resume exchange must be served to an attach-to-exited client")
+	}
+	if !strings.Contains(string(all), "deadwords") {
+		t.Errorf("final screen replay missing the child's last output; got %d frames, %d bytes", frames, len(all))
+	}
+}
 
 // TestProcessExitClosesWith4001 verifies the terminal WS closes with
 // statusProcessExited (4001), not a normal closure, when the child process

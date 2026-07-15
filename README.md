@@ -3,9 +3,9 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal-engine/v2.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal-engine/v2)
 [![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-engine)](https://www.npmjs.com/package/@cplieger/web-terminal-engine)
 [![JSR](https://jsr.io/badges/@cplieger/web-terminal-engine)](https://jsr.io/@cplieger/web-terminal-engine)
-[![Go version](https://img.shields.io/github/go-mod/go-version/cplieger/web-terminal-engine)](https://github.com/cplieger/web-terminal-engine/blob/main/go.mod)
 [![Test coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/coverage.json)](https://github.com/cplieger/web-terminal-engine/actions/workflows/coverage.yml)
 [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/mutation.json)](https://github.com/cplieger/web-terminal-engine/issues?q=label%3Agremlins-tracker)
+[![Mutation (TS)](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/mutation-ts.json)](https://github.com/cplieger/web-terminal-engine/issues?q=label%3Astryker-tracker)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13225/badge)](https://www.bestpractices.dev/projects/13225)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/web-terminal-engine/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/web-terminal-engine)
 

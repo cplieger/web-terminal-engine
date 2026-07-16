@@ -291,9 +291,10 @@ func (m *SessionManager) Shutdown() {
 	}
 }
 
-// WebSocketHandler serves the terminal stream at /ws?session=<id>. An unknown
-// or missing id is a 404. While a client is attached the manager counts it as
-// present, which suppresses the idle reaper.
+// WebSocketHandler serves the terminal stream at WSPath (/ws?session=<id>).
+// An unknown or missing id is a 404. While a client is attached the manager
+// counts it as present, which suppresses the idle reaper. Mounted for you by
+// MountSessionRoutes / MountAPI; exported so consumer tests can stub it.
 func (m *SessionManager) WebSocketHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Query().Get("session")
@@ -312,10 +313,12 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 	})
 }
 
-// RESTHandler serves the session REST API: POST /api/sessions (create),
-// GET /api/sessions (list), DELETE /api/sessions/{id} (close), and
-// PUT /api/sessions/{id}/title (set the client-fallback title). Mount it for
-// the /api/sessions and /api/sessions/ paths.
+// RESTHandler serves the session REST API: POST SessionsPath (create),
+// GET SessionsPath (list), DELETE /api/sessions/{id} (close), and
+// PUT /api/sessions/{id}/title (set the client-fallback title). Its internal
+// patterns are absolute, so it only functions on the SessionsPath +
+// SessionsSubtreePath mounts — MountSessionRoutes / MountAPI perform them
+// (the route-set contract lives there); exported so consumer tests can stub it.
 func (m *SessionManager) RESTHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sessions", m.handleCreate)

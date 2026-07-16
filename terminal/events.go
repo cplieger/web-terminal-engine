@@ -236,12 +236,13 @@ func (m *SessionManager) snapshot() []statusEvent {
 	return out
 }
 
-// EventsHandler serves the status stream at /api/sessions/events (SSE). A
-// subscriber is counted as a present client (suppressing the idle reaper) and
-// first receives an initial sync of every session's current status, then a
-// stream of changes. A subscriber that falls behind its bounded buffer is
-// dropped; the number of concurrent subscribers is bounded by the fixed
-// maxSubscribers cap.
+// EventsHandler serves the status stream at SessionEventsPath
+// (/api/sessions/events, SSE). A subscriber is counted as a present client
+// (suppressing the idle reaper) and first receives an initial sync of every
+// session's current status, then a stream of changes. A subscriber that falls
+// behind its bounded buffer is dropped; the number of concurrent subscribers
+// is bounded by the fixed maxSubscribers cap. Mounted for you by
+// MountSessionRoutes / MountAPI; exported so consumer tests can stub it.
 func (m *SessionManager) EventsHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Flush through a ResponseController so the stream works behind

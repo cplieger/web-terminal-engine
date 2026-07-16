@@ -10,6 +10,7 @@ export * as connection from "./connection.js";
 export { decodeWireBinary } from "./wire-binary.js";
 export { controlFrame, CONTROL_FRAME_PREFIX } from "./wire.js";
 export { wsURL } from "./wsurl.js";
+export { WS_PATH, SESSIONS_PATH, SESSION_EVENTS_PATH } from "./routes.js";
 export { connectStatusStream } from "./status-stream.js";
 export type {
   SessionStatus,

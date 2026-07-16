@@ -22,6 +22,7 @@
 // without bound.
 
 import { wsURL } from "./wsurl.js";
+import { WS_PATH } from "./routes.js";
 import { controlFrame } from "./wire.js";
 import { decodeWireBinary, WIRE_PROTOCOL_VERSION } from "./wire-binary.js";
 import * as modes from "./modes.js";
@@ -45,7 +46,7 @@ let connState: ConnState = { status: "disconnected" };
 let reconnectDelay = INITIAL_DELAY_MS;
 let lastSentCols = 0;
 let lastSentRows = 0;
-let wsPath = "/ws";
+let wsPath: string = WS_PATH;
 
 // --- Per-session resume state (the switching cache's connection half) ---
 //

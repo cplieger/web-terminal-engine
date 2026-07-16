@@ -17,6 +17,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as render from "./render.js";
+import { LineStore as RealLineStore } from "./store.js";
 import type { WireRun } from "./types.js";
 import type { LineStore, StoreChanges, WindowState } from "./store.js";
 
@@ -152,6 +153,12 @@ describe("render: bounded error-path reschedule (d-u4-1)", () => {
     errorSpy.mockRestore();
     globalThis.requestAnimationFrame = realRaf;
     globalThis.cancelAnimationFrame = realCaf;
+    // Re-bind a REAL store: render.ts holds a module-level `store`, vitest runs
+    // with isolate:false, and bind(makeFakeStore(...)) above would otherwise
+    // leave the fake (no applyScreen/applyScroll) bound for whichever test file
+    // shares this worker next — the cross-file "store.applyScreen is not a
+    // function" flake whose failing file moved run to run on main.
+    render.bind(new RealLineStore());
   });
 
   function gaveUp(): boolean {

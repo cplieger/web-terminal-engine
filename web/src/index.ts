@@ -13,6 +13,7 @@ export { wsURL } from "./wsurl.js";
 export { WS_PATH, SESSIONS_PATH, SESSION_EVENTS_PATH } from "./routes.js";
 export { connectStatusStream } from "./status-stream.js";
 export type {
+  SessionInfo,
   SessionStatus,
   StatusStream,
   StatusStreamCallbacks,

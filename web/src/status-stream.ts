@@ -7,9 +7,11 @@
 
 import { nextBackoffDelay } from "./reconnect.js";
 
-/** SessionStatus is one session's current status as carried on the stream. It
- *  mirrors the server's status event. */
-export interface SessionStatus {
+/** SessionInfo is one session's wire shape: the JSON object the session REST
+ *  API (GET/POST /api/sessions) returns per session. Mirrors the Go
+ *  terminal.SessionInfo — the two are kept in lockstep by hand (single 6-field
+ *  type; flip to wiregen if this surface grows). */
+export interface SessionInfo {
   readonly id: string;
   readonly status: "working" | "idle" | "input" | "done" | "exited";
   readonly title: string;
@@ -18,14 +20,20 @@ export interface SessionStatus {
    *  this instead of `title`. */
   readonly clientTitle?: string;
   readonly createdAt: string;
-  /** true when the session is gone (closed or reaped); the consumer drops it. */
-  readonly removed?: boolean;
   /** true once the session has emitted a genuine activity signal — OSC 9;4
    *  progress (kiro-cli, Claude Code, …) or a classified OSC 9 notification.
    *  Sticky for the session's life. Consumers reveal the per-tab activity dot
    *  only when this is set; a program that emits no OSC 9 signal (a plain shell)
    *  keeps its tab dot hidden. */
   readonly reportsActivity?: boolean;
+}
+
+/** SessionStatus is one session's current status as carried on the status
+ *  stream (SSE): the REST wire shape plus the stream-only removal marker. It
+ *  mirrors the server's status event. */
+export interface SessionStatus extends SessionInfo {
+  /** true when the session is gone (closed or reaped); the consumer drops it. */
+  readonly removed?: boolean;
 }
 
 /** StatusStreamCallbacks are the consumer's hooks. Declared as function-typed

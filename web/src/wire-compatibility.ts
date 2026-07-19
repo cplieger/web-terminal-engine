@@ -12,8 +12,15 @@ export const MIN_SUPPORTED_SERVER_WIRE_VERSION = 3;
 /** Definitive private WebSocket close code for an incompatible declared peer. */
 export const WIRE_INCOMPATIBLE_CLOSE_CODE = 4002;
 
+/** Shape of the machine-readable compatibility metadata object. */
+export interface WireCompatibility {
+  readonly protocolVersion: number;
+  readonly minimumServerProtocolVersion: number;
+  readonly incompatibleCloseCode: number;
+}
+
 /** Machine-readable compatibility metadata shipped in every TS release. */
-export const WIRE_COMPATIBILITY = Object.freeze({
+export const WIRE_COMPATIBILITY: WireCompatibility = Object.freeze({
   protocolVersion: WIRE_PROTOCOL_VERSION,
   minimumServerProtocolVersion: MIN_SUPPORTED_SERVER_WIRE_VERSION,
   incompatibleCloseCode: WIRE_INCOMPATIBLE_CLOSE_CODE,

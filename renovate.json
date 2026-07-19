@@ -1,1 +1,11 @@
-{ "extends": ["github>cplieger/.github"] }
+{
+  "extends": ["github>cplieger/.github"],
+  "ignoreDeps": ["@cplieger/web-terminal-engine-v3"],
+  "packageRules": [
+    {
+      "description": "The npm alias @cplieger/web-terminal-engine-v3 pins the PREVIOUS published decoder (the wire-v3 baseline) for the cross-version compatibility gate in web/. It advances only deliberately, together with the frozen wire-golden fixtures, when a receiver floor is raised — a bot bump to the current release would silently turn the compat gate into current-vs-current and gut its meaning (Renovate proposed exactly that in PR #337). ignoreDeps above does the blocking; this rule documents it beside the other rules.",
+      "matchDepNames": ["@cplieger/web-terminal-engine-v3"],
+      "enabled": false
+    }
+  ]
+}

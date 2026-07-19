@@ -313,7 +313,11 @@ func (m *SessionManager) Shutdown() {
 }
 
 // WebSocketHandler serves the terminal stream at WSPath (/ws?session=<id>).
-// An unknown or missing id is a 404. While a client is attached the manager
+// An unknown or missing id is reported AFTER the upgrade via the definitive
+// close code 4004 (statusUnknownSession); a non-WebSocket GET gets Accept's
+// 426 whether or not the session exists, so a plain probe cannot test
+// session existence (no pre-upgrade 404 — browser JS cannot read one, and
+// it doubled as an existence oracle). While a client is attached the manager
 // counts it as present, which suppresses the idle reaper. Mounted for you by
 // MountSessionRoutes / MountAPI; exported so consumer tests can stub it.
 func (m *SessionManager) WebSocketHandler() http.Handler {

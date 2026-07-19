@@ -6,6 +6,7 @@
 // run by hand: `node e2e/render-bench.mjs [runsPerScenario]`.
 import * as esbuild from "esbuild";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
@@ -203,4 +204,9 @@ for (const [fn, n] of top) {
 }
 
 await browser.close();
-fs.writeFileSync("/tmp/render-bench-results.json", JSON.stringify(results, null, 2));
+// A private mkdtemp dir instead of a fixed /tmp name: a predictable shared
+// path is symlink-attackable on multi-user machines (CodeQL js/insecure-temporary-file).
+const outDir = fs.mkdtempSync(path.join(os.tmpdir(), "render-bench-"));
+const outFile = path.join(outDir, "render-bench-results.json");
+fs.writeFileSync(outFile, JSON.stringify(results, null, 2));
+console.log(`\nresults written to ${outFile}`);

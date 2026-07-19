@@ -122,10 +122,14 @@ func TestMountAPIWiresManagerHandlers(t *testing.T) {
 		t.Errorf("fresh manager listed %d sessions, want 0", len(infos))
 	}
 
-	// An unknown session id on the WebSocket route 404s through the same mount.
+	// A plain (non-upgrade) GET with an unknown session id gets Accept's 426
+	// through the same mount — the SAME answer a known id gives, so a probe
+	// cannot distinguish session existence (the old 404-vs-426 oracle). A
+	// real WebSocket dial to an unknown id gets the accepted-then-closed 4004
+	// treatment (TestWebSocketUnknownSessionClosesDefinitively).
 	rec2 := httptest.NewRecorder()
 	mux.ServeHTTP(rec2, httptest.NewRequest(http.MethodGet, WSPath+"?session=nope", nil))
-	if rec2.Code != http.StatusNotFound {
-		t.Errorf("GET %s?session=nope = %d, want 404", WSPath, rec2.Code)
+	if rec2.Code != http.StatusUpgradeRequired {
+		t.Errorf("GET %s?session=nope = %d, want 426 (upgrade required, matching the known-session answer)", WSPath, rec2.Code)
 	}
 }

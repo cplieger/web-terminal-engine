@@ -25,6 +25,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // SessionInfo is the public description of one session, returned by List and
@@ -80,7 +82,7 @@ func WithManagerLogger(l *slog.Logger) ManagerOption {
 // WithStatusClassifier maps an OSC 9 notification message to a session status
 // (return ok=false to ignore a message). This keeps the engine generic: web-terminal-kiro
 // maps kiro-cli's "Permission required" to input and "Response complete" to
-// idle, while a plain shell server sets no classifier and gets working/idle from
+// done, while a plain shell server sets no classifier and gets working/idle from
 // output activity only. A classified input status latches (persists while the
 // process waits) until the turn resumes or a done message clears it.
 func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
@@ -98,17 +100,19 @@ type session struct {
 	clientTitle string // client-supplied fallback title, used when the OSC title is empty
 }
 
-// effectiveTitle returns the session's reported title: the live OSC window
-// title from the handler when non-empty, otherwise the stored client-supplied
-// fallback title. This is OSC-first — a program that emits its own window title
-// (an interactive shell) wins, while a program that emits no usable OSC title
-// (kiro-cli under web-terminal-kiro) falls back to the client-pushed label. Callers MUST
-// hold m.mu because it reads s.clientTitle.
-func effectiveTitle(s *session) string {
-	if t := s.handler.Title(); t != "" {
-		return t
+// effectiveTitle combines a session's title sources: the live OSC window title
+// when the program set one, otherwise the client-supplied fallback. This is
+// OSC-first — a program that emits its own window title (an interactive shell)
+// wins, while a program that emits no usable OSC title (kiro-cli under
+// web-terminal-kiro) falls back to the client-pushed label. Pure by design: the
+// OSC title comes from a handler getter (h.mu) and the fallback from manager
+// state (m.mu), and every caller (List, snapshot, diffStatuses) reads the two
+// under their own locks — never one lock nested in the other.
+func effectiveTitle(oscTitle, clientTitle string) string {
+	if oscTitle != "" {
+		return oscTitle
 	}
-	return s.clientTitle
+	return clientTitle
 }
 
 // SessionManager maps session ids to PTY-backed handlers and serves the
@@ -215,23 +219,40 @@ func logID(id string) string {
 }
 
 // List returns all sessions sorted by creation time.
+//
+// Two-phase like diffStatuses: manager state (session set, client titles,
+// tracker latches) is captured under m.mu, then the handler getters (Title /
+// Exited / Progress — each takes that handler's h.mu) run after m.mu is
+// released, so one wedged handler stalls only this call, never every manager
+// path.
 func (m *SessionManager) List() []SessionInfo {
+	type listItem struct {
+		handler *Handler
+		info    SessionInfo
+		latched bool
+	}
 	m.mu.Lock()
-	out := make([]SessionInfo, 0, len(m.sessions))
+	items := make([]listItem, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		// reportsActivity mirrors the status stream: sticky once any OSC 9;4
-		// progress has been seen (Progress() >= 0), or a notification latched.
 		tr := m.trackers[s.id]
-		out = append(out, SessionInfo{
-			ID:              s.id,
-			Title:           effectiveTitle(s),
-			ClientTitle:     s.clientTitle,
-			Status:          statusOf(s.handler),
-			CreatedAt:       s.createdAt,
-			ReportsActivity: s.handler.Progress() >= 0 || (tr != nil && tr.latched != ""),
+		items = append(items, listItem{
+			info:    SessionInfo{ID: s.id, ClientTitle: s.clientTitle, CreatedAt: s.createdAt},
+			handler: s.handler,
+			latched: tr != nil && tr.latched != "",
 		})
 	}
 	m.mu.Unlock()
+
+	out := make([]SessionInfo, 0, len(items))
+	for i := range items {
+		it := &items[i]
+		it.info.Status = statusOf(it.handler)
+		it.info.Title = effectiveTitle(it.handler.Title(), it.info.ClientTitle)
+		// reportsActivity mirrors the status stream: sticky once any OSC 9;4
+		// progress has been seen (Progress() >= 0), or a notification latched.
+		it.info.ReportsActivity = it.handler.Progress() >= 0 || it.latched
+		out = append(out, it.info)
+	}
 	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
 	return out
 }
@@ -305,7 +326,22 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 		}
 		m.mu.Unlock()
 		if !ok {
-			http.Error(w, "unknown session", http.StatusNotFound)
+			// Unknown session: accept the upgrade and close with the
+			// DEFINITIVE application code (4004), which the client reads and
+			// routes to its ended state — a pre-upgrade 404 is unreadable
+			// from browser JS (an opaque code-1006 failure) and condemned
+			// clients to an endless reconnect loop against a session that
+			// will never exist. nil AcceptOptions keep coder/websocket's
+			// same-origin default, matching the fleet's live posture (no
+			// consumer sets WithAcceptOptions). A non-WebSocket GET gets
+			// Accept's own 426 — the same answer the known-session path
+			// gives, so a plain probe can no longer distinguish session
+			// existence (the old 404-vs-426 oracle).
+			ws, err := websocket.Accept(w, r, nil)
+			if err != nil {
+				return // Accept already wrote its error response (e.g. 426)
+			}
+			_ = ws.Close(statusUnknownSession, "unknown session")
 			return
 		}
 		defer m.clientDisconnected()

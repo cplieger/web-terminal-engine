@@ -220,9 +220,11 @@ describe("render: wide-char and zero-width handling", () => {
   // position, so a visible cursor positioned AFTER a wide char lands on the
   // correct cell rather than one cell too far right per preceding wide char.
 
-  it("places a visible cursor after a wide char on the correct cell (counts the spacer)", async () => {
+  it("places the caret overlay after a wide char on the correct cell (counts the spacer)", async () => {
     // Row "A漢B": A=col0, 漢=col1 (occupies cols 1-2 via the spacer), B=col3.
-    // cursor_col=3 => the caret sits ON B, not on a phantom cell to its right.
+    // cursor_col=3 => the caret sits ON B, not on a phantom cell to its right:
+    // the overlay's glyph copy reads the char at TRUE cell col 3 (the \uFFFF
+    // continuation advanced the column like a printed cell).
     const msg: ScreenMessage = {
       type: "screen",
       base: 0,
@@ -234,34 +236,31 @@ describe("render: wide-char and zero-width handling", () => {
       cursorBlink: true,
     };
     await flush(msg);
-    const rowEl = outputEl.children[0] as HTMLElement;
-    const cursorSpan = rowEl.querySelector<HTMLElement>(
-      ".term-cursor, .term-cursor-underline, .term-cursor-bar",
-    );
-    expect(cursorSpan, "a cursor span must be rendered").not.toBeNull();
+    const overlay = document.querySelector<HTMLElement>(".term-cursor-overlay");
+    expect(overlay, "the caret overlay must be rendered").not.toBeNull();
+    expect(overlay!.classList.contains("visible")).toBe(true);
     // The caret is on B (the cell at true col 3), the char cursor_col points at.
-    expect(cursorSpan!.textContent).toBe("B");
+    expect(overlay!.textContent).toBe("B");
   });
 
-  it("hidden cursor on a wide-char row renders no cursor span", async () => {
+  it("hidden cursor renders no visible caret and no in-row cursor span", async () => {
     // cursorHidden is true (makeMsg default): the host draws its own cursor, so
-    // the renderer emits no inline cursor span.
+    // the renderer shows no caret.
     await flush(makeMsg([row("A漢\uFFFFB" + " ".repeat(6))], [0, 1], [0]));
 
     const rowEl = outputEl.children[0] as HTMLElement;
     expect(rowEl).toBeDefined();
-    const cursorSpan = childSpans(rowEl).find(
-      (s) =>
-        s.classList.contains("term-cursor") ||
-        s.classList.contains("term-cursor-underline") ||
-        s.classList.contains("term-cursor-bar"),
-    );
-    expect(cursorSpan).toBeUndefined();
+    expect(
+      rowEl.querySelector(".term-cursor, .term-cursor-underline, .term-cursor-bar"),
+    ).toBeNull();
+    const overlay = document.querySelector<HTMLElement>(".term-cursor-overlay");
+    expect(overlay?.classList.contains("visible") ?? false).toBe(false);
   });
 
-  it("visible cursor ON a wide char renders the caret at that glyph", async () => {
-    // Cursor at cell col 1 = the wide char 漢 (A=col0, 漢=col1). This is the
-    // on-a-wide-char case, which render.ts handles correctly.
+  it("caret overlay ON a wide char copies the glyph and spans both its cells", async () => {
+    // Cursor at cell col 1 = the wide char 漢 (A=col0, 漢=col1): the overlay
+    // carries the wide glyph itself and widens to two cells, exactly like the
+    // old inline cursor span's continuation-spacer adjustment.
     const msg: ScreenMessage = {
       type: "screen",
       base: 0,
@@ -274,20 +273,9 @@ describe("render: wide-char and zero-width handling", () => {
     };
     await flush(msg);
 
-    const rowEl = outputEl.children[0] as HTMLElement;
-    const cursorSpan = rowEl.querySelector<HTMLElement>(
-      ".term-cursor, .term-cursor-underline, .term-cursor-bar",
-    );
-    expect(cursorSpan, "a cursor span must be rendered").not.toBeNull();
-    // The caret sits on the wide glyph itself.
-    expect(cursorSpan!.textContent).toBe("漢");
-    // And it is preceded only by the single narrow glyph 'A' (i.e. at col 1).
-    const spans = childSpans(rowEl);
-    const cursorIdx = spans.indexOf(cursorSpan!);
-    const before = spans
-      .slice(0, cursorIdx)
-      .map((s) => s.textContent ?? "")
-      .join("");
-    expect(before).toBe("A");
+    const overlay = document.querySelector<HTMLElement>(".term-cursor-overlay");
+    expect(overlay, "the caret overlay must be rendered").not.toBeNull();
+    // The caret carries the wide glyph itself.
+    expect(overlay!.textContent).toBe("漢");
   });
 });

@@ -135,15 +135,17 @@ let trimMarkerEl: HTMLDivElement | null = null;
 const renderQueue = new Set<number>();
 const MAX_ROWS_PER_FRAME = 300;
 
-// Cursor state, refreshed from the store window on each flush. Kept as module
-// vars because buildRowSpans/cursorClassName read them.
+// Cursor state, refreshed from the store window on each flush. The caret is
+// painted by a dedicated overlay element (see positionCursorOverlay), NOT by
+// restyling the span at the cursor cell: rows are pure content, so cursor
+// motion never rewrites row DOM — which preserves any native selection in the
+// old/new cursor rows and deletes the per-keystroke row rebuild entirely
+// (judgement finding: changed-row replaceChildren collapsed a row-local
+// selection).
 let cursorAbs = -1; // absolute index of the row the cursor is on
 let cursorCol = 0;
 let cursorHidden = false;
 let cursorStyleVal = 0; // 0-6: DECSCUSR
-let prevCursorCol = -1;
-let prevCursorHidden = false;
-let prevCursorStyleVal = -1;
 
 function cursorClassName(): string {
   // DECSCUSR: 0/1=blinking block, 2=steady block, 3=blinking underline,
@@ -161,6 +163,28 @@ let cellHeight = 17;
 let defaultSpacing = 0;
 let onCursorMove: (() => void) | null = null;
 let pendingFrame: number | undefined;
+
+// termWrap's padding, cached: the overlay positioners (caret, predicted
+// cursor, getCursorPx for the IME view) need it EVERY flush, and a live
+// getComputedStyle after the flush's DOM writes forces a style recalc —
+// measured at real cost in the render bench (the caret positioner alone was
+// ~11% of flush CPU under full-screen churn). Lazily read once per attach and
+// refreshed by updateFontMetrics (the same staleness contract as
+// cellWidth/cellHeight: a consumer that restyles the terminal calls
+// updateFontMetrics, which re-reads both).
+let padLeft = 0;
+let padTop = 0;
+let padValid = false;
+
+function termPadding(): { padL: number; padT: number } {
+  if (!padValid) {
+    const cs = window.getComputedStyle(termWrap);
+    padLeft = parseFloat(cs.paddingLeft);
+    padTop = parseFloat(cs.paddingTop);
+    padValid = true;
+  }
+  return { padL: padLeft, padT: padTop };
+}
 
 // Bounded error-path reschedule (l-f28 / d-u4-1). The drain loop deletes a
 // queued row only AFTER upsertRow succeeds, so a row whose build throws stays
@@ -195,17 +219,23 @@ export function init(opts: {
   output = opts.output;
   termWrap = opts.termWrap;
   onCursorMove = opts.onCursorMove ?? null;
+  // New attach target: the cached padding belongs to the previous termWrap.
+  padValid = false;
   // Fresh attach: drop any prior model + DOM so re-init (and vitest's
   // non-isolated module reuse) starts clean.
   store.reset();
   rowEls.clear();
   renderQueue.clear();
   trimMarkerEl = null;
-  // Drop the predicted-cursor overlay (re-created lazily against the new
-  // termWrap on the next setPredictedCursor call) so re-init starts clean.
+  // Drop the predicted-cursor + caret overlays (re-created lazily against the
+  // new termWrap) so re-init starts clean.
   if (predCursorEl) {
     predCursorEl.remove();
     predCursorEl = null;
+  }
+  if (cursorEl) {
+    cursorEl.remove();
+    cursorEl = null;
   }
   output.replaceChildren();
   cursorAbs = -1;
@@ -303,9 +333,7 @@ export function rebuild(): void {
   trimMarkerEl = null;
   cursorAbs = -1;
   altRendered = false;
-  prevCursorCol = -1;
-  prevCursorHidden = false;
-  prevCursorStyleVal = -1;
+  altPrevRows = [];
   // Fresh surface: a stale give-up streak from a prior store must not deny the
   // rebuilt surface its full transient-retry budget.
   renderNoProgressStreak = 0;
@@ -390,8 +418,20 @@ function linkifySpans(
       // persistent underline would then bleed across the cell/row.
       a.className = "term-link term-autolink";
       a.textContent = match[0];
-      // Copy inline styles from the source span
-      a.style.cssText = span.style.cssText;
+      // Copy inline styles from the source span property-by-property, never
+      // via cssText: a cssText assignment is a string-PARSED style write, the
+      // one kind a style-src CSP reasons about, and this was the renderer's
+      // only such write. With it gone, every style write in the render path
+      // is an individually-assigned property (unambiguously ungoverned by
+      // style-src), which keeps the consumers' CSP-hardening story clean.
+      for (let i = 0; i < span.style.length; i++) {
+        const prop = span.style.item(i);
+        a.style.setProperty(
+          prop,
+          span.style.getPropertyValue(prop),
+          span.style.getPropertyPriority(prop),
+        );
+      }
       out.push(a);
       last = match.index + match[0].length;
     }
@@ -430,9 +470,8 @@ function runHasLinkText(spans: (HTMLSpanElement | HTMLAnchorElement)[]): boolean
 }
 
 // --- Build row DOM ---
-function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HTMLAnchorElement)[] {
+function buildRowSpans(runs: readonly WireRun[]): (HTMLSpanElement | HTMLAnchorElement)[] {
   const out: (HTMLSpanElement | HTMLAnchorElement)[] = [];
-  let col = 0;
   for (const run of runs) {
     if (!run.t) {
       continue;
@@ -540,26 +579,10 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
             prev.style.letterSpacing = `${cellWidth * 2 - w}px`;
           }
         }
-        // The spacer occupies the wide char's second cell, so it advances the
-        // column exactly like a printed cell. The engine reports cursor_col in
-        // true cell coordinates (a wide glyph moves curX by 2), so col must
-        // count this cell too — otherwise a visible cursor positioned after a
-        // wide char lands one cell too far right per preceding wide char.
-        col++;
-        continue;
-      }
-      if (col === cursorAt) {
-        flush();
-        const w = measureChar(ch, isBold, isItalic);
-        const spacing = cellWidth - w;
-        const span = document.createElement("span");
-        span.className = cursorClassName();
-        span.textContent = ch;
-        if (spacing !== defaultSpacing) {
-          span.style.letterSpacing = `${spacing}px`;
-        }
-        out.push(span);
-        col++;
+        // The spacer occupies the wide char's second cell. (Column arithmetic
+        // for the caret lives in glyphAt, which mirrors this advance rule —
+        // the engine reports cursor_col in true cell coordinates, a wide
+        // glyph moving curX by 2.)
         continue;
       }
       const w = measureChar(ch, isBold, isItalic);
@@ -571,7 +594,6 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
         prevSpacing = spacing;
       }
       buffer += ch;
-      col++;
     }
     flush();
     // Wrap this run's spans in an <a> when it has a hyperlink URL — but only if
@@ -606,18 +628,6 @@ function buildRowSpans(runs: WireRun[], cursorAt: number): (HTMLSpanElement | HT
         out.push(s);
       }
     }
-  }
-  if (cursorAt >= 0 && col <= cursorAt) {
-    while (col < cursorAt) {
-      const span = document.createElement("span");
-      span.textContent = " ";
-      out.push(span);
-      col++;
-    }
-    const cursor = document.createElement("span");
-    cursor.className = cursorClassName();
-    cursor.textContent = " ";
-    out.push(cursor);
   }
   if (out.length === 0) {
     const span = document.createElement("span");
@@ -721,7 +731,6 @@ function flushRenderInner(): void {
   // Refresh cursor state from the window.
   const win = store.getWindow();
   const newCursorAbs = win.base + win.cursorRow;
-  const prevCursorAbs = cursorAbs;
   cursorAbs = newCursorAbs;
   cursorCol = win.cursorCol;
   cursorHidden = win.cursorHidden;
@@ -729,8 +738,14 @@ function flushRenderInner(): void {
   setCursorBlink(win.cursorBlink);
 
   // Alt screen: render the ephemeral grid instead of the absolute buffer.
+  // Returning here skips the dirtyLines queueing below — safe by invariant:
+  // main-buffer rows never repaint while alt is active, and the alt-exit
+  // branch below rebuilds EVERYTHING via queueRowsViewportFirst, so any line
+  // dirtied during the alt session is repainted at exit.
   if (store.isAlt()) {
-    renderAlt(store.getAltRows());
+    const altRows = store.getAltRows();
+    renderAlt(altRows);
+    positionCursorOverlay(altRows[win.cursorRow]);
     if (onCursorMove) {
       onCursorMove();
     }
@@ -741,6 +756,7 @@ function flushRenderInner(): void {
     // viewport-first (shared with rebuild()) so the visible viewport fills
     // before deep scrollback on a large-history alt-exit.
     altRendered = false;
+    altPrevRows = [];
     output.replaceChildren();
     rowEls.clear();
     renderQueue.clear();
@@ -753,28 +769,15 @@ function flushRenderInner(): void {
     renderQueue.add(abs);
   }
 
-  // The cursor rows are built regardless of the budget so the inline cursor span
-  // is always current; a huge backlog must never make the caret lag. But skip
-  // rebuilding the current cursor row when neither the cursor's visual state nor
-  // the row content changed: an unconditional replaceChildren() would discard a
-  // text selection on that row, defeating the byte-identical selection-preserving
-  // guarantee the store idempotency gives every other row.
-  if (prevCursorAbs !== newCursorAbs && prevCursorAbs >= 0) {
-    upsertRow(prevCursorAbs);
-    renderQueue.delete(prevCursorAbs);
-  }
-  const cursorVisualChanged =
-    prevCursorAbs !== newCursorAbs ||
-    cursorCol !== prevCursorCol ||
-    cursorHidden !== prevCursorHidden ||
-    cursorStyleVal !== prevCursorStyleVal;
-  if (cursorVisualChanged || renderQueue.has(newCursorAbs)) {
+  // The cursor's row is built regardless of the budget — the caret overlay
+  // positions off the row element's offsetTop, so a huge backlog must never
+  // leave it floating over a not-yet-built row. Content-driven only: cursor
+  // MOTION no longer touches row DOM (the overlay carries the caret), so a
+  // selection anywhere — including on the cursor row — survives typing.
+  if (renderQueue.has(newCursorAbs) || !rowEls.has(newCursorAbs)) {
     upsertRow(newCursorAbs);
+    renderQueue.delete(newCursorAbs);
   }
-  renderQueue.delete(newCursorAbs);
-  prevCursorCol = cursorCol;
-  prevCursorHidden = cursorHidden;
-  prevCursorStyleVal = cursorStyleVal;
 
   // Drain up to MAX_ROWS_PER_FRAME queued rows this frame; the rest carry over
   // to the next frame (scheduled below) so one big burst never blocks paint.
@@ -796,6 +799,8 @@ function flushRenderInner(): void {
   if (renderQueue.size > 0) {
     scheduleFlush();
   }
+
+  positionCursorOverlay(store.getLine(cursorAbs));
 
   if (onCursorMove) {
     onCursorMove();
@@ -839,8 +844,7 @@ function upsertRow(abs: number): void {
     }
     return;
   }
-  const cursorAt = !cursorHidden && abs === cursorAbs ? cursorCol : -1;
-  const spans = buildRowSpans(runs, cursorAt);
+  const spans = buildRowSpans(runs);
   let el = rowEls.get(abs);
   if (el === undefined) {
     el = document.createElement("div");
@@ -879,20 +883,44 @@ function rowAbs(el: HTMLElement): number {
 
 // --- Alt screen (ephemeral grid; no history) ---
 let altRendered = false;
+// The alt row arrays rendered by the last flush, by grid index. Row identity
+// is the store's change signal (applyScreen swaps exactly the changed rows'
+// arrays; getAltRows returns the live references), so `prev[y] === rows[y]`
+// means row y's DOM is already current. Cleared on alt exit and re-init.
+let altPrevRows: readonly (readonly WireRun[])[] = [];
 
-function renderAlt(rows: WireRun[][]): void {
-  altRendered = true;
+function renderAlt(rows: readonly (readonly WireRun[])[]): void {
   rowEls.clear();
-  const els: HTMLDivElement[] = [];
-  for (let y = 0; y < rows.length; y++) {
-    const div = document.createElement("div");
-    div.className = "term-row";
-    const cursorAt = !cursorHidden && y === cursorAbs - store.getWindow().base ? cursorCol : -1;
-    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- y < rows.length
-    div.replaceChildren(...buildRowSpans(rows[y]!, cursorAt));
-    els.push(div);
+  // Full (re)build: first alt frame, a grid-height change (resize), or a
+  // desynced DOM (defensive; e.g. a consumer poked the subtree).
+  if (!altRendered || output.children.length !== rows.length) {
+    altRendered = true;
+    const els: HTMLDivElement[] = [];
+    for (const runs of rows) {
+      const div = document.createElement("div");
+      div.className = "term-row";
+      div.replaceChildren(...buildRowSpans(runs));
+      els.push(div);
+    }
+    output.replaceChildren(...els);
+    altPrevRows = rows.slice();
+    return;
   }
-  output.replaceChildren(...els);
+  // Reconcile in place: rebuild only rows whose array identity changed. A
+  // full-screen TUI that repaints everything (htop) rebuilds every row either
+  // way; one that repaints a few lines (vim editing, a progress bar) now
+  // touches only those rows' DOM — measured ~50x less flush CPU in the render
+  // bench's partial-update scenario, and the browser skips layout for
+  // untouched rows.
+  for (let y = 0; y < rows.length; y++) {
+    if (altPrevRows[y] === rows[y]) {
+      continue;
+    }
+    const div = output.children[y] as HTMLDivElement;
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- y < rows.length === children.length
+    div.replaceChildren(...buildRowSpans(rows[y]!));
+  }
+  altPrevRows = rows.slice();
 }
 
 /** Pin the viewport to the bottom iff the user is following. The scroll
@@ -906,13 +934,24 @@ const CURSOR_BLINK_MS = 530;
 let blinkInterval: ReturnType<typeof setInterval> | null = null;
 let blinkEnabled = true;
 
+// hiddenDoc reports whether the page is currently background/hidden. The blink
+// interval is gated on it: rAF-driven flushes already freeze in a hidden tab,
+// but a plain setInterval keeps firing (throttled), so an idle hidden terminal
+// would keep toggling a class — pointless wakeups that cost battery on mobile.
+function hiddenDoc(): boolean {
+  return typeof document !== "undefined" && document.visibilityState === "hidden";
+}
+
 function startCursorBlink(): void {
-  if (blinkInterval !== null) {
+  if (blinkInterval !== null || !blinkEnabled || hiddenDoc()) {
     return;
   }
-  output.classList.remove("cursor-blink-off");
+  // The blink class lives on termWrap: the caret overlay is a termWrap child
+  // (not inside output), and the `.cursor-blink-off .term-cursor` descendant
+  // selector must reach it.
+  termWrap.classList.remove("cursor-blink-off");
   blinkInterval = setInterval(() => {
-    output.classList.toggle("cursor-blink-off");
+    termWrap.classList.toggle("cursor-blink-off");
   }, CURSOR_BLINK_MS);
 }
 
@@ -921,7 +960,30 @@ function stopCursorBlink(): void {
     clearInterval(blinkInterval);
     blinkInterval = null;
   }
-  output.classList.remove("cursor-blink-off");
+  termWrap.classList.remove("cursor-blink-off");
+}
+
+// Pause the interval while hidden; resume (cursor solid, phase reset) when the
+// tab is foregrounded again. Registered once at module load — init() re-runs
+// on re-attach, and a per-init registration would stack listeners.
+if (typeof document !== "undefined") {
+  document.addEventListener("visibilitychange", () => {
+    // Pre-init (no termWrap yet) there is nothing to pause or resume.
+    if ((termWrap as HTMLElement | undefined) === undefined) {
+      return;
+    }
+    if (hiddenDoc()) {
+      // Stop the timer only: blinkEnabled keeps the server-driven state so
+      // foregrounding can restart without waiting for the next mode frame.
+      if (blinkInterval !== null) {
+        clearInterval(blinkInterval);
+        blinkInterval = null;
+      }
+      termWrap.classList.remove("cursor-blink-off");
+      return;
+    }
+    startCursorBlink();
+  });
 }
 
 /** Called from the flush when cursorBlink state changes. */
@@ -945,6 +1007,11 @@ function setCursorBlink(enabled: boolean): void {
  */
 export function updateFontMetrics(): void {
   const cs = window.getComputedStyle(termWrap);
+  // Refresh the overlay-positioning padding cache from the same computed
+  // style (one staleness contract for all cached box metrics).
+  padLeft = parseFloat(cs.paddingLeft);
+  padTop = parseFloat(cs.paddingTop);
+  padValid = true;
   const fontSize = cs.fontSize;
   const family = cs.fontFamily;
   fontString = `${fontSize} ${family}`;
@@ -978,22 +1045,136 @@ export function computeSize(): { cols: number; rows: number } {
   return { cols, rows };
 }
 
+// rowTopInTermWrap returns a row element's top in termWrap's coordinate space
+// (the space every absolutely-positioned overlay — caret, predicted cursor,
+// composition view — resolves against). A bare `offsetTop` is NOT that: it is
+// relative to the element's offsetParent, and the UI package's CSS makes
+// `.term-output` a positioned element (position: relative, for its own
+// reasons), so rows report offsets in output-space,
+// one padding/offset short of termWrap-space (the caret floated 4px above
+// every glyph under the real stylesheet — invisible to the harness, whose
+// unpositioned #out made both spaces coincide). Walk the offsetParent chain
+// and accumulate until termWrap so the math is correct under EITHER
+// stylesheet, and under any future wrapper the UI grows between the two.
+function rowTopInTermWrap(el: HTMLElement): number {
+  let top = 0;
+  let node: Element | null = el;
+  while (node instanceof HTMLElement && node !== termWrap) {
+    top += node.offsetTop;
+    node = node.offsetParent;
+    // offsetTop is measured from the offsetParent's padding edge, but an
+    // intermediate parent's own offsetTop locates its BORDER box — add its
+    // top border so the accumulation stays exact if a wrapper ever grows one
+    // (both current stylesheets use border: 0 here). termWrap itself is
+    // excluded: absolute children resolve from its padding edge already.
+    if (node instanceof HTMLElement && node !== termWrap) {
+      top += node.clientTop;
+    }
+  }
+  // Chain ended off termWrap (display:none, detached, or termWrap unpositioned
+  // with the row offset-rooted elsewhere): fall back to rect delta, which is
+  // space-independent. scrollTop re-bases the viewport-relative delta into
+  // content space.
+  if (node !== termWrap) {
+    return (
+      el.getBoundingClientRect().top - termWrap.getBoundingClientRect().top + termWrap.scrollTop
+    );
+  }
+  return top;
+}
+
 /**
- * Returns the cursor's pixel position relative to the output element, plus
- * the current cell height, for positioning custom overlays (predicted-cursor,
- * IME composition, etc.). Uses the cursor row's actual DOM offset.
+ * Returns the cursor's pixel position relative to the scroll container
+ * (termWrap) — the coordinate space of the absolutely-positioned overlays
+ * (predicted-cursor, IME composition view) — plus the current cell height.
+ * Uses the cursor row's actual DOM offset.
  */
 export function getCursorPx(): { left: number; top: number; cellH: number } {
-  const cs = window.getComputedStyle(termWrap);
-  const padL = parseFloat(cs.paddingLeft);
-  const padT = parseFloat(cs.paddingTop);
+  const { padL, padT } = termPadding();
   const el = rowEls.get(cursorAbs);
-  const top = el ? el.offsetTop : padT;
+  const top = el ? rowTopInTermWrap(el) : padT;
   return {
     left: Math.round(padL + cursorCol * cellWidth),
     top: Math.round(top),
     cellH: cellHeight,
   };
+}
+
+// --- Caret overlay ---
+//
+// The real cursor is a single absolutely-positioned element appended to
+// termWrap (the positioned scroll container, same coordinate system as the
+// predicted-cursor overlay), NOT a restyled span inside the cursor row. Rows
+// stay pure content: cursor motion repositions this element and never
+// rewrites row DOM, so a native selection survives typing — including on the
+// cursor row itself — and the per-keystroke row rebuild is gone.
+let cursorEl: HTMLElement | null = null;
+
+function ensureCursorEl(): HTMLElement {
+  if (cursorEl === null) {
+    cursorEl = document.createElement("div");
+    cursorEl.setAttribute("aria-hidden", "true");
+    termWrap.appendChild(cursorEl);
+  }
+  return cursorEl;
+}
+
+// glyphAt returns the character occupying `col` in a row's runs, advancing
+// columns exactly like buildRowSpans (each char one cell; the \uFFFF
+// continuation placeholder occupies the wide char's second cell). A miss —
+// cursor past end of text, empty row, or a continuation cell — reads as a
+// space (the block cursor then paints an inverted blank, matching a real
+// terminal).
+function glyphAt(runs: readonly WireRun[] | undefined, col: number): string {
+  if (!runs) {
+    return " ";
+  }
+  let c = 0;
+  for (const run of runs) {
+    if (!run.t) {
+      continue;
+    }
+    for (const ch of run.t) {
+      if (c === col) {
+        return ch === "\uFFFF" ? " " : ch;
+      }
+      c++;
+    }
+  }
+  return " ";
+}
+
+// positionCursorOverlay moves/styles the caret overlay for the current cursor
+// state. `runs` is the cursor row's content (main: store.getLine; alt: the
+// grid row) — the block style copies the glyph under the cursor so the
+// inverted cell looks exactly like the old inline-span cursor. Called at the
+// end of every flush; hidden when the cursor is hidden or the screen is empty.
+function positionCursorOverlay(runs: readonly WireRun[] | undefined): void {
+  const el = ensureCursorEl();
+  if (cursorHidden || cursorAbs < 0) {
+    el.className = "term-cursor-overlay";
+    return;
+  }
+  const win = store.getWindow();
+  const { padL, padT } = termPadding();
+  const rowEl = rowEls.get(cursorAbs);
+  // Alt-screen rows are not registered in rowEls; their grid is uniform, so
+  // the row offset derives from the window-relative row index. Main-screen
+  // rows exist by the time this runs (the flush force-builds the cursor row).
+  // rowTopInTermWrap (not bare offsetTop) so the top is in termWrap space
+  // regardless of which ancestor is the rows' offsetParent.
+  const top = rowEl ? rowTopInTermWrap(rowEl) : padT + (cursorAbs - win.base) * cellHeight;
+  const ch = glyphAt(runs, cursorCol);
+  // A wide glyph (CJK, emoji) owns two cells; the overlay covers both, like
+  // the old inline cursor span did via its continuation-spacer adjustment.
+  const wide = measureChar(ch, false, false) > cellWidth * 1.5;
+  el.textContent = ch === " " ? "\u00a0" : ch;
+  el.className = `term-cursor-overlay visible ${cursorClassName()}`;
+  el.style.left = `${Math.round(padL + cursorCol * cellWidth)}px`;
+  el.style.top = `${Math.round(top)}px`;
+  el.style.width = `${wide ? cellWidth * 2 : cellWidth}px`;
+  el.style.height = `${cellHeight}px`;
+  el.style.lineHeight = `${cellHeight}px`;
 }
 
 let predCursorEl: HTMLElement | null = null;
@@ -1026,10 +1207,9 @@ export function setPredictedCursor(row: number, col: number, active: boolean): v
     el.classList.remove("visible");
     return;
   }
-  const cs = window.getComputedStyle(termWrap);
-  const padL = parseFloat(cs.paddingLeft);
+  const { padL, padT } = termPadding();
   const rowEl = rowEls.get(predAbs);
-  const top = rowEl ? rowEl.offsetTop : parseFloat(cs.paddingTop) + row * cellHeight;
+  const top = rowEl ? rowTopInTermWrap(rowEl) : padT + row * cellHeight;
   el.style.left = `${Math.round(padL + col * cellWidth)}px`;
   el.style.top = `${Math.round(top)}px`;
   el.style.width = `${cellWidth}px`;

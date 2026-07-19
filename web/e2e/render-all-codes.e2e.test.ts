@@ -18,7 +18,7 @@
 // sidecar is debug-only). Out of the vitest battery; run `npm run test:e2e`.
 import { test, expect } from "@playwright/test";
 import { standard256, rgb, vga16 } from "../src/test-helpers/spec-colors.js";
-import { bundleEngine, HARNESS, readGolden, frameBytesArray } from "./e2e-harness.js";
+import { bundleEngine, HARNESS, readGolden, frameBytesArray, waitForRows } from "./e2e-harness.js";
 
 // One row's dumped computed style (the styled first span carrying the glyph).
 interface CellDump {
@@ -81,8 +81,9 @@ test.describe("all-codes display conformance (engine wire → real chromium → 
       WTE.render.updateFontMetrics();
       WTE.render.handleScreen(msg);
     }, frameBytes);
-    // render.ts batches DOM writes; let the flush complete before dumping.
-    await page.waitForTimeout(250);
+    // render.ts batches DOM writes across rAF frames; wait until every
+    // manifest row's div exists (deterministic, replaces a fixed sleep).
+    await waitForRows(page, manifest.length);
 
     // Dump the computed style of every NON-BLANK span per row, in DOM order.
     // Single-glyph rows use span [0]; the on->off rows (attrOff / defaultColor /

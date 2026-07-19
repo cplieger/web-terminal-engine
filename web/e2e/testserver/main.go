@@ -1,0 +1,51 @@
+// Command testserver backs the typed-framing e2e test: a real terminal
+// Handler (running /bin/cat) plus a minimal harness page, listening on an
+// ephemeral 127.0.0.1 port printed to stdout. The Playwright test spawns it,
+// drives the REAL browser client against it, and kills it when done; the
+// stdin watchdog exits the server if the test process dies without cleanup.
+package main
+
+import (
+	"fmt"
+	"io"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/cplieger/web-terminal-engine/v3/terminal"
+)
+
+const harnessPage = `<!doctype html><html><head><meta charset="utf-8"></head>
+<body><div id="out"></div></body></html>`
+
+func main() {
+	h := terminal.NewHandler([]string{"/bin/cat"}, terminal.WithLogger(nil))
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	mux.HandleFunc("/", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		_, _ = io.WriteString(w, harnessPage)
+	})
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		log.Fatalf("listen: %v", err)
+	}
+	// The e2e test parses this exact line to find the server.
+	fmt.Printf("LISTEN http://%s\n", ln.Addr().String())
+
+	// Stdin watchdog: the test holds our stdin pipe open; when the test
+	// process exits (even killed), stdin closes and we shut down instead of
+	// leaking a /bin/cat PTY on the machine.
+	go func() {
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		os.Exit(0)
+	}()
+
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	if err := srv.Serve(ln); err != nil {
+		log.Fatalf("serve: %v", err)
+	}
+}

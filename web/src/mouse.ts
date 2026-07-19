@@ -84,7 +84,6 @@ export interface MouseInputHandler {
 }
 
 let handler: MouseInputHandler | null = null;
-let lastButton = -1;
 // True while a Shift-initiated press is in flight. Shift+click/drag is the
 // xterm convention for "bypass application mouse tracking": the gesture is
 // reserved for the browser's native text selection instead of being reported
@@ -92,21 +91,62 @@ let lastButton = -1;
 // so the move/up of a bypassed drag stay bypassed even if Shift is lifted
 // mid-drag.
 let shiftBypass = false;
+// Last motion report sent, for same-cell dedup: a drag within one cell fires
+// many DOM mousemove events that would all encode to the identical SGR
+// sequence and flood the PTY (xterm.js applies the same suppression). Cleared
+// on press/release so the first motion of a new gesture always reports.
+let lastMotion = "";
+// The element the current init() attached to, so a re-init or dispose can
+// detach the exact listener set (addEventListener dedups identical
+// registrations on the SAME element, but a re-init on a NEW element would
+// otherwise leak the old one's listeners).
+let attachedEl: HTMLElement | null = null;
+
+function detach(): void {
+  if (!attachedEl) {
+    return;
+  }
+  attachedEl.removeEventListener("mousedown", onMouseDown);
+  attachedEl.removeEventListener("mouseup", onMouseUp);
+  attachedEl.removeEventListener("mousemove", onMouseMove);
+  attachedEl.removeEventListener("wheel", onWheel);
+  attachedEl.removeEventListener("focusin", onFocusIn);
+  attachedEl.removeEventListener("focusout", onFocusOut);
+  attachedEl = null;
+}
 
 /**
  * Initialize the mouse module by attaching pointer/wheel/focus listeners to
  * the terminal element. Listeners gate on the active mouse mode + SGR 1006
  * encoding; they are no-ops when the server hasn't enabled mouse tracking.
+ *
+ * Returns an idempotent disposer that detaches the listeners and resets the
+ * module state, so a consumer can tear the terminal down (or re-init on a
+ * different element) without leaking listeners. Re-initializing without
+ * disposing first detaches the previous element automatically.
  */
-export function init(h: MouseInputHandler): void {
+export function init(h: MouseInputHandler): () => void {
+  detach(); // self-heal a re-init on a different element
   handler = h;
+  shiftBypass = false;
+  lastMotion = "";
   const el = h.termElement();
+  attachedEl = el;
   el.addEventListener("mousedown", onMouseDown);
   el.addEventListener("mouseup", onMouseUp);
   el.addEventListener("mousemove", onMouseMove);
   el.addEventListener("wheel", onWheel, { passive: false });
   el.addEventListener("focusin", onFocusIn);
   el.addEventListener("focusout", onFocusOut);
+  return function dispose(): void {
+    if (attachedEl !== el) {
+      return; // superseded by a later init — nothing of ours left to detach
+    }
+    detach();
+    handler = null;
+    shiftBypass = false;
+    lastMotion = "";
+  };
 }
 
 // pixelToCell returns the coordinate pair to report for a mouse event. Normally
@@ -151,12 +191,12 @@ function onMouseDown(e: MouseEvent): void {
     return;
   }
   shiftBypass = false;
+  lastMotion = ""; // new gesture: next motion always reports
   const pos = pixelToCell(e);
   if (!pos) {
     return;
   }
-  lastButton = domButtonToXterm(e.button);
-  const code = buttonCode(lastButton, false, e.shiftKey, e.altKey, e.ctrlKey);
+  const code = buttonCode(domButtonToXterm(e.button), false, e.shiftKey, e.altKey, e.ctrlKey);
   handler.send(encodeSGR(code, pos.col, pos.row, false));
   e.preventDefault();
 }
@@ -178,7 +218,7 @@ function onMouseUp(e: MouseEvent): void {
   const btn = domButtonToXterm(e.button);
   const code = buttonCode(btn, false, e.shiftKey, e.altKey, e.ctrlKey);
   handler.send(encodeSGR(code, pos.col, pos.row, true));
-  lastButton = -1;
+  lastMotion = ""; // gesture over: next motion always reports
   e.preventDefault();
 }
 
@@ -207,7 +247,12 @@ function onMouseMove(e: MouseEvent): void {
   // code 3, not 0 — code 0 would be read as a left-button drag during hover.
   const btn = e.buttons ? (e.buttons & 1 ? 0 : e.buttons & 4 ? 1 : e.buttons & 2 ? 2 : 0) : 3;
   const code = buttonCode(btn, true, e.shiftKey, e.altKey, e.ctrlKey);
-  handler.send(encodeSGR(code, pos.col, pos.row, false));
+  const seq = encodeSGR(code, pos.col, pos.row, false);
+  if (seq === lastMotion) {
+    return; // same cell, same buttons/modifiers: suppress the duplicate report
+  }
+  lastMotion = seq;
+  handler.send(seq);
 }
 
 function onWheel(e: WheelEvent): void {

@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 )
 
 // dialHandler stands up the handler on an httptest server and opens
@@ -316,9 +316,10 @@ func TestBuildFrame_appendsScrollLinesToRing(t *testing.T) {
 			t.Fatalf("screen write: %v", err)
 		}
 	}
-	h.resized = true
+	h.sizeEstablished = true
+	h.registry.Add(&websocket.Conn{}) // attached client: the render path, not zero-client suspension
 
-	frame := h.buildFrame()
+	frame, _ := h.buildFrame()
 	if frame == nil {
 		t.Fatalf("buildFrame returned nil; expected a frame with scroll lines")
 	}
@@ -689,7 +690,7 @@ func TestHandleResume_commitsScrolledLinesToHistory(t *testing.T) {
 	if before := h.scrollback.Committed(); before != 0 {
 		t.Fatalf("precondition: committed=%d, want 0 before resume", before)
 	}
-	h.handleResume(server, &clientState{}, "sid", -1)
+	h.handleResume(server, &clientState{}, "sid", -1, 0)
 
 	if got := h.scrollback.Committed(); got == 0 {
 		t.Errorf("handleResume committed %d lines to history; want > 0 (scrolled lines must be retained)", got)
@@ -737,7 +738,7 @@ func TestHandleResume_altStraddleDrainNotCommitted(t *testing.T) {
 			if before := h.scrollback.Committed(); before != 0 {
 				t.Fatalf("precondition: committed=%d, want 0 before resume", before)
 			}
-			h.handleResume(server, &clientState{}, "sid", -1)
+			h.handleResume(server, &clientState{}, "sid", -1, 0)
 
 			if gotCommitted := h.scrollback.Committed() > 0; gotCommitted != tc.wantCommitted {
 				t.Errorf("after resume: committed-history-present=%v, want %v (alt-straddle drain must be dropped; plain main-screen drain must commit)",
@@ -759,7 +760,7 @@ func TestHandleResume_replayStartsAfterHaveThrough(t *testing.T) {
 
 	h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")})
 
-	h.handleResume(server, &clientState{}, "sid", 0) // client already holds index 0
+	h.handleResume(server, &clientState{}, "sid", 0, 0) // client already holds index 0
 
 	frames := readServerFrames(t, client, 300*time.Millisecond)
 	var scroll []byte
@@ -796,7 +797,7 @@ func TestHandleResume_replayChunkBoundaryEmitsSingleFrame(t *testing.T) {
 	}
 	h.scrollback.Append(lines)
 
-	h.handleResume(server, &clientState{}, "sid", -1) // -1 ⇒ replay everything from index 0
+	h.handleResume(server, &clientState{}, "sid", -1, 0) // -1 ⇒ replay everything from index 0
 
 	types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond))
 	if types[wireMsgScroll] != 1 {
@@ -820,7 +821,7 @@ func TestHandleResume_replayChunksCarryAscendingAbsoluteIndices(t *testing.T) {
 	}
 	h.scrollback.Append(lines)
 
-	h.handleResume(server, &clientState{}, "sid", -1) // replay all from index 0
+	h.handleResume(server, &clientState{}, "sid", -1, 0) // replay all from index 0
 
 	var firstIdxs []uint64
 	for _, f := range readServerFrames(t, client, 300*time.Millisecond) {
@@ -904,7 +905,7 @@ func TestEnsureStarted_reaperInvokesOnProcessExitWithStatus(t *testing.T) {
 // VT screen produce a Response, which handlePTYData must write back to the PTY
 // (outside h.mu). CSI 6 n (DSR cursor-position) on a fresh screen with the cursor
 // at home yields ESC[1;1R. No terminal-level test drove this path (handlePTYData
-// was 66.7%), so a mutant dropping the `resp = h.screen.Response` capture or the
+// was 66.7%), so a mutant dropping the `resp = h.screen.TakeResponse()` capture or the
 // `h.ptmx.Write(resp)` writeback survived. The read deadline is required so the
 // red case fails instead of blocking forever.
 func TestHandlePTYData_writesDeviceQueryResponseToPTY(t *testing.T) {
@@ -925,7 +926,7 @@ func TestHandlePTYData_writesDeviceQueryResponseToPTY(t *testing.T) {
 	buf := make([]byte, 64)
 	n, err := pr.Read(buf)
 	if err != nil {
-		t.Fatalf("reading device-query response from PTY: %v (handlePTYData must write screen.Response back)", err)
+		t.Fatalf("reading device-query response from PTY: %v (handlePTYData must write the screen's taken response back)", err)
 	}
 	if got, want := string(buf[:n]), "\x1b[1;1R"; got != want {
 		t.Errorf("device-query response written to PTY = %q, want %q", got, want)
@@ -971,7 +972,7 @@ func TestHandleResume_frameOrderByAltState(t *testing.T) {
 			// The window frame must carry this live alt state in both arms.
 			h.screen.InAltScreen = tc.inAlt
 
-			h.handleResume(server, &clientState{}, "sid", -1) // -1 ⇒ client holds nothing, replay all
+			h.handleResume(server, &clientState{}, "sid", -1, 0) // -1 ⇒ client holds nothing, replay all
 
 			frames := readServerFrames(t, client, 300*time.Millisecond)
 
@@ -1105,5 +1106,453 @@ func TestMaybeHealSize_onlyArmsForTheBindingClient(t *testing.T) {
 	h.mu.Unlock()
 	if !armed {
 		t.Errorf("maybeHealSize(40x20) did not arm a heal, but the departed client held the current 40x20 screen")
+	}
+}
+
+// TestHandleResume_ledgerLostFlag pins the resumeAck ledger-loss signal: the
+// ackFlags bit fires exactly when the resume key missed the registry while the
+// client claimed sent bytes (its ledger was GC'd/evicted — the server cannot
+// vouch for that input), and stays clear for a genuine first connect
+// (sentBytes=0) or a key hit. Also pins the tail layout: byte 33 carries the
+// server's wireProtocolVersion, byte 34 the flags.
+func TestHandleResume_ledgerLostFlag(t *testing.T) {
+	tests := []struct {
+		name           string
+		preSeedSession bool
+		sentBytes      uint64
+		wantLost       bool
+	}{
+		{"key miss with claimed bytes signals loss", false, 120, true},
+		{"genuine first connect stays clear", false, 0, false},
+		{"key hit with claimed bytes stays clear", true, 120, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+			server, client, cleanup := dualConn(t)
+			defer cleanup()
+
+			if tc.preSeedSession {
+				h.registry.sessions["sid"] = &sessionState{lastSeen: time.Now(), bytesReceived: 120}
+			}
+			h.handleResume(server, &clientState{}, "sid", -1, tc.sentBytes)
+
+			var resumeAck []byte
+			for _, f := range readServerFrames(t, client, 300*time.Millisecond) {
+				if len(f) > 0 && f[0] == wireMsgResumeAck {
+					resumeAck = f
+					break
+				}
+			}
+			if resumeAck == nil {
+				t.Fatalf("no resumeAck frame received")
+			}
+			if len(resumeAck) < 35 {
+				t.Fatalf("resumeAck is %d bytes; want >= 35 (serverWireVersion + ackFlags tail)", len(resumeAck))
+			}
+			if v := resumeAck[33]; v != wireProtocolVersion {
+				t.Errorf("resumeAck serverWireVersion byte = %d, want %d", v, wireProtocolVersion)
+			}
+			if gotLost := resumeAck[34]&resumeAckFlagLedgerLost != 0; gotLost != tc.wantLost {
+				t.Errorf("resumeAck ledgerLost flag = %v, want %v", gotLost, tc.wantLost)
+			}
+		})
+	}
+}
+
+// TestSweepAcks_acksQuietInputOnce pins the ackOnly sweep: input applied with
+// no content frame in the same tick (a silent app — `read -s`) must produce
+// exactly one ackOnly frame carrying the advanced count, and a second sweep
+// with no further input must send nothing (lastAckSent recorded). This is the
+// path that keeps outbox trimming independent of app output.
+func TestSweepAcks_acksQuietInputOnce(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	state := h.registry.Add(server)
+	h.registry.ResolveSession(state, "sid")
+	h.registry.IncrementReceived(state, 42)
+
+	h.sweepAcks()
+	frames := readServerFrames(t, client, 300*time.Millisecond)
+	var acks []uint64
+	for _, f := range frames {
+		if len(f) == 9 && f[0] == wireMsgAckOnly {
+			acks = append(acks, binary.LittleEndian.Uint64(f[1:9]))
+		}
+	}
+	if len(acks) != 1 || acks[0] != 42 {
+		t.Fatalf("sweep after quiet input sent acks %v; want exactly [42]", acks)
+	}
+
+	h.sweepAcks()
+	if extra := readServerFrames(t, client, 300*time.Millisecond); len(extra) != 0 {
+		t.Errorf("second sweep with no new input sent %d frame(s); want 0", len(extra))
+	}
+}
+
+// TestDispatchFrame_suppressesRedundantAckSweep verifies the NoteAcksSent hook:
+// when a content frame already carried a client's current ack (stamped by
+// withClientAck in dispatchFrame), the following no-frame tick's sweep must
+// not resend it as an ackOnly.
+func TestDispatchFrame_suppressesRedundantAckSweep(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	server, client, cleanup := dualConn(t)
+	defer cleanup()
+
+	state := h.registry.Add(server)
+	h.registry.ResolveSession(state, "sid")
+	h.registry.IncrementReceived(state, 7)
+
+	frame := &flushFrame{
+		clients:      map[*websocket.Conn]uint64{server: 7},
+		modesPayload: encodeModesMsg(true, false, false, false, false, false, false, 0, 0),
+		screenHeight: 1,
+	}
+	h.dispatchFrame(frame)
+	if types := countFramesByType(readServerFrames(t, client, 300*time.Millisecond)); types[wireMsgModes] != 1 {
+		t.Fatalf("dispatch emitted %d modes frame(s); want 1", types[wireMsgModes])
+	}
+
+	h.sweepAcks()
+	if extra := readServerFrames(t, client, 300*time.Millisecond); len(extra) != 0 {
+		t.Errorf("sweep after a content frame carried ack=7 sent %d frame(s); want 0 (NoteAcksSent must suppress)", len(extra))
+	}
+}
+
+// sendText writes a raw TEXT WebSocket message (the v4 control transport).
+func sendText(t *testing.T, ws *websocket.Conn, payload []byte) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := ws.Write(ctx, websocket.MessageText, payload); err != nil {
+		t.Fatalf("text write: %v", err)
+	}
+}
+
+// bootstrapResume sends the v3-encoded binary resume that ARMS a connection
+// for the typed-framing upgrade (protocolVersion >= 4), mirroring the client's
+// bootstrap (design §4 phase 1).
+func bootstrapResume(t *testing.T, ws *websocket.Conn, sessionID string) {
+	t.Helper()
+	sendControl(t, ws, map[string]any{
+		"type": "resume", "sessionId": sessionID, "sentBytes": 0,
+		"haveThrough": -1, "protocolVersion": wireProtocolVersion,
+	})
+}
+
+// readUntilClose drains frames until the server closes the connection,
+// returning the close status (or failing on timeout / non-close errors).
+func readUntilClose(t *testing.T, ws *websocket.Conn, timeout time.Duration) websocket.StatusCode {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	for {
+		_, _, err := ws.Read(ctx)
+		if err == nil {
+			continue
+		}
+		status := websocket.CloseStatus(err)
+		if status == -1 {
+			t.Fatalf("connection ended without a close status: %v", err)
+		}
+		return status
+	}
+}
+
+// TestTypedFraming_latchSequence pins the v4 happy path end to end, including
+// the adversarial-review F1 payload: after bootstrap (binary resume, arms) +
+// text upgrade (latches), a binary frame that IS a byte-exact v3 control frame
+// (0x00 + {"type":"ping"}) must reach the PTY as literal input — the latch
+// retired the sentinel, so nothing is consumed as control anymore. Delivery is
+// proven three ways (impl-review finding 2): the echo carries the JSON, NO
+// pong frame is ever sent (a sentinel mis-parse would have answered the ping),
+// and the session ledger advances by EXACTLY len(payload) — every byte,
+// leading NUL included, counted as input.
+func TestTypedFraming_latchSequence(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithWorkDir("/"))
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	//nolint:bodyclose // library contract: Body is nil on success
+	ws, _, err := websocket.Dial(dctx, wsURL, nil)
+	dcancel()
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer func() { _ = ws.Close(websocket.StatusNormalClosure, "") }()
+
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 100, "rows": 40})
+	bootstrapResume(t, ws, "sid-latch")
+
+	sendText(t, ws, []byte(`{"type":"upgrade"}`))
+	// Post-latch text controls still dispatch (resize via text keeps the pipe healthy).
+	sendText(t, ws, []byte(`{"type":"resize","cols":90,"rows":30}`))
+
+	// The F1 payload: valid v3 control bytes sent as post-latch binary input.
+	payload := append([]byte{0x00}, []byte(`{"type":"ping"}`)...)
+	wctx, wcancel := context.WithTimeout(context.Background(), time.Second)
+	defer wcancel()
+	if err := ws.Write(wctx, websocket.MessageBinary, payload); err != nil {
+		t.Fatalf("binary write: %v", err)
+	}
+
+	// Drain frames until cat's echo carries the JSON — and assert no pong
+	// (wireMsgPong) ever arrives: the decisive negative that the payload was
+	// NOT consumed as a control ping.
+	rctx, rcancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer rcancel()
+	var echoed bytes.Buffer
+	for !bytes.Contains(echoed.Bytes(), []byte(`{"type":"ping"}`)) {
+		_, msg, err := ws.Read(rctx)
+		if err != nil {
+			t.Fatalf("read: %v (echo so far: %q)", err, echoed.Bytes())
+		}
+		if len(msg) > 0 && msg[0] == wireMsgPong {
+			t.Fatalf("server answered a pong: the post-latch binary payload was parsed as a control ping")
+		}
+		echoed.Write(msg)
+	}
+
+	// Ledger proof: exactly len(payload) input bytes were counted for the
+	// session (IncrementReceived runs only on the input path, with the whole
+	// frame). The resize/upgrade controls contribute nothing.
+	want := uint64(len(payload))
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		h.registry.mu.Lock()
+		sess := h.registry.sessions["sid-latch"]
+		var got uint64
+		if sess != nil {
+			got = sess.bytesReceived
+		}
+		h.registry.mu.Unlock()
+		if got == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session bytesReceived = %d, want %d (all payload bytes incl. the leading NUL must count as input)", got, want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestTypedFraming_textSizeLimits pins the wsReadLimit boundary for text
+// controls empirically (impl-review finding 5: verify coder/websocket's
+// boundary semantics rather than assuming them): a valid control padded to
+// EXACTLY wsReadLimit bytes must still dispatch (and latch), while one byte
+// over must close the connection with 1009 StatusMessageTooBig — enforced by
+// the transport before handler code runs.
+func TestTypedFraming_textSizeLimits(t *testing.T) {
+	pad := func(total int) []byte {
+		// {"type":"upgrade","pad":"<a...>"} padded to exactly total bytes.
+		const overhead = len(`{"type":"upgrade","pad":""}`)
+		return []byte(`{"type":"upgrade","pad":"` + strings.Repeat("a", total-overhead) + `"}`)
+	}
+
+	t.Run("exactly at the limit dispatches", func(t *testing.T) {
+		ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+		defer cleanup()
+		bootstrapResume(t, ws, "sid-limit")
+
+		msg := pad(wsReadLimit)
+		if len(msg) != wsReadLimit {
+			t.Fatalf("test bug: padded control is %d bytes, want %d", len(msg), wsReadLimit)
+		}
+		sendText(t, ws, msg) // latches; a close here would fail the next step
+		// Prove the connection survived and latched: post-latch binary input
+		// with a leading NUL reaches the PTY.
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := ws.Write(ctx, websocket.MessageBinary, []byte{0x00, 'O', 'K', '9'}); err != nil {
+			t.Fatalf("post-limit write: %v", err)
+		}
+		readUntil(t, ws, []byte("OK9"), 2*time.Second)
+	})
+
+	t.Run("one byte over closes 1009", func(t *testing.T) {
+		ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+		defer cleanup()
+		bootstrapResume(t, ws, "sid-limit-over")
+
+		sendText(t, ws, pad(wsReadLimit+1))
+		if got := readUntilClose(t, ws, 2*time.Second); got != websocket.StatusMessageTooBig {
+			t.Errorf("close status = %v, want %v (transport-enforced read limit)", got, websocket.StatusMessageTooBig)
+		}
+	})
+}
+
+// TestTypedFraming_textPolicyCloses pins the server's text-frame policy: text
+// before the arm, unparseable text after the arm, empty text, and invalid
+// UTF-8 all close the connection with the documented status codes — never
+// latching, never guessing, never reaching the PTY (review F3/F7).
+func TestTypedFraming_textPolicyCloses(t *testing.T) {
+	tests := []struct {
+		name       string
+		arm        bool
+		payload    []byte
+		wantStatus websocket.StatusCode
+	}{
+		{"text before arm", false, []byte(`{"type":"upgrade"}`), websocket.StatusUnsupportedData},
+		{"unparseable text after arm", true, []byte("not json"), websocket.StatusUnsupportedData},
+		{"empty text", true, []byte{}, websocket.StatusUnsupportedData},
+		{"invalid utf-8 text", true, []byte{0xff, 0xfe, '{'}, websocket.StatusInvalidFramePayloadData},
+		{"unrecognized control before latch", true, []byte(`{"type":"mystery"}`), websocket.StatusUnsupportedData},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+			defer cleanup()
+			if tc.arm {
+				bootstrapResume(t, ws, "sid-policy")
+			}
+			sendText(t, ws, tc.payload)
+			if got := readUntilClose(t, ws, 2*time.Second); got != tc.wantStatus {
+				t.Errorf("close status = %v, want %v", got, tc.wantStatus)
+			}
+		})
+	}
+}
+
+// TestTypedFraming_preLatchKeepsV3Semantics verifies that an ARMED (but not
+// latched) connection still runs the exact v3 binary path: sentinel controls
+// dispatch, and the parse-fallback delivers a 0x00-leading non-JSON frame to
+// the PTY whole (the P2 closure) — so a v4-capable client that never upgrades
+// (v3 server pairing) loses nothing.
+func TestTypedFraming_preLatchKeepsV3Semantics(t *testing.T) {
+	ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+	defer cleanup()
+
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 100, "rows": 40})
+	bootstrapResume(t, ws, "sid-prelatch")
+
+	// Sentinel control still consumed as control (resize does not reach the PTY).
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 90, "rows": 30})
+
+	// P2 parse-fallback: 0x00-leading non-JSON binary is INPUT, delivered whole.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := ws.Write(ctx, websocket.MessageBinary, []byte{0x00, 'Z', 'Q', '7'}); err != nil {
+		t.Fatalf("fallback write: %v", err)
+	}
+	readUntil(t, ws, []byte("ZQ7"), 2*time.Second)
+}
+
+// TestParseFallback_countsBytes pins the P2 accounting contract: a fallback
+// frame increments the session ledger by the FULL frame length (leading NUL
+// included), so client and server byte counts stay aligned and acks land on
+// frame boundaries.
+func TestParseFallback_countsBytes(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithWorkDir("/"))
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	dctx, dcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	//nolint:bodyclose // library contract: Body is nil on success
+	ws, _, err := websocket.Dial(dctx, wsURL, nil)
+	dcancel()
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer func() { _ = ws.Close(websocket.StatusNormalClosure, "") }()
+
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 100, "rows": 40})
+	bootstrapResume(t, ws, "sid-count")
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	// A solitary NUL and a NUL-leading frame — both fallback input.
+	if err := ws.Write(ctx, websocket.MessageBinary, []byte{0x00}); err != nil {
+		t.Fatalf("solitary NUL write: %v", err)
+	}
+	if err := ws.Write(ctx, websocket.MessageBinary, []byte{0x00, 'A'}); err != nil {
+		t.Fatalf("NUL-leading write: %v", err)
+	}
+	readUntil(t, ws, []byte("A"), 2*time.Second) // input observed at the PTY
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		h.registry.mu.Lock()
+		sess := h.registry.sessions["sid-count"]
+		var got uint64
+		if sess != nil {
+			got = sess.bytesReceived
+		}
+		h.registry.mu.Unlock()
+		if got == 3 {
+			break // 1 (solitary NUL) + 2 (NUL + 'A')
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session bytesReceived = %d, want 3 (fallback frames must count their full length)", got)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestWireCompatibility_declaredClientVersionPolicy(t *testing.T) {
+	tests := map[string]struct {
+		version      int
+		wantRejected bool
+	}{
+		"version silent":  {version: 0},
+		"supported floor": {version: MinSupportedClientWireVersion},
+		"current":         {version: WireProtocolVersion},
+		"future":          {version: WireProtocolVersion + 1},
+		"below floor": {
+			version:      MinSupportedClientWireVersion - 1,
+			wantRejected: true,
+		},
+	}
+
+	for name, tc := range tests {
+		t.Run(name, func(t *testing.T) {
+			ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+			defer cleanup()
+
+			sendControl(t, ws, map[string]any{
+				"type":            ctlTypeResume,
+				"protocolVersion": tc.version,
+			})
+
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			if tc.wantRejected {
+				for {
+					_, _, err := ws.Read(ctx)
+					if err == nil {
+						continue
+					}
+					if got := websocket.CloseStatus(err); got != WireIncompatibleCloseCode {
+						t.Errorf("close status = %d, want %d", got, WireIncompatibleCloseCode)
+					}
+					if !strings.Contains(err.Error(), "reload or upgrade") {
+						t.Errorf("close error %q lacks actionable reload/upgrade reason", err)
+					}
+					return
+				}
+			}
+
+			// A supported, current, future, or version-silent declaration keeps
+			// the socket usable. A binary-sentinel ping proves the read loop did
+			// not exit; future revisions deliberately retain the v4 baseline.
+			sendControl(t, ws, map[string]any{"type": ctlTypePing})
+			for {
+				_, msg, err := ws.Read(ctx)
+				if err != nil {
+					t.Fatalf("accepted version %d closed before pong: %v", tc.version, err)
+				}
+				if len(msg) > 0 && msg[0] == wireMsgPong {
+					return
+				}
+			}
+		})
 	}
 }

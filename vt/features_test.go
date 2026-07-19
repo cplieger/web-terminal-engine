@@ -12,7 +12,7 @@ import "testing"
 func TestOSC4PaletteOverride(t *testing.T) {
 	s := New(2, 10)
 	s.Write([]byte("\x1b]4;1;rgb:00/ff/00\x07")) // index 1 -> pure green
-	if !s.PaletteChanged {
+	if !s.paletteChanged {
 		t.Errorf("OSC 4 set did not mark PaletteChanged")
 	}
 	s.Write([]byte("\x1b[31mX")) // SGR 31 = basic fg index 1
@@ -33,7 +33,7 @@ func TestOSC4Query(t *testing.T) {
 	s.Write([]byte("\x1b]4;1;?\x07"))
 	// Default palette index 1 is 0xaa0000; reported as 16-bit-per-channel.
 	want := "\x1b]4;1;rgb:aaaa/0000/0000\x1b\\"
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("OSC 4 query = %q, want %q", got, want)
 	}
 }
@@ -64,7 +64,7 @@ func TestOSC4HashSpec(t *testing.T) {
 func TestOSC52ClipboardSet(t *testing.T) {
 	s := New(2, 10)
 	s.Write([]byte("\x1b]52;c;aGVsbG8=\x07")) // base64("hello")
-	if got := string(s.PendingClipboard); got != "hello" {
+	if got := string(s.pendingClipboard); got != "hello" {
 		t.Errorf("OSC 52 set: PendingClipboard = %q, want hello", got)
 	}
 }
@@ -76,11 +76,11 @@ func TestOSC52ClipboardSet(t *testing.T) {
 func TestOSC52QueryDenied(t *testing.T) {
 	s := New(2, 10)
 	s.Write([]byte("\x1b]52;c;?\x07"))
-	if s.PendingClipboard != nil {
-		t.Errorf("OSC 52 query should be denied, got PendingClipboard %q", s.PendingClipboard)
+	if s.pendingClipboard != nil {
+		t.Errorf("OSC 52 query should be denied, got PendingClipboard %q", s.pendingClipboard)
 	}
-	if len(s.Response) != 0 {
-		t.Errorf("OSC 52 query should not respond, got %q", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("OSC 52 query should not respond, got %q", s.response)
 	}
 }
 
@@ -92,9 +92,9 @@ func TestMouse1016Tracked(t *testing.T) {
 	if !s.MousePixels {
 		t.Error("?1016h did not set MousePixels")
 	}
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[?1016$p")) // DECRQM
-	if got, want := string(s.Response), "\x1b[?1016;1$y"; got != want {
+	if got, want := string(s.response), "\x1b[?1016;1$y"; got != want {
 		t.Errorf("DECRQM ?1016 = %q, want %q", got, want)
 	}
 	s.Write([]byte("\x1b[?1016l"))
@@ -111,9 +111,9 @@ func TestDECNKM(t *testing.T) {
 	if !s.AppKeypad {
 		t.Error("?66h did not set AppKeypad")
 	}
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[?66$p"))
-	if got, want := string(s.Response), "\x1b[?66;1$y"; got != want {
+	if got, want := string(s.response), "\x1b[?66;1$y"; got != want {
 		t.Errorf("DECRQM ?66 = %q, want %q", got, want)
 	}
 	s.Write([]byte("\x1b[?66l"))
@@ -135,9 +135,9 @@ func TestLNM(t *testing.T) {
 	if got := s.RowString(1); got != "cd" {
 		t.Errorf("LNM row 1 = %q, want %q", got, "cd")
 	}
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[20$p"))
-	if got, want := string(s.Response), "\x1b[20;1$y"; got != want {
+	if got, want := string(s.response), "\x1b[20;1$y"; got != want {
 		t.Errorf("DECRQM 20 = %q, want %q", got, want)
 	}
 	s.Write([]byte("\x1b[20l"))
@@ -211,23 +211,23 @@ func TestDECRQCRAChecksum(t *testing.T) {
 	s.Write([]byte("AB")) // row 0: 'A'(0x41) at col0, 'B'(0x42) at col1
 
 	// Single cell containing 'A': checksum = 0x10000 - 0x41 = 0xFFBF.
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[1;0;1;1;1;1*y")) // Pid=1 Pp=0 rect=(top1,left1,bottom1,right1)
-	if got, want := string(s.Response), "\x1bP1!~FFBF\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP1!~FFBF\x1b\\"; got != want {
 		t.Errorf("DECRQCRA single cell 'A' = %q, want %q", got, want)
 	}
 
 	// Two cells "AB": checksum = 0x10000 - (0x41+0x42) = 0xFF7D.
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[2;0;1;1;1;2*y")) // Pid=2, cols 1..2
-	if got, want := string(s.Response), "\x1bP2!~FF7D\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP2!~FF7D\x1b\\"; got != want {
 		t.Errorf("DECRQCRA cells 'AB' = %q, want %q", got, want)
 	}
 
 	// A blank (unwritten) cell counts as space (0x20): checksum = 0xFFE0.
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[3;0;1;5;1;5*y")) // Pid=3, a blank cell at col 5
-	if got, want := string(s.Response), "\x1bP3!~FFE0\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP3!~FFE0\x1b\\"; got != want {
 		t.Errorf("DECRQCRA blank cell = %q, want %q", got, want)
 	}
 }
@@ -237,10 +237,10 @@ func TestDECRQCRAChecksum(t *testing.T) {
 func TestDECRQCRAGatedOff(t *testing.T) {
 	s := New(2, 10)
 	s.Write([]byte("AB"))
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[1;0;1;1;1;1*y"))
-	if len(s.Response) != 0 {
-		t.Errorf("DECRQCRA with AllowScreenReport off should not respond, got %q", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("DECRQCRA with AllowScreenReport off should not respond, got %q", s.response)
 	}
 }
 
@@ -253,12 +253,12 @@ func TestOSC52QueryRoundTrip(t *testing.T) {
 	s := New(2, 10)
 	s.AllowScreenReport = true
 	s.Write([]byte("\x1b]52;;dGVzdGluZyAxMjM=\x07")) // set, empty target, base64("testing 123")
-	if got := string(s.PendingClipboard); got != "testing 123" {
+	if got := string(s.pendingClipboard); got != "testing 123" {
 		t.Fatalf("OSC 52 set: PendingClipboard = %q, want %q", got, "testing 123")
 	}
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]52;;?\x07")) // query, empty target
-	if got, want := string(s.Response), "\x1b]52;s0;dGVzdGluZyAxMjM=\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]52;s0;dGVzdGluZyAxMjM=\x1b\\"; got != want {
 		t.Errorf("OSC 52 query = %q, want %q", got, want)
 	}
 }
@@ -268,9 +268,9 @@ func TestOSC52QueryEchoesTarget(t *testing.T) {
 	s := New(2, 10)
 	s.AllowScreenReport = true
 	s.Write([]byte("\x1b]52;p;aGk=\x07")) // set primary = base64("hi")
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]52;p;?\x07"))
-	if got, want := string(s.Response), "\x1b]52;p;aGk=\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]52;p;aGk=\x1b\\"; got != want {
 		t.Errorf("OSC 52 query (target p) = %q, want %q", got, want)
 	}
 }
@@ -285,9 +285,9 @@ func TestOSC52QueryStripsControlRunesFromTarget(t *testing.T) {
 	s := New(2, 10)
 	s.AllowScreenReport = true
 	s.Write([]byte("\x1b]52;p;aGk=\x07")) // set primary = base64("hi")
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]52;p\r\n;?\x07")) // query; CR/LF smuggled into the target
-	if got, want := string(s.Response), "\x1b]52;p;aGk=\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]52;p;aGk=\x1b\\"; got != want {
 		t.Errorf("OSC 52 query with CR/LF in target = %q, want %q (control runes stripped)", got, want)
 	}
 }
@@ -298,9 +298,9 @@ func TestOSC52ClearEmptiesSelection(t *testing.T) {
 	s.AllowScreenReport = true
 	s.Write([]byte("\x1b]52;c;aGk=\x07")) // set
 	s.Write([]byte("\x1b]52;c;\x07"))     // empty payload clears
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]52;c;?\x07"))
-	if got, want := string(s.Response), "\x1b]52;c;\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]52;c;\x1b\\"; got != want {
 		t.Errorf("OSC 52 query after clear = %q, want %q", got, want)
 	}
 }
@@ -312,9 +312,9 @@ func TestOSC52LenientDecodeTolerantOfStrayByte(t *testing.T) {
 	s := New(2, 10)
 	s.AllowScreenReport = true
 	s.Write([]byte("\x1b]52;;dGVzdGluZyAxMjM='\x07")) // trailing quote, as esctest sends
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]52;;?\x07"))
-	if got, want := string(s.Response), "\x1b]52;s0;dGVzdGluZyAxMjM=\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]52;s0;dGVzdGluZyAxMjM=\x1b\\"; got != want {
 		t.Errorf("OSC 52 query after stray-byte set = %q, want %q", got, want)
 	}
 }
@@ -355,15 +355,15 @@ func TestDECNCSMDECRQM(t *testing.T) {
 	if !s.noClearOnColumn {
 		t.Fatal("?95h did not set noClearOnColumn")
 	}
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[?95$p"))
-	if got, want := string(s.Response), "\x1b[?95;1$y"; got != want {
+	if got, want := string(s.response), "\x1b[?95;1$y"; got != want {
 		t.Errorf("DECRQM ?95 (set) = %q, want %q", got, want)
 	}
 	s.Write([]byte("\x1b[?95l")) // DECRESET
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[?95$p"))
-	if got, want := string(s.Response), "\x1b[?95;2$y"; got != want {
+	if got, want := string(s.response), "\x1b[?95;2$y"; got != want {
 		t.Errorf("DECRQM ?95 (reset) = %q, want %q", got, want)
 	}
 }
@@ -398,9 +398,9 @@ func TestDECNCSMSuppressesClear(t *testing.T) {
 func TestAllow80To132DECRQM(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[?40h"))
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[?40$p"))
-	if got, want := string(s.Response), "\x1b[?40;1$y"; got != want {
+	if got, want := string(s.response), "\x1b[?40;1$y"; got != want {
 		t.Errorf("DECRQM ?40 (set) = %q, want %q", got, want)
 	}
 }
@@ -434,9 +434,9 @@ func TestTitleQueryHexEncodes(t *testing.T) {
 	s := New(2, 10)
 	s.Write([]byte("\x1b]2;ab\x07")) // title "ab" (set-hex off)
 	s.Write([]byte("\x1b[>1t"))      // XTSMTITLE query-hex
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[21t")) // WINOP 21 report window title
-	if got, want := string(s.Response), "\x1b]l6162\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]l6162\x1b\\"; got != want {
 		t.Errorf("query-hex report = %q, want %q", got, want)
 	}
 }
@@ -492,9 +492,9 @@ func TestTitleReportStripsControlRunes(t *testing.T) {
 			s := New(2, 10)
 			s.Write([]byte("\x1b[>0t")) // XTSMTITLE set-hex on (admits raw bytes)
 			s.Write([]byte(tc.setSeq))
-			s.Response = nil
+			s.response = nil
 			s.Write([]byte(tc.report)) // query-hex off -> non-hex encodeTitle path
-			if got := string(s.Response); got != tc.want {
+			if got := string(s.response); got != tc.want {
 				t.Errorf("%s report = %q, want %q (control runes stripped)", tc.name, got, tc.want)
 			}
 		})

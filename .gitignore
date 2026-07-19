@@ -1,6 +1,10 @@
 # Go
 /vendor/
 
+# Go workspace
+go.work
+go.work.sum
+
 # esctest2 conformance suite (GPL-2.0) — fetched by scripts/esctest.sh, never vendored
 /.esctest2/
 

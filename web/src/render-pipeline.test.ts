@@ -10,7 +10,7 @@
 // would, with one exception: instead of arriving over a WebSocket, the
 // frames are decoded directly from base64-encoded bytes.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import * as render from "./render.js";
 import { decodeWireBinary } from "./wire-binary.js";
 import type { ScreenMessage } from "./types.js";
@@ -415,3 +415,63 @@ function expectInverseAtCol(
   ).toBe(col);
   expect([...foundInverseText][0]).toBe(expectedChar);
 }
+
+describe("cursor-blink visibility gate", () => {
+  let outputEl: HTMLDivElement;
+  let termWrap: HTMLDivElement;
+
+  // setVisibility fakes the page's visibility state (happy-dom has no native
+  // way to background a document) and fires the event the gate listens on.
+  function setVisibility(state: "visible" | "hidden"): void {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  beforeEach(() => {
+    setVisibility("visible");
+    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
+    termWrap = document.getElementById("term") as HTMLDivElement;
+    outputEl = document.getElementById("term-output") as HTMLDivElement;
+    render.resetScreen();
+    render.init({ output: outputEl, termWrap });
+    render.updateFontMetrics();
+  });
+
+  it("pauses the blink interval while hidden (solid cursor) and resumes on foreground", async () => {
+    // A visible blinking cursor: one frame with cursorBlink=true (the default).
+    await flushFrame(
+      buildScreenFrame({
+        cursorRow: 0,
+        cursorCol: 0,
+        screenHeight: 2,
+        changed: [{ idx: 0, runs: [{ text: " ".repeat(10), attr: 0 }] }],
+      }),
+    );
+
+    // Drive only the interval clock; rAF (the flush path) stays real. The
+    // interval running now was created before the fake clock, so cycle it
+    // through hidden->visible once to re-arm it under the fake timers.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      setVisibility("hidden");
+      setVisibility("visible");
+      // Blinking: the phase class toggles within one cycle.
+      vi.advanceTimersByTime(530);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(true);
+
+      // Hidden: the timer stops and the phase resets to solid — a background
+      // tab must not keep waking up to toggle an invisible cursor (battery).
+      setVisibility("hidden");
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(false);
+      vi.advanceTimersByTime(530 * 4);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(false);
+
+      // Foregrounded: blinking resumes from the solid phase.
+      setVisibility("visible");
+      vi.advanceTimersByTime(530);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

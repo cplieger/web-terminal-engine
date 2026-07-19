@@ -57,13 +57,13 @@ func TestDECRQM_SynchronizedOutput(t *testing.T) {
 	s := New(5, 10)
 	s.HoldFlush(time.Now().Add(time.Hour))
 	s.Write([]byte("\x1b[?2026$p"))
-	if got, want := string(s.Response), "\x1b[?2026;1$y"; got != want {
+	if got, want := string(s.response), "\x1b[?2026;1$y"; got != want {
 		t.Errorf("DECRQM ?2026 while held = %q, want %q", got, want)
 	}
-	s.Response = nil
+	s.response = nil
 	s.ReleaseFlush()
 	s.Write([]byte("\x1b[?2026$p"))
-	if got, want := string(s.Response), "\x1b[?2026;2$y"; got != want {
+	if got, want := string(s.response), "\x1b[?2026;2$y"; got != want {
 		t.Errorf("DECRQM ?2026 after release = %q, want %q", got, want)
 	}
 }

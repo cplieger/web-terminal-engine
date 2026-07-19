@@ -14,7 +14,7 @@
 // vt screen tracks both bracketed paste (?2004) and DECCKM (?1) and
 // emits a modes frame whenever they change.
 
-import { getKeyboardFlags, isApplicationCursor, isBracketedPaste } from "./modes.js";
+import { getKeyboardFlags, isBracketedPaste } from "./modes.js";
 
 /** Result of mapping a keyboard event. */
 export type KeyboardResult =
@@ -53,27 +53,80 @@ function modifiersDigit(ev: KeyboardEvent): number {
 }
 
 // -- Cursor / navigation keys -----------------------------------------------
+
+/** The cursor-key trailing letters that honor DECCKM (arrows + Home/End). */
+type CursorKeyLetter = "A" | "B" | "C" | "D" | "H" | "F";
+
+function isCursorKeyLetter(letter: string): letter is CursorKeyLetter {
+  return (
+    letter === "A" ||
+    letter === "B" ||
+    letter === "C" ||
+    letter === "D" ||
+    letter === "H" ||
+    letter === "F"
+  );
+}
+
+/**
+ * plainCursorKeySeq is THE encoding of an unmodified logical cursor-key press
+ * (arrows, Home, End) — the one home for the mode decision, shared by the
+ * physical-key path (csiLetter's modifier-less branch) and the mobile
+ * toolbar's arrow buttons so the two encoders cannot drift:
+ *   - kitty disambiguate active: the CSI form regardless of DECCKM (the
+ *     protocol supersedes cursor-key mode);
+ *   - DECCKM (application cursor mode): the SS3 form (ESC O letter);
+ *   - otherwise: the bare CSI form.
+ *
+ * Both mode bits are PARAMETERS (not read from the module-global mode state):
+ * mapKeyboardEvent honors an injected KeyboardModes, and a helper silently
+ * consulting the global would diverge from it in a tabbed shell.
+ */
+export function plainCursorKeySeq(
+  letter: CursorKeyLetter,
+  kittyActive: boolean,
+  appCursor: boolean,
+): string {
+  if (kittyActive) {
+    return `${ESC}[${letter}`;
+  }
+  return appCursor ? `${ESC}O${letter}` : `${ESC}[${letter}`;
+}
+
+/**
+ * plainEscapeSeq is THE encoding of an unmodified logical Escape press: CSI
+ * 27 u under kitty disambiguate (the protocol's headline unambiguous-Esc
+ * feature — the app never has to distinguish a lone ESC byte from the start
+ * of an escape sequence), else the bare ESC byte. Shared by the physical-key
+ * path and the toolbar's ESC button. The flag is a parameter for the same
+ * injected-modes honesty as plainCursorKeySeq.
+ */
+export function plainEscapeSeq(kittyActive: boolean): string {
+  return kittyActive ? `${ESC}[27u` : ESC;
+}
+
+/** kittyActiveIn reads the disambiguate flag from an INJECTED KeyboardModes
+ *  (the seam mapKeyboardEvent honors), as opposed to kittyDisambiguateActive,
+ *  which reads the module-global active-session facade used by the toolbar.
+ *  connection.setSession restores that facade from the target session's
+ *  snapshot synchronously before switch-window input can be encoded. */
+function kittyActiveIn(modes: KeyboardModes): boolean {
+  return (modes.getKeyboardFlags() & KITTY_DISAMBIGUATE) !== 0;
+}
+
 // Letter is the xterm trailing letter (ABCDEFGHPQRS for arrows / Home /
 // End / F1-F4 etc.). Without modifiers we send the bare CSI form; with
 // modifiers we send CSI 1;{mod}{letter}. xterm.js Keyboard.ts pattern.
 //
 // Application cursor mode (DECCKM, CSI ?1) is plumbed via modes.ts.
 // When the application has set DECCKM, the modifier-less form switches
-// from CSI to SS3 (ESC O letter); modifier-bearing forms stay on CSI
-// because they have no SS3 equivalent.
+// from CSI to SS3 (ESC O letter) via plainCursorKeySeq; modifier-bearing
+// forms stay on CSI because they have no SS3 equivalent.
 function csiLetter(letter: string, ev: KeyboardEvent, modes: KeyboardModes): string {
   const m = modifiersDigit(ev);
   if (m === 1) {
-    if (
-      modes.isApplicationCursor() &&
-      (letter === "A" ||
-        letter === "B" ||
-        letter === "C" ||
-        letter === "D" ||
-        letter === "H" ||
-        letter === "F")
-    ) {
-      return `${ESC}O${letter}`;
+    if (isCursorKeyLetter(letter)) {
+      return plainCursorKeySeq(letter, kittyActiveIn(modes), modes.isApplicationCursor());
     }
     return `${ESC}[${letter}`;
   }
@@ -101,6 +154,19 @@ const FN_TILDE: Record<string, number | undefined> = {
   F10: 21,
   F11: 23,
   F12: 24,
+  // F13-F20 use xterm's own extended tilde codes (25-34, with 27 and 30
+  // skipped historically). F21-F24 have NO standard legacy encoding — xterm
+  // itself stops at F20 — so they stay silent here and are covered only by
+  // the kitty path (dedicated codepoints; see KITTY_FN_HIGH). Note xterm.js
+  // supports none of F13+ (xtermjs/xterm.js#1426, open since 2018).
+  F13: 25,
+  F14: 26,
+  F15: 28,
+  F16: 29,
+  F17: 31,
+  F18: 32,
+  F19: 33,
+  F20: 34,
 };
 
 const ARROW_LETTER: Record<string, string | undefined> = {
@@ -183,6 +249,26 @@ const KITTY_TILDE: Record<string, number | undefined> = {
   F12: 24,
 };
 
+// F13-F24 under kitty: the spec assigns them dedicated functional-key
+// codepoints (57376-57387, contiguous), encoded as CSI {code};{mod} u like
+// the keypad keys. The legacy path covers only F13-F20 (xterm tilde codes;
+// see FN_TILDE) — these twelve make the kitty path the complete one, which
+// exceeds xterm.js (no F13+ support at all, xtermjs/xterm.js#1426).
+const KITTY_FN_HIGH: Record<string, number | undefined> = {
+  F13: 57376,
+  F14: 57377,
+  F15: 57378,
+  F16: 57379,
+  F17: 57380,
+  F18: 57381,
+  F19: 57382,
+  F20: 57383,
+  F21: 57384,
+  F22: 57385,
+  F23: 57386,
+  F24: 57387,
+};
+
 // US-layout base (unshifted) codepoints for the non-alphanumeric physical keys,
 // keyed by ev.code. Used so a ctrl/alt+shift+symbol event reports the UNSHIFTED
 // key code the spec mandates (e.g. Ctrl+Shift+; is CSI 59;6u using ';'=59, not
@@ -201,6 +287,58 @@ const KITTY_CODE_BASE: Record<string, number | undefined> = {
   BracketRight: 93, // ]
   Quote: 39, // '
 };
+
+// US-layout shifted character -> unshifted base codepoint, for input paths
+// that only have the produced CHARACTER (the mobile toolbar's sticky-Ctrl),
+// not a KeyboardEvent with ev.code. The character-level twin of
+// KITTY_CODE_BASE: Ctrl+':' must encode as CSI 59;6u (unshifted ';' + the
+// shift modifier), matching what the physical-keyboard path derives from
+// ev.code — not 58;5u from the shifted glyph.
+const KITTY_SHIFTED_CHAR_BASE: Record<string, number | undefined> = {
+  ":": 59, // ;
+  "<": 44, // ,
+  ">": 46, // .
+  "?": 47, // /
+  '"': 39, // '
+  "{": 91, // [
+  "}": 93, // ]
+  "|": 92, // \
+  "~": 96, // `
+  "+": 61, // =
+  _: 45, // -
+  "!": 49, // 1
+  "@": 50, // 2
+  "#": 51, // 3
+  $: 52, // 4
+  "%": 53, // 5
+  "^": 54, // 6
+  "&": 55, // 7
+  "*": 56, // 8
+  "(": 57, // 9
+  ")": 48, // 0
+};
+
+/**
+ * kittyCtrlCharSeq encodes Ctrl+<typed character> in the kitty CSI-u form
+ * using the spec's unshifted-key rule: a shifted glyph (':', 'A', '{') maps to
+ * its US-layout base codepoint with the shift bit added to the modifier
+ * (Ctrl+':' -> 59;6u), an unshifted one encodes directly (Ctrl+'s' -> 115;5u).
+ * Shared by every path that has only the character (sticky-Ctrl toolbar),
+ * keeping it byte-identical with the physical-keyboard encoder.
+ */
+export function kittyCtrlCharSeq(ch: string): string | null {
+  let cp = KITTY_SHIFTED_CHAR_BASE[ch];
+  let shifted = cp !== undefined;
+  if (cp === undefined && ch >= "A" && ch <= "Z") {
+    cp = ch.toLowerCase().codePointAt(0);
+    shifted = true;
+  }
+  cp ??= ch.toLowerCase().codePointAt(0);
+  if (cp === undefined) {
+    return null;
+  }
+  return `${ESC}[${cp};${shifted ? 6 : 5}u`; // 5 = ctrl, 6 = ctrl+shift
+}
 
 // Keypad NON-TEXT keys under disambiguate, keyed by ev.key (the key's current
 // function — NumLock flips a numpad key between its text digit, which stays text
@@ -303,6 +441,10 @@ function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
   if (tnum !== undefined) {
     return { kind: "send", bytes: kittyTildeSeq(tnum, ev) };
   }
+  const fnHigh = KITTY_FN_HIGH[key];
+  if (fnHigh !== undefined) {
+    return { kind: "send", bytes: kittyUSeq(fnHigh, ev) };
+  }
 
   // Enter / Tab / Backspace keep their legacy bytes when UNMODIFIED (so a user
   // can still type `reset` if a program leaves the mode on after crashing);
@@ -317,7 +459,11 @@ function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
     return { kind: "send", bytes: anyModifier(ev) ? kittyUSeq(127, ev) : DEL };
   }
   if (key === "Escape") {
-    return { kind: "send", bytes: kittyUSeq(27, ev) };
+    // Unmodified Escape shares the logical-Escape home with the toolbar's ESC
+    // button; a modified Escape carries its modifier digit (no toolbar analog).
+    // Kitty is definitionally active on this path (mapKeyboardEvent routes
+    // here only when the injected modes carry the disambiguate flag).
+    return { kind: "send", bytes: anyModifier(ev) ? kittyUSeq(27, ev) : plainEscapeSeq(true) };
   }
 
   // Single-character keys: text stays text (deferred to the textarea) UNLESS a
@@ -325,6 +471,15 @@ function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
   // ambiguous (Ctrl+I == Tab, Alt+x == ESC x, …) so we send the CSI-u form with
   // the unshifted codepoint.
   if (key.length === 1) {
+    // Meta/Cmd-ONLY combos stay with the browser even under kitty
+    // disambiguate, mirroring the legacy path's deliberate carve-out: Cmd+C /
+    // Cmd+V / Cmd+R are browser/OS chrome, and the protocol's reference
+    // implementation (the kitty terminal itself) likewise consumes
+    // emulator-owned shortcuts rather than reporting them to the app. Without
+    // this, enabling the protocol silently broke copy-on-macOS.
+    if (ev.metaKey && !ev.ctrlKey && !ev.altKey) {
+      return { kind: "ignore" };
+    }
     if (ev.ctrlKey || ev.altKey || ev.metaKey) {
       const cp = kittyKeyCodepoint(ev);
       if (cp > 0) {
@@ -336,8 +491,12 @@ function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
   return { kind: "ignore" };
 }
 
-/** True when the kitty disambiguate flag is active in the global mode state. */
-function kittyDisambiguateActive(): boolean {
+/** True when the kitty disambiguate flag is active in the GLOBAL
+ *  active-session mode facade. Exported for the toolbar widget (toolbar.ts);
+ *  connection.setSession synchronously restores the target session's cached
+ *  snapshot before input resumes. Encoder paths in this module use
+ *  kittyActiveIn (the injected-modes read) instead. */
+export function kittyDisambiguateActive(): boolean {
   return (getKeyboardFlags() & KITTY_DISAMBIGUATE) !== 0;
 }
 
@@ -478,9 +637,11 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
     return { kind: "send", bytes: DEL };
   }
 
-  // Escape — ESC. Alt+Escape = ESC ESC (xterm.js convention).
+  // Escape — ESC (via the shared logical-Escape home; kitty is definitionally
+  // inactive on this legacy path, so it yields the bare ESC byte).
+  // Alt+Escape = ESC ESC (xterm.js convention).
   if (ev.key === "Escape") {
-    return { kind: "send", bytes: ev.altKey ? `${ESC}${ESC}` : ESC };
+    return { kind: "send", bytes: ev.altKey ? `${ESC}${ESC}` : plainEscapeSeq(false) };
   }
 
   // Space — \x00 with Ctrl (per xterm). Alt+Space = ESC ' '.
@@ -636,259 +797,15 @@ export function bracketTextForPaste(text: string): string {
   return `\x1b[200~${sanitised}\x1b[201~`;
 }
 
-/** Normalise CR/LF to a single CR before bracketing. xterm.js convention. */
+/**
+ * Normalise CR/LF to a single CR and strip NUL bytes before bracketing.
+ * xterm.js convention on both counts: NUL in pasted text is never meaningful
+ * terminal input, and under the v3 wire framing a NUL-leading paste would
+ * otherwise be split or (on old servers) misread as a control frame.
+ */
 export function prepareTextForTerminal(text: string): string {
-  return text.replace(/\r?\n/g, "\r");
+  // eslint-disable-next-line no-control-regex -- intentional: stripping NUL from pasted text
+  return text.replace(/\r?\n/g, "\r").replace(/\x00/g, "");
 }
 
 // -- Mobile toolbar ---------------------------------------------------------
-
-/**
- * Default DOM ids for the on-screen mobile keyboard toolbar buttons,
- * inside the toolbar container element passed to `bindMobileToolbar`.
- * Override individual ids via `BindMobileToolbarOptions.ids`.
- */
-export const DEFAULT_TOOLBAR_IDS = {
-  toggle: "kb-toggle",
-  ctrl: "kb-ctrl",
-  up: "kb-up",
-  down: "kb-down",
-  left: "kb-left",
-  right: "kb-right",
-  tab: "kb-tab",
-  enter: "kb-enter",
-  esc: "kb-esc",
-} as const;
-
-/** Per-button id overrides for `bindMobileToolbar`. */
-export interface MobileToolbarIds {
-  readonly toggle?: string;
-  readonly ctrl?: string;
-  readonly up?: string;
-  readonly down?: string;
-  readonly left?: string;
-  readonly right?: string;
-  readonly tab?: string;
-  readonly enter?: string;
-  readonly esc?: string;
-}
-
-/** Options for `bindMobileToolbar`. */
-export interface BindMobileToolbarOptions {
-  /**
-   * Toolbar container element. Buttons are looked up by id within this
-   * element via `querySelector('#<id>')`. The same element is the one
-   * `kb-toggle` adds/removes the `.collapsed` class on.
-   */
-  readonly toolbar: HTMLElement;
-  /**
-   * Send sink for arrow keys, Tab, Enter, Esc — i.e. for everything
-   * the toolbar emits. Sticky-Ctrl input goes through `applyStickyCtrl`
-   * on the controller; the consumer is responsible for routing
-   * keyboard / paste / IME text through it before handing the result
-   * to the same `send`.
-   */
-  readonly send: (bytes: string) => void;
-  /** Optional id overrides. Missing keys fall back to defaults. */
-  readonly ids?: MobileToolbarIds;
-  /**
-   * Fired whenever the sticky-Ctrl state changes (toolbar press,
-   * `setCtrlArmed`, or auto-disarm after applying a Ctrl byte).
-   */
-  readonly onCtrlChange?: (armed: boolean) => void;
-}
-
-/** Returned from `bindMobileToolbar`; manages sticky-Ctrl state and tear-down. */
-export interface MobileToolbarController {
-  /**
-   * Apply sticky-Ctrl to a piece of input text.
-   *   - When NOT armed: returns `text` unchanged.
-   *   - Armed AND `text.length === 1`: returns the matching Ctrl byte
-   *     (`ctrlByteFor(text)`), or the original char when no mapping
-   *     exists. Always disarms.
-   *   - Armed AND longer (e.g. paste, IME commit): returns `text`
-   *     unchanged and disarms — applying Ctrl to a multi-char string
-   *     would garble it.
-   */
-  applyStickyCtrl(text: string): string;
-  /** Programmatically arm/disarm Ctrl. Updates the toolbar button visuals (`.armed` class + `aria-pressed`) + fires `onCtrlChange`. */
-  setCtrlArmed(on: boolean): void;
-  /** Whether sticky-Ctrl is currently armed. */
-  isCtrlArmed(): boolean;
-  /** Detach all event listeners and reset the toolbar to a non-armed state. Idempotent. */
-  dispose(): void;
-}
-
-/**
- * Wire a mobile / touch toolbar of on-screen keyboard buttons (Ctrl,
- * arrows, Tab, Enter, Esc, plus a collapse toggle) to a vterm send
- * sink. This was duplicated across vibekit and web-terminal-kiro — same wire
- * sequences, same sticky-Ctrl semantics, same DECCKM nuance — so it
- * lives here.
- *
- * Each button's `pointerdown` is intercepted with `preventDefault()`
- * so the press never fires a focus change or scroll on the host page.
- *
- * Arrow keys consult `isApplicationCursor()` from `modes.ts` so apps
- * that have set DECCKM (vim, less, fzf, htop, …) get SS3 sequences
- * (`ESC O A..D`) and apps in the default mode get the bare CSI form
- * (`ESC [ A..D`). This matches what `mapKeyboardEvent` does for
- * physical-keyboard arrows.
- */
-export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbarController {
-  const ids = { ...DEFAULT_TOOLBAR_IDS, ...opts.ids };
-  let armed = false;
-
-  function findBtn(id: string): HTMLElement | null {
-    // IDs are kebab-case ASCII; no CSS escaping needed.
-    return opts.toolbar.querySelector<HTMLElement>(`#${id}`);
-  }
-
-  const toggleBtn = findBtn(ids.toggle);
-  const ctrlBtn = findBtn(ids.ctrl);
-  const upBtn = findBtn(ids.up);
-  const downBtn = findBtn(ids.down);
-  const leftBtn = findBtn(ids.left);
-  const rightBtn = findBtn(ids.right);
-  const tabBtn = findBtn(ids.tab);
-  const enterBtn = findBtn(ids.enter);
-  const escBtn = findBtn(ids.esc);
-
-  function paintCtrlBtn(on: boolean): void {
-    if (!ctrlBtn) {
-      return;
-    }
-    ctrlBtn.classList.toggle("armed", on);
-    // Keep the ARIA toggle state in sync with the visual `.armed` class so
-    // assistive tech announces the sticky-Ctrl button as pressed/unpressed.
-    // The scaffold ships kb-ctrl as `aria-pressed="false"`; consumers used to
-    // own this in their own setCtrlArmed before delegating the toolbar here.
-    ctrlBtn.setAttribute("aria-pressed", on ? "true" : "false");
-  }
-
-  function setCtrlArmed(on: boolean): void {
-    if (armed === on) {
-      // Still update visuals defensively (e.g. after dispose was called
-      // and someone re-armed via setCtrlArmed) — but skip the change
-      // notification to keep onCtrlChange edge-triggered.
-      paintCtrlBtn(on);
-      return;
-    }
-    armed = on;
-    paintCtrlBtn(on);
-    opts.onCtrlChange?.(on);
-  }
-
-  function arrowSeq(letter: "A" | "B" | "C" | "D"): string {
-    // Under kitty disambiguate, arrows use the CSI form regardless of DECCKM
-    // (the protocol supersedes cursor-key mode). Otherwise DECCKM chooses SS3.
-    if (kittyDisambiguateActive()) {
-      return `${ESC}[${letter}`;
-    }
-    return isApplicationCursor() ? `${ESC}O${letter}` : `${ESC}[${letter}`;
-  }
-
-  // Listener registry so dispose() can detach them all.
-  const cleanups: (() => void)[] = [];
-  function on(el: HTMLElement | null, handler: (e: PointerEvent) => void): void {
-    if (!el) {
-      return;
-    }
-    const wrapped = (e: Event): void => {
-      handler(e as PointerEvent);
-    };
-    el.addEventListener("pointerdown", wrapped);
-    cleanups.push(() => {
-      el.removeEventListener("pointerdown", wrapped);
-    });
-  }
-
-  on(toggleBtn, (e) => {
-    e.preventDefault();
-    // Show/hide the toolbar. Deliberately does NOT clear armed Ctrl —
-    // toggling visibility shouldn't lose state.
-    opts.toolbar.classList.toggle("collapsed");
-  });
-
-  on(ctrlBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(!armed);
-  });
-
-  on(upBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(false);
-    opts.send(arrowSeq("A"));
-  });
-  on(downBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(false);
-    opts.send(arrowSeq("B"));
-  });
-  on(rightBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(false);
-    opts.send(arrowSeq("C"));
-  });
-  on(leftBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(false);
-    opts.send(arrowSeq("D"));
-  });
-
-  on(tabBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(false);
-    opts.send("\t");
-  });
-  on(enterBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(false);
-    opts.send("\r");
-  });
-  on(escBtn, (e) => {
-    e.preventDefault();
-    setCtrlArmed(false);
-    // Under kitty disambiguate, Escape is CSI 27 u (so the app never has to
-    // disambiguate a lone ESC byte from the start of an escape sequence).
-    opts.send(kittyDisambiguateActive() ? `${ESC}[27u` : ESC);
-  });
-
-  function applyStickyCtrl(text: string): string {
-    if (!armed) {
-      return text;
-    }
-    if (text.length === 1) {
-      setCtrlArmed(false);
-      // Under kitty disambiguate, Ctrl+char is the CSI-u form (ctrl modifier =
-      // 5) with the unshifted codepoint, matching the physical-keyboard path.
-      if (kittyDisambiguateActive()) {
-        const cp = text.toLowerCase().codePointAt(0);
-        if (cp !== undefined) {
-          return `${ESC}[${cp};5u`;
-        }
-      }
-      const ctrl = ctrlByteFor(text);
-      return ctrl ?? text;
-    }
-    // Multi-char input (paste, IME commit) — applying Ctrl to a string
-    // would garble it. Disarm and pass through verbatim.
-    setCtrlArmed(false);
-    return text;
-  }
-
-  function dispose(): void {
-    setCtrlArmed(false);
-    for (const c of cleanups) {
-      c();
-    }
-    cleanups.length = 0;
-  }
-
-  return {
-    applyStickyCtrl,
-    setCtrlArmed,
-    isCtrlArmed: () => armed,
-    dispose,
-  };
-}

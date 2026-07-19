@@ -22,19 +22,8 @@ const MSG_MODES = 3;
 const MSG_TITLE = 4;
 const MSG_PONG = 5;
 const MSG_CLIPBOARD = 6;
+const MSG_ACK_ONLY = 7;
 
-/**
- * Wire protocol version. Sent by the client in the `resume` control message so
- * the server can detect a client built against a different protocol revision
- * (e.g. a stale cached bundle after a breaking change) and warn rather than
- * silently mis-decode. Bump on any breaking change to the binary frame layout
- * or control-message shape. Mirrors `wireProtocolVersion` in wire_binary.go.
- *
- * v3: the modes frame gained a trailing kbdFlags byte (kitty keyboard
- * protocol). Decoding is tolerant of a pre-v3 server (kbdFlags defaults to 0
- * when the byte is absent), so the bump only drives the mismatch warning.
- */
-export const WIRE_PROTOCOL_VERSION = 3;
 const MODE_FLAG_BRACKETED_PASTE = 1;
 const MODE_FLAG_APP_CURSOR_KEYS = 2;
 const MODE_FLAG_MOUSE_SGR = 4;
@@ -154,15 +143,23 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     // Optional tails, length-gated for back-compat with older servers:
     //   >= 17 bytes: + serverEpoch (restart detection)
     //   >= 33 bytes: + committed + oldestIndex (resume gap detection)
+    //   >= 35 bytes: + serverWireVersion + ackFlags (bit0 = ledgerLost)
     let serverEpoch: number | undefined;
     let committed: number | undefined;
     let oldestIndex: number | undefined;
+    let serverWireVersion: number | undefined;
+    let ledgerLost: boolean | undefined;
     if (buf.byteLength >= 17) {
       serverEpoch = c.u64();
     }
     if (buf.byteLength >= 33) {
       committed = c.u64();
       oldestIndex = c.u64();
+    }
+    if (buf.byteLength >= 35) {
+      serverWireVersion = c.u8();
+      const ackFlags = c.u8();
+      ledgerLost = (ackFlags & 1) !== 0;
     }
     const msg: ResumeAckMessage = { type: "resumeAck", received: inputAck };
     if (serverEpoch !== undefined) {
@@ -174,7 +171,18 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     if (oldestIndex !== undefined) {
       msg.oldestIndex = oldestIndex;
     }
+    if (serverWireVersion !== undefined) {
+      msg.serverWireVersion = serverWireVersion;
+    }
+    if (ledgerLost !== undefined) {
+      msg.ledgerLost = ledgerLost;
+    }
     return msg;
+  }
+  if (msgType === MSG_ACK_ONLY) {
+    // Bare ack: header only (type + inputAck). Applied to the outbox by the
+    // connection module and never forwarded to consumers.
+    return { type: "ackOnly", inputAck };
   }
   if (msgType === MSG_SCREEN) {
     // Sparse row array: the frame carries only changed rows (indexed by

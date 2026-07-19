@@ -136,9 +136,17 @@ export class LineStore {
     return this.alt;
   }
 
-  /** A copy of the ephemeral alt-screen grid rows. */
-  getAltRows(): WireRun[][] {
-    return this.altRows.map((r) => r.slice());
+  /**
+   * The ephemeral alt-screen grid rows, as a read-only view of the store's
+   * internal arrays (no copy: the pre-2026-07 deep copy allocated the whole
+   * grid on every flush while a full-screen TUI was active — measured at real
+   * cost in the render bench). Row identity is meaningful: applyScreen
+   * replaces exactly the changed rows' arrays and leaves unchanged rows
+   * reference-identical, which is what lets the renderer reconcile the alt
+   * grid row-by-row instead of rebuilding it (renderAlt).
+   */
+  getAltRows(): readonly (readonly WireRun[])[] {
+    return this.altRows;
   }
 
   /**

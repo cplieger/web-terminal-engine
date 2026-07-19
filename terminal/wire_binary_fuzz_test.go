@@ -4,7 +4,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 )
 
 // FuzzEncodeScreenMsg_structuralIntegrity generates random screen states,

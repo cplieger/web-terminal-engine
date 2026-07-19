@@ -58,11 +58,17 @@ type Screen struct {
 	// joined when stamping live rows and later drains. nil when the top row
 	// starts its own chain. Bounded to maxAutolinkRows-1 entries. Main screen
 	// only (alt drains are discarded by the flush builder).
-	drainTail        []string
-	PendingClipboard []byte
+	drainTail []string
+	// pendingClipboard holds an OSC 52 copy payload queued for the consumer;
+	// drained atomically via TakeClipboard.
+	pendingClipboard []byte
 	selectionData    []byte
-	Response         []byte
-	titleStack       []titleEntry
+	// response holds bytes the emulator queued for the APPLICATION (query
+	// replies: DA, DSR, DECRQSS, XTGETTCAP, kitty progressive-enhancement
+	// queries, …); drained atomically via TakeResponse and written back to
+	// the PTY by the consumer.
+	response   []byte
+	titleStack []titleEntry
 	// mainKbd/altKbd hold the kitty keyboard-protocol flags and push/pop stack
 	// for the main and alternate screens respectively (see kitty.go). They are
 	// independent per the spec; activeKbd() selects by InAltScreen.
@@ -99,15 +105,18 @@ type Screen struct {
 	MouseMode        uint16
 	lastPrintedStyle Style
 	charsetState
-	OriginMode        bool
-	noClearOnColumn   bool
-	titleSetHex       bool
-	titleQueryHex     bool
-	CursorBlink       bool
-	AutoWrap          bool
-	CursorStyle       uint8
-	BellRing          bool
-	ScrollbackCleared bool
+	OriginMode      bool
+	noClearOnColumn bool
+	titleSetHex     bool
+	titleQueryHex   bool
+	CursorBlink     bool
+	AutoWrap        bool
+	CursorStyle     uint8
+	// bellRing / scrollbackCleared / paletteChanged are one-shot events
+	// (BEL received, ED3 erased the scrollback, OSC 4/104 recolored the
+	// palette) drained atomically via their Take* methods.
+	bellRing          bool
+	scrollbackCleared bool
 	MouseSGR          bool
 	FocusReporting    bool
 	AppKeypad         bool
@@ -126,7 +135,54 @@ type Screen struct {
 	curProtected      bool
 	moreFix           bool
 	AllowScreenReport bool
-	PaletteChanged    bool
+	paletteChanged    bool
+}
+
+// TakeResponse returns the bytes the emulator queued for the application
+// (query replies such as DA, DSR, DECRQSS, XTGETTCAP) and clears the queue.
+// One-shot drain: the caller owns the returned slice and writes it back to
+// the PTY. Callers must serialize access to the Screen (one mutex-guarded
+// owner), as with every other Screen method.
+func (s *Screen) TakeResponse() []byte {
+	r := s.response
+	s.response = nil
+	return r
+}
+
+// TakeClipboard returns an OSC 52 copy payload queued since the last take
+// (nil when none) and clears it. The consumer forwards it to the system
+// clipboard (the terminal package emits it as a clipboard wire frame).
+func (s *Screen) TakeClipboard() []byte {
+	c := s.pendingClipboard
+	s.pendingClipboard = nil
+	return c
+}
+
+// TakeBell reports whether BEL was received since the last take, clearing
+// the flag. The consumer typically forwards it as a one-frame bell signal.
+func (s *Screen) TakeBell() bool {
+	b := s.bellRing
+	s.bellRing = false
+	return b
+}
+
+// TakeScrollbackCleared reports whether the application erased the
+// scrollback (ED3 / RIS) since the last take, clearing the flag. The
+// consumer discards its retained history to match a real terminal.
+func (s *Screen) TakeScrollbackCleared() bool {
+	c := s.scrollbackCleared
+	s.scrollbackCleared = false
+	return c
+}
+
+// TakePaletteChanged reports whether OSC 4/104 (or a special-color set/reset)
+// changed the palette since the last take, clearing the flag. The consumer
+// schedules a full repaint so already-drawn cells re-resolve through the new
+// palette.
+func (s *Screen) TakePaletteChanged() bool {
+	p := s.paletteChanged
+	s.paletteChanged = false
+	return p
 }
 
 // CursorState holds cursor position, saved cursor, and current style.

@@ -108,6 +108,40 @@ export interface ResumeAckMessage {
    * shows a "history trimmed" marker rather than misaligning.
    */
   oldestIndex?: number;
+  /**
+   * The server's wire-protocol revision (third length-gated tail, absent on
+   * older servers). A value OUTSIDE the client's supported range means one
+   * side runs a stale bundle/binary; the connection module warns and fires
+   * `onWireVersionMismatch` so the UI can offer a reload. Versions inside
+   * the range are normal pairings (a v3 server just means the socket stays
+   * in sentinel mode); a value >= 4 additionally triggers the typed-framing
+   * upgrade (docs/wire-v4-typed-framing.md).
+   */
+  serverWireVersion?: number;
+  /**
+   * Set when the resume key missed the server's registry while this client
+   * claimed sent bytes: the input ledger was reclaimed (idle GC / cap
+   * eviction), so the server cannot vouch for any previously sent input.
+   * The connection module responds deterministically with its designed loss
+   * semantic — drop the outbox and notify (`onServerRestart`) — instead of
+   * replaying possibly-duplicate input. Absent on older servers (the
+   * `received === 0 && bytesAcked > 0` heuristic remains as their fallback).
+   */
+  ledgerLost?: boolean;
+}
+
+/**
+ * Bare input-ack frame. Sent from the server's flush tick when input was
+ * applied but no content frame carried the advanced ack within the tick
+ * (e.g. typing into a no-echo `read -s`), so outbox trimming never depends
+ * on the app producing output. Transport-internal: the connection module
+ * consumes it and does not forward it to `onMessage`.
+ */
+export interface AckOnlyMessage {
+  /** Discriminator — always `"ackOnly"`. */
+  type: "ackOnly";
+  /** Server-confirmed bytesReceived for the input ACK protocol. */
+  inputAck: number;
 }
 
 /**
@@ -173,7 +207,13 @@ export interface ClipboardMessage {
 
 /** Discriminated union of all messages the server can send to the client. */
 export type ServerMessage =
-  ScreenMessage | ScrollMessage | ResumeAckMessage | ModesMessage | TitleMessage | ClipboardMessage;
+  | ScreenMessage
+  | ScrollMessage
+  | ResumeAckMessage
+  | ModesMessage
+  | TitleMessage
+  | ClipboardMessage
+  | AckOnlyMessage;
 
 /**
  * Discriminated union of all control messages the client can send to the
@@ -188,4 +228,11 @@ export type ControlMessage =
       haveThrough: number;
       protocolVersion: number;
     }
-  | { type: "ping" };
+  | { type: "ping" }
+  /**
+   * v4 typed-framing transition (docs/wire-v4-typed-framing.md §4): the first
+   * TEXT message a client sends after the resumeAck proves the server speaks
+   * wire revision >= 4. Receiving it latches the server's connection to typed
+   * mode (text = control, binary = full-alphabet PTY input); otherwise a no-op.
+   */
+  | { type: "upgrade" };

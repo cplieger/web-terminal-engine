@@ -9,6 +9,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { PNG } from "pngjs";
+import type { Page } from "@playwright/test";
 
 const webDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const goldenDir = path.resolve(webDir, "..", "render-golden");
@@ -35,6 +36,7 @@ export async function bundleEngine(): Promise<string> {
       contents: `export * as render from "./src/render.js";
 export * as modes from "./src/modes.js";
 export * as keyboard from "./src/keyboard.js";
+export * as connection from "./src/connection.js";
 export { decodeWireBinary } from "./src/wire-binary.js";`,
       resolveDir: webDir,
       loader: "ts",
@@ -60,11 +62,63 @@ export const HARNESS = `<!doctype html><html><head><meta charset="utf-8"><style>
   :root { --bg: #000000; --text: #dddee1; }
   html, body { margin: 0; padding: 0; background: var(--bg); }
   #wrap { font: 16px/1.25 "DejaVu Sans Mono", "Liberation Mono", "Courier New", monospace;
-          color: var(--text); background: var(--bg); padding: 0; width: 400px; }
-  #out { white-space: pre; }
+          color: var(--text); background: var(--bg); padding: 4px; width: 400px;
+          position: relative; /* the caret overlay positions against termWrap */ }
+  /* position: relative + the wrap padding replicate web-terminal-ui's
+     production stylesheet (.term-output is a positioned child of a padded
+     .term): rows then report offsetTop in OUTPUT space, not termWrap space,
+     which is exactly the coordinate-space mismatch that floated the caret
+     overlay 4px above every glyph in production while an unpositioned,
+     unpadded harness hid it. Keep both so overlay geometry is asserted
+     against the real coordinate topology. */
+  #out { white-space: pre; position: relative; }
+  /* Load-bearing caret-overlay geometry, mirroring web-terminal-ui's
+     02-terminal.css (the harness carries no UI bundle): the engine positions
+     one absolute element in termWrap; colors come from the variant classes. */
+  .term-cursor-overlay { position: absolute; pointer-events: none;
+                         white-space: pre; overflow: hidden; box-sizing: border-box; }
+  .term-cursor-overlay:not(.visible) { display: none; }
+  .term-cursor { background: var(--text); color: var(--bg); }
+  .term-cursor-underline { border-bottom: 2px solid var(--text); }
+  .term-cursor-bar { border-left: 2px solid var(--text); }
 </style></head><body>
   <div id="wrap"><div id="out"></div></div>
 </body></html>`;
+
+/**
+ * waitForRows waits until the renderer's rAF-batched flush has materialized at
+ * least `n` row divs under #out. Deterministic replacement for the fixed
+ * waitForTimeout sleeps, which flaked under parallel-worker CPU contention
+ * (a starved rAF left the read racing the flush). The flush callback is
+ * synchronous JS, so once the polled predicate sees the row count the WHOLE
+ * flush — including the caret-overlay positioning at its end — has completed.
+ */
+export async function waitForRows(page: Page, n: number): Promise<void> {
+  await page.waitForFunction((want: number) => {
+    const out = document.getElementById("out");
+    return out !== null && out.children.length >= want;
+  }, n);
+}
+
+/**
+ * waitForRowText waits until row `idx` under #out exists and its text (nbsp
+ * normalized, trailing blanks trimmed) equals `text`. For asserting an
+ * in-place rewrite of an existing row (clear, alt-screen enter/exit), where
+ * the row COUNT never changes and waitForRows proves nothing.
+ */
+export async function waitForRowText(page: Page, idx: number, text: string): Promise<void> {
+  await page.waitForFunction(
+    (arg: { idx: number; text: string }) => {
+      const row = document.getElementById("out")?.children[arg.idx];
+      if (!row) {
+        return false;
+      }
+      const got = row.textContent.replace(/\u00a0/g, " ").replace(/[ ]+$/, "");
+      return got === arg.text;
+    },
+    { idx, text },
+  );
+}
 
 /** readGolden reads a render-golden fixture (relative name) as bytes. */
 export function readGolden(name: string): Buffer {

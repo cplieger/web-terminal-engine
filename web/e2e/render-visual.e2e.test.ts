@@ -20,6 +20,8 @@ import {
   centerColor,
   decodePng,
   pixelDiffFraction,
+  waitForRows,
+  waitForRowText,
   type Rect,
 } from "./e2e-harness.js";
 
@@ -98,7 +100,9 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
       WTE.render.updateFontMetrics();
       WTE.render.handleScreen(m);
     }, msg);
-    await page.waitForTimeout(200);
+    // Deterministic flush wait: every frame here is a fresh full grid, so all
+    // its rows materialize as divs (replaces a flaky fixed sleep).
+    await waitForRows(page, (msg as { rows: unknown[] }).rows.length);
   }
 
   test("layout geometry: monospace grid, a wide char spans two cells, rows are contiguous", async ({
@@ -149,24 +153,32 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
   });
 
   test("cursor pixel position matches its cell column", async ({ page }) => {
-    // Visible cursor at column 3; its painted span must sit at 3 * cellW from
-    // the row's left edge.
+    // Visible cursor at column 3; the caret overlay (a termWrap child — rows
+    // are pure content) must paint at 3 * cellW from the row's left edge and
+    // carry a copy of the glyph under the cursor.
     await renderMsg(page, screenMsg([[run("ABCDEFGH")], [run(" ".repeat(8))]], [0, 3], false));
     const g = await page.evaluate(() => {
       const out = document.getElementById("out")!;
       const cellW = parseFloat(
         getComputedStyle(document.documentElement).getPropertyValue("--char-w"),
       );
-      const rowLeft = (out.children[0] as HTMLElement).getBoundingClientRect().x;
-      const cur = out.querySelector<HTMLElement>(
-        ".term-cursor, .term-cursor-underline, .term-cursor-bar",
-      );
+      const rowRect = (out.children[0] as HTMLElement).getBoundingClientRect();
+      const cur = document.querySelector<HTMLElement>(".term-cursor-overlay.visible");
       const b = cur?.getBoundingClientRect();
-      return { cellW, rowLeft, curX: b ? b.x : null, curText: cur?.textContent ?? null };
+      return {
+        cellW,
+        rowLeft: rowRect.x,
+        rowTop: rowRect.y,
+        curX: b ? b.x : null,
+        curY: b ? b.y : null,
+        curText: cur?.textContent ?? null,
+      };
     });
-    expect(g.curX, "a cursor span is painted").not.toBeNull();
+    expect(g.curX, "the caret overlay is painted").not.toBeNull();
     expect(g.curText).toBe("D"); // column 3 (0-indexed) of "ABCDEFGH"
     expect(Math.abs(g.curX! - g.rowLeft - 3 * g.cellW), "cursor at col 3").toBeLessThan(1.5);
+    // And vertically over its row (the overlay tracks the row's offsetTop).
+    expect(Math.abs(g.curY! - g.rowTop), "cursor over its row").toBeLessThan(1.5);
   });
 
   test("painted pixels: colors, bold/dim/inverse/hidden ink, underline", async ({ page }) => {
@@ -273,7 +285,9 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
         cursorBlink: false,
       });
     });
-    await page.waitForTimeout(200);
+    // In-place rewrite (row count unchanged): wait for row 0's text to go
+    // blank, which proves the flush landed, before sampling pixels.
+    await waitForRowText(page, 0, "");
     const afterClear = avgLuminance(decodePng(await page.screenshot()), rowRect);
     expect(afterClear, "cleared row paints no ink").toBeLessThan(2);
   });
@@ -430,13 +444,14 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
       (m) => WTE.render.handleScreen(m),
       altMsg([[run("ALT-1")], [run("ALT-2")], [run(" ".repeat(8))], [run(" ".repeat(8))]], [0, 0]),
     );
-    await page.waitForTimeout(150);
+    // Alt-screen swap rewrites rows in place: wait on content, not row count.
+    await waitForRowText(page, 0, "ALT-1");
     const alt = await page.evaluate(readGrid);
     expect(alt.slice(0, 2), "alt screen shows the ephemeral alt grid").toEqual(["ALT-1", "ALT-2"]);
 
     // Exit the alternate screen: a normal frame restores the main buffer.
     await page.evaluate((m) => WTE.render.handleScreen(m), screenMsg(mainRows, [3, 0]));
-    await page.waitForTimeout(150);
+    await waitForRowText(page, 0, "MAIN-A");
     const restored = await page.evaluate(readGrid);
     expect(restored.slice(0, 2), "exiting alt restores the main buffer").toEqual([
       "MAIN-A",
@@ -447,9 +462,10 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
   test("cursor styles (DECSCUSR): block / underline / bar map to distinct cursor classes", async ({
     page,
   }) => {
-    // A visible cursor at column 2 of "ABCDEFGH"; the DECSCUSR style value drives
-    // the class render.ts puts on the cursor span (block 0-2, underline 3-4, bar
-    // 5-6). The shape CSS is the consumer's; the CLASS is the engine's contract.
+    // A visible cursor at column 2 of "ABCDEFGH"; the DECSCUSR style value
+    // drives the variant class render.ts puts on the caret OVERLAY (block
+    // 0-2, underline 3-4, bar 5-6). The shape CSS is the consumer's; the
+    // CLASS is the engine's contract.
     const cases: readonly [number, string][] = [
       [2, "term-cursor"], // steady block
       [4, "term-cursor-underline"], // steady underline
@@ -461,12 +477,10 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
         screenMsg([[run("ABCDEFGH")], [run(" ".repeat(8))]], [0, 2], false, style),
       );
       const info = await page.evaluate(() => {
-        const cur = document.querySelector<HTMLElement>(
-          ".term-cursor, .term-cursor-underline, .term-cursor-bar",
-        );
+        const cur = document.querySelector<HTMLElement>(".term-cursor-overlay.visible");
         return { cls: cur?.className ?? null, text: cur?.textContent ?? null };
       });
-      expect(info.cls, `DECSCUSR ${style} cursor class`).toBe(cls);
+      expect(info.cls, `DECSCUSR ${style} cursor class`).toBe(`term-cursor-overlay visible ${cls}`);
       expect(info.text, `DECSCUSR ${style} cursor sits on column 2 ("C")`).toBe("C");
     }
   });

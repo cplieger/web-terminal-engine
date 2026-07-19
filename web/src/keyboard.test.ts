@@ -25,11 +25,11 @@
 // Content transcribed/rephrased from invisible-island.net xterm docs for
 // compliance with licensing restrictions.
 
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import {
-  bindMobileToolbar,
   bracketTextForPaste,
   ctrlByteFor,
+  kittyCtrlCharSeq,
   mapKeyboardEvent as mapKeyboardEventRaw,
   prepareTextForTerminal,
   type KeyboardResult,
@@ -250,6 +250,41 @@ describe("function keys F5-F12 [spec: CSI {15,17,18,19,20,21,23,24}~]", () => {
         expect(sent(mapKeyboardEvent(ev({ key, ...MOD_INIT[mod] })))).toBe(tildeForm(num, mod));
       });
     }
+  }
+});
+
+// ===========================================================================
+// Function keys F13-F20 — xterm's extended tilde codes (25-34; 27 and 30
+// skipped historically). F21-F24 have NO standard legacy encoding — xterm
+// itself stops at F20 — so they must stay silent on the legacy path (the
+// kitty path covers all twelve with dedicated codepoints; see the kitty
+// suite). xterm.js supports none of F13+ (xtermjs/xterm.js#1426).
+// ===========================================================================
+
+describe("function keys F13-F20 [spec: CSI {25,26,28,29,31,32,33,34}~] and F21-F24 silence", () => {
+  const fnKeys: { key: string; num: number }[] = [
+    { key: "F13", num: 25 },
+    { key: "F14", num: 26 },
+    { key: "F15", num: 28 },
+    { key: "F16", num: 29 },
+    { key: "F17", num: 31 },
+    { key: "F18", num: 32 },
+    { key: "F19", num: 33 },
+    { key: "F20", num: 34 },
+  ];
+
+  for (const { key, num } of fnKeys) {
+    for (const mod of ALL_MODS) {
+      it(`${key} + ${mod} → ${JSON.stringify(tildeForm(num, mod))}`, () => {
+        expect(sent(mapKeyboardEvent(ev({ key, ...MOD_INIT[mod] })))).toBe(tildeForm(num, mod));
+      });
+    }
+  }
+
+  for (const key of ["F21", "F22", "F23", "F24"]) {
+    it(`${key} → ignore (no standard legacy encoding; kitty-only)`, () => {
+      expect(mapKeyboardEvent(ev({ key }))).toEqual({ kind: "ignore" });
+    });
   }
 });
 
@@ -476,301 +511,23 @@ describe("bracketed paste", () => {
 
   it("normalises CR/LF to CR", () => {
     expect(prepareTextForTerminal("a\r\nb\nc\r")).toBe("a\rb\rc\r");
+    // Paste NUL hygiene (P2): NUL bytes are stripped wherever they appear —
+    // never meaningful paste content, and a leading NUL would otherwise
+    // interact with the v3 wire framing.
+    expect(prepareTextForTerminal("\x00lead\x00mid\x00")).toBe("leadmid");
   });
 });
 
-// ===========================================================================
-// bindMobileToolbar — on-screen mobile keyboard toolbar wiring.
-// (Not part of the input-encoding matrix, but exported by keyboard.ts and
-// verified here; DECCKM-aware arrows share modes.ts with mapKeyboardEvent.)
-// ===========================================================================
-
-function makeToolbar(): {
-  toolbar: HTMLElement;
-  buttons: Record<string, HTMLElement>;
-} {
-  const toolbar = document.createElement("div");
-  toolbar.className = "kb-toolbar";
-  const buttons: Record<string, HTMLElement> = {};
-  const ids = [
-    "kb-toggle",
-    "kb-ctrl",
-    "kb-up",
-    "kb-down",
-    "kb-left",
-    "kb-right",
-    "kb-tab",
-    "kb-enter",
-    "kb-esc",
-  ];
-  for (const id of ids) {
-    const b = document.createElement("button");
-    b.id = id;
-    toolbar.appendChild(b);
-    buttons[id] = b;
-  }
-  document.body.appendChild(toolbar);
-  return { toolbar, buttons };
-}
-
-function fireDown(el: HTMLElement): { defaultPrevented: boolean } {
-  const ev = new Event("pointerdown", { cancelable: true, bubbles: true });
-  el.dispatchEvent(ev);
-  return { defaultPrevented: ev.defaultPrevented };
-}
-
-describe("bindMobileToolbar: happy path", () => {
-  let send: ReturnType<typeof vi.fn<(bytes: string) => void>>;
-  let fixture: ReturnType<typeof makeToolbar>;
-
-  beforeEach(() => {
-    document.body.innerHTML = "";
-    send = vi.fn<(bytes: string) => void>();
-    fixture = makeToolbar();
+describe("kittyCtrlCharSeq: character-level unshifted-key rule", () => {
+  it("maps shifted US-layout symbols to base codepoint + ctrl+shift", () => {
+    expect(kittyCtrlCharSeq(":")).toBe("\x1b[59;6u"); // ';' + shift
+    expect(kittyCtrlCharSeq("{")).toBe("\x1b[91;6u"); // '[' + shift
+    expect(kittyCtrlCharSeq("!")).toBe("\x1b[49;6u"); // '1' + shift
   });
 
-  it("kb-up/down/right/left send arrow CSI sequences (default DECCKM off)", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-
-    fireDown(fixture.buttons["kb-up"]!);
-    fireDown(fixture.buttons["kb-down"]!);
-    fireDown(fixture.buttons["kb-right"]!);
-    fireDown(fixture.buttons["kb-left"]!);
-
-    expect(send).toHaveBeenNthCalledWith(1, "\x1b[A");
-    expect(send).toHaveBeenNthCalledWith(2, "\x1b[B");
-    expect(send).toHaveBeenNthCalledWith(3, "\x1b[C");
-    expect(send).toHaveBeenNthCalledWith(4, "\x1b[D");
-
-    ctrl.dispose();
-  });
-
-  it("kb-tab/enter/esc send the canonical bytes", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-
-    fireDown(fixture.buttons["kb-tab"]!);
-    fireDown(fixture.buttons["kb-enter"]!);
-    fireDown(fixture.buttons["kb-esc"]!);
-
-    expect(send).toHaveBeenNthCalledWith(1, "\t");
-    expect(send).toHaveBeenNthCalledWith(2, "\r");
-    expect(send).toHaveBeenNthCalledWith(3, "\x1b");
-
-    ctrl.dispose();
-  });
-
-  it("preventDefault is called on every toolbar press", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    for (const id of [
-      "kb-toggle",
-      "kb-ctrl",
-      "kb-up",
-      "kb-down",
-      "kb-left",
-      "kb-right",
-      "kb-tab",
-      "kb-enter",
-      "kb-esc",
-    ]) {
-      const r = fireDown(fixture.buttons[id]!);
-      expect(r.defaultPrevented).toBe(true);
-    }
-    ctrl.dispose();
-  });
-
-  it("kb-toggle toggles .collapsed on the toolbar; does NOT clear armed Ctrl", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    ctrl.setCtrlArmed(true);
-    expect(fixture.toolbar.classList.contains("collapsed")).toBe(false);
-
-    fireDown(fixture.buttons["kb-toggle"]!);
-    expect(fixture.toolbar.classList.contains("collapsed")).toBe(true);
-    expect(ctrl.isCtrlArmed()).toBe(true); // toggle doesn't disarm
-
-    fireDown(fixture.buttons["kb-toggle"]!);
-    expect(fixture.toolbar.classList.contains("collapsed")).toBe(false);
-    expect(ctrl.isCtrlArmed()).toBe(true);
-
-    ctrl.dispose();
-  });
-
-  it("kb-ctrl toggles armed state and does NOT call send", () => {
-    const onChange = vi.fn();
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send, onCtrlChange: onChange });
-
-    expect(ctrl.isCtrlArmed()).toBe(false);
-    fireDown(fixture.buttons["kb-ctrl"]!);
-    expect(ctrl.isCtrlArmed()).toBe(true);
-    expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(true);
-    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("true");
-    expect(onChange).toHaveBeenLastCalledWith(true);
-
-    fireDown(fixture.buttons["kb-ctrl"]!);
-    expect(ctrl.isCtrlArmed()).toBe(false);
-    expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(false);
-    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("false");
-    expect(onChange).toHaveBeenLastCalledWith(false);
-
-    expect(send).not.toHaveBeenCalled();
-
-    ctrl.dispose();
-  });
-
-  it("arrow / Tab / Enter / Esc presses clear armed Ctrl", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    for (const id of ["kb-up", "kb-down", "kb-left", "kb-right", "kb-tab", "kb-enter", "kb-esc"]) {
-      ctrl.setCtrlArmed(true);
-      fireDown(fixture.buttons[id]!);
-      expect(ctrl.isCtrlArmed()).toBe(false);
-    }
-    ctrl.dispose();
-  });
-
-  it("missing toolbar buttons are skipped silently", () => {
-    const empty = document.createElement("div");
-    document.body.appendChild(empty);
-    const ctrl = bindMobileToolbar({ toolbar: empty, send });
-    expect(() => ctrl.applyStickyCtrl("a")).not.toThrow();
-    ctrl.dispose();
-    expect(send).not.toHaveBeenCalled();
-  });
-});
-
-describe("bindMobileToolbar: applyStickyCtrl", () => {
-  let send: ReturnType<typeof vi.fn<(bytes: string) => void>>;
-  let fixture: ReturnType<typeof makeToolbar>;
-
-  beforeEach(() => {
-    document.body.innerHTML = "";
-    send = vi.fn<(bytes: string) => void>();
-    fixture = makeToolbar();
-  });
-
-  it("not armed → returns text unchanged", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    expect(ctrl.applyStickyCtrl("a")).toBe("a");
-    expect(ctrl.applyStickyCtrl("hello")).toBe("hello");
-    expect(ctrl.isCtrlArmed()).toBe(false);
-    ctrl.dispose();
-  });
-
-  it("armed + 1-char input → ctrl byte and disarms", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("c")).toBe("\x03");
-    expect(ctrl.isCtrlArmed()).toBe(false);
-    ctrl.dispose();
-  });
-
-  it("armed + 1-char unmapped input → original char and disarms", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("é")).toBe("é");
-    expect(ctrl.isCtrlArmed()).toBe(false);
-    ctrl.dispose();
-  });
-
-  it("armed + paste (multi-char) → text unchanged and disarms", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("hello")).toBe("hello");
-    expect(ctrl.isCtrlArmed()).toBe(false);
-    ctrl.dispose();
-  });
-});
-
-describe("bindMobileToolbar: dispose", () => {
-  it("removes all listeners — pointerdown after dispose does NOT call send", () => {
-    document.body.innerHTML = "";
-    const send = vi.fn<(bytes: string) => void>();
-    const fixture = makeToolbar();
-
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    ctrl.dispose();
-
-    for (const id of ["kb-up", "kb-down", "kb-left", "kb-right", "kb-tab", "kb-enter", "kb-esc"]) {
-      fireDown(fixture.buttons[id]!);
-    }
-    expect(send).not.toHaveBeenCalled();
-  });
-
-  it("clears armed state and resets kb-ctrl visuals", () => {
-    document.body.innerHTML = "";
-    const send = vi.fn<(bytes: string) => void>();
-    const fixture = makeToolbar();
-
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    ctrl.setCtrlArmed(true);
-    expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(true);
-    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("true");
-
-    ctrl.dispose();
-    expect(ctrl.isCtrlArmed()).toBe(false);
-    expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(false);
-    expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("false");
-  });
-
-  it("is idempotent", () => {
-    document.body.innerHTML = "";
-    const send = vi.fn<(bytes: string) => void>();
-    const fixture = makeToolbar();
-
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    expect(() => {
-      ctrl.dispose();
-      ctrl.dispose();
-    }).not.toThrow();
-  });
-});
-
-describe("bindMobileToolbar: DECCKM-aware arrows", () => {
-  it("application-cursor mode → SS3 sequences (\\x1bOA..D)", () => {
-    document.body.innerHTML = "";
-    const send = vi.fn<(bytes: string) => void>();
-    const fixture = makeToolbar();
-
-    modes.setModes(true /* bracketed */, true /* app cursor */);
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-
-    fireDown(fixture.buttons["kb-up"]!);
-    fireDown(fixture.buttons["kb-down"]!);
-    fireDown(fixture.buttons["kb-right"]!);
-    fireDown(fixture.buttons["kb-left"]!);
-
-    expect(send).toHaveBeenNthCalledWith(1, "\x1bOA");
-    expect(send).toHaveBeenNthCalledWith(2, "\x1bOB");
-    expect(send).toHaveBeenNthCalledWith(3, "\x1bOC");
-    expect(send).toHaveBeenNthCalledWith(4, "\x1bOD");
-
-    ctrl.dispose();
-  });
-
-  it("default mode → CSI sequences (\\x1b[A..D])", () => {
-    document.body.innerHTML = "";
-    const send = vi.fn<(bytes: string) => void>();
-    const fixture = makeToolbar();
-
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-
-    fireDown(fixture.buttons["kb-up"]!);
-    expect(send).toHaveBeenLastCalledWith("\x1b[A");
-
-    ctrl.dispose();
-  });
-
-  it("mode is consulted on each press, not at bind time", () => {
-    document.body.innerHTML = "";
-    const send = vi.fn<(bytes: string) => void>();
-    const fixture = makeToolbar();
-
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send });
-    fireDown(fixture.buttons["kb-up"]!);
-    expect(send).toHaveBeenLastCalledWith("\x1b[A");
-
-    modes.setModes(true, true);
-    fireDown(fixture.buttons["kb-up"]!);
-    expect(send).toHaveBeenLastCalledWith("\x1bOA");
-
-    ctrl.dispose();
+  it("encodes unshifted characters with plain ctrl", () => {
+    expect(kittyCtrlCharSeq("s")).toBe("\x1b[115;5u");
+    expect(kittyCtrlCharSeq(";")).toBe("\x1b[59;5u");
+    expect(kittyCtrlCharSeq("1")).toBe("\x1b[49;5u");
   });
 });

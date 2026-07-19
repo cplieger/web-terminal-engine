@@ -1,15 +1,23 @@
 // Pure wire-format helpers for the client → server WebSocket protocol.
 //
-// Protocol: every WebSocket message the client sends to the server is a
-// binary frame whose first byte tags the message type:
+// v3 framing (the bootstrap/fallback encoding): every client→server message
+// is a binary frame whose first byte tags the message type:
 //
 //   0x00  control message (JSON-encoded {type, ...} payload)
 //   any   raw terminal input bytes
 //
-// The 0x00 prefix is the only framing convention; raw input flows
-// through the rest of the byte space, because terminal input never
-// starts a write with NUL. See the Go terminal package's frame parser
-// for the receiving end.
+// Disambiguation rule (amended with the parse-fallback): a solitary [0x00],
+// and any 0x00-leading frame that is not a valid control message, are literal
+// terminal input; 0x00 + valid control JSON is the reserved control channel.
+// The client additionally never emits a multi-byte 0x00-leading input frame
+// in v3 mode (sendInputFrames splits leading NULs into solitary frames), so
+// in practice the reserved channel only ever carries real controls.
+//
+// v4 framing (docs/wire-v4-typed-framing.md) retires the sentinel once a
+// socket upgrades: control messages travel as WebSocket TEXT frames and
+// binary frames are full-alphabet PTY input. This module's controlFrame stays
+// the encoding for the v3 bootstrap (every socket's first resume) and for
+// v3-mode sockets (older servers).
 //
 // Pulled into a dedicated module so unit tests can exercise the framing
 // without spinning up a WebSocket. Pure: no DOM, no WebSocket, no

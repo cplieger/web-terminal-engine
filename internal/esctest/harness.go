@@ -31,7 +31,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 	"github.com/creack/pty"
 )
 
@@ -236,9 +236,8 @@ func pump(r io.Reader, w io.Writer, screen *vt.Screen) {
 		n, readErr := r.Read(buf)
 		if n > 0 {
 			_, _ = screen.Write(buf[:n])
-			if len(screen.Response) > 0 {
-				_, _ = w.Write(screen.Response)
-				screen.Response = screen.Response[:0]
+			if resp := screen.TakeResponse(); len(resp) > 0 {
+				_, _ = w.Write(resp)
 			}
 		}
 		if readErr != nil {

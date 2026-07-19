@@ -1,4 +1,4 @@
-module github.com/cplieger/web-terminal-engine/v2
+module github.com/cplieger/web-terminal-engine/v3
 
 go 1.26.5
 

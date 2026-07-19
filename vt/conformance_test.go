@@ -146,8 +146,8 @@ func TestTabStops_CBT(t *testing.T) {
 func TestDSR5(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[5n"))
-	if string(s.Response) != "\x1b[0n" {
-		t.Errorf("DSR 5 response: got %q, want %q", string(s.Response), "\x1b[0n")
+	if string(s.response) != "\x1b[0n" {
+		t.Errorf("DSR 5 response: got %q, want %q", string(s.response), "\x1b[0n")
 	}
 }
 
@@ -158,8 +158,8 @@ func TestDECXCPR(t *testing.T) {
 	s.Write([]byte("\x1b[?6n"))    // DECXCPR
 	// VT400+ (which the engine advertises) includes the page number (always 1).
 	want := "\x1b[?10;20;1R"
-	if string(s.Response) != want {
-		t.Errorf("DECXCPR response: got %q, want %q", string(s.Response), want)
+	if string(s.response) != want {
+		t.Errorf("DECXCPR response: got %q, want %q", string(s.response), want)
 	}
 }
 
@@ -170,24 +170,24 @@ func TestDECRQM_DEC(t *testing.T) {
 	// Mode 7 (DECAWM) should be set by default
 	s.Write([]byte("\x1b[?7$p"))
 	want := "\x1b[?7;1$y" // set
-	if string(s.Response) != want {
-		t.Errorf("DECRQM ?7: got %q, want %q", string(s.Response), want)
+	if string(s.response) != want {
+		t.Errorf("DECRQM ?7: got %q, want %q", string(s.response), want)
 	}
-	s.Response = nil
+	s.response = nil
 
 	// Mode 6 (DECOM) should be reset by default
 	s.Write([]byte("\x1b[?6$p"))
 	want = "\x1b[?6;2$y" // reset
-	if string(s.Response) != want {
-		t.Errorf("DECRQM ?6: got %q, want %q", string(s.Response), want)
+	if string(s.response) != want {
+		t.Errorf("DECRQM ?6: got %q, want %q", string(s.response), want)
 	}
-	s.Response = nil
+	s.response = nil
 
 	// Unknown mode should return 0
 	s.Write([]byte("\x1b[?9999$p"))
 	want = "\x1b[?9999;0$y"
-	if string(s.Response) != want {
-		t.Errorf("DECRQM ?9999: got %q, want %q", string(s.Response), want)
+	if string(s.response) != want {
+		t.Errorf("DECRQM ?9999: got %q, want %q", string(s.response), want)
 	}
 }
 
@@ -211,11 +211,11 @@ func TestDECSCNM(t *testing.T) {
 
 	// Verify via DECRQM
 	s.Write([]byte("\x1b[?5h"))
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[?5$p"))
 	want := "\x1b[?5;1$y"
-	if string(s.Response) != want {
-		t.Errorf("DECRQM ?5 after set: got %q, want %q", string(s.Response), want)
+	if string(s.response) != want {
+		t.Errorf("DECRQM ?5 after set: got %q, want %q", string(s.response), want)
 	}
 }
 
@@ -233,7 +233,7 @@ func TestDECRQM_ANSI(t *testing.T) {
 	for _, tc := range cases {
 		s := New(24, 80)
 		s.Write([]byte(tc.seq))
-		if got := string(s.Response); got != tc.want {
+		if got := string(s.response); got != tc.want {
 			t.Errorf("DECRQM %q = %q, want %q", tc.seq, got, tc.want)
 		}
 	}

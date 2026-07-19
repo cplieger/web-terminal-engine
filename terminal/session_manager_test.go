@@ -157,15 +157,18 @@ func TestSessionManagerWSUnknownSession(t *testing.T) {
 	srv := httptest.NewServer(m.WebSocketHandler())
 	t.Cleanup(srv.Close)
 
-	// A plain GET (no WS upgrade) for an unknown session is a 404, decided
-	// before any upgrade attempt.
+	// A plain GET (no WS upgrade) for an unknown session answers 426 — the
+	// SAME status a known session's handler gives a non-upgrade request, so
+	// a probe cannot distinguish session existence (the old 404 was an
+	// oracle). A real WS dial gets the definitive 4004 close instead
+	// (TestWebSocketUnknownSessionClosesDefinitively).
 	resp, err := http.Get(srv.URL + "/ws?session=bogus")
 	if err != nil {
 		t.Fatalf("GET: %v", err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("unknown session status = %d, want 404", resp.StatusCode)
+	if resp.StatusCode != http.StatusUpgradeRequired {
+		t.Fatalf("unknown session status = %d, want 426", resp.StatusCode)
 	}
 }
 
@@ -380,5 +383,38 @@ func TestSanitizeTitle(t *testing.T) {
 	// Control characters and DEL are stripped, surrounding runes preserved.
 	if got := sanitizeTitle("a\nb\x1bc\x7fd\te"); got != "abcde" {
 		t.Fatalf("sanitizeTitle(control chars) = %q, want %q", got, "abcde")
+	}
+}
+
+// TestWebSocketUnknownSessionClosesDefinitively pins the unknown-session WS
+// contract: a real WebSocket dial to an id the manager does not know is
+// ACCEPTED and then closed with the definitive 4004 application code, which
+// the browser client reads and routes to its ended state. A pre-upgrade 404
+// is unreadable from browser JS (an opaque code-1006 failed connect), so the
+// old behavior condemned a client with a stale id (reaped session, restarted
+// server) to an endless reconnect loop.
+func TestWebSocketUnknownSessionClosesDefinitively(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	mux := http.NewServeMux()
+	m.MountAPI(mux)
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	//nolint:bodyclose // coder/websocket Dial nils resp.Body on success
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+WSPath+"?session=nope", nil)
+	if err != nil {
+		t.Fatalf("ws dial to an unknown session must be accepted (then closed 4004), got dial error: %v", err)
+	}
+	defer ws.Close(websocket.StatusNormalClosure, "") // #nosec G104 -- best-effort test cleanup
+
+	_, _, rerr := ws.Read(ctx)
+	if rerr == nil {
+		t.Fatal("expected the read to fail with the 4004 close, got a frame")
+	}
+	if got := websocket.CloseStatus(rerr); got != statusUnknownSession {
+		t.Fatalf("close status = %d, want %d (statusUnknownSession); read err: %v", got, statusUnknownSession, rerr)
 	}
 }

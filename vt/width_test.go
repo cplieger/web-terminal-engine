@@ -167,3 +167,18 @@ func TestEmojiRangesSortedNonOverlapping(t *testing.T) {
 		}
 	}
 }
+
+// TestWideRangesSortedNonOverlapping guards the same binary-search invariant
+// for wideRanges, which is generated (scripts/gen-width-tables.py) as exact
+// coalesced UAX#11 W/F intervals: ascending, non-overlapping, non-inverted.
+func TestWideRangesSortedNonOverlapping(t *testing.T) {
+	for i, iv := range wideRanges {
+		if iv.first > iv.last {
+			t.Errorf("wideRanges[%d] inverted: {%U, %U}", i, iv.first, iv.last)
+		}
+		if i > 0 && iv.first <= wideRanges[i-1].last {
+			t.Errorf("wideRanges[%d] {%U, %U} not strictly after wideRanges[%d] {%U, %U}",
+				i, iv.first, iv.last, i-1, wideRanges[i-1].first, wideRanges[i-1].last)
+		}
+	}
+}

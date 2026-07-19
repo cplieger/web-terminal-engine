@@ -15,8 +15,8 @@ func TestXTMODKEYS_NotTreatedAsSGR(t *testing.T) {
 	if s.style != (Style{}) {
 		t.Errorf("CSI >4;1m mutated style = %+v, want zero (XTMODKEYS is not SGR)", s.style)
 	}
-	if len(s.Response) != 0 {
-		t.Errorf("CSI >4;1m produced a response %q, want none", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("CSI >4;1m produced a response %q, want none", s.response)
 	}
 	// A plain SGR must still work.
 	s.Write([]byte("\x1b[1m"))
@@ -45,7 +45,7 @@ func TestKittyKeyboardQuery_ReportsFlags(t *testing.T) {
 	if row, col := s.CursorPos(); row != 4 || col != 6 {
 		t.Errorf("CSI ?u moved cursor to %d,%d, want 4,6", row, col)
 	}
-	if got, want := string(s.Response), "\x1b[?0u"; got != want {
+	if got, want := string(s.response), "\x1b[?0u"; got != want {
 		t.Errorf("CSI ?u = %q, want %q (flags 0 initially)", got, want)
 	}
 }
@@ -60,8 +60,8 @@ func TestKittyKeyboardVariants_NoCursorMoveNoReply(t *testing.T) {
 		if row, col := s.CursorPos(); row != 2 || col != 2 {
 			t.Errorf("%q moved cursor to %d,%d, want 2,2", seq, row, col)
 		}
-		if len(s.Response) != 0 {
-			t.Errorf("%q produced a response %q, want none (only the query replies)", seq, s.Response)
+		if len(s.response) != 0 {
+			t.Errorf("%q produced a response %q, want none (only the query replies)", seq, s.response)
 		}
 	}
 }
@@ -84,7 +84,7 @@ func TestXTSAVERESTORE_NotCursorOrRegion(t *testing.T) {
 func TestXTVERSION_Answered(t *testing.T) {
 	s := New(5, 20)
 	s.Write([]byte("\x1b[>q"))
-	if got, want := string(s.Response), "\x1bP>|web-terminal-engine\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP>|web-terminal-engine\x1b\\"; got != want {
 		t.Errorf("CSI >q = %q, want %q", got, want)
 	}
 }
@@ -99,7 +99,7 @@ func TestRIS_HomesCursorAndClearsScrollback(t *testing.T) {
 	if row, col := s.CursorPos(); row != 0 || col != 0 {
 		t.Errorf("RIS left cursor at %d,%d, want 0,0", row, col)
 	}
-	if !s.ScrollbackCleared {
+	if !s.scrollbackCleared {
 		t.Errorf("RIS did not set ScrollbackCleared")
 	}
 }
@@ -286,9 +286,9 @@ func TestDECSCA_SelectiveErase(t *testing.T) {
 func TestBrightColorRoundTrip(t *testing.T) {
 	s := New(2, 10)
 	s.Write([]byte("\x1b[91m")) // bright red fg
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1bP$qm\x1b\\")) // DECRQSS SGR
-	if got, want := string(s.Response), "\x1bP1$r0;91m\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP1$r0;91m\x1b\\"; got != want {
 		t.Errorf("DECRQSS after 91m = %q, want %q", got, want)
 	}
 }
@@ -342,15 +342,15 @@ func TestOSCColorQueries(t *testing.T) {
 	for _, tc := range cases {
 		s := New(5, 20)
 		s.Write([]byte(tc.seq))
-		if got := string(s.Response); got != tc.want {
+		if got := string(s.response); got != tc.want {
 			t.Errorf("query %q -> %q, want %q", tc.seq, got, tc.want)
 		}
 	}
 	// The SET form (non-"?") is ignored and produces no response.
 	s := New(5, 20)
 	s.Write([]byte("\x1b]11;rgb:ff/00/00\x1b\\"))
-	if len(s.Response) != 0 {
-		t.Errorf("OSC 11 set produced a response %q, want none", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("OSC 11 set produced a response %q, want none", s.response)
 	}
 }
 
@@ -364,10 +364,10 @@ func TestOSCColorThemeConfigurable(t *testing.T) {
 		Cursor:     RGB(0x77, 0x88, 0x99),
 	}
 	query := func(s *Screen, seq string) string {
-		s.Response = s.Response[:0]
+		s.response = s.response[:0]
 		s.Write([]byte(seq))
-		out := string(s.Response)
-		s.Response = s.Response[:0]
+		out := string(s.response)
+		s.response = s.response[:0]
 		return out
 	}
 

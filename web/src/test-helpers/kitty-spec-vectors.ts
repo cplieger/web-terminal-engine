@@ -126,11 +126,27 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
     kitty: send(`${ESC}[59;6u`),
   },
   {
-    spec: "Modifiers: meta(super)+a -> 97;9u",
+    // DELIBERATE PRODUCT DEVIATION from the spec table (which would send
+    // 97;9u): meta/Cmd-ONLY printable combos are browser/OS chrome (Cmd+C,
+    // Cmd+V, Cmd+R) and stay with the browser, exactly as the legacy path
+    // carves them out — and as the kitty terminal itself consumes its own
+    // emulator shortcuts instead of reporting them. Reporting these ate
+    // copy-on-macOS inside kitty apps (judgement finding, fixed 2026-07).
+    // Meta combined with ctrl/alt still reports (vector below).
+    spec: "DEVIATION (browser chrome): meta(super)+a alone is NOT reported -> ignore (spec table: 97;9u)",
     key: "a",
     code: "KeyA",
     meta: true,
-    kitty: send(`${ESC}[97;9u`),
+    kitty: ignore,
+    legacy: ignore,
+  },
+  {
+    spec: "Modifiers: ctrl+meta(super)+a -> 97;13u (meta reports when combined with ctrl/alt)",
+    key: "a",
+    code: "KeyA",
+    ctrl: true,
+    meta: true,
+    kitty: send(`${ESC}[97;13u`),
   },
   {
     spec: "Legacy ctrl mapping: ctrl+space -> 32;5u (vs legacy NUL)",
@@ -249,6 +265,48 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
     legacy: send(`${ESC}[15~`),
   },
   { spec: "Functional: F12 = CSI 24~", key: "F12", kitty: send(`${ESC}[24~`) },
+
+  // --- F13-F24 (Functional key definitions: F13 57376 .. F24 57387, CSI u
+  // form). Legacy covers F13-F20 via xterm's extended tilde codes (25-34, 27
+  // and 30 skipped); F21-F24 have NO legacy encoding (xterm stops at F20) and
+  // must stay silent there — under kitty all twelve report. ---
+  {
+    spec: "Functional: F13 = CSI 57376 u (legacy xterm tilde 25~)",
+    key: "F13",
+    kitty: send(`${ESC}[57376u`),
+    legacy: send(`${ESC}[25~`),
+  },
+  {
+    spec: "Functional: ctrl+F13 = CSI 57376;5 u",
+    key: "F13",
+    ctrl: true,
+    kitty: send(`${ESC}[57376;5u`),
+    legacy: send(`${ESC}[25;5~`),
+  },
+  {
+    spec: "Functional: F20 = CSI 57383 u (legacy xterm tilde 34~)",
+    key: "F20",
+    kitty: send(`${ESC}[57383u`),
+    legacy: send(`${ESC}[34~`),
+  },
+  {
+    spec: "Functional: F21 = CSI 57384 u (no legacy encoding — silent)",
+    key: "F21",
+    kitty: send(`${ESC}[57384u`),
+    legacy: ignore,
+  },
+  {
+    spec: "Functional: F24 = CSI 57387 u (no legacy encoding — silent)",
+    key: "F24",
+    kitty: send(`${ESC}[57387u`),
+    legacy: ignore,
+  },
+  {
+    spec: "Functional: shift+F24 = CSI 57387;2 u",
+    key: "F24",
+    shift: true,
+    kitty: send(`${ESC}[57387;2u`),
+  },
 
   // --- Keypad (Functional key codes KP_* 57414-57427). Under 0x1 only the
   // NON-TEXT keypad keys (NumLock-off navigation + NumpadEnter) get dedicated

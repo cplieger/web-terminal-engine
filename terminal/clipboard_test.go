@@ -3,6 +3,8 @@ package terminal
 import (
 	"encoding/binary"
 	"testing"
+
+	"github.com/coder/websocket"
 )
 
 // TestOSC52ClipboardFrame verifies the handler drains an OSC 52 clipboard copy
@@ -13,12 +15,13 @@ import (
 func TestOSC52ClipboardFrame(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"})
 
+	h.registry.Add(&websocket.Conn{})                 // attached client: the render path, not zero-client suspension
 	h.handlePTYData([]byte("\x1b]52;c;aGVsbG8=\x07")) // base64("hello")
 	if got := string(h.pendingClipboard); got != "hello" {
 		t.Fatalf("handlePTYData did not stage clipboard: got %q, want hello", got)
 	}
 
-	frame := h.buildFrame()
+	frame, _ := h.buildFrame()
 	if frame == nil {
 		t.Fatal("buildFrame returned nil; a clipboard event must synthesize a frame")
 	}
@@ -50,7 +53,8 @@ func TestOSC4ForcesRepaintPending(t *testing.T) {
 		t.Fatal("OSC 4 must set paletteChangedPending")
 	}
 
-	_ = h.buildFrame()
+	h.registry.Add(&websocket.Conn{}) // attached client: the render path, not zero-client suspension
+	_, _ = h.buildFrame()
 	if h.paletteChangedPending {
 		t.Error("buildFrame should have consumed paletteChangedPending")
 	}

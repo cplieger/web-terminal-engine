@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 )
 
 // FuzzScrollbackRing_replayMatchesModel is a model-based oracle for the

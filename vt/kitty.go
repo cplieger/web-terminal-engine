@@ -88,7 +88,7 @@ func (s *Screen) KeyboardFlags() uint8 {
 // screen contents), so a probing app that also requests device attributes gets
 // the reply before the DA answer and thus detects protocol support.
 func (s *Screen) reportKeyboardFlags() {
-	s.Response = fmt.Appendf(s.Response, "\x1b[?%du", s.activeKbd().flags)
+	s.response = fmt.Appendf(s.response, "\x1b[?%du", s.activeKbd().flags)
 }
 
 // pushKeyboardFlags implements CSI > flags u: save the current flags onto the

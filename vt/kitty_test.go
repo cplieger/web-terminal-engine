@@ -8,10 +8,10 @@ import (
 // queryKbd issues the kitty query CSI ? u and returns the reply, clearing the
 // response buffer before and after so each call reads only its own answer.
 func queryKbd(s *Screen) string {
-	s.Response = s.Response[:0]
+	s.response = s.response[:0]
 	s.Write([]byte("\x1b[?u"))
-	out := string(s.Response)
-	s.Response = s.Response[:0]
+	out := string(s.response)
+	s.response = s.response[:0]
 	return out
 }
 
@@ -156,10 +156,10 @@ func TestKittyRISResets(t *testing.T) {
 func TestKittyQueryPrecedesDA(t *testing.T) {
 	s := New(5, 20)
 	s.Write([]byte("\x1b[=1;1u"))
-	s.Response = s.Response[:0]
+	s.response = s.response[:0]
 	s.Write([]byte("\x1b[?u")) // query
 	s.Write([]byte("\x1b[c"))  // primary DA
-	got := string(s.Response)
+	got := string(s.response)
 	if !strings.HasPrefix(got, "\x1b[?1u") {
 		t.Errorf("combined response = %q, want it to start with the kitty reply CSI ?1u", got)
 	}

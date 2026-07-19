@@ -82,30 +82,83 @@ func (m *SessionManager) sweepLoop(ctx context.Context) {
 	}
 }
 
-// diffStatuses recomputes every session's status under the manager lock and
-// returns the events for sessions whose status, effective title, raw client
-// title, or reported activity changed since the last sweep, plus removed events
-// for sessions that vanished. Broadcasting happens outside the lock (see
-// sweepLoop).
+// statusRaw carries one session's handler-derived status inputs, read in
+// diffStatuses's lock-free phase (each getter takes only that handler's h.mu).
+type statusRaw struct {
+	createdAt time.Time
+	handler   *Handler
+	tr        *statusTracker
+	id        string
+	notifMsg  string
+	oscTitle  string
+	notifSeq  uint64
+	progress  int
+	exited    bool
+}
+
+// read fills the handler-derived fields (diffStatuses phase 2). It takes only
+// the handler's own locks — never the manager's.
+func (it *statusRaw) read() {
+	it.exited = it.handler.Exited()
+	it.progress = it.handler.Progress()
+	it.notifMsg, it.notifSeq = it.handler.Notification()
+	it.oscTitle = it.handler.Title()
+}
+
+// diffStatuses recomputes every session's status and returns the events for
+// sessions whose status, effective title, raw client title, or reported
+// activity changed since the last sweep, plus removed events for sessions that
+// vanished. Broadcasting happens outside the lock (see sweepLoop).
+//
+// It runs in three phases so the manager lock is never held across handler
+// getters: each getter takes that handler's h.mu, and one wedged handler under
+// m.mu would stall every manager path (List, create/close, snapshot) for as
+// long as the handler stays stuck — 4×/s, forever. Phase 1 snapshots the
+// session set under m.mu; phase 2 reads each handler's inputs with no manager
+// lock (a stuck handler now stalls only the sweep goroutine); phase 3 re-takes
+// m.mu to run the tracker state machine and change detection (snapshot() reads
+// tracker fields under m.mu, so mutating them outside would race). A session
+// closed between phases is skipped in phase 3 and emits its removed event in
+// the same sweep; one added between phases is picked up next sweep (250ms).
 func (m *SessionManager) diffStatuses() []statusEvent {
-	var events []statusEvent
+	// Phase 1: snapshot sessions + tracker refs under m.mu. No handler calls.
 	m.mu.Lock()
-	seen := make(map[string]struct{}, len(m.sessions))
+	items := make([]statusRaw, 0, len(m.sessions))
 	for id, s := range m.sessions {
-		seen[id] = struct{}{}
 		tr := m.trackers[id]
 		if tr == nil {
 			tr = &statusTracker{}
 			m.trackers[id] = tr
 		}
-		status := m.computeStatus(s.handler, tr)
-		title := effectiveTitle(s)
+		items = append(items, statusRaw{id: id, createdAt: s.createdAt, handler: s.handler, tr: tr})
+	}
+	m.mu.Unlock()
+
+	// Phase 2: read handler inputs lock-free (per-handler h.mu only).
+	for i := range items {
+		items[i].read()
+	}
+
+	// Phase 3: tracker state machine + change detection under m.mu.
+	var events []statusEvent
+	m.mu.Lock()
+	for i := range items {
+		it := &items[i]
+		s, live := m.sessions[it.id]
+		if !live {
+			continue // closed while computing; the removed sweep below emits it
+		}
+		tr := it.tr
+		status := m.computeStatus(it, tr)
+		// The client title is re-read under m.mu — a PUT /title during phase 2
+		// must not be masked by the phase-1 capture.
 		clientTitle := s.clientTitle
+		title := effectiveTitle(it.oscTitle, clientTitle)
 		// reportsActivity is sticky: Progress() stays >= 0 once any OSC 9;4 has
 		// been seen (state 0 is "cleared", not "never seen" = -1), and a latched
 		// notification is the other genuine OSC 9 signal. The client reveals the
 		// tab's activity dot only when this is set.
-		reports := s.handler.Progress() >= 0 || tr.latched != ""
+		reports := it.progress >= 0 || tr.latched != ""
 		// Emit on a raw client-title change too: a PUT /title can change only the
 		// client title (OSC title and status unchanged), and a consumer reading
 		// clientTitle directly needs that pushed even when the effective title is
@@ -115,11 +168,11 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 			tr.lastTitle = title
 			tr.lastClientTitle = clientTitle
 			tr.lastReports = reports
-			events = append(events, statusEvent{ID: id, Status: status, Title: title, ClientTitle: clientTitle, CreatedAt: s.createdAt, ReportsActivity: reports})
+			events = append(events, statusEvent{ID: it.id, Status: status, Title: title, ClientTitle: clientTitle, CreatedAt: it.createdAt, ReportsActivity: reports})
 		}
 	}
 	for id, tr := range m.trackers {
-		if _, ok := seen[id]; !ok {
+		if _, ok := m.sessions[id]; !ok {
 			delete(m.trackers, id)
 			events = append(events, statusEvent{ID: id, Status: StatusExited, Title: tr.lastTitle, Removed: true, ReportsActivity: tr.lastReports})
 		}
@@ -128,24 +181,24 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 	return events
 }
 
-// computeStatus derives a session's status. Callers hold m.mu (it reads the
-// handler and mutates the tracker's latch state). Precedence: exited, then
+// computeStatus derives a session's status from the handler inputs captured in
+// diffStatuses's lock-free phase. Callers hold m.mu (it mutates the tracker's
+// latch state, which snapshot() reads under m.mu). Precedence: exited, then
 // working (OSC 9;4 progress active), then a latched notification state
 // (needs-input or done), then idle (the default / new-session / at-rest state).
 // Working comes ONLY from OSC 9;4 progress — never from raw output activity — so
 // a program that reports no progress never flaps to working merely because the
 // user is typing at its prompt (the reveal gate then keeps its dot hidden).
-func (m *SessionManager) computeStatus(h *Handler, tr *statusTracker) string {
-	if h.Exited() {
+func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) string {
+	if in.exited {
 		return StatusExited
 	}
-	m.applyNotification(h, tr)
+	m.applyNotification(in, tr)
 	// A progress-reporting program (kiro-cli, Claude Code) drives working from
 	// its OSC 9;4 progress: an active state (1 value, 3 indeterminate) means the
 	// agent is working. A new working phase supersedes a prior done/needs-input
 	// latch.
-	prog := h.Progress()
-	if prog == 1 || prog == 3 {
+	if in.progress == 1 || in.progress == 3 {
 		tr.latched = ""
 		return StatusWorking
 	}
@@ -161,16 +214,15 @@ func (m *SessionManager) computeStatus(h *Handler, tr *statusTracker) string {
 // via the consumer's classifier, if any. The classified state (StatusInput or
 // StatusDone) is latched; it persists until the next working phase clears it
 // (see computeStatus). An unclassified message leaves the latch unchanged.
-func (m *SessionManager) applyNotification(h *Handler, tr *statusTracker) {
+func (m *SessionManager) applyNotification(in *statusRaw, tr *statusTracker) {
 	if m.classifier == nil {
 		return
 	}
-	msg, seq := h.Notification()
-	if seq <= tr.notifSeen {
+	if in.notifSeq <= tr.notifSeen {
 		return
 	}
-	tr.notifSeen = seq
-	if cls, ok := m.classifier(msg); ok {
+	tr.notifSeen = in.notifSeq
+	if cls, ok := m.classifier(in.notifMsg); ok {
 		tr.latched = cls
 	}
 }
@@ -220,18 +272,42 @@ func (m *SessionManager) unsubscribe(ch chan statusEvent) {
 // snapshot returns the current status of every session for the initial sync a
 // new subscriber receives, using the tracker's computed status when available
 // (else the coarse liveness status).
+//
+// Two-phase like diffStatuses and List: manager state under m.mu, handler
+// getters (Exited/Progress/Title, each taking h.mu) after it is released.
 func (m *SessionManager) snapshot() []statusEvent {
+	type snapItem struct {
+		lastStatus string
+		handler    *Handler
+		ev         statusEvent
+		latched    bool
+	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]statusEvent, 0, len(m.sessions))
+	items := make([]snapItem, 0, len(m.sessions))
 	for id, s := range m.sessions {
-		status := statusOf(s.handler)
 		tr := m.trackers[id]
-		if tr != nil && tr.lastStatus != "" {
-			status = tr.lastStatus
+		it := snapItem{
+			ev:      statusEvent{ID: id, ClientTitle: s.clientTitle, CreatedAt: s.createdAt},
+			handler: s.handler,
 		}
-		reports := s.handler.Progress() >= 0 || (tr != nil && tr.latched != "")
-		out = append(out, statusEvent{ID: id, Status: status, Title: effectiveTitle(s), ClientTitle: s.clientTitle, CreatedAt: s.createdAt, ReportsActivity: reports})
+		if tr != nil {
+			it.lastStatus = tr.lastStatus
+			it.latched = tr.latched != ""
+		}
+		items = append(items, it)
+	}
+	m.mu.Unlock()
+
+	out := make([]statusEvent, 0, len(items))
+	for i := range items {
+		it := &items[i]
+		it.ev.Status = it.lastStatus
+		if it.ev.Status == "" {
+			it.ev.Status = statusOf(it.handler)
+		}
+		it.ev.Title = effectiveTitle(it.handler.Title(), it.ev.ClientTitle)
+		it.ev.ReportsActivity = it.handler.Progress() >= 0 || it.latched
+		out = append(out, it.ev)
 	}
 	return out
 }

@@ -22,8 +22,11 @@ import {
   init,
   reconnectNow,
   sendBinary,
+  sendResize,
   setSession,
 } from "./connection.js";
+import * as modes from "./modes.js";
+import { mapKeyboardEvent } from "./keyboard.js";
 import type { ServerMessage } from "./types.js";
 
 interface MockWS {
@@ -184,8 +187,18 @@ describe("connection: a socket superseded by a reconnect delivers no duplicate m
     vi.unstubAllGlobals();
   });
 
-  function titleFrame(title: string): string {
-    return JSON.stringify({ type: "title", title });
+  // Binary title frame ([1B type=4][8B ack][2B len][utf8 title]) mirroring
+  // encodeTitleMsg — the server-sent text-JSON form no longer exists (the
+  // dormant unvalidated string branch was removed 2026-07).
+  function titleFrame(title: string): ArrayBuffer {
+    const body = new TextEncoder().encode(title);
+    const buf = new ArrayBuffer(11 + body.length);
+    const v = new DataView(buf);
+    v.setUint8(0, 4); // MSG_TITLE
+    v.setBigUint64(1, 0n, true);
+    v.setUint16(9, body.length, true);
+    new Uint8Array(buf).set(body, 11);
+    return buf;
   }
 
   it("reconnecting while still connecting orphans the first socket so its late frames are ignored", () => {
@@ -385,8 +398,19 @@ describe("connection: per-session resume state (tab switch)", () => {
     serverEpoch?: number;
     committed?: number;
     oldestIndex?: number;
-  }): string {
-    return JSON.stringify({ type: "resumeAck", ...fields });
+  }): ArrayBuffer {
+    // Binary resumeAck (33-byte pre-tail form) mirroring encodeResumeAck; the
+    // server-sent text-JSON form no longer exists (dormant branch removed
+    // 2026-07). serverEpoch 0 = "absent" (skips restart detection), matching
+    // the epoch-gating in handleDecoded.
+    const buf = new ArrayBuffer(33);
+    const v = new DataView(buf);
+    v.setUint8(0, 2); // MSG_RESUME_ACK
+    v.setBigUint64(1, BigInt(fields.received), true);
+    v.setBigUint64(9, BigInt(fields.serverEpoch ?? 0), true);
+    v.setBigUint64(17, BigInt(fields.committed ?? 0), true);
+    v.setBigUint64(25, BigInt(fields.oldestIndex ?? 0), true);
+    return buf;
   }
 
   // The non-control (raw input) frames a socket was asked to send.
@@ -400,16 +424,50 @@ describe("connection: per-session resume state (tab switch)", () => {
   // to stay isolated rather than relying on a reset that the module does not
   // expose.
 
-  it("routes the socket to ?session=<id> and resumes with that id", () => {
+  it("routes the socket to ?session=<id> and resumes with a per-sender key derived from it", () => {
     setSession("route-A");
     const sock = allMockWebSockets[0]!;
+    // The URL carries the BARE routing id (the server routes on it)...
     expect(sock.url).toContain("session=route-A");
+    expect(sock.url).not.toContain("#");
 
     sock.fireOpen();
     const resume = controlFramesSent(sock).find((m) => m.type === "resume");
     expect(resume).toBeDefined();
-    expect(resume!.sessionId).toBe("route-A");
+    // ...while the resume frame carries the per-sender ledger key (P1):
+    // routing id + "#" + a crypto-random per-client instance id, so two
+    // devices on one session never share a server-side bytesReceived ledger
+    // (a shared ledger acked device B's bytes to device A, whose applyAck
+    // then trimmed unacked bytes the server never got from A).
+    expect(resume!.sessionId).toMatch(/^route-A#[0-9a-f-]{16,}$/);
+    expect(resume!.sessionId).not.toBe("route-A");
     expect(resume!.sentBytes).toBe(0);
+  });
+
+  it("keeps ONE instance id for the page lifetime (stable across sessions and reconnects)", () => {
+    setSession("stable-A");
+    allMockWebSockets.at(-1)!.fireOpen();
+    const keyA = controlFramesSent(allMockWebSockets.at(-1)!).find((m) => m.type === "resume")!
+      .sessionId as string;
+
+    setSession("stable-B");
+    allMockWebSockets.at(-1)!.fireOpen();
+    const keyB = controlFramesSent(allMockWebSockets.at(-1)!).find((m) => m.type === "resume")!
+      .sessionId as string;
+
+    reconnectNow();
+    allMockWebSockets.at(-1)!.fireOpen();
+    const keyB2 = controlFramesSent(allMockWebSockets.at(-1)!).find((m) => m.type === "resume")!
+      .sessionId as string;
+
+    const instanceOf = (k: string): string => k.slice(k.indexOf("#") + 1);
+    // Same page = same sender: the instance suffix is identical everywhere
+    // (the server-side ledger key changes only with the session), and a
+    // reconnect resumes the SAME ledger rather than minting a new one.
+    expect(instanceOf(keyA)).toBe(instanceOf(keyB));
+    expect(keyB2).toBe(keyB);
+    expect(keyA.startsWith("stable-A#")).toBe(true);
+    expect(keyB.startsWith("stable-B#")).toBe(true);
   });
 
   it("does not replay session A's unacked bytes onto session B after a switch", () => {
@@ -429,7 +487,7 @@ describe("connection: per-session resume state (tab switch)", () => {
     // B resumes with ITS OWN counters (0 sent), and its socket never receives
     // A's queued input — no cross-tab replay.
     const resumeB = controlFramesSent(b).find((m) => m.type === "resume");
-    expect(resumeB!.sessionId).toBe("noreplay-B");
+    expect(resumeB!.sessionId).toMatch(/^noreplay-B#/); // per-sender key (P1)
     expect(resumeB!.sentBytes).toBe(0);
     expect(rawInputSends(b).length).toBe(0);
   });
@@ -669,5 +727,615 @@ describe("connection: a process-exited close (4001) is definitive, not transient
     expect(allMockWebSockets.length).toBe(2);
     const again = allMockWebSockets[1]!;
     expect(again.url).toContain("session=procexit-D");
+  });
+
+  it("routes an unknown-session close (4004) to the same definitive path as 4001", () => {
+    // The server accepts a WS to an id it does not know and closes 4004
+    // (statusUnknownSession) precisely so the client can READ the reason (a
+    // pre-upgrade 404 is an opaque 1006). Reconnecting can only earn another
+    // 4004, so it must take the ended path, never the backoff loop.
+    initWith({ withProcessExit: true });
+    setSession("unknown-A");
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+
+    sock.fireClose(4004);
+
+    expect(onProcessExit).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(60_000);
+    expect(allMockWebSockets.length).toBe(1);
+  });
+});
+
+describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface", () => {
+  // Pins the resume-reliability additions from the session-transport /
+  // wire-protocol judgement portfolio (P5 + P8): an explicit resumeAck
+  // ledgerLost flag replaces the client-side guess for the bytesAcked === 0
+  // duplicate-replay branch (drop-and-notify, never replay), a bare ackOnly
+  // frame trims the outbox when input produced no output frame, and the
+  // resumeAck's serverWireVersion tail surfaces a protocol skew through
+  // onWireVersionMismatch. Frames are hand-built byte-mirrors of the Go
+  // encoders (wire-golden.test.ts pins the exact cross-language bytes).
+  let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
+  let onServerRestart: ReturnType<typeof vi.fn<() => void>>;
+  let onWireVersionMismatch: ReturnType<typeof vi.fn<(server: number, client: number) => void>>;
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    onMessage = vi.fn<(msg: ServerMessage) => void>();
+    onServerRestart = vi.fn<() => void>();
+    onWireVersionMismatch = vi.fn<(server: number, client: number) => void>();
+    init({
+      onMessage,
+      onServerRestart,
+      onWireVersionMismatch,
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose: () => {
+        /* no-op */
+      },
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+  });
+
+  afterEach(() => {
+    disconnect();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  // resumeAck frame bytes, mirroring encodeResumeAck (wire_binary.go).
+  // 33-byte form = pre-tail server; 35-byte form adds serverWireVersion +
+  // ackFlags (bit0 = ledgerLost). epoch defaults to 0 so the restart
+  // detector stays out of these tests' way.
+  function resumeAckFrame(opts: {
+    received: number;
+    version?: number;
+    ledgerLost?: boolean;
+    legacy33?: boolean;
+  }): ArrayBuffer {
+    const len = opts.legacy33 ? 33 : 35;
+    const buf = new ArrayBuffer(len);
+    const v = new DataView(buf);
+    v.setUint8(0, 2); // MSG_RESUME_ACK
+    v.setBigUint64(1, BigInt(opts.received), true);
+    v.setBigUint64(9, 0n, true); // serverEpoch: 0 = skip restart detection
+    v.setBigUint64(17, 0n, true); // committed
+    v.setBigUint64(25, 0n, true); // oldestIndex
+    if (!opts.legacy33) {
+      v.setUint8(33, opts.version ?? 3);
+      v.setUint8(34, opts.ledgerLost ? 1 : 0);
+    }
+    return buf;
+  }
+
+  // ackOnly frame bytes, mirroring encodeAckOnly: [1B type=7][8B ack].
+  function ackOnlyFrame(ack: number): ArrayBuffer {
+    const buf = new ArrayBuffer(9);
+    const v = new DataView(buf);
+    v.setUint8(0, 7); // MSG_ACK_ONLY
+    v.setBigUint64(1, BigInt(ack), true);
+    return buf;
+  }
+
+  // Raw (non-control) frames handed to sock.send — i.e. PTY input bytes,
+  // including retransmitOutbox replays. Control frames start with 0x00.
+  function rawInputSends(sock: MockWS): Uint8Array[] {
+    const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const out: Uint8Array[] = [];
+    for (const c of calls) {
+      const a = c[0];
+      const bytes =
+        a instanceof Uint8Array ? a : a instanceof ArrayBuffer ? new Uint8Array(a) : null;
+      if (bytes && bytes.length > 0 && bytes[0] !== 0x00) {
+        out.push(bytes);
+      }
+    }
+    return out;
+  }
+
+  it("ledgerLost resumeAck drops the unacked outbox (no duplicate replay) and notifies", () => {
+    setSession(generateSessionId()); // opens a socket via reconnectNow
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    sendBinary(new Uint8Array([1, 2, 3])); // applied by the server, never acked
+
+    // Reconnect: the resume claims sentBytes=3; the server's ledger is gone
+    // (idle GC) and says so explicitly.
+    reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    expect(second).not.toBe(first);
+    second.fireOpen();
+    expect(controlFramesSent(second).at(-1)?.sentBytes).toBe(3);
+
+    second.fireMessage(resumeAckFrame({ received: 0, ledgerLost: true }));
+
+    expect(rawInputSends(second)).toEqual([]); // outbox dropped, NOT replayed
+    expect(onServerRestart).toHaveBeenCalledTimes(1); // drop-and-notify
+  });
+
+  it("a clear ledgerLost flag keeps the legacy in-transit-loss replay (received=0, bytesAcked=0)", () => {
+    setSession(generateSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    sendBinary(new Uint8Array([1, 2, 3])); // lost in transit, never applied
+
+    reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    second.fireMessage(resumeAckFrame({ received: 0, ledgerLost: false }));
+
+    // Key hit with a genuinely-zero ledger: replay is CORRECT and must survive.
+    expect(rawInputSends(second).map((b) => Array.from(b))).toEqual([[1, 2, 3]]);
+    expect(onServerRestart).not.toHaveBeenCalled();
+  });
+
+  it("ackOnly trims the outbox so a later reconnect retransmits nothing", () => {
+    setSession(generateSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    sendBinary(new Uint8Array([1, 2, 3]));
+
+    first.fireMessage(ackOnlyFrame(3)); // quiet-input ack (no content frame)
+    expect(onMessage).not.toHaveBeenCalled(); // transport-internal, not forwarded
+
+    reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    second.fireMessage(resumeAckFrame({ received: 3 }));
+
+    expect(rawInputSends(second)).toEqual([]); // nothing unacked to replay
+    expect(onServerRestart).not.toHaveBeenCalled();
+  });
+
+  it("warns on a future server revision but keeps the socket usable", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      /* silence */
+    });
+    setSession(generateSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+
+    sock.fireMessage(resumeAckFrame({ received: 0, version: 99 }));
+    expect(onWireVersionMismatch).toHaveBeenCalledWith(99, 4);
+    expect(warn).toHaveBeenCalled();
+    expect(sock.close).not.toHaveBeenCalled();
+
+    // Supported-range servers (v3 sentinel peer, v4 current) are normal
+    // pairings and produce no mismatch noise.
+    onWireVersionMismatch.mockClear();
+    sock.fireMessage(resumeAckFrame({ received: 0, version: 3 }));
+    expect(onWireVersionMismatch).not.toHaveBeenCalled();
+    sock.fireMessage(resumeAckFrame({ received: 0, version: 4 }));
+    expect(onWireVersionMismatch).not.toHaveBeenCalled();
+
+    // Version-silent old server (33-byte resumeAck, no tail): tolerated.
+    sock.fireMessage(resumeAckFrame({ received: 0, legacy33: true }));
+    expect(onWireVersionMismatch).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it("refuses an explicit below-floor server revision and blocks reconnects", () => {
+    const onWireIncompatible = vi.fn();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {
+      /* silence */
+    });
+    init({
+      onMessage,
+      onServerRestart,
+      onWireVersionMismatch,
+      onWireIncompatible,
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose: () => {
+        /* no-op */
+      },
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+    setSession(generateSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+
+    sock.fireMessage(resumeAckFrame({ received: 0, version: 2 }));
+
+    expect(onWireVersionMismatch).toHaveBeenCalledWith(2, 4);
+    expect(onWireIncompatible).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: "server-version",
+        serverVersion: 2,
+        clientVersion: 4,
+        minimumServerVersion: 3,
+      }),
+    );
+    expect(sock.close).toHaveBeenCalledWith(4002, expect.stringContaining("upgrade the server"));
+    vi.advanceTimersByTime(60_000);
+    reconnectNow(); // wake/manual reconnect cannot bypass the terminal state
+    expect(allMockWebSockets).toHaveLength(1);
+    warn.mockRestore();
+  });
+
+  it("treats a server 4002 rejection as definitive and surfaces incompatibility", () => {
+    const onClose = vi.fn();
+    const onWireIncompatible = vi.fn();
+    init({
+      onMessage,
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose,
+      onWireIncompatible,
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+    setSession(generateSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+
+    sock.fireClose(4002);
+
+    expect(onWireIncompatible).toHaveBeenCalledWith(
+      expect.objectContaining({ source: "server-close", clientVersion: 4 }),
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(60_000);
+    reconnectNow();
+    expect(allMockWebSockets).toHaveLength(1);
+  });
+});
+
+describe("connection: v4 typed-framing negotiation (docs/wire-v4-typed-framing.md)", () => {
+  // Pins the client half of the three-phase handshake: binary bootstrap
+  // resume first on every socket (F4), text `upgrade` as the FIRST message
+  // after proof and before any retransmit (F1), text controls only after
+  // upgrade, v3 mode against old servers, per-socket state (fresh sockets
+  // re-bootstrap), the stale-Blob guard (F2), and the single input encoder
+  // (F5: v3-mode leading-NUL split vs v4 verbatim).
+  let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
+  let onServerRestart: ReturnType<typeof vi.fn<() => void>>;
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    onMessage = vi.fn<(msg: ServerMessage) => void>();
+    onServerRestart = vi.fn<() => void>();
+    init({
+      onMessage,
+      onServerRestart,
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose: () => {
+        /* no-op */
+      },
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+  });
+
+  afterEach(() => {
+    disconnect();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function resumeAckV4(received = 0): ArrayBuffer {
+    const buf = new ArrayBuffer(35);
+    const v = new DataView(buf);
+    v.setUint8(0, 2);
+    v.setBigUint64(1, BigInt(received), true);
+    v.setBigUint64(9, 0n, true);
+    v.setBigUint64(17, 0n, true);
+    v.setBigUint64(25, 0n, true);
+    v.setUint8(33, 4); // serverWireVersion = 4 (proof)
+    v.setUint8(34, 0);
+    return buf;
+  }
+
+  function resumeAckV3(received = 0): ArrayBuffer {
+    const buf = new ArrayBuffer(33); // tail-absent old server
+    const v = new DataView(buf);
+    v.setUint8(0, 2);
+    v.setBigUint64(1, BigInt(received), true);
+    v.setBigUint64(9, 0n, true);
+    v.setBigUint64(17, 0n, true);
+    v.setBigUint64(25, 0n, true);
+    return buf;
+  }
+
+  // All sends on a socket, classified: "text" (string), "control" (binary
+  // 0x00-sentinel), or "input" (other binary).
+  function sendLog(sock: MockWS): { kind: string; text?: string; bytes?: number[] }[] {
+    const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return calls.map((c) => {
+      const a = c[0];
+      if (typeof a === "string") {
+        return { kind: "text", text: a };
+      }
+      const bytes =
+        a instanceof Uint8Array ? a : a instanceof ArrayBuffer ? new Uint8Array(a) : null;
+      if (!bytes) {
+        return { kind: "other" };
+      }
+      // A binary frame is a v3 control iff 0x00 + valid control JSON — first
+      // byte alone cannot distinguish it from v4 full-alphabet input (that
+      // ambiguity is exactly what the typed migration removes), so classify
+      // by parseability like the server's fallback does.
+      if (bytes.length > 1 && bytes[0] === 0x00) {
+        try {
+          JSON.parse(new TextDecoder().decode(bytes.subarray(1)));
+          return { kind: "control", bytes: Array.from(bytes) };
+        } catch {
+          // fall through: 0x00-leading input (e.g. the P2 fallback class)
+        }
+      }
+      return { kind: "input", bytes: Array.from(bytes) };
+    });
+  }
+
+  it("bootstrap resume is message one even when onOpen sends immediately", () => {
+    init({
+      onMessage,
+      onOpen: () => {
+        sendResize();
+        sendBinary(new Uint8Array([65]));
+      },
+      onClose: () => {
+        /* no-op */
+      },
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+    setSession(generateSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+
+    const first = controlFramesSent(sock)[0];
+    expect(first?.type).toBe("resume");
+    const log = sendLog(sock);
+    expect(log[0]?.kind).toBe("control"); // the binary bootstrap resume
+  });
+
+  it("upgrades on v4 proof: text upgrade precedes the retransmit, later controls are text", () => {
+    setSession(generateSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sendBinary(new Uint8Array([1, 2, 3])); // unacked at proof time
+
+    const sendsBefore = sendLog(sock).length;
+    sock.fireMessage(resumeAckV4(0));
+
+    const after = sendLog(sock).slice(sendsBefore);
+    expect(after[0]?.kind).toBe("text"); // the upgrade transition, FIRST
+    expect(JSON.parse(after[0]!.text!)).toEqual({ type: "upgrade" });
+    expect(after[1]?.kind).toBe("input"); // retransmit follows the latch
+    expect(after[1]?.bytes).toEqual([1, 2, 3]);
+
+    sendResize();
+    const last = sendLog(sock).at(-1)!;
+    expect(last.kind).toBe("text");
+    expect((JSON.parse(last.text!) as { type: string }).type).toBe("resize");
+  });
+
+  it("stays in v3 mode against old servers (tail-absent resumeAck)", () => {
+    setSession(generateSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sock.fireMessage(resumeAckV3(0));
+
+    sendResize();
+    const last = sendLog(sock).at(-1)!;
+    expect(last.kind).toBe("control"); // still binary sentinel
+    expect(sendLog(sock).some((s) => s.kind === "text")).toBe(false);
+  });
+
+  it("a fresh socket re-bootstraps in v3 mode after an upgraded one", () => {
+    setSession(generateSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    first.fireMessage(resumeAckV4(0));
+    expect(sendLog(first).some((s) => s.kind === "text")).toBe(true); // upgraded
+
+    reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    const log = sendLog(second);
+    expect(log[0]?.kind).toBe("control"); // binary bootstrap again
+    sendResize();
+    expect(sendLog(second).at(-1)?.kind).toBe("control"); // no proof yet → binary
+  });
+
+  it("v3-mode input splits leading NULs; upgraded input goes verbatim", () => {
+    setSession(generateSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+
+    // v3 mode (no proof yet): leading NULs go out as solitary frames.
+    sendBinary(new Uint8Array([0, 0, 65]));
+    let inputs = sendLog(sock).filter((s) => s.kind === "input");
+    expect(inputs.map((s) => s.bytes)).toEqual([[0], [0], [65]]);
+
+    // Upgrade, then the same bytes go out as ONE full-alphabet frame.
+    sock.fireMessage(resumeAckV4(3)); // acks the 3 bytes already sent
+    sendBinary(new Uint8Array([0, 66]));
+    inputs = sendLog(sock).filter((s) => s.kind === "input");
+    expect(inputs.at(-1)?.bytes).toEqual([0, 66]);
+  });
+
+  it("v3 reconnect replay splits a leading-NUL chunk (the F5 regression)", () => {
+    // The original F5 defect class: replay bypassing the live-send encoder.
+    // A leading-NUL chunk left unacked across a reconnect to a v3 server
+    // (tail-absent resumeAck) must be retransmitted SPLIT — solitary [0]
+    // then [65] — with no text frame anywhere on the socket.
+    setSession(generateSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    sendBinary(new Uint8Array([0, 65]));
+
+    reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    second.fireMessage(resumeAckV3(0)); // old server: no proof, no upgrade
+
+    const log = sendLog(second);
+    expect(log.some((s) => s.kind === "text")).toBe(false);
+    expect(log.filter((s) => s.kind === "input").map((s) => s.bytes)).toEqual([[0], [65]]);
+  });
+
+  it("retransmit uses the socket's framing mode (split in v3, verbatim after upgrade)", () => {
+    setSession(generateSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    sendBinary(new Uint8Array([0, 65])); // v3 mode live send: split into [0],[65]
+
+    // Reconnect to a v4 server with the chunk still unacked: the retransmit
+    // happens AFTER the upgrade, so it goes out verbatim as one frame.
+    reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    second.fireMessage(resumeAckV4(0));
+    const log = sendLog(second);
+    const firstText = log.findIndex((s) => s.kind === "text");
+    const firstInput = log.findIndex((s) => s.kind === "input");
+    expect(firstText).toBeGreaterThanOrEqual(0);
+    expect(firstInput).toBeGreaterThan(firstText); // latch precedes retransmit
+    expect(log[firstInput]?.bytes).toEqual([0, 65]); // verbatim, not split
+  });
+
+  it("a stale Blob resumeAck from a superseded socket cannot upgrade or retransmit on the new one", async () => {
+    vi.useRealTimers(); // Blob.arrayBuffer() is a real microtask hop
+    setSession(generateSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    sendBinary(new Uint8Array([1, 2, 3]));
+
+    // Deliver the proof as a Blob (iOS path) and supersede the socket before
+    // the async conversion resolves.
+    first.fireMessage(new Blob([new Uint8Array(resumeAckV4(0))]));
+    reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+
+    await new Promise((r) => setTimeout(r, 10)); // let the Blob chain drain
+
+    // The stale proof must not have upgraded the NEW socket…
+    sendResize();
+    expect(sendLog(second).at(-1)?.kind).toBe("control");
+    // …nor triggered a retransmit on it (only the bootstrap resume + resize).
+    expect(sendLog(second).filter((s) => s.kind === "input")).toEqual([]);
+    expect(onServerRestart).not.toHaveBeenCalled();
+  });
+});
+
+describe("connection: per-session DEC-mode mirror (P3)", () => {
+  // Mode state was page-global while every neighboring state was
+  // session-scoped: a keystroke in the tab-switch window encoded under the
+  // OLD session's modes (vim's DECCKM arrows bleeding into a shell tab, wrong
+  // paste bracketing, stale kitty flags) and was delivered to the NEW
+  // session's outbox. setSession now restores the target's cached snapshot
+  // synchronously; these tests drive the full path a real switch takes:
+  // binary modes frames in, keyboard encoding out.
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    init({
+      onMessage: vi.fn(),
+      onOpen: () => {
+        /* no-op */
+      },
+      onClose: () => {
+        /* no-op */
+      },
+      computeSize: () => ({ cols: 80, rows: 24 }),
+    });
+  });
+
+  afterEach(() => {
+    disconnect();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+    // Leave the shared modes singleton at power-on for later test files
+    // (vitest isolate:false).
+    modes.applySnapshot(modes.POWER_ON_MODES);
+  });
+
+  // Binary MSG_MODES frame mirroring wire_binary.go: type(1) + inputAck(8) +
+  // flags(1) + mouseMode(2) + kbdFlags(1).
+  function modesFrame(fields: {
+    bracketed?: boolean;
+    appCursor?: boolean;
+    kbdFlags?: number;
+    mouseMode?: number;
+  }): ArrayBuffer {
+    const buf = new ArrayBuffer(13);
+    const v = new DataView(buf);
+    v.setUint8(0, 3); // MSG_MODES
+    v.setBigUint64(1, 0n, true);
+    let flags = 0;
+    if (fields.bracketed ?? false) {
+      flags |= 1;
+    }
+    if (fields.appCursor ?? false) {
+      flags |= 2;
+    }
+    v.setUint8(9, flags);
+    v.setUint16(10, fields.mouseMode ?? 0, true);
+    v.setUint8(12, fields.kbdFlags ?? 0);
+    return buf;
+  }
+
+  it("a keydown in the switch window encodes under the TARGET session's modes, never the old tab's", () => {
+    // Session A announces DECCKM + kitty disambiguate (a vim-like app).
+    setSession("modes-A");
+    const a = allMockWebSockets.at(-1)!;
+    a.fireOpen();
+    a.fireMessage(modesFrame({ bracketed: true, appCursor: true, kbdFlags: 1 }));
+    expect(modes.isApplicationCursor()).toBe(true);
+    expect(modes.getKeyboardFlags()).toBe(1);
+
+    // Switch to a session the page has never seen: SYNCHRONOUSLY at power-on
+    // defaults — an ArrowUp fired before B's modes frame arrives encodes as
+    // legacy CSI A, not A's SS3/kitty form.
+    setSession("modes-B");
+    expect(modes.isApplicationCursor()).toBe(false);
+    expect(modes.getKeyboardFlags()).toBe(0);
+    const up = mapKeyboardEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }), modes);
+    expect(up).toEqual({ kind: "send", bytes: "\x1b[A" });
+
+    // B announces its own modes (mouse tracking, no DECCKM).
+    allMockWebSockets.at(-1)!.fireOpen();
+    allMockWebSockets.at(-1)!.fireMessage(modesFrame({ bracketed: true, mouseMode: 1000 }));
+    expect(modes.getMouseMode()).toBe(1000);
+
+    // Switching BACK to A restores A's snapshot synchronously: the same
+    // ArrowUp now encodes under A's DECCKM... except kitty disambiguate
+    // supersedes it (CSI form) — exactly what A's live encoder did.
+    setSession("modes-A");
+    expect(modes.isApplicationCursor()).toBe(true);
+    expect(modes.getKeyboardFlags()).toBe(1);
+    expect(modes.getMouseMode()).toBe(0); // B's mouse mode did not bleed into A
+    const upOnA = mapKeyboardEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }), modes);
+    expect(upOnA).toEqual({ kind: "send", bytes: "\x1b[A" }); // kitty CSI form
+    // Escape makes the kitty restoration visible unambiguously.
+    const esc = mapKeyboardEvent(new KeyboardEvent("keydown", { key: "Escape" }), modes);
+    expect(esc).toEqual({ kind: "send", bytes: "\x1b[27u" });
+  });
+
+  it("a modes frame updates the singleton AND the session's cached snapshot (single writer)", () => {
+    setSession("modes-C");
+    const c = allMockWebSockets.at(-1)!;
+    c.fireOpen();
+    c.fireMessage(modesFrame({ bracketed: false, appCursor: true }));
+    expect(modes.isBracketedPaste()).toBe(false);
+
+    // Bounce away and back with no new frames: the cache round-trips.
+    setSession("modes-D");
+    expect(modes.isBracketedPaste()).toBe(true); // D: power-on defaults
+    setSession("modes-C");
+    expect(modes.isBracketedPaste()).toBe(false);
+    expect(modes.isApplicationCursor()).toBe(true);
   });
 });

@@ -44,10 +44,10 @@ func TestCSISpaceGuardRequiresInterm(t *testing.T) {
 func TestCSIDollarGuardRequiresInterm(t *testing.T) {
 	s := New(10, 10)
 	s.Write([]byte("\x1b[$p")) // DECRQM: leaves pIntermed[0]=='$', numInterm==1
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[6p")) // CSI 6 p with numInterm==0: 'p' unhandled, no reply
-	if len(s.Response) != 0 {
-		t.Errorf("len(Response) after CSI 6 p with numInterm==0 = %d, want 0 (DECRQM must require an intermediate)", len(s.Response))
+	if len(s.response) != 0 {
+		t.Errorf("len(Response) after CSI 6 p with numInterm==0 = %d, want 0 (DECRQM must require an intermediate)", len(s.response))
 	}
 }
 
@@ -518,7 +518,7 @@ func TestDeviceAttributesPrimary(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[c"))
 	want := "\x1b[?65;1;2;6;9;15;16;17;18;21;22;28;29c"
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("DA1 = %q, want %q", got, want)
 	}
 }
@@ -528,7 +528,7 @@ func TestDSRCursorPosition(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[5;10H"))
 	s.Write([]byte("\x1b[6n"))
-	if got := string(s.Response); got != "\x1b[5;10R" {
+	if got := string(s.response); got != "\x1b[5;10R" {
 		t.Errorf("DSR CPR = %q, want %q", got, "\x1b[5;10R")
 	}
 }
@@ -543,7 +543,7 @@ func TestCSIPrivateMarkerRouting(t *testing.T) {
 	}
 	s.Write([]byte("\x1b[>c")) // secondary DA
 	want := "\x1b[>64;410;0c"  // VT525-class model, firmware level 410
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("secondary DA = %q, want %q", got, want)
 	}
 }
@@ -645,13 +645,13 @@ func TestCursorTabForward(t *testing.T) {
 func TestWindowManipulationReportSize(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[18t"))
-	if got, want := string(s.Response), "\x1b[8;24;80t"; got != want {
+	if got, want := string(s.response), "\x1b[8;24;80t"; got != want {
 		t.Errorf("CSI 18 t = %q, want %q", got, want)
 	}
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[99t"))
-	if len(s.Response) != 0 {
-		t.Errorf("CSI 99 t (unsupported) wrote %q, want no reply", string(s.Response))
+	if len(s.response) != 0 {
+		t.Errorf("CSI 99 t (unsupported) wrote %q, want no reply", string(s.response))
 	}
 }
 

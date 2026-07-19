@@ -31,9 +31,10 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 	"github.com/creack/pty"
 )
 
@@ -59,6 +60,28 @@ const (
 	// (the tab should close) apart from a transient disconnect (reconnect).
 	// 4001 is in the private application close-code range (4000-4999).
 	statusProcessExited websocket.StatusCode = 4001
+
+	// WireIncompatibleCloseCode is the definitive WebSocket close code for an
+	// explicitly declared peer revision below the receiver's supported floor.
+	// The server uses it when rejecting a stale client; clients may use the
+	// same code when an explicit server revision is below their floor. It is
+	// exported so independently released consumers can recognize the contract.
+	WireIncompatibleCloseCode websocket.StatusCode = 4002
+
+	// wireIncompatibleClientReason is intentionally actionable and short enough
+	// for the WebSocket close-reason limit. The detailed versions are logged.
+	wireIncompatibleClientReason = "client wire protocol is below the server minimum; reload or upgrade the client"
+
+	// statusUnknownSession (4004) is the close code for a WS connect whose
+	// ?session= id the manager does not know (reaped, closed elsewhere, or a
+	// restarted server). The upgrade is ACCEPTED and then closed with this
+	// code: a plain pre-upgrade 404 surfaces in the browser as an opaque
+	// failed connect (code 1006, reason unreadable from JS), which the client
+	// can only treat as transient — an endless "Reconnecting…" flap against a
+	// session that will never exist. Like 4001 it is DEFINITIVE ("this
+	// session will never produce output"), and the client routes both to the
+	// same ended state. 4004 for the 404 mnemonic.
+	statusUnknownSession websocket.StatusCode = 4004
 
 	// exitedAttachReplayGrace bounds how long a client that attaches to an
 	// ALREADY-exited session may take to complete its resume exchange before
@@ -96,7 +119,12 @@ const (
 
 	ctlTypeResize = "resize"
 	ctlTypeResume = "resume"
-	ctlTypePing   = "ping"
+	// ctlTypeUpgrade is the v4 typed-framing transition control: sent as the
+	// first TEXT message by a client that received proof (resumeAck
+	// serverWireVersion >= 4). Recognizing it latches the connection to typed
+	// mode; the message itself is otherwise a no-op.
+	ctlTypeUpgrade = "upgrade"
+	ctlTypePing    = "ping"
 
 	// scrollbackCapacity is the number of scrollback lines the server
 	// retains for replay to new/reconnecting clients. Matches the
@@ -200,6 +228,13 @@ type sessionState struct {
 // fields are guarded by the clientRegistry's mutex (registry.mu), not h.mu.
 type clientState struct {
 	session atomic.Pointer[sessionState]
+	// lastAckSent is the most recent inputAck value actually written to this
+	// socket (stamped on a content frame by dispatchFrame, sent bare by a
+	// no-frame scheduler pass's ackOnly sweep, or carried by handleResume's
+	// resumeAck). The sweep compares it to the session's bytesReceived so input
+	// into a silent app is acknowledged on the next dirty pass. Atomic because
+	// handleResume (per-connection goroutine) and flushLoop both write it.
+	lastAckSent atomic.Uint64
 	// cols/rows are this socket's most recently requested terminal size,
 	// guarded by clientRegistry.mu (NOT by the atomic session pointer). They
 	// feed MinLiveSize so a disconnect can relax the shared screen to the
@@ -218,23 +253,32 @@ type clientState struct {
 // performs ws.Write outside the lock so a slow client can't block
 // readLoop / handleControl / new handleWS connections.
 type Handler struct {
-	cmd                      *exec.Cmd
-	screen                   *vt.Screen
-	registry                 *clientRegistry
-	builder                  *flushFrameBuilder
-	scrollback               *scrollbackRing
-	cancel                   context.CancelFunc
-	ptmx                     *os.File
-	procExitCh               chan struct{}
-	healTimer                *time.Timer
-	pendingClipboard         []byte
-	command                  []string
-	cfg                      handlerConfig
-	bootEpoch                int64
-	lastActivity             atomic.Int64
-	mu                       sync.Mutex
-	started                  atomic.Bool
-	resized                  bool
+	cmd        *exec.Cmd
+	screen     *vt.Screen
+	registry   *clientRegistry
+	builder    *flushFrameBuilder
+	scrollback *scrollbackRing
+	cancel     context.CancelFunc
+	ptmx       *os.File
+	procExitCh chan struct{}
+	// dirty is the flush scheduler's wakeup: 1-buffered so any number of
+	// markDirty pokes coalesce into one pending signal. flushLoop sleeps on
+	// it when idle — no ticker, no periodic wakeups (P4).
+	dirty            chan struct{}
+	healTimer        *time.Timer
+	pendingClipboard []byte
+	command          []string
+	cfg              handlerConfig
+	bootEpoch        int64
+	lastActivity     atomic.Int64
+	mu               sync.Mutex
+	started          atomic.Bool
+	// sizeEstablished is latched true once the PTY has real dimensions (the
+	// eager start's default size, or a client resize) and never cleared: the
+	// flush builder emits nothing before it, so clients never see a frame
+	// rendered against the zero-size screen. It does NOT mean "a resize
+	// happened this tick" (its former name, `resized`, invited that reading).
+	sizeEstablished          bool
 	scrollbackClearedPending bool
 	paletteChangedPending    bool
 	lastFocusReporting       bool
@@ -266,6 +310,18 @@ func NewHandler(command []string, opts ...Option) *Handler {
 		scrollback: newScrollbackRing(cfg.scrollbackCapacity),
 		bootEpoch:  time.Now().UnixNano(),
 		procExitCh: make(chan struct{}),
+		dirty:      make(chan struct{}, 1),
+	}
+}
+
+// markDirty pokes the flush scheduler: some state that could produce a frame
+// changed (PTY output, resize, resume, input needing an ack sweep). Non-
+// blocking — the 1-buffered channel coalesces any number of pokes into one
+// pending wakeup, which is all the scheduler needs.
+func (h *Handler) markDirty() {
+	select {
+	case h.dirty <- struct{}{}:
+	default:
 	}
 }
 
@@ -438,11 +494,13 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	// iTerm.app (>= 3.6.6) is the single identity that unlocks OSC 9;4 progress
 	// for BOTH kiro-cli (allowlists iTerm.app/WezTerm/Windows Terminal) and
 	// Claude Code (iTerm.app >= 3.6.6), plus DEC 2026 synchronized output — all
-	// of which this engine implements. Capabilities it does NOT implement (inline
-	// images, the kitty keyboard protocol) are consumed silently and never
-	// mis-rendered, so over-claiming degrades gracefully rather than corrupting
-	// the screen. h.cfg.env is appended last so a consumer's WithEnv can override
-	// any of these (last value wins).
+	// of which this engine implements. Capabilities it does NOT implement
+	// (inline images, the kitty IMAGE protocol, and the kitty keyboard flags
+	// beyond the implemented disambiguate subset — see vt/kitty.go and the
+	// README keyboard section) are consumed silently and never mis-rendered,
+	// so over-claiming degrades gracefully rather than corrupting the screen.
+	// h.cfg.env is appended last so a consumer's WithEnv can override any of
+	// these (last value wins).
 	env := append(os.Environ(),
 		"TERM=xterm-256color",
 		"COLORTERM=truecolor",
@@ -464,19 +522,19 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	h.ptmx = ptmx
 	h.cmd = cmd
 	h.started.Store(true)
-	h.resized = true
+	h.sizeEstablished = true
 	h.screen.Resize(rows, cols)
 	h.cfg.logger.Info("terminal: process started",
 		"pid", cmd.Process.Pid, "command", h.command, "cols", cols, "rows", rows)
 
 	// PTY reader goroutine — feeds VT screen and notifies clients.
 	go h.readLoop(ctx)
-	// Flush ticker — sends screen updates to all clients.
+	// Flush scheduler — sends screen updates to all clients.
 	go h.flushLoop(ctx)
 	// Process monitor — reaps the child (so it does not linger as a
 	// zombie), fires the documented onProcessExit callback with the
 	// exit status, and cancels the read/flush loops on natural child
-	// exit so flushLoop's ticker does not leak after the process dies.
+	// exit so the scheduler goroutine does not leak after the process dies.
 	go func() {
 		werr := cmd.Wait() // reap; werr carries the exit status
 		// Guarantee client notification (procExitCh drives the 4001 close) and
@@ -562,35 +620,31 @@ func (h *Handler) handlePTYData(data []byte) {
 	var resp []byte
 	h.mu.Lock()
 	h.screen.Write(data) //nolint:errcheck // screen.Write always returns nil
-	if h.screen.ScrollbackCleared {
+	if h.screen.TakeScrollbackCleared() {
 		// ED3 (erase scrollback): the app discarded its saved lines (kiro-cli
 		// does this on every resize redraw). Clear the retained ring to match a
 		// real terminal — Clear preserves committed so absolute indices stay
 		// monotonic — and flag the next frame to tell clients to drop history.
-		h.screen.ScrollbackCleared = false
 		h.scrollback.Clear()
 		h.scrollbackClearedPending = true
 	}
-	if h.screen.PaletteChanged {
+	if h.screen.TakePaletteChanged() {
 		// OSC 4/104 changed the palette; defer a full repaint to the next frame.
-		h.screen.PaletteChanged = false
 		h.paletteChangedPending = true
 	}
-	if len(h.screen.PendingClipboard) > 0 {
+	if clip := h.screen.TakeClipboard(); len(clip) > 0 {
 		// OSC 52 copy; hand it to the next frame as a clipboard message.
-		h.pendingClipboard = h.screen.PendingClipboard
-		h.screen.PendingClipboard = nil
+		h.pendingClipboard = clip
 	}
-	if len(h.screen.Response) > 0 {
-		resp = h.screen.Response
-		h.screen.Response = nil
-	}
+	resp = h.screen.TakeResponse()
 	// Keep-unfocused: if the process just enabled focus reporting, pin it to
 	// unfocused so a focus-gated notifier keeps emitting (see WithKeepUnfocused).
 	if fo := h.focusOutOnEnable(); fo != nil {
 		resp = append(resp, fo...)
 	}
 	h.mu.Unlock()
+	// PTY output is the primary dirty source: wake the flush scheduler.
+	h.markDirty()
 	if len(resp) > 0 {
 		h.ptmx.Write(resp) //nolint:errcheck // best-effort
 	}
@@ -623,22 +677,52 @@ type flushFrame struct {
 	scrollbackCleared bool
 }
 
-// buildFrame computes the next outbound frame under h.mu. Returns nil
-// if there is nothing to send (no resize yet, flush held, or no
-// changed rows and no scroll lines).
-func (h *Handler) buildFrame() *flushFrame {
+// buildFrame computes the next outbound frame under h.mu. Returns a nil frame
+// if there is nothing to send (no resize yet, flush held, no attached
+// clients, or no changed rows and no scroll lines). holdUntil is non-zero
+// when a DEC 2026 synchronized-output hold is active — the scheduler arms a
+// retry at that deadline so a final held redraw with no subsequent PTY byte
+// still flushes (a trigger-only scheduler would strand it).
+// retainSuspendedScrollback drains lines produced with no attached clients into
+// the retained main-screen history. The caller holds h.mu. One-shot signals
+// deliberately remain pending for the next attach.
+func (h *Handler) retainSuspendedScrollback() {
+	if !h.sizeEstablished {
+		return
+	}
+	drained := h.screen.DrainScrollback()
+	if h.screen.InAltScreen || h.builder.altTransitionPending(h.screen) || len(drained) == 0 {
+		return
+	}
+	h.scrollback.Append(drained)
+}
+
+func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	clients := h.registry.Snapshot()
+	if len(clients) == 0 {
+		// Zero-client suspension (P4): nobody to render for. Retain history
+		// but skip RenderRowWire/diff entirely. One-shot signals (palette
+		// repaint, ED3 clear, OSC 52 clipboard) stay pending for the next
+		// attach, whose builder reset forces their visible effect.
+		h.retainSuspendedScrollback()
+		return nil, time.Time{}
+	}
 	// An OSC 4/104 palette change re-colors already-drawn cells; force a full
 	// repaint so every visible row re-resolves through the new palette. The
-	// Reset persists if Build produces no frame this tick (flush held / no
+	// Reset persists if Build produces no frame this pass (flush held / no
 	// resize yet), so the repaint still lands on the next frame.
 	if h.paletteChangedPending {
 		h.builder.Reset()
 		h.paletteChangedPending = false
 	}
-	clients := h.registry.Snapshot()
+	if h.screen.IsFlushHeld() {
+		holdUntil = h.screen.FlushHoldUntil
+	}
 	committedBefore := h.scrollback.Committed()
-	frame := h.builder.Build(h.screen, h.resized, clients, committedBefore)
+	frame = h.builder.Build(h.screen, h.sizeEstablished, clients, committedBefore)
 	if frame != nil && len(frame.scrollLines) > 0 {
 		h.scrollback.Append(frame.scrollLines)
 	}
@@ -664,24 +748,139 @@ func (h *Handler) buildFrame() *flushFrame {
 		frame.clipboardPayload = encodeClipboardMsg(0, h.pendingClipboard)
 		h.pendingClipboard = nil
 	}
-	h.mu.Unlock()
-	return frame
+	return frame, holdUntil
 }
 
-func (h *Handler) flushLoop(ctx context.Context) {
-	ticker := time.NewTicker(flushInterval)
-	defer ticker.Stop()
+// flushPass runs one scheduler pass: build, then dispatch the frame or sweep
+// bare acks (input into a silent app must still trim the client outbox).
+// Returns the DEC 2026 hold deadline when the pass was suppressed by a hold.
+func (h *Handler) flushPass() (holdUntil time.Time) {
+	frame, holdUntil := h.buildFrame()
+	if frame != nil {
+		h.dispatchFrame(frame)
+		return holdUntil
+	}
+	h.sweepAcks()
+	return holdUntil
+}
 
+// flushLoop is the event-driven coalescing flush scheduler (P4; it replaced
+// the permanent 50 ms ticker). Semantics:
+//
+//   - IDLE: with nothing dirty, the loop sleeps on the dirty channel — zero
+//     wakeups, zero renders, no matter how many idle sessions a server holds.
+//   - FIRST output after idle flushes IMMEDIATELY: first-byte echo latency is
+//     the connect RTT, not a tick-alignment lottery (the old ticker added
+//     0-50 ms to every isolated keystroke echo).
+//   - SUSTAINED output batches exactly like the ticker did: after each pass
+//     the loop absorbs pokes for one flushInterval before flushing again, so
+//     consecutive frames stay >= flushInterval apart.
+//   - A DEC 2026 hold (synchronized output) arms a retry at the release
+//     deadline: the final held redraw flushes even when no PTY byte follows
+//     the hold (the deadline case a trigger-only scheduler would strand).
+//     A new poke during the hold sleep re-passes early, which re-reads the
+//     (possibly extended) deadline; passes stay suppressed while held.
+//
+// Dirty sources: PTY output (handlePTYData), resize, resume/attach, and
+// reliable input needing an ack sweep (deliverInput). Zero-client suspension
+// lives in buildFrame: a poke with nobody attached drains scrollback into the
+// ring and skips all render/diff work.
+func (h *Handler) flushLoop(ctx context.Context) {
+	for h.waitForDirty(ctx) {
+		if !h.flushBurst(ctx) {
+			return
+		}
+	}
+}
+
+// flushBurst passes immediately, then keeps passing while work arrives with
+// passes spaced one flushInterval apart. A full quiet window ends the burst;
+// context cancellation ends the scheduler.
+func (h *Handler) flushBurst(ctx context.Context) bool {
 	for {
+		holdUntil := h.flushPass()
+		if !holdUntil.IsZero() {
+			if !h.waitForHoldRetry(ctx, holdUntil) {
+				return false
+			}
+			continue
+		}
+		gotMore, alive := h.waitForBatchWindow(ctx)
+		if !alive {
+			return false
+		}
+		if !gotMore {
+			return true
+		}
+	}
+}
+
+// waitForDirty blocks without a timer while the scheduler is idle.
+func (h *Handler) waitForDirty(ctx context.Context) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-h.dirty:
+		return true
+	}
+}
+
+// waitForHoldRetry waits until the current synchronized-output hold expires,
+// or returns early on another dirty poke so the live deadline can be re-read.
+func (h *Handler) waitForHoldRetry(ctx context.Context, holdUntil time.Time) bool {
+	timer := time.NewTimer(max(time.Until(holdUntil), 0))
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return false
+	case <-h.dirty:
+		timer.Stop()
+		return true
+	case <-timer.C:
+		return true
+	}
+}
+
+// waitForBatchWindow preserves the ticker-era sustained-output cadence. A
+// dirty poke during the window waits out its remainder; a quiet window returns
+// gotMore=false so flushLoop can go back to its timer-free idle wait.
+func (h *Handler) waitForBatchWindow(ctx context.Context) (gotMore, alive bool) {
+	timer := time.NewTimer(flushInterval)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return false, false
+	case <-h.dirty:
 		select {
 		case <-ctx.Done():
-			return
-		case <-ticker.C:
+			timer.Stop()
+			return false, false
+		case <-timer.C:
+			return true, true
 		}
+	case <-timer.C:
+		// A poke racing the timer edge stays buffered in h.dirty and
+		// re-enters through waitForDirty immediately.
+		return false, true
+	}
+}
 
-		if frame := h.buildFrame(); frame != nil {
-			h.dispatchFrame(frame)
-		}
+// sweepAcks sends a bare ackOnly frame to every client whose session ledger
+// advanced without a content frame carrying the new value this pass — input
+// into a silent app (no echo, no output; e.g. `read -s`) would otherwise stay
+// unacked indefinitely, leaving the client outbox untrimmed and widening the
+// window where a later ledger loss drops (previously) or duplicated input.
+// Called from flushLoop only on passes that produced no frame; passes WITH a
+// frame stamp the fresh ack on every payload via withClientAck instead.
+func (h *Handler) sweepAcks() {
+	targets := h.registry.AckSweepTargets()
+	if len(targets) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for ws, ack := range targets {
+		ws.Write(ctx, websocket.MessageBinary, encodeAckOnly(ack)) //nolint:errcheck // best-effort
 	}
 }
 
@@ -715,25 +914,42 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 			encodeScrollMsg(0, frame.scrollFirstIdx+uint64(i), frame.scrollLines[i:end]))
 	}
 
-	for ws, ack := range frame.clients {
-		writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if frame.modesPayload != nil {
-			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.modesPayload, ack)) //nolint:errcheck // best-effort
+	// Assemble the per-client write sequence once, preserving the send order
+	// (modes, title, clipboard, screen, scroll chunks).
+	payloads := make([][]byte, 0, 4+len(scrollPayloads))
+	for _, p := range [][]byte{frame.modesPayload, frame.titlePayload, frame.clipboardPayload, screenPayload} {
+		if p != nil {
+			payloads = append(payloads, p)
 		}
-		if frame.titlePayload != nil {
-			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.titlePayload, ack)) //nolint:errcheck // best-effort
-		}
-		if frame.clipboardPayload != nil {
-			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(frame.clipboardPayload, ack)) //nolint:errcheck // best-effort
-		}
-		if screenPayload != nil {
-			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(screenPayload, ack)) //nolint:errcheck // best-effort
-		}
-		for _, sp := range scrollPayloads {
-			ws.Write(writeCtx, websocket.MessageBinary, withClientAck(sp, ack)) //nolint:errcheck // best-effort
-		}
-		cancel()
 	}
+	payloads = append(payloads, scrollPayloads...)
+	if len(payloads) == 0 {
+		return
+	}
+	// Fan out concurrently: one goroutine per client, each writing ITS frames
+	// in order. Serial fan-out let one wedged client stall every other
+	// client's output for up to 5s × payload count (judgement finding); now a
+	// wedged client costs only itself, and the tick blocks at most one 5s
+	// window total. Per-connection write serialization is coder/websocket's
+	// (concurrent writers to one conn are internally locked — handleResume /
+	// sweepAcks already overlap with this loop today); withClientAck clones
+	// the shared template per call, so goroutines never share a buffer.
+	var wg sync.WaitGroup
+	for ws, ack := range frame.clients {
+		wg.Add(1)
+		go func(ws *websocket.Conn, ack uint64) {
+			defer wg.Done()
+			writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			for _, p := range payloads {
+				ws.Write(writeCtx, websocket.MessageBinary, withClientAck(p, ack)) //nolint:errcheck // best-effort
+			}
+		}(ws, ack)
+	}
+	wg.Wait()
+	// Record what each client was just told, so the next no-frame tick's ack
+	// sweep doesn't resend a value a content frame already carried.
+	h.registry.NoteAcksSent(frame.clients)
 }
 
 // controlMsg is a JSON control message from the client.
@@ -753,10 +969,10 @@ type controlMsg struct {
 	Cols        int    `json:"cols,omitempty"`
 	Rows        int    `json:"rows,omitempty"`
 	// ProtocolVersion is the client's wire-protocol revision (resume only).
-	// 0 = unset (an older client that predates the field). A non-zero value
-	// differing from wireProtocolVersion means the client was built against a
-	// different protocol revision; handleControl logs a warning so the skew
-	// is visible rather than surfacing as a silent mis-decode.
+	// 0 means version-silent legacy client and remains tolerated. A declared
+	// revision below MinSupportedClientWireVersion is refused; a higher-than-
+	// current revision warns but continues because it may retain this server's
+	// compatible baseline.
 	ProtocolVersion int `json:"protocolVersion,omitempty"`
 }
 
@@ -781,6 +997,11 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	h.builder.Reset()
 	h.mu.Unlock()
+	// Wake the scheduler for the attach itself: a client that never speaks
+	// resume or resize (a bare reader) must still receive the current screen
+	// — under the old ticker the next tick delivered it; the event-driven
+	// loop needs the poke (this also ends any zero-client suspension).
+	h.markDirty()
 
 	defer func() {
 		dCols, dRows := h.registry.Remove(ws)
@@ -807,75 +1028,201 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	go h.closeOnProcExit(ctx, ws, resumeServed)
 
 	// Read input from this client and write to the shared PTY.
+	h.clientReadLoop(ctx, ws, state, markResumeServed)
+}
+
+// clientReadLoop pumps one client's messages until the socket dies or a
+// protocol violation closes it.
+//
+// v4 typed-framing state (docs/wire-v4-typed-framing.md §4): a binary
+// bootstrap resume declaring protocolVersion >= 4 ARMS the connection; the
+// first valid recognized TEXT control on an armed connection LATCHES typed
+// mode (text = control, binary = full-alphabet PTY input). Until the latch,
+// binary frames keep exact v3 semantics — the 0x00 sentinel plus the
+// parse-fallback — so v3 and version-silent clients ride that path forever.
+func (h *Handler) clientReadLoop(ctx context.Context, ws *websocket.Conn, state *clientState, markResumeServed func()) {
+	var armed, latched bool
 	for {
-		_, msg, err := ws.Read(ctx)
+		typ, msg, err := ws.Read(ctx)
 		if err != nil {
 			return
 		}
-		if len(msg) == 0 {
-			continue
-		}
-		if msg[0] == 0x00 {
-			h.handleControl(ws, state, msg[1:], markResumeServed)
-			continue
-		}
-		// Ensure process is started (fallback if no resize was sent).
-		// h.started is atomic.Bool so the fast-path read does not race
-		// with ensureStarted's write. cols/rows of 0 select defaults.
-		if !h.started.Load() {
-			if err := h.ensureStarted(0, 0); err != nil {
-				h.cfg.logger.Error("terminal: process start failed", "error", err)
+		if typ == websocket.MessageText {
+			var closed bool
+			armed, latched, closed = h.handleTextControl(ws, state, msg, armed, latched, markResumeServed)
+			if closed {
 				return
 			}
+			continue
 		}
-		if _, err := h.ptmx.Write(msg); err != nil {
-			h.cfg.logger.Debug("terminal: pty write", "error", err)
+		if len(msg) == 0 {
+			continue // ignored without latching (documented in the design)
+		}
+		var ok bool
+		armed, ok = h.handleBinaryFrame(ws, state, msg, armed, latched, markResumeServed)
+		if !ok {
 			return
 		}
-		// Increment session bytesReceived for the resume protocol.
-		// state.session is set when the client sends its first resume
-		// control message; without it we silently skip — the client is
-		// either not using the protocol or hasn't initialized yet.
-		h.registry.IncrementReceived(state, len(msg))
 	}
 }
 
-// handleControl dispatches one client control frame. onResumeServed is invoked
-// after a resume exchange has been fully written to the socket (resumeAck +
-// modes/title + window frame + history replay); handleWS uses it to release the
-// deferred process-exited close for a client that attached to an already-exited
-// session (see closeOnProcExit).
-func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload []byte, onResumeServed func()) {
+// handleBinaryFrame routes one binary message: pre-latch, a 0x00-leading
+// frame is tried as a v3 sentinel control (with the parse-fallback delivering
+// non-JSON frames to the PTY whole, leading NUL included, so no input byte is
+// ever silently swallowed and acks stay on frame boundaries); post-latch, and
+// for all non-sentinel frames, the bytes are PTY input. Returns the updated
+// armed state and ok=false when the connection must end (PTY start/write
+// failure).
+func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg []byte, armed, latched bool, onResumeServed func()) (newArmed, ok bool) {
+	if !latched && msg[0] == 0x00 {
+		if d := h.handleControl(ws, state, msg[1:], onResumeServed); d.parsed {
+			return armed || d.armsV4, !d.closed
+		}
+		// Parse-fallback: fall through and deliver the WHOLE frame as input.
+	}
+	// Ensure process is started (fallback if no resize was sent).
+	// h.started is atomic.Bool so the fast-path read does not race
+	// with ensureStarted's write. cols/rows of 0 select defaults.
+	if !h.started.Load() {
+		if err := h.ensureStarted(0, 0); err != nil {
+			h.cfg.logger.Error("terminal: process start failed", "error", err)
+			return armed, false
+		}
+	}
+	if _, err := h.ptmx.Write(msg); err != nil {
+		h.cfg.logger.Debug("terminal: pty write", "error", err)
+		return armed, false
+	}
+	// Increment session bytesReceived for the resume protocol.
+	// state.session is set when the client sends its first resume
+	// control message; without it we silently skip — the client is
+	// either not using the protocol or hasn't initialized yet.
+	h.registry.IncrementReceived(state, len(msg))
+	// Wake the scheduler even though no PTY output may follow (a silent
+	// reader, e.g. `read -s`): the pass's ack sweep is what trims the
+	// client's outbox for input that produces no echo.
+	h.markDirty()
+	return armed, true
+}
+
+// handleTextControl applies the v4 text-frame policy
+// (docs/wire-v4-typed-framing.md §4) to one text message: text is only ever a
+// control channel, it can never become PTY input, and anything that is not a
+// valid control on an armed connection closes the connection rather than
+// risking framing-state poison. Returns the updated (armed, latched) state and
+// closed=true when it has closed the connection.
+func (h *Handler) handleTextControl(ws *websocket.Conn, state *clientState, msg []byte, armed, latched bool, onResumeServed func()) (newArmed, newLatched, closed bool) {
+	if !utf8.Valid(msg) {
+		// RFC 6455 §5.6 requires valid UTF-8 in text messages and
+		// coder/websocket does not validate it; Go's encoding/json would
+		// silently replace invalid sequences, so reject explicitly.
+		h.cfg.logger.Warn("terminal: closing on invalid UTF-8 text frame", "bytes", len(msg))
+		_ = ws.Close(websocket.StatusInvalidFramePayloadData, "control frames must be valid UTF-8")
+		return armed, latched, true
+	}
+	if len(msg) == 0 || !armed {
+		// No v3 peer ever sends text, so pre-arm (or empty) text is a
+		// protocol violation; closing is the only response that cannot
+		// poison the framing state.
+		h.cfg.logger.Warn("terminal: closing on unexpected text frame", "armed", armed, "bytes", len(msg))
+		_ = ws.Close(websocket.StatusUnsupportedData, "unexpected text frame")
+		return armed, latched, true
+	}
+	d := h.handleControl(ws, state, msg, onResumeServed)
+	switch {
+	case d.closed:
+		return armed, latched, true
+	case !d.parsed:
+		h.cfg.logger.Warn("terminal: closing on unparseable text control", "bytes", len(msg))
+		_ = ws.Close(websocket.StatusUnsupportedData, "unparseable control frame")
+		return armed, latched, true
+	case d.known:
+		latched = true // the transition (and every later recognized text control) latches
+		if d.armsV4 {
+			armed = true // a text resume keeps the arm current (idempotent)
+		}
+	case !latched:
+		// Valid JSON but an unrecognized type before any latch: refuse
+		// rather than guess (post-latch, unknown types are tolerated and
+		// dropped, matching the binary path's long-standing behavior).
+		h.cfg.logger.Warn("terminal: closing on unrecognized text control before upgrade")
+		_ = ws.Close(websocket.StatusUnsupportedData, "unrecognized control before upgrade")
+		return armed, latched, true
+	}
+	return armed, latched, false
+}
+
+// controlDisposition reports how handleControl classified one control payload,
+// so the read loop can drive the v4 framing state machine (arm/latch) and the
+// v3 parse-fallback without re-parsing the JSON.
+type controlDisposition struct {
+	parsed bool // payload was valid control JSON
+	known  bool // c.Type was a recognized control type
+	armsV4 bool // a resume declaring protocolVersion >= typedFramingMinVersion
+	closed bool // compatibility enforcement closed the connection
+}
+
+// handleControl dispatches one client control message (binary sentinel payload
+// or whole text message — the transport is the caller's concern). onResumeServed
+// is invoked after a resume exchange has been fully written to the socket
+// (resumeAck + modes/title + window frame + history replay); handleWS uses it to
+// release the deferred process-exited close for a client that attached to an
+// already-exited session (see closeOnProcExit).
+func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload []byte, onResumeServed func()) controlDisposition {
 	var c controlMsg
 	if err := json.Unmarshal(payload, &c); err != nil {
 		h.cfg.logger.Debug("terminal: bad control frame", "error", err, "bytes", len(payload))
-		return
+		return controlDisposition{}
 	}
-	if c.Type == ctlTypeResume && c.SessionID != "" {
-		if c.ProtocolVersion != 0 && c.ProtocolVersion != wireProtocolVersion {
-			h.cfg.logger.Warn("terminal: client wire-protocol version mismatch",
+	d := controlDisposition{parsed: true}
+	switch c.Type {
+	case ctlTypeResume:
+		d.known = true
+		if c.ProtocolVersion != 0 && c.ProtocolVersion < minSupportedClientWireVersion {
+			h.cfg.logger.Warn("terminal: refusing client below wire-protocol compatibility floor",
 				"client", c.ProtocolVersion, "server", wireProtocolVersion,
-				"hint", "client may be running a stale bundle; a hard refresh should fix it")
+				"min_supported", minSupportedClientWireVersion,
+				"hint", "reload or upgrade the client")
+			_ = ws.Close(WireIncompatibleCloseCode, wireIncompatibleClientReason)
+			d.closed = true
+			return d
 		}
-		// A nil (omitted) haveThrough means the client holds nothing and wants
-		// full history (-1), not "have line 0" (which would drop index 0).
-		ht := int64(-1)
-		if c.HaveThrough != nil {
-			ht = *c.HaveThrough
+		d.armsV4 = c.ProtocolVersion >= typedFramingMinVersion
+		// A higher revision may retain this server's compatible baseline, so it
+		// warns but is not refused. Version-silent clients remain tolerated.
+		if c.ProtocolVersion > wireProtocolVersion {
+			h.cfg.logger.Warn("terminal: client wire-protocol version is newer than server",
+				"client", c.ProtocolVersion, "server", wireProtocolVersion,
+				"min_supported", minSupportedClientWireVersion,
+				"hint", "upgrade the server if terminal behavior is incorrect")
 		}
-		h.handleResume(ws, state, c.SessionID, ht)
-		if onResumeServed != nil {
-			onResumeServed()
+		if c.SessionID != "" {
+			// A nil (omitted) haveThrough means the client holds nothing and
+			// wants full history (-1), not "have line 0" (which would drop
+			// index 0).
+			ht := int64(-1)
+			if c.HaveThrough != nil {
+				ht = *c.HaveThrough
+			}
+			h.handleResume(ws, state, c.SessionID, ht, c.SentBytes)
+			if onResumeServed != nil {
+				onResumeServed()
+			}
 		}
-		return
-	}
-	if c.Type == ctlTypeResize {
+	case ctlTypeResize:
+		d.known = true
 		h.handleResize(state, c.Cols, c.Rows)
-		return
-	}
-	if c.Type == ctlTypePing {
+	case ctlTypePing:
+		d.known = true
 		h.handlePing(ws)
+	case ctlTypeUpgrade:
+		// The v4 transition control: recognizing it is what latches typed
+		// framing in the read loop; nothing else to do.
+		d.known = true
+	default:
+		h.cfg.logger.Debug("terminal: unrecognized control type", "type", c.Type)
 	}
+	return d
 }
 
 // handlePing answers a client liveness probe with a pong. The client
@@ -916,8 +1263,25 @@ func (h *Handler) handlePing(ws *websocket.Conn) {
 // clamped into the retained range; the resumeAck's oldestIndex lets the
 // client detect an eviction gap when its haveThrough is older than what
 // the ring still holds.
-func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID string, haveThrough int64) {
-	ack := h.registry.ResolveSession(state, sessionID)
+//
+// sentBytes is the client's claimed total of reliable input bytes sent this
+// session. When the resume key misses the registry (idle GC or cap eviction
+// reclaimed the ledger) while sentBytes > 0, the client believed it had a
+// ledger the server no longer holds — the server cannot vouch for any of
+// that input (it cannot distinguish forgotten-after-applying from
+// lost-having-applied-nothing), so the resumeAck carries an explicit
+// ledger-lost flag and the client drops-and-notifies deterministically
+// instead of guessing from an ambiguous received=0.
+func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID string, haveThrough int64, sentBytes uint64) {
+	ack, created := h.registry.ResolveSession(state, sessionID)
+	ledgerLost := created && sentBytes > 0
+	if ledgerLost {
+		// The client half of the event gcIdleSessions logged server-side;
+		// together the two lines make a forgotten-ledger incident correlatable
+		// end to end.
+		h.cfg.logger.Info("terminal: resume key missed with claimed sent bytes; signaling ledger loss",
+			"session_id", logID(sessionID), "sent_bytes", sentBytes)
+	}
 
 	h.mu.Lock()
 	// Force a full repaint on the next flush so the resuming client sees
@@ -983,7 +1347,8 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 
 	// resumeAck first so the client can trim its outbox and learn the
 	// history bounds (for gap detection) before the replay lands.
-	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest)) //nolint:errcheck // best-effort
+	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest, ledgerLost)) //nolint:errcheck // best-effort
+	state.lastAckSent.Store(ack)
 
 	// Resend current modes/title inline (before the window/replay) so input
 	// encoding is correct before the user can type; a fresh tab starts at
@@ -1020,6 +1385,11 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 		ws.Write(ctx, websocket.MessageBinary, windowPayload) //nolint:errcheck // best-effort
 		replayHistory()
 	}
+
+	// A fresh attach ends any zero-client suspension: poke the scheduler so
+	// the diff-driven flush (against the Reset builder above) repaints the
+	// window idempotently on the first pass.
+	h.markDirty()
 }
 
 // clampResize floors the requested dimensions to a sane minimum and caps them
@@ -1075,8 +1445,12 @@ func (h *Handler) applySize(cols, rows int, reason string) {
 	h.screen.Resize(rows, cols)
 	h.screen.HoldFlush(time.Now().Add(time.Second))
 	h.cfg.logger.Info("terminal: "+reason, "rows", rows, "cols", cols)
-	h.resized = true
+	h.sizeEstablished = true
 	h.builder.Reset()
+	// The resize hold suppresses passes until the app's redraw settles; the
+	// poke makes the scheduler arm the release deadline so the repaint
+	// flushes even if the app writes nothing after the hold window.
+	h.markDirty()
 }
 
 // maybeHealSize arms a debounced size recompute when the client that just

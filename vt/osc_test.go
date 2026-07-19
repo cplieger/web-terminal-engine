@@ -279,17 +279,17 @@ func TestOSC5SpecialColorSetQueryReset(t *testing.T) {
 	s := New(2, 10)
 	// OSC 5 sets special color 0 to pure green.
 	s.Write([]byte("\x1b]5;0;rgb:00/ff/00\x07"))
-	s.Response = nil
+	s.response = nil
 	// OSC 5 query reports it back, 16-bit-per-channel.
 	s.Write([]byte("\x1b]5;0;?\x07"))
-	if got, want := string(s.Response), "\x1b]5;0;rgb:0000/ffff/0000\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]5;0;rgb:0000/ffff/0000\x1b\\"; got != want {
 		t.Errorf("OSC 5 query after set = %q, want %q", got, want)
 	}
 	// OSC 105 resets special color 0; the query then reports the unset default (black).
 	s.Write([]byte("\x1b]105;0\x07"))
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]5;0;?\x07"))
-	if got, want := string(s.Response), "\x1b]5;0;rgb:0000/0000/0000\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1b]5;0;rgb:0000/0000/0000\x1b\\"; got != want {
 		t.Errorf("OSC 5 query after OSC 105 reset = %q, want %q", got, want)
 	}
 }
@@ -305,11 +305,11 @@ func TestOSC105ResetAllSpecialColors(t *testing.T) {
 	s.Write([]byte("\x1b]5;0;rgb:00/ff/00\x07")) // special color 0 -> green
 	s.Write([]byte("\x1b]5;1;rgb:ff/00/00\x07")) // special color 1 -> red
 	s.Write([]byte("\x1b]105\x07"))              // reset ALL (no index)
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]5;0;?\x07"))
 	s.Write([]byte("\x1b]5;1;?\x07"))
 	want := "\x1b]5;0;rgb:0000/0000/0000\x1b\\" + "\x1b]5;1;rgb:0000/0000/0000\x1b\\"
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("after OSC 105 reset-all, queries = %q, want both black %q", got, want)
 	}
 }
@@ -322,21 +322,21 @@ func TestOSC104ResetAllPalette(t *testing.T) {
 	s := New(2, 10)
 	// Reset with no overrides set: nil-guard early return, nothing marked.
 	s.Write([]byte("\x1b]104\x07"))
-	if s.PaletteChanged {
+	if s.paletteChanged {
 		t.Error("OSC 104 reset with no overrides marked PaletteChanged; want unchanged")
 	}
 	// Override two indices, then reset the whole palette with an empty payload.
 	s.Write([]byte("\x1b]4;1;rgb:00/ff/00\x07"))
 	s.Write([]byte("\x1b]4;2;rgb:00/00/ff\x07"))
-	s.PaletteChanged = false
+	s.paletteChanged = false
 	s.Write([]byte("\x1b]104\x07")) // reset ALL
-	if !s.PaletteChanged {
+	if !s.paletteChanged {
 		t.Error("OSC 104 reset-all did not mark PaletteChanged")
 	}
 	// The override is gone: index 1 no longer queries back as the green override.
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b]4;1;?\x07"))
-	if got := string(s.Response); got == "\x1b]4;1;rgb:0000/ffff/0000\x1b\\" {
+	if got := string(s.response); got == "\x1b]4;1;rgb:0000/ffff/0000\x1b\\" {
 		t.Errorf("index 1 override survived OSC 104 reset-all: %q", got)
 	}
 }

@@ -12,7 +12,7 @@ func TestDECRQSS_SGRDefault(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1bP$qm\x1b\\"))
 	want := "\x1bP1$r0m\x1b\\"
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("DECRQSS SGR default = %q, want %q", got, want)
 	}
 }
@@ -24,7 +24,7 @@ func TestDECRQSS_SGRReflectsStyle(t *testing.T) {
 	s.Write([]byte("\x1b[1;31m")) // bold + red
 	s.Write([]byte("\x1bP$qm\x1b\\"))
 	want := "\x1bP1$r0;1;31m\x1b\\"
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("DECRQSS SGR = %q, want %q", got, want)
 	}
 }
@@ -34,9 +34,9 @@ func TestDECRQSS_SGRReflectsStyle(t *testing.T) {
 func TestDECRQSS_SGRAllAttributesPresent(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1b[1;2;3;4;5;7;8;9;53m"))
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1bP$qm\x1b\\"))
-	got := string(s.Response)
+	got := string(s.response)
 	if !strings.HasPrefix(got, "\x1bP1$r") || !strings.HasSuffix(got, "m\x1b\\") {
 		t.Fatalf("response format: %q", got)
 	}
@@ -58,7 +58,7 @@ func TestDECRQSS_DECSTBMDefault(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1bP$qr\x1b\\"))
 	want := "\x1bP1$r1;24r\x1b\\"
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("DECRQSS DECSTBM default = %q, want %q", got, want)
 	}
 }
@@ -70,7 +70,7 @@ func TestDECRQSS_DECSTBMCustom(t *testing.T) {
 	s.Write([]byte("\x1b[5;20r")) // set scroll region
 	s.Write([]byte("\x1bP$qr\x1b\\"))
 	want := "\x1bP1$r5;20r\x1b\\"
-	if got := string(s.Response); got != want {
+	if got := string(s.response); got != want {
 		t.Errorf("DECRQSS DECSTBM = %q, want %q", got, want)
 	}
 }
@@ -96,7 +96,7 @@ func TestDECRQSS_DECSCUSRStyles(t *testing.T) {
 			s := New(24, 80)
 			s.Write([]byte(tc.set))
 			s.Write([]byte("\x1bP$q q\x1b\\"))
-			if got := string(s.Response); got != tc.want {
+			if got := string(s.response); got != tc.want {
 				t.Errorf("DECRQSS DECSCUSR after %q = %q, want %q", tc.set, got, tc.want)
 			}
 		})
@@ -109,14 +109,14 @@ func TestDECRQSS_DECSCA(t *testing.T) {
 	s := New(24, 80)
 	// Default: not protected -> Ps 0.
 	s.Write([]byte("\x1bP$q\"q\x1b\\"))
-	if got, want := string(s.Response), "\x1bP1$r0\"q\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP1$r0\"q\x1b\\"; got != want {
 		t.Errorf("DECRQSS DECSCA default = %q, want %q", got, want)
 	}
 	// After DECSCA marks cells protected -> Ps 1.
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[1\"q"))        // DECSCA: protect
 	s.Write([]byte("\x1bP$q\"q\x1b\\")) // DECRQSS DECSCA
-	if got, want := string(s.Response), "\x1bP1$r1\"q\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP1$r1\"q\x1b\\"; got != want {
 		t.Errorf("DECRQSS DECSCA after protect = %q, want %q", got, want)
 	}
 }
@@ -126,14 +126,14 @@ func TestDECRQSS_DECSCA(t *testing.T) {
 func TestDECRQSS_DECSCL(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1bP$q\"p\x1b\\"))
-	if got, want := string(s.Response), "\x1bP1$r65;1\"p\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP1$r65;1\"p\x1b\\"; got != want {
 		t.Errorf("DECRQSS DECSCL (default) = %q, want %q", got, want)
 	}
 	// After DECSCL sets level 4 (63), the query reports it back.
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1b[63;1\"p"))
 	s.Write([]byte("\x1bP$q\"p\x1b\\"))
-	if got, want := string(s.Response), "\x1bP1$r63;1\"p\x1b\\"; got != want {
+	if got, want := string(s.response), "\x1bP1$r63;1\"p\x1b\\"; got != want {
 		t.Errorf("DECRQSS DECSCL (after set 63) = %q, want %q", got, want)
 	}
 }
@@ -147,7 +147,7 @@ func TestDECRQSS_UnsupportedQueries(t *testing.T) {
 		t.Run(q, func(t *testing.T) {
 			s := New(24, 80)
 			s.Write([]byte("\x1bP$q" + q + "\x1b\\"))
-			if got := string(s.Response); got != want {
+			if got := string(s.response); got != want {
 				t.Errorf("DECRQSS unsupported %q = %q, want %q", q, got, want)
 			}
 		})
@@ -169,8 +169,8 @@ func TestDECRQSSBufferBoundedAtMax(t *testing.T) {
 		t.Errorf("dcsBuf = %d, want %d (capped)", len(s.dcsBuf), maxDCSLen)
 	}
 	s.Write([]byte("\x1b\\"))
-	if !strings.HasPrefix(string(s.Response), "\x1bP0$r") {
-		t.Errorf("oversized DECRQSS response = %q, want invalid (0$r) prefix", s.Response)
+	if !strings.HasPrefix(string(s.response), "\x1bP0$r") {
+		t.Errorf("oversized DECRQSS response = %q, want invalid (0$r) prefix", s.response)
 	}
 	if s.pState != stGround {
 		t.Errorf("state after ST = %d, want Ground", s.pState)
@@ -191,8 +191,8 @@ func TestUnknownDCSNotBuffered(t *testing.T) {
 		t.Errorf("state after unknown DCS ST = %d, want Ground", s.pState)
 	}
 	// Observable outcome: an unknown DCS never replies.
-	if len(s.Response) != 0 {
-		t.Errorf("unknown DCS produced a response %q, want none", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("unknown DCS produced a response %q, want none", s.response)
 	}
 }
 
@@ -205,7 +205,7 @@ func TestDCS8BitSTTerminates(t *testing.T) {
 	if s.pState != stGround {
 		t.Errorf("8-bit ST did not terminate DCS: state=%d", s.pState)
 	}
-	if len(s.Response) == 0 {
+	if len(s.response) == 0 {
 		t.Error("DECRQSS with 8-bit ST produced no response")
 	}
 }
@@ -215,11 +215,11 @@ func TestDCS8BitSTTerminates(t *testing.T) {
 func TestMultipleSequentialDECRQSS(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1bP$qm\x1b\\"))
-	first := string(s.Response)
-	s.Response = nil
+	first := string(s.response)
+	s.response = nil
 	s.Write([]byte("\x1b[1m")) // set bold
 	s.Write([]byte("\x1bP$qm\x1b\\"))
-	second := string(s.Response)
+	second := string(s.response)
 	if first == second {
 		t.Error("two DECRQSS with different state gave same response")
 	}
@@ -234,8 +234,8 @@ func TestDCSAbortedByCAN(t *testing.T) {
 	if s.pState != stGround {
 		t.Errorf("CAN did not abort DCS: state=%d", s.pState)
 	}
-	if len(s.Response) != 0 {
-		t.Errorf("CAN in DCS produced response: %q", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("CAN in DCS produced response: %q", s.response)
 	}
 }
 
@@ -247,8 +247,8 @@ func TestDCSAbortedBySUB(t *testing.T) {
 	if s.pState != stGround {
 		t.Errorf("SUB did not abort DCS: state=%d", s.pState)
 	}
-	if len(s.Response) != 0 {
-		t.Errorf("SUB in DCS produced response: %q", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("SUB in DCS produced response: %q", s.response)
 	}
 }
 
@@ -274,7 +274,7 @@ func TestXTGETTCAP(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := New(24, 80)
 			s.Write([]byte("\x1bP+q" + tc.hex + "\x1b\\"))
-			if got := string(s.Response); got != tc.want {
+			if got := string(s.response); got != tc.want {
 				t.Errorf("XTGETTCAP %q = %q, want %q", tc.hex, got, tc.want)
 			}
 		})
@@ -290,13 +290,13 @@ func TestXTGETTCAP(t *testing.T) {
 func TestXTGETTCAPMalformedNameNotEchoed(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1bP+qZZ\x1b\\")) // "ZZ" is not valid hex
-	if len(s.Response) != 0 {
-		t.Errorf("non-hex XTGETTCAP name produced reply %q, want none (skipped, not echoed)", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("non-hex XTGETTCAP name produced reply %q, want none (skipped, not echoed)", s.response)
 	}
-	s.Response = nil
+	s.response = nil
 	s.Write([]byte("\x1bP+qabc\x1b\\")) // 3 chars: odd-length hex
-	if len(s.Response) != 0 {
-		t.Errorf("odd-length XTGETTCAP name produced reply %q, want none (skipped, not echoed)", s.Response)
+	if len(s.response) != 0 {
+		t.Errorf("odd-length XTGETTCAP name produced reply %q, want none (skipped, not echoed)", s.response)
 	}
 }
 
@@ -315,7 +315,7 @@ func TestDECRQSS_AdditionalSelectors(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := New(24, 80)
 			s.Write([]byte("\x1bP$q" + tc.query + "\x1b\\"))
-			if got := string(s.Response); got != tc.want {
+			if got := string(s.response); got != tc.want {
 				t.Errorf("DECRQSS %q = %q, want %q", tc.query, got, tc.want)
 			}
 		})

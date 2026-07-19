@@ -128,3 +128,31 @@ describe("scroll controller (brick 4)", () => {
     expect(scroll.isUserScrolledUp()).toBe(false);
   });
 });
+
+describe("per-view scroll memory seam (currentScrollTop / restoreScrollTop)", () => {
+  let el: HTMLElement;
+
+  beforeEach(() => {
+    el = makeScrollEl(1000, 300);
+    scroll.init({ scrollEl: el });
+  });
+
+  it("reads the live offset through currentScrollTop", () => {
+    scrollTo(el, 250);
+    expect(scroll.currentScrollTop()).toBe(250);
+  });
+
+  it("restoring a mid position holds; restoring the bottom re-engages follow", () => {
+    // A tabbed shell re-entering a tab whose user had scrolled up: the write
+    // fires a scroll event (as any scrollTop assignment does in a browser) and
+    // the follow/hold state re-derives from it like a user scroll.
+    scroll.restoreScrollTop(100);
+    el.dispatchEvent(new Event("scroll")); // happy-dom doesn't auto-fire it
+    expect(scroll.currentScrollTop()).toBe(100);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+
+    scroll.restoreScrollTop(700); // back to the bottom (distance 0)
+    el.dispatchEvent(new Event("scroll"));
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+});

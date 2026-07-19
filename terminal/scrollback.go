@@ -1,6 +1,6 @@
 package terminal
 
-import "github.com/cplieger/web-terminal-engine/v2/vt"
+import "github.com/cplieger/web-terminal-engine/v3/vt"
 
 // scrollbackRing is a fixed-capacity ring buffer of scrollback lines,
 // addressed by absolute line index.

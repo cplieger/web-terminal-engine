@@ -92,11 +92,18 @@ test.describe("kitty disambiguate encoding in a real browser (real key events ->
       ["Alt+a", "\x1b[97;3u"],
       ["Control+Shift+A", "\x1b[97;6u"], // UNSHIFTED codepoint 97, not 65
       ["Control+3", "\x1b[51;5u"],
-      ["Meta+a", "\x1b[97;9u"],
+      ["Control+Meta+a", "\x1b[97;13u"], // meta reports when combined with ctrl/alt
     ];
     for (const [combo, want] of cases) {
       expect(await pressAndRead(page, combo), combo).toEqual({ kind: "send", bytes: want });
     }
+    // DELIBERATE product deviation (mirrors the legacy carve-out and the kitty
+    // terminal's own emulator-shortcut precedence): meta/Cmd-ONLY printables
+    // are browser chrome (Cmd+C / Cmd+R) and are NOT reported to the app —
+    // reporting them ate copy-on-macOS inside kitty apps.
+    expect(await pressAndRead(page, "Meta+a"), "Meta+a stays with the browser").toEqual({
+      kind: "ignore",
+    });
   });
 
   test("functional keys and the Enter/Tab/Backspace exception with the flag ON", async ({

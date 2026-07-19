@@ -277,7 +277,7 @@ func (s *Screen) paramVal(i, def int) int {
 func (s *Screen) execControl(b byte) {
 	switch b {
 	case 0x07:
-		s.BellRing = true
+		s.bellRing = true
 	case '\b':
 		s.backspace()
 	case '\n', 0x0B, 0x0C: // LF, VT, FF
@@ -396,7 +396,7 @@ func (s *Screen) dispatchEsc(b byte) {
 		s.pendingWrap = false
 		s.Drained = nil
 		s.clearWrapState()
-		s.ScrollbackCleared = true
+		s.scrollbackCleared = true
 		s.InAltScreen = false
 		s.savedMainCells = nil
 		s.savedMainWrapped = nil

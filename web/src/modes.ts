@@ -1,5 +1,11 @@
-// Current DEC private mode state, as last announced by the server via
-// a wireMsgModes frame. Used by:
+// DEC private mode state — THE ACTIVE SESSION'S VIEW (P3). This singleton
+// mirrors the modes of whichever session the live socket serves: the
+// connection module is the single writer (it applies every inbound modes
+// frame via applySnapshot AND, in a tabbed shell, synchronously restores the
+// target session's cached snapshot inside setSession — power-on defaults for
+// a session never seen). Readers therefore never observe another session's
+// modes after setSession returns; the only staleness left is the inherent
+// one-frame lag against the session's own server state. Used by:
 //   - keyboard.ts arrow-key encoder: emits SS3 (ESC O letter) when
 //     applicationCursor is true, CSI (ESC [ letter) otherwise.
 //   - paste handling: wraps in \e[200~..\e[201~ only when
@@ -14,6 +20,41 @@
 // interpret as typed input (potentially executing pasted commands
 // character-by-character). applicationCursor starts false (normal
 // mode) because that's the VT100 power-on default.
+
+/**
+ * One session's complete DEC-mode mirror, as a typed value (P3). The
+ * connection module caches one per session and applies it via applySnapshot;
+ * the named-field shape (vs setModes' nine positional parameters) makes
+ * field-order drift impossible for production writers.
+ */
+export interface ModeSnapshot {
+  bracketedPaste: boolean;
+  applicationCursor: boolean;
+  mouseSGR: boolean;
+  focusReporting: boolean;
+  mouseMode: number;
+  applicationKeypad: boolean;
+  reverseVideo: boolean;
+  mousePixels: boolean;
+  keyboardFlags: number;
+}
+
+/**
+ * The VT power-on mode state — what a session that has never announced modes
+ * is in. Matches this module's initial values (see the bracketedPaste
+ * default rationale above).
+ */
+export const POWER_ON_MODES: Readonly<ModeSnapshot> = {
+  bracketedPaste: true,
+  applicationCursor: false,
+  mouseSGR: false,
+  focusReporting: false,
+  mouseMode: 0,
+  applicationKeypad: false,
+  reverseVideo: false,
+  mousePixels: false,
+  keyboardFlags: 0,
+};
 
 let bracketedPaste = true;
 let applicationCursor = false;
@@ -66,6 +107,39 @@ export function setModes(
   if (kbdFlags !== undefined) {
     keyboardFlags = kbdFlags;
   }
+}
+
+/**
+ * Apply a complete mode snapshot — every field, no optional-leaves-unchanged
+ * semantics (that is setModes' positional back-compat contract). The
+ * connection module uses this for both inbound modes frames and the
+ * synchronous per-session restore in setSession.
+ */
+export function applySnapshot(s: Readonly<ModeSnapshot>): void {
+  bracketedPaste = s.bracketedPaste;
+  applicationCursor = s.applicationCursor;
+  mouseSGR = s.mouseSGR;
+  focusReporting = s.focusReporting;
+  mouseMode = s.mouseMode;
+  applicationKeypad = s.applicationKeypad;
+  reverseVideo = s.reverseVideo;
+  mousePixels = s.mousePixels;
+  keyboardFlags = s.keyboardFlags;
+}
+
+/** The current mode state as a snapshot value (a copy; safe to retain). */
+export function snapshot(): ModeSnapshot {
+  return {
+    bracketedPaste,
+    applicationCursor,
+    mouseSGR,
+    focusReporting,
+    mouseMode,
+    applicationKeypad,
+    reverseVideo,
+    mousePixels,
+    keyboardFlags,
+  };
 }
 
 /** True when the server has DEC 2004 (bracketed paste) enabled. */

@@ -136,3 +136,28 @@ export function scrollToBottom(): void {
 export function isUserScrolledUp(): boolean {
   return !following;
 }
+
+/**
+ * The viewport's current scroll offset, for a consumer keeping per-view
+ * scroll memory (a tabbed shell saving the position of the tab it is
+ * leaving). Pairs with restoreScrollTop. This module owns the container's
+ * scrollTop; consumers read it through this seam rather than the DOM element
+ * so an engine-side change to the scroll geometry cannot silently break them.
+ */
+export function currentScrollTop(): number {
+  return scrollEl ? scrollEl.scrollTop : 0;
+}
+
+/**
+ * Restore a previously saved scroll offset (per-view scroll memory: a tabbed
+ * shell re-entering a tab whose user had scrolled up to read). The offset is
+ * applied verbatim; the follow/hold state then re-derives from the resulting
+ * scroll event exactly as it does for a user scroll, so a restored read
+ * position holds and a restored at-bottom position re-engages following.
+ */
+export function restoreScrollTop(top: number): void {
+  if (!scrollEl) {
+    return;
+  }
+  scrollEl.scrollTop = top;
+}

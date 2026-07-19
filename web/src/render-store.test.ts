@@ -124,7 +124,7 @@ describe("render (store-backed, brick 3)", () => {
     expect((outputEl.children[0]?.textContent ?? "").trim()).toBe("spin \\");
   });
 
-  it("renders a visible cursor span on the cursor row when not hidden", async () => {
+  it("paints the caret overlay over the cursor cell when not hidden (rows stay pure content)", async () => {
     const msg: ScreenMessage = {
       type: "screen",
       base: 0,
@@ -137,10 +137,31 @@ describe("render (store-backed, brick 3)", () => {
     };
     render.handleScreen(msg);
     await tick();
-    const cursorRowEl = outputEl.children[1] as HTMLElement;
-    expect(cursorRowEl.querySelector(".term-cursor")).not.toBeNull();
-    // The non-cursor row has no cursor span.
-    expect((outputEl.children[0] as HTMLElement).querySelector(".term-cursor")).toBeNull();
+    // The caret is a single overlay element in termWrap, never a span inside
+    // a row: row DOM is pure content so selections survive cursor motion.
+    const overlay = termWrap.querySelector(".term-cursor-overlay");
+    expect(overlay).not.toBeNull();
+    expect(overlay!.classList.contains("visible")).toBe(true);
+    expect(overlay!.classList.contains("term-cursor")).toBe(true);
+    expect(overlay!.textContent).toBe("c"); // block style copies the glyph under the cursor
+    expect(outputEl.querySelector(".term-cursor")).toBeNull(); // no in-row cursor span anywhere
+  });
+
+  it("hides the caret overlay when the cursor is hidden", async () => {
+    render.handleScreen({
+      type: "screen",
+      base: 0,
+      rows: [row("ab")],
+      changed: [0],
+      cursor: [0, 0],
+      cursorHidden: true,
+      cursorStyle: 0,
+      cursorBlink: false,
+    });
+    await tick();
+    const overlay = termWrap.querySelector(".term-cursor-overlay");
+    expect(overlay).not.toBeNull();
+    expect(overlay!.classList.contains("visible")).toBe(false);
   });
 
   it("wipes all rows on a full reset (server restart)", async () => {
@@ -210,7 +231,7 @@ describe("render: cursor-row tracking across frames (selective rebuild)", () => 
     render.updateFontMetrics();
   });
 
-  it("moves the visible cursor span to the new row and clears it from the row the cursor left", async () => {
+  it("moves the caret overlay on cursor motion WITHOUT touching either row's DOM", async () => {
     render.handleScreen({
       type: "screen",
       base: 0,
@@ -222,25 +243,32 @@ describe("render: cursor-row tracking across frames (selective rebuild)", () => 
       cursorBlink: false,
     });
     await tick();
-    expect((outputEl.children[0] as HTMLElement).querySelector(".term-cursor")).not.toBeNull();
-    expect((outputEl.children[1] as HTMLElement).querySelector(".term-cursor")).toBeNull();
+    const row0 = outputEl.children[0] as HTMLElement;
+    const row1 = outputEl.children[1] as HTMLElement;
+    const span0 = row0.firstElementChild;
+    const span1 = row1.firstElementChild;
+    const overlay = termWrap.querySelector(".term-cursor-overlay")!;
+    expect(overlay.textContent).toBe("a");
 
-    // Cursor moves to row 1 with NO row-content change (changed is empty): the
-    // renderer must repaint the row the cursor left so its stale cursor span is
-    // dropped, and paint the cursor onto the new row.
+    // Cursor moves to row 1 with NO row-content change (changed is empty):
+    // ONLY the overlay moves — the exact spans of both rows survive
+    // untouched, which is what keeps a native selection alive while typing
+    // (the old inline-span cursor rebuilt both rows here).
     render.handleScreen({
       type: "screen",
       base: 0,
       rows: [row("aa"), row("bb")],
       changed: [],
-      cursor: [1, 0],
+      cursor: [1, 1],
       cursorHidden: false,
       cursorStyle: 0,
       cursorBlink: false,
     });
     await tick();
-    expect((outputEl.children[0] as HTMLElement).querySelector(".term-cursor")).toBeNull();
-    expect((outputEl.children[1] as HTMLElement).querySelector(".term-cursor")).not.toBeNull();
+    expect(row0.firstElementChild).toBe(span0); // identical span objects: no rebuild
+    expect(row1.firstElementChild).toBe(span1);
+    expect(outputEl.querySelector(".term-cursor")).toBeNull();
+    expect(overlay.textContent).toBe("b"); // glyph copy follows the cursor cell
   });
 
   it("leaves the cursor row's DOM untouched when only another row changes (selection-preserving)", async () => {

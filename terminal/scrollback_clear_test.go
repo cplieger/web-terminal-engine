@@ -3,7 +3,8 @@ package terminal
 import (
 	"testing"
 
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/coder/websocket"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 )
 
 // TestED3ClearsScrollbackRing verifies that ED3 (CSI 3 J) emitted by the child
@@ -50,7 +51,8 @@ func TestED3_nextFrameSignalsClientToDropHistory(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
 	// Latch flushing on without spawning a PTY (buildFrame returns nil until a
 	// resize sets resized; we set it directly to keep the test process-free).
-	h.resized = true
+	h.sizeEstablished = true
+	h.registry.Add(&websocket.Conn{}) // attached client: the render path, not zero-client suspension
 
 	// Visible content so the repaint frame is non-empty, then ED3 to erase
 	// scrollback. Neither sequence produces a PTY reply, so the nil ptmx is
@@ -58,7 +60,7 @@ func TestED3_nextFrameSignalsClientToDropHistory(t *testing.T) {
 	h.handlePTYData([]byte("visible content"))
 	h.handlePTYData([]byte("\x1b[3J"))
 
-	frame := h.buildFrame()
+	frame, _ := h.buildFrame()
 	if frame == nil {
 		t.Fatal("buildFrame returned nil; expected a repaint frame carrying the scrollback-cleared signal")
 	}

@@ -29,6 +29,8 @@ export default [
       // Test fixtures that aren't real code
       "**/test-stubs/**",
       "**/__mocks__/**",
+      // Hand-run perf harness (plain Node script, no tsconfig membership)
+      "e2e/render-bench.mjs",
     ],
   },
   // 2. Strictest official preset combination (typed linting required).

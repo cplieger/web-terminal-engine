@@ -9,7 +9,7 @@
 // grid is spec-authored in terminal/render_golden_test.go TestRenderGoldenBehavior
 // and asserted there against the engine too. Run with `npm run test:e2e`.
 import { test, expect } from "@playwright/test";
-import { bundleEngine, HARNESS, readGolden } from "./e2e-harness.js";
+import { bundleEngine, HARNESS, readGolden, waitForRows } from "./e2e-harness.js";
 
 interface BehaviorEntry {
   name: string;
@@ -44,7 +44,10 @@ test.describe("behavioral display conformance in a real browser (escape seq -> e
         WTE.render.updateFontMetrics();
         WTE.render.handleScreen(msg);
       }, frameBytes);
-      await page.waitForTimeout(150); // let render.ts's rAF-batched flush complete
+      // Deterministic flush wait: every spec grid's rows must exist as divs
+      // (the fixture frame is a full repaint, so at least want.length rows
+      // materialize; rows build in ascending order).
+      await waitForRows(page, sc.want.length);
 
       const got = await page.evaluate(() => {
         const out = document.getElementById("out")!;

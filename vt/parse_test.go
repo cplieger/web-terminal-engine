@@ -140,7 +140,7 @@ func TestC1_UTF8MultibyteNotCorrupted(t *testing.T) {
 func TestC0_BEL_ExecutesMidCSI(t *testing.T) {
 	s := New(5, 80)
 	s.Write([]byte("\x1b[1\x07;1H")) // BEL mid-CSI
-	if !s.BellRing {
+	if !s.bellRing {
 		t.Error("BEL not executed mid-CSI")
 	}
 }

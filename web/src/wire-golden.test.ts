@@ -56,6 +56,37 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     expect(m.serverEpoch).toBe(1234567890);
     expect(m.committed).toBe(200);
     expect(m.oldestIndex).toBe(10);
+    expect(m.serverWireVersion).toBe(4);
+    expect(m.ledgerLost).toBe(false);
+  });
+
+  it("decodes the ledger-lost resumeAck frame", () => {
+    const m = decodeWireBinary(load("resumeack-ledgerlost"));
+    expect(m?.type).toBe("resumeAck");
+    if (m?.type !== "resumeAck") {
+      return;
+    }
+    expect(m.received).toBe(7);
+    expect(m.serverWireVersion).toBe(4);
+    expect(m.ledgerLost).toBe(true);
+  });
+
+  it("decodes the ackOnly frame", () => {
+    const m = decodeWireBinary(load("ackonly"));
+    expect(m?.type).toBe("ackOnly");
+    if (m?.type !== "ackOnly") {
+      return;
+    }
+    expect(m.inputAck).toBe(42);
+  });
+
+  it("decodes the clipboard frame", () => {
+    const m = decodeWireBinary(load("clipboard"));
+    expect(m?.type).toBe("clipboard");
+    if (m?.type !== "clipboard") {
+      return;
+    }
+    expect(m.text).toBe("copy me");
   });
 
   it("decodes the modes frame", () => {

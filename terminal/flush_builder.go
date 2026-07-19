@@ -4,7 +4,7 @@ import (
 	"slices"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 )
 
 // flushFrameBuilder computes outbound flush frames by diffing the
@@ -56,11 +56,14 @@ func (b *flushFrameBuilder) Reset() {
 }
 
 // Build computes the next outbound frame from the current screen state
-// and client snapshot. committedBefore is the absolute index of the top
-// screen row before this frame's drain is committed to history. Returns
-// nil if there is nothing to send.
-func (b *flushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*websocket.Conn]uint64, committedBefore uint64) *flushFrame {
-	if !resized {
+// and client snapshot. sizeEstablished gates emission entirely: until the
+// PTY has real dimensions (Handler.sizeEstablished), frames would be
+// rendered against a zero-size screen, so Build only drains scrollback and
+// returns nil. committedBefore is the absolute index of the top screen row
+// before this frame's drain is committed to history. Returns nil if there
+// is nothing to send.
+func (b *flushFrameBuilder) Build(screen *vt.Screen, sizeEstablished bool, clients map[*websocket.Conn]uint64, committedBefore uint64) *flushFrame {
+	if !sizeEstablished {
 		screen.DrainScrollback()
 		return nil
 	}
@@ -98,8 +101,7 @@ func (b *flushFrameBuilder) Build(screen *vt.Screen, resized bool, clients map[*
 	}
 	curRow, curCol := screen.CursorPos()
 
-	bell := screen.BellRing
-	screen.BellRing = false
+	bell := screen.TakeBell()
 
 	changed := b.diffWindow(rows, base)
 

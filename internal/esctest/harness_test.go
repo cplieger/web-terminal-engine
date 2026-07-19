@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 )
 
 // TestConformance runs the esctest2 suite against the engine's VT and asserts
@@ -266,7 +266,7 @@ func TestCrossCheckSummary(t *testing.T) {
 // TestPumpInMemory drives pump over an in-memory reader/writer (no PTY, no
 // *os.File): it feeds a DSR query (CSI 5 n), which vt.Screen answers with
 // "\x1b[0n" WITHOUT needing AllowScreenReport, and asserts the answer is
-// written back verbatim and screen.Response is drained (reset) afterward.
+// written back verbatim and the response queue is drained afterward.
 func TestPumpInMemory(t *testing.T) {
 	screen := vt.New(25, 80)
 	r := bytes.NewReader([]byte("\x1b[5n")) // DSR: report device status
@@ -277,8 +277,8 @@ func TestPumpInMemory(t *testing.T) {
 	if got, want := w.String(), "\x1b[0n"; got != want {
 		t.Errorf("pump wrote %q back to the child, want the DSR answer %q", got, want)
 	}
-	if len(screen.Response) != 0 {
-		t.Errorf("pump left screen.Response = %q, want it drained to empty after writing", screen.Response)
+	if resp := screen.TakeResponse(); len(resp) != 0 {
+		t.Errorf("pump left a queued response = %q, want it drained to empty after writing", resp)
 	}
 }
 
@@ -322,8 +322,8 @@ func TestPumpOSPipe(t *testing.T) {
 	if want := "\x1b[1;1R"; string(got) != want { // fresh screen: cursor at row 1, col 1
 		t.Errorf("pump wrote %q back over the pipe, want the CPR answer %q", got, want)
 	}
-	if len(screen.Response) != 0 {
-		t.Errorf("pump left screen.Response = %q, want it drained to empty", screen.Response)
+	if resp := screen.TakeResponse(); len(resp) != 0 {
+		t.Errorf("pump left a queued response = %q, want it drained to empty", resp)
 	}
 }
 

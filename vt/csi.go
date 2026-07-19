@@ -6,100 +6,130 @@ import (
 	"time"
 )
 
-//nolint:gocyclo,gocognit // wide CSI final-byte dispatch; cognitively flat (each case is a one-line handler call)
-func (s *Screen) dispatchCSI(final byte) {
-	// Any cursor-affecting CSI clears pending wrap.
-	switch final {
-	case 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'f', 'd', 'e', '`', 'a', 'I', 'Z', 'u':
-		s.pendingWrap = false
-	}
+// csiHandler executes one dispatched CSI command. A handler owns everything
+// after the parser: it reads its parameters (s.paramVal) and s.privateMarker
+// itself, exactly as the former switch arms did.
+type csiHandler = func(s *Screen)
 
-	// Intermediate-byte sequences (SP, '!', '$') dispatch separately. An
-	// unrecognized intermediate returns false and falls through to the main
-	// final-byte dispatch below, preserving the original behavior.
-	if s.numInterm > 0 && s.dispatchCSIIntermediate(final) {
-		return
-	}
+// csiCUP implements CUP / HVP — cursor position (shared by 'H' and 'f').
+func csiCUP(s *Screen) {
+	s.cursorPosition(s.paramVal(0, 1)-1, s.paramVal(1, 1)-1)
+}
 
-	switch final {
-	case 'A': // CUU — cursor up (stops at the top margin when starting in-region)
-		s.cursorUp(s.paramVal(0, 1))
-	case 'B': // CUD — cursor down (stops at the bottom margin when starting in-region)
-		s.cursorDown(s.paramVal(0, 1))
-	case 'C': // CUF — cursor forward (stops at the right margin when starting in-region)
-		s.cursorRight(s.paramVal(0, 1))
-	case 'D': // CUB — cursor back (stops at the left margin when starting in-region)
-		s.cursorLeft(s.paramVal(0, 1))
-	case 'E': // CNL — cursor next line (region-aware down, then to the left margin)
+// csiCHA implements CHA ('G') / HPA ('`') — cursor horizontal absolute
+// (origin-mode aware column); the two finals are aliases of the same motion.
+func csiCHA(s *Screen) {
+	s.curX = s.originCol(s.paramVal(0, 1) - 1)
+}
+
+// csiClearsWrap marks the cursor-affecting CSI finals that clear the deferred
+// autowrap state before dispatch (printing at the right margin sets it; any
+// cursor motion cancels it).
+var csiClearsWrap = [256]bool{
+	'A': true, 'B': true, 'C': true, 'D': true, 'E': true, 'F': true, 'G': true,
+	'H': true, 'f': true, 'd': true, 'e': true, '`': true, 'a': true, 'I': true,
+	'Z': true, 'u': true,
+}
+
+// csiMain is the final-byte dispatch table for CSI sequences without an
+// intermediate byte. Adding a control is one entry here (or one in
+// csiIntermediate when it carries an intermediate byte); an absent entry logs
+// the unhandled-CSI line in dispatchCSI.
+var csiMain = [256]csiHandler{
+	// CUU — cursor up (stops at the top margin when starting in-region)
+	'A': func(s *Screen) { s.cursorUp(s.paramVal(0, 1)) },
+	// CUD — cursor down (stops at the bottom margin when starting in-region)
+	'B': func(s *Screen) { s.cursorDown(s.paramVal(0, 1)) },
+	// CUF — cursor forward (stops at the right margin when starting in-region)
+	'C': func(s *Screen) { s.cursorRight(s.paramVal(0, 1)) },
+	// CUB — cursor back (stops at the left margin when starting in-region)
+	'D': func(s *Screen) { s.cursorLeft(s.paramVal(0, 1)) },
+	// CNL — cursor next line (region-aware down, then to the left margin)
+	'E': func(s *Screen) {
 		s.cursorDown(s.paramVal(0, 1))
 		s.curX = s.leftBound()
-	case 'F': // CPL — cursor previous line (region-aware up, then to the left margin)
+	},
+	// CPL — cursor previous line (region-aware up, then to the left margin)
+	'F': func(s *Screen) {
 		s.cursorUp(s.paramVal(0, 1))
 		s.curX = s.leftBound()
-	case 'G': // CHA — cursor horizontal absolute (origin-mode aware column)
-		s.curX = s.originCol(s.paramVal(0, 1) - 1)
-	case 'H', 'f': // CUP / HVP — cursor position
-		s.cursorPosition(s.paramVal(0, 1)-1, s.paramVal(1, 1)-1)
-	case 'J': // ED (CSI J) / DECSED (CSI ? J — selective, spares protected cells)
-		s.eraseInDisplay(s.paramVal(0, 0), s.privateMarker == '?')
-	case 'K': // EL (CSI K) / DECSEL (CSI ? K — selective, spares protected cells)
-		s.eraseInLine(s.paramVal(0, 0), s.privateMarker == '?')
-	case '@': // ICH — insert characters
-		s.insertChars(s.paramVal(0, 1))
-	case 'L': // IL — insert lines
-		s.insertLines(s.paramVal(0, 1))
-	case 'M': // DL — delete lines
-		s.deleteLines(s.paramVal(0, 1))
-	case 'P': // DCH — delete characters
-		s.deleteChars(s.paramVal(0, 1))
-	case 'S': // SU — scroll up
-		s.scrollUp(s.paramVal(0, 1))
-	case 'T', '^': // SD — scroll down. CSI > Pm T is XTRMTITLE (reset title modes).
-		if final == 'T' && s.privateMarker == '>' {
+	},
+	// CHA — cursor horizontal absolute (origin-mode aware column)
+	'G': csiCHA,
+	// CUP / HVP — cursor position
+	'H': csiCUP,
+	'f': csiCUP,
+	// ED (CSI J) / DECSED (CSI ? J — selective, spares protected cells)
+	'J': func(s *Screen) { s.eraseInDisplay(s.paramVal(0, 0), s.privateMarker == '?') },
+	// EL (CSI K) / DECSEL (CSI ? K — selective, spares protected cells)
+	'K': func(s *Screen) { s.eraseInLine(s.paramVal(0, 0), s.privateMarker == '?') },
+	// ICH — insert characters
+	'@': func(s *Screen) { s.insertChars(s.paramVal(0, 1)) },
+	// IL — insert lines
+	'L': func(s *Screen) { s.insertLines(s.paramVal(0, 1)) },
+	// DL — delete lines
+	'M': func(s *Screen) { s.deleteLines(s.paramVal(0, 1)) },
+	// DCH — delete characters
+	'P': func(s *Screen) { s.deleteChars(s.paramVal(0, 1)) },
+	// SU — scroll up
+	'S': func(s *Screen) { s.scrollUp(s.paramVal(0, 1)) },
+	// SD — scroll down. CSI > Pm T is XTRMTITLE (reset title modes).
+	'T': func(s *Screen) {
+		if s.privateMarker == '>' {
 			s.setTitleModes(false)
 		} else {
 			s.scrollDown(s.paramVal(0, 1))
 		}
-	case 'X': // ECH — erase characters
-		s.eraseChars(s.paramVal(0, 1))
-	case 'I': // CHT — cursor forward tabulation
-		s.cursorTabForward(s.paramVal(0, 1))
-	case 'Z': // CBT — cursor backward tabulation
-		s.cursorTabBackward(s.paramVal(0, 1))
-	case '`': // HPA — horizontal position absolute (origin-mode aware column)
-		s.curX = s.originCol(s.paramVal(0, 1) - 1)
-	case 'a': // HPR — horizontal position relative (relative move; no re-origin)
+	},
+	// SD (the '^' alias never carries the XTRMTITLE form)
+	'^': func(s *Screen) { s.scrollDown(s.paramVal(0, 1)) },
+	// ECH — erase characters
+	'X': func(s *Screen) { s.eraseChars(s.paramVal(0, 1)) },
+	// CHT — cursor forward tabulation
+	'I': func(s *Screen) { s.cursorTabForward(s.paramVal(0, 1)) },
+	// CBT — cursor backward tabulation
+	'Z': func(s *Screen) { s.cursorTabBackward(s.paramVal(0, 1)) },
+	// HPA — horizontal position absolute (origin-mode aware column)
+	'`': csiCHA,
+	// HPR — horizontal position relative (relative move; no re-origin)
+	'a': func(s *Screen) {
 		s.curX += s.paramVal(0, 1)
 		s.clampCursor()
-	case 'd': // VPA — vertical position absolute (origin-mode aware row; column unchanged)
-		s.curY = s.originRow(s.paramVal(0, 1) - 1)
-	case 'e': // VPR — vertical position relative (same as CUD)
-		s.cursorDown(s.paramVal(0, 1))
-	case 'b': // REP — repeat last printed character
-		s.repeatLastChar(s.paramVal(0, 1))
-	case 'c': // DA — device attributes
-		s.deviceAttributes()
-	case 'g': // TBC — tab clear
-		s.tabClear(s.paramVal(0, 0))
-	case 'r': // DECSTBM — set scroll region. CSI ? Pm r is XTRESTORE (restore
-		// the DEC private mode values saved by XTSAVE).
+	},
+	// VPA — vertical position absolute (origin-mode aware row; column unchanged)
+	'd': func(s *Screen) { s.curY = s.originRow(s.paramVal(0, 1) - 1) },
+	// VPR — vertical position relative (same as CUD)
+	'e': func(s *Screen) { s.cursorDown(s.paramVal(0, 1)) },
+	// REP — repeat last printed character
+	'b': func(s *Screen) { s.repeatLastChar(s.paramVal(0, 1)) },
+	// DA — device attributes
+	'c': func(s *Screen) { s.deviceAttributes() },
+	// TBC — tab clear
+	'g': func(s *Screen) { s.tabClear(s.paramVal(0, 0)) },
+	// DECSTBM — set scroll region. CSI ? Pm r is XTRESTORE (restore the DEC
+	// private mode values saved by XTSAVE).
+	'r': func(s *Screen) {
 		switch s.privateMarker {
 		case 0:
 			s.setScrollRegion()
 		case '?':
 			s.xtRestoreModes()
 		}
-	case 'm': // SGR — select graphic rendition. CSI > Pp;Pv m is XTMODKEYS
-		// (modifyOtherKeys) and CSI ? Pp m is XTQMODKEYS — key-option controls,
-		// NOT SGR. Routing them to applySGR would apply bogus text attributes
-		// (kiro-cli emits CSI > 4 ; 1 m at init). We don't implement
-		// modifyOtherKeys, so consume the marked forms as no-ops.
+	},
+	// SGR — select graphic rendition. CSI > Pp;Pv m is XTMODKEYS
+	// (modifyOtherKeys) and CSI ? Pp m is XTQMODKEYS — key-option controls,
+	// NOT SGR. Routing them to applySGR would apply bogus text attributes
+	// (kiro-cli emits CSI > 4 ; 1 m at init). We don't implement
+	// modifyOtherKeys, so consume the marked forms as no-ops.
+	'm': func(s *Screen) {
 		if s.privateMarker == 0 {
 			s.applySGR()
 		}
-	case 's': // CSI Pl;Pr s is DECSLRM (set left/right margins) when DECLRMM is
-		// enabled; otherwise CSI s is SCOSC (save cursor). CSI ? Pm s is XTSAVE
-		// (save DEC private mode values for later XTRESTORE).
+	},
+	// CSI Pl;Pr s is DECSLRM (set left/right margins) when DECLRMM is
+	// enabled; otherwise CSI s is SCOSC (save cursor). CSI ? Pm s is XTSAVE
+	// (save DEC private mode values for later XTRESTORE).
+	's': func(s *Screen) {
 		switch s.privateMarker {
 		case 0:
 			if s.LRMarginMode {
@@ -110,11 +140,13 @@ func (s *Screen) dispatchCSI(final byte) {
 		case '?':
 			s.xtSaveModes()
 		}
-	case 'u': // Plain CSI u is SCORC (restore cursor). The private-marker forms
-		// are the kitty keyboard protocol — query (?), push (>), pop (<) and set
-		// (=) the progressive-enhancement flags. The flags are synced to the
-		// client, whose key encoder produces the matching kitty CSI-u sequences,
-		// so advertising support here is safe. See kitty.go.
+	},
+	// Plain CSI u is SCORC (restore cursor). The private-marker forms are the
+	// kitty keyboard protocol — query (?), push (>), pop (<) and set (=) the
+	// progressive-enhancement flags. The flags are synced to the client, whose
+	// key encoder produces the matching kitty CSI-u sequences, so advertising
+	// support here is safe. See kitty.go.
+	'u': func(s *Screen) {
 		switch s.privateMarker {
 		case 0:
 			s.restoreCursor()
@@ -127,30 +159,138 @@ func (s *Screen) dispatchCSI(final byte) {
 		case '=': // set flags with mode (default mode 1)
 			s.setKeyboardFlags(s.paramVal(0, 0), s.paramVal(1, 1))
 		}
-	case 'q': // XTVERSION (CSI > q) — report a generic terminal name so probing
-		// apps get an answer instead of stalling. Kept intentionally generic (no
-		// known-terminal name/version) so apps don't enable terminal-specific
-		// quirks. Plain CSI q is DECLL (load LEDs), which we don't support.
+	},
+	// XTVERSION (CSI > q) — report a generic terminal name so probing apps get
+	// an answer instead of stalling. Kept intentionally generic (no
+	// known-terminal name/version) so apps don't enable terminal-specific
+	// quirks. Plain CSI q is DECLL (load LEDs), which we don't support.
+	'q': func(s *Screen) {
 		if s.privateMarker == '>' {
-			s.Response = append(s.Response, "\x1bP>|web-terminal-engine\x1b\\"...)
+			s.response = append(s.response, "\x1bP>|web-terminal-engine\x1b\\"...)
 		}
-	case 'h':
-		s.applyModes(true)
-	case 'l':
-		s.applyModes(false)
-	case 't': // window manipulation. CSI > Pm t is XTSMTITLE (set title modes).
+	},
+	// SM / DECSET — set modes
+	'h': func(s *Screen) { s.applyModes(true) },
+	// RM / DECRST — reset modes
+	'l': func(s *Screen) { s.applyModes(false) },
+	// Window manipulation. CSI > Pm t is XTSMTITLE (set title modes).
+	't': func(s *Screen) {
 		if s.privateMarker == '>' {
 			s.setTitleModes(true)
 		} else {
 			s.windowManipulation()
 		}
-	case 'n': // DSR — device status report
-		s.deviceStatusReport()
-	default:
-		if final != 0 {
-			slog.Info("vt: unhandled CSI", "cmd", string(final), "marker", s.privateMarker)
+	},
+	// DSR — device status report
+	'n': func(s *Screen) { s.deviceStatusReport() },
+}
+
+// csiIntermediate is the dispatch table for CSI sequences carrying an
+// intermediate byte, keyed by {first intermediate, final}. A known
+// intermediate prefix CONSUMES its sequence even when the final byte has no
+// entry (see dispatchCSIIntermediate); an unknown prefix falls through to the
+// main dispatch, preserving the pre-table behavior.
+var csiIntermediate = map[[2]byte]csiHandler{
+	// SL — shift left
+	{' ', '@'}: func(s *Screen) { s.shiftLeft(s.paramVal(0, 1)) },
+	// SR — shift right
+	{' ', 'A'}: func(s *Screen) { s.shiftRight(s.paramVal(0, 1)) },
+	// DECSCUSR — set cursor style
+	{' ', 'q'}: func(s *Screen) {
+		v := s.paramVal(0, 0)
+		if v <= 6 {
+			s.CursorStyle = uint8(v) // #nosec G115 -- v bounded [0,6]
+			s.CursorBlink = v == 0 || v%2 == 1
 		}
+	},
+	// DECSTR — soft terminal reset
+	{'!', 'p'}: func(s *Screen) { s.softReset() },
+	// DECRQM — request mode (with or without the '?' prefix)
+	{'$', 'p'}: func(s *Screen) { s.handleDECRQM() },
+	// DECFRA — fill rectangular area with a character
+	{'$', 'x'}: func(s *Screen) { s.fillRect() },
+	// DECERA — erase rectangular area (to blanks)
+	{'$', 'z'}: func(s *Screen) { s.eraseRect(false) },
+	// DECSERA — selective erase rectangular area (spares DECSCA cells)
+	{'$', '{'}: func(s *Screen) { s.eraseRect(true) },
+	// DECCRA — copy rectangular area
+	{'$', 'v'}: func(s *Screen) { s.copyRect() },
+	// DECSCA — select character protection: Ps=1 protects cells printed from
+	// now on; Ps=0/2 clears the attribute.
+	{'"', 'q'}: func(s *Screen) { s.curProtected = s.paramVal(0, 0) == 1 },
+	// DECSCL — conformance level. Track the requested level (60+n) so a
+	// DECRQSS DECSCL query reports it back; no other behavioral effect.
+	{'"', 'p'}: func(s *Screen) { s.conformanceLevel = s.paramVal(0, 65) },
+	// DECIC — insert blank columns at the cursor column across the region
+	{'\'', '}'}: func(s *Screen) { s.insertColumns(s.paramVal(0, 1)) },
+	// DECDC — delete columns at the cursor column across the region
+	{'\'', '~'}: func(s *Screen) { s.deleteColumns(s.paramVal(0, 1)) },
+	// DECRQCRA — request rectangular-area checksum
+	{'*', 'y'}: func(s *Screen) { s.reportRectChecksum() },
+	// DECSACE — set attribute change extent, configuring rectangular ops we
+	// don't implement; consumed as a no-op.
+	{'*', 'x'}: func(*Screen) {},
+	// DECSNLS — set number of lines per screen. The browser viewport owns the
+	// row count, so the requested value is tracked only (for the DECRQSS "*|"
+	// report), not applied as a resize.
+	{'*', '|'}: func(s *Screen) { s.linesPerScreen = s.paramVal(0, 0) },
+}
+
+func (s *Screen) dispatchCSI(final byte) {
+	// Any cursor-affecting CSI clears pending wrap.
+	if csiClearsWrap[final] {
+		s.pendingWrap = false
 	}
+
+	// Intermediate-byte sequences dispatch separately. An unrecognized
+	// intermediate returns false and falls through to the main final-byte
+	// dispatch below, preserving the pre-table behavior.
+	if s.numInterm > 0 && s.dispatchCSIIntermediate(final) {
+		return
+	}
+
+	if h := csiMain[final]; h != nil {
+		h(s)
+		return
+	}
+	if final != 0 {
+		slog.Info("vt: unhandled CSI", "cmd", string(final), "marker", s.privateMarker)
+	}
+}
+
+// dispatchCSIIntermediate handles CSI sequences carrying an intermediate byte
+// via the csiIntermediate table. It returns true when it consumed the
+// sequence; an unrecognized intermediate PREFIX returns false so the caller
+// falls through to the main final-byte dispatch. A known prefix with an
+// unknown final is consumed (logged per prefix, except '!' which was
+// historically silent), never falling through — matching the pre-table
+// per-prefix default arms. Called only when s.numInterm > 0.
+func (s *Screen) dispatchCSIIntermediate(final byte) bool {
+	intermediate := s.pIntermed[0]
+	if h, ok := csiIntermediate[[2]byte{intermediate, final}]; ok {
+		h(s)
+		return true
+	}
+	switch intermediate {
+	case ' ':
+		slog.Info("vt: unhandled CSI SP", "cmd", string(final), "args", s.paramVal(0, 0))
+		return true
+	case '!':
+		return true // historically consumed without logging
+	case '$':
+		slog.Info("vt: unhandled CSI $", "cmd", string(final))
+		return true
+	case '"':
+		slog.Info("vt: unhandled CSI \"", "cmd", string(final))
+		return true
+	case '\'':
+		slog.Info("vt: unhandled CSI '", "cmd", string(final))
+		return true
+	case '*':
+		slog.Info("vt: unhandled CSI *", "cmd", string(final))
+		return true
+	}
+	return false
 }
 
 // clampCursor confines the cursor to the screen bounds. The cursor-movement
@@ -290,85 +430,6 @@ func (s *Screen) backspace() {
 	}
 }
 
-// dispatchCSIIntermediate handles CSI sequences carrying an intermediate byte
-// (SP, '!', or '$'). It returns true when it consumed the sequence; an
-// unrecognized intermediate returns false so the caller falls through to the
-// main final-byte dispatch. Called only when s.numInterm > 0.
-func (s *Screen) dispatchCSIIntermediate(final byte) bool {
-	switch s.pIntermed[0] {
-	case ' ': // SP-prefixed
-		s.dispatchCSISpace(final)
-		return true
-	case '!': // DECSTR — soft terminal reset
-		if final == 'p' {
-			s.softReset()
-		}
-		return true
-	case '$': // DECRQM (p), DECFRA (x), DECERA (z), DECSERA ({), DECCRA (v)
-		s.dispatchCSIDollar(final)
-		return true
-	case '"': // DECSCA (" q) select protection / DECSCL (" p) conformance
-		s.dispatchCSIQuote(final)
-		return true
-	case '\'': // DECIC (' }) insert columns / DECDC (' ~) delete columns
-		s.dispatchCSIApostrophe(final)
-		return true
-	case '*': // DECRQCRA (* y) rectangular-area checksum / DECSACE (* x)
-		s.dispatchCSIStar(final)
-		return true
-	}
-	return false
-}
-
-// dispatchCSIQuote handles the '"'-intermediate CSI sequences. DECSCA (Ps " q)
-// selects the character-protection attribute applied to subsequently printed
-// cells (Ps=1 protects; Ps=0/2 clears). DECSCL (Ps " p) sets the conformance
-// level, accepted with no behavioral effect.
-func (s *Screen) dispatchCSIQuote(final byte) {
-	switch final {
-	case 'q': // DECSCA
-		s.curProtected = s.paramVal(0, 0) == 1
-	case 'p': // DECSCL — conformance level. Track the requested level (60+n) so
-		// a DECRQSS DECSCL query reports it back; no other behavioral effect.
-		s.conformanceLevel = s.paramVal(0, 65)
-	default:
-		slog.Info("vt: unhandled CSI \"", "cmd", string(final))
-	}
-}
-
-// dispatchCSIApostrophe handles the '\”-intermediate CSI sequences: DECIC
-// (Ps ' }) inserts blank columns and DECDC (Ps ' ~) deletes columns, both at
-// the cursor column across every row of the scroll region.
-func (s *Screen) dispatchCSIApostrophe(final byte) {
-	switch final {
-	case '}': // DECIC — insert columns
-		s.insertColumns(s.paramVal(0, 1))
-	case '~': // DECDC — delete columns
-		s.deleteColumns(s.paramVal(0, 1))
-	default:
-		slog.Info("vt: unhandled CSI '", "cmd", string(final))
-	}
-}
-
-// dispatchCSIStar handles the '*'-intermediate CSI sequences. The only one we
-// answer is DECRQCRA (Pid ; Pp ; Pt ; Pl ; Pb ; Pr * y), the rectangular-area
-// checksum request. DECSACE (* x) configures the change-extent for the
-// DECCRA/DECFRA rectangular-editing ops we don't implement, so it is consumed
-// as a no-op.
-func (s *Screen) dispatchCSIStar(final byte) {
-	switch final {
-	case 'y': // DECRQCRA — request rectangular-area checksum
-		s.reportRectChecksum()
-	case 'x': // DECSACE — set attribute change extent (unimplemented rect ops)
-	case '|': // DECSNLS — set number of lines per screen. The browser viewport
-		// owns the row count, so the requested value is tracked only (for the
-		// DECRQSS "*|" report), not applied as a resize.
-		s.linesPerScreen = s.paramVal(0, 0)
-	default:
-		slog.Info("vt: unhandled CSI *", "cmd", string(final))
-	}
-}
-
 // reportRectChecksum answers DECRQCRA with DCS Pid ! ~ hhhh ST, where hhhh is
 // the checksum of the requested rectangle. Gated behind AllowScreenReport (see
 // the field doc): the reply is written back into the PTY as input, so it is a
@@ -401,28 +462,7 @@ func (s *Screen) reportRectChecksum() {
 		}
 	}
 	checksum := (0x10000 - sum%0x10000) % 0x10000 // negated 16-bit ordinal sum
-	s.Response = fmt.Appendf(s.Response, "\x1bP%d!~%04X\x1b\\", pid, checksum)
-}
-
-// dispatchCSIDollar handles the '$'-intermediate CSI sequences: DECRQM (p, with
-// or without the '?' prefix) plus the VT400 rectangular-area editing ops.
-// DECCARA ($r) / DECRARA ($t) — change/reverse attributes in a rectangle — are
-// not implemented (no per-rect SGR need); they are consumed as no-ops.
-func (s *Screen) dispatchCSIDollar(final byte) {
-	switch final {
-	case 'p': // DECRQM — request mode
-		s.handleDECRQM()
-	case 'x': // DECFRA — fill rectangular area with a character
-		s.fillRect()
-	case 'z': // DECERA — erase rectangular area (to blanks)
-		s.eraseRect(false)
-	case '{': // DECSERA — selective erase rectangular area (spares DECSCA cells)
-		s.eraseRect(true)
-	case 'v': // DECCRA — copy rectangular area
-		s.copyRect()
-	default:
-		slog.Info("vt: unhandled CSI $", "cmd", string(final))
-	}
+	s.response = fmt.Appendf(s.response, "\x1bP%d!~%04X\x1b\\", pid, checksum)
 }
 
 // rectBounds resolves a 1-based rectangle (Pt;Pl;Pb;Pr, 0 = default) to 0-based
@@ -525,25 +565,6 @@ func (s *Screen) copyRect() {
 	}
 }
 
-// dispatchCSISpace handles the SP-intermediate CSI sequences (SL, SR,
-// DECSCUSR).
-func (s *Screen) dispatchCSISpace(final byte) {
-	switch final {
-	case '@': // SL — shift left
-		s.shiftLeft(s.paramVal(0, 1))
-	case 'A': // SR — shift right
-		s.shiftRight(s.paramVal(0, 1))
-	case 'q': // DECSCUSR — set cursor style
-		v := s.paramVal(0, 0)
-		if v <= 6 {
-			s.CursorStyle = uint8(v) // #nosec G115 -- v bounded [0,6]
-			s.CursorBlink = v == 0 || v%2 == 1
-		}
-	default:
-		slog.Info("vt: unhandled CSI SP", "cmd", string(final), "args", s.paramVal(0, 0))
-	}
-}
-
 // eraseInDisplay implements ED (CSI J) and, when selective is true, DECSED
 // (CSI ? J), which spares DECSCA-protected cells.
 func (s *Screen) eraseInDisplay(mode int, selective bool) {
@@ -579,7 +600,7 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 		// previous frame before repainting; honoring it is exactly what keeps a
 		// real terminal from accumulating stale frames on resize. The pending
 		// (not-yet-committed) drain is scrollback-bound, so it is discarded too.
-		s.ScrollbackCleared = true
+		s.scrollbackCleared = true
 		s.Drained = nil
 		// The retained cross-boundary chain tail describes history that no
 		// longer exists; the on-screen flags describe rows that remain.
@@ -703,10 +724,10 @@ func (s *Screen) deviceAttributes() {
 		// Secondary DA (DA2): CSI > 64 ; Pv ; 0 c. 64 = VT525-class model (xterm
 		// at VT level 5); Pv is the firmware/patch level. daFirmwareVersion sits
 		// in xterm's plausible range so version-probing apps get a sane answer.
-		s.Response = fmt.Appendf(s.Response, "\x1b[>64;%d;0c", daFirmwareVersion)
+		s.response = fmt.Appendf(s.response, "\x1b[>64;%d;0c", daFirmwareVersion)
 	case '=':
 		// Tertiary DA (DA3): DCS ! | <unit id> ST. A fixed all-zero site id.
-		s.Response = append(s.Response, "\x1bP!|00000000\x1b\\"...)
+		s.response = append(s.response, "\x1bP!|00000000\x1b\\"...)
 	default:
 		// Primary DA: CSI ? 65 ; ... c. 65 = VT525 conformance; the trailing
 		// list is xterm's default level-5 feature set:
@@ -714,7 +735,7 @@ func (s *Screen) deviceAttributes() {
 		//   16 locator  17 terminal-state  18 user-windows  21 horizontal-scroll
 		//   22 color    28 rectangular-editing          29 ANSI-text-locator
 		if s.paramVal(0, 0) == 0 {
-			s.Response = append(s.Response, "\x1b[?65;1;2;6;9;15;16;17;18;21;22;28;29c"...)
+			s.response = append(s.response, "\x1b[?65;1;2;6;9;15;16;17;18;21;22;28;29c"...)
 		}
 	}
 }
@@ -778,13 +799,13 @@ func (s *Screen) setLeftRightMargins() {
 func (s *Screen) windowManipulation() {
 	switch s.paramVal(0, 0) {
 	case 18: // report text area size in characters: CSI 8 ; height ; width t
-		s.Response = fmt.Appendf(s.Response, "\x1b[8;%d;%dt", s.Height, s.Width)
+		s.response = fmt.Appendf(s.response, "\x1b[8;%d;%dt", s.Height, s.Width)
 	case 19: // report screen size in characters (no separate window chrome here)
-		s.Response = fmt.Appendf(s.Response, "\x1b[9;%d;%dt", s.Height, s.Width)
+		s.response = fmt.Appendf(s.response, "\x1b[9;%d;%dt", s.Height, s.Width)
 	case 20: // report icon label: OSC L <icon> ST
-		s.Response = fmt.Appendf(s.Response, "\x1b]L%s\x1b\\", s.encodeTitle(s.iconTitle))
+		s.response = fmt.Appendf(s.response, "\x1b]L%s\x1b\\", s.encodeTitle(s.iconTitle))
 	case 21: // report window title: OSC l <title> ST
-		s.Response = fmt.Appendf(s.Response, "\x1b]l%s\x1b\\", s.encodeTitle(s.Title))
+		s.response = fmt.Appendf(s.response, "\x1b]l%s\x1b\\", s.encodeTitle(s.Title))
 	case 22: // push icon and/or window title onto the respective stack
 		s.pushTitle(s.paramVal(1, 0))
 	case 23: // pop icon and/or window title from the respective stack
@@ -872,9 +893,9 @@ func (s *Screen) deviceStatusReport() {
 	}
 	switch s.paramVal(0, 0) {
 	case 5:
-		s.Response = append(s.Response, "\x1b[0n"...)
+		s.response = append(s.response, "\x1b[0n"...)
 	case 6:
-		s.Response = fmt.Appendf(s.Response, "\x1b[%d;%dR", row, col)
+		s.response = fmt.Appendf(s.response, "\x1b[%d;%dR", row, col)
 	}
 }
 
@@ -889,27 +910,27 @@ func (s *Screen) decDeviceStatus(row, col int) {
 	case 6: // DECXCPR — extended cursor position: CSI ? Pl ; Pc ; Pp R. The page
 		// (Pp) is always 1 here (a browser terminal has no page memory). We
 		// advertise VT level 4+ via DA2, so the page must be present.
-		s.Response = fmt.Appendf(s.Response, "\x1b[?%d;%d;1R", row, col)
+		s.response = fmt.Appendf(s.response, "\x1b[?%d;%d;1R", row, col)
 	case 15: // printer status — no printer
-		s.Response = append(s.Response, "\x1b[?13n"...)
+		s.response = append(s.response, "\x1b[?13n"...)
 	case 25: // user-defined keys — locked
-		s.Response = append(s.Response, "\x1b[?21n"...)
+		s.response = append(s.response, "\x1b[?21n"...)
 	case 26: // keyboard status: CSI ? 27 ; Pn ; Pst ; Ptyp n. VT level 4+ (which
 		// we advertise) carries all four fields: language 0 (unknown), status 0
 		// (ready), type 0 (LK201).
-		s.Response = append(s.Response, "\x1b[?27;0;0;0n"...)
+		s.response = append(s.response, "\x1b[?27;0;0;0n"...)
 	case 55: // locator status — no locator
-		s.Response = append(s.Response, "\x1b[?53n"...)
+		s.response = append(s.response, "\x1b[?53n"...)
 	case 56: // locator type — cannot identify
-		s.Response = append(s.Response, "\x1b[?57;0n"...)
+		s.response = append(s.response, "\x1b[?57;0n"...)
 	case 62: // DECMSR — macro space report (none available)
-		s.Response = append(s.Response, "\x1b[0*{"...)
+		s.response = append(s.response, "\x1b[0*{"...)
 	case 63: // DECCKSR — memory checksum of macro Pid (we hold none -> 0000)
-		s.Response = fmt.Appendf(s.Response, "\x1bP%d!~0000\x1b\\", s.paramVal(1, 0))
+		s.response = fmt.Appendf(s.response, "\x1bP%d!~0000\x1b\\", s.paramVal(1, 0))
 	case 75: // data integrity — ready, no errors
-		s.Response = append(s.Response, "\x1b[?70n"...)
+		s.response = append(s.response, "\x1b[?70n"...)
 	case 85: // multiple-session status — not configured
-		s.Response = append(s.Response, "\x1b[?83n"...)
+		s.response = append(s.response, "\x1b[?83n"...)
 	}
 }
 
@@ -1161,9 +1182,9 @@ func (s *Screen) handleDECRQM() {
 	}
 	mode := s.paramVal(0, 0)
 	if s.privateMarker == '?' {
-		s.Response = fmt.Appendf(s.Response, "\x1b[?%d;%d$y", mode, s.decModeStatus(mode))
+		s.response = fmt.Appendf(s.response, "\x1b[?%d;%d$y", mode, s.decModeStatus(mode))
 	} else {
-		s.Response = fmt.Appendf(s.Response, "\x1b[%d;%d$y", mode, s.ansiModeStatus(mode))
+		s.response = fmt.Appendf(s.response, "\x1b[%d;%d$y", mode, s.ansiModeStatus(mode))
 	}
 }
 

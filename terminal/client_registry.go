@@ -114,7 +114,13 @@ func (r *clientRegistry) Snapshot() map[*websocket.Conn]uint64 {
 
 // ResolveSession looks up or creates a session for the given ID,
 // attaches it to the client state, and returns the session's current
-// bytesReceived.
+// bytesReceived plus whether the session had to be created (a key miss —
+// the caller uses it with the client's claimed sentBytes to signal ledger
+// loss on the resumeAck rather than leaving the client to guess from an
+// ambiguous received=0).
+// A key hit refreshes lastSeen so an attached, input-idle client (a pure
+// viewer that reconnects but never types) is not GC-eligible merely because
+// IncrementReceived never ran for it.
 // Opportunistically GCs sessions idle >60 min. The 60-minute window is
 // long enough to survive iOS Safari aggressively unloading a backgrounded
 // tab (which can keep the same sessionId via sessionStorage but suspends
@@ -124,29 +130,50 @@ func (r *clientRegistry) Snapshot() map[*websocket.Conn]uint64 {
 // client's resumeAck handler trims nothing → retransmitOutbox replays
 // every queued chunk → the child re-receives the same input as fresh
 // keystrokes and queues duplicate messages.
-func (r *clientRegistry) ResolveSession(state *clientState, sessionID string) (ack uint64) {
+func (r *clientRegistry) ResolveSession(state *clientState, sessionID string) (ack uint64, created bool) {
 	r.mu.Lock()
 	sess, ok := r.sessions[sessionID]
 	if !ok {
+		created = true
 		sess = &sessionState{lastSeen: time.Now()}
 		r.sessions[sessionID] = sess
 		r.gcIdleSessions()
 		r.evictOldestSession()
+	} else {
+		sess.lastSeen = time.Now()
 	}
 	state.session.Store(sess)
 	ack = sess.bytesReceived
 	r.mu.Unlock()
-	return ack
+	return ack, created
+}
+
+// attachedSessions returns the set of sessions currently attached to a live
+// client, so the GC and the cap eviction never reclaim a ledger out from
+// under a connected socket. The caller MUST hold r.mu.
+func (r *clientRegistry) attachedSessions() map[*sessionState]bool {
+	m := make(map[*sessionState]bool, len(r.clients))
+	for _, st := range r.clients {
+		if s := st.session.Load(); s != nil {
+			m[s] = true
+		}
+	}
+	return m
 }
 
 // gcIdleSessions deletes sessions idle longer than the 60-minute
-// retention window, logging any GC'd session that had received bytes (a
-// reconnect with that sessionId will see bytesReceived=0 and, per its
-// own safeguard, drop unacked bytes — surfacing as input-loss rather
-// than duplicate-resend; the log helps correlate those reports).
+// retention window, skipping sessions attached to a live client (a
+// connected viewer's ledger must never be reclaimed under it). A GC'd
+// session that had received bytes is logged: a later reconnect with that
+// sessionId takes the explicit ledger-lost path on the resumeAck
+// (drop-and-notify), and the log is the server half of that event.
 // The caller MUST hold r.mu.
 func (r *clientRegistry) gcIdleSessions() {
+	attached := r.attachedSessions()
 	for id, s := range r.sessions {
+		if attached[s] {
+			continue
+		}
 		if time.Since(s.lastSeen) > 60*time.Minute {
 			if s.bytesReceived > 0 {
 				r.logger.Info("terminal: gc'd idle session with received bytes",
@@ -161,21 +188,78 @@ func (r *clientRegistry) gcIdleSessions() {
 
 // evictOldestSession caps the retained session count at maxResumeSessions by
 // evicting the oldest-lastSeen entry (backstops the idle GC against a
-// client minting many sessionIDs inside the 60-minute window). The
-// caller MUST hold r.mu.
+// client minting many sessionIDs inside the 60-minute window). Sessions
+// attached to a live client are preferred-last victims: an abuser minting
+// ids can then only evict other abandoned ledgers, not a connected
+// client's resume state. If every retained session is attached
+// (pathological), the cap still holds by evicting the oldest overall.
+// The caller MUST hold r.mu.
 func (r *clientRegistry) evictOldestSession() {
 	if len(r.sessions) <= maxResumeSessions {
 		return
 	}
+	attached := r.attachedSessions()
 	var oldestID string
 	var oldest time.Time
+	var oldestAnyID string
+	var oldestAny time.Time
 	for id, sx := range r.sessions {
+		if oldestAnyID == "" || sx.lastSeen.Before(oldestAny) {
+			oldestAnyID, oldestAny = id, sx.lastSeen
+		}
+		if attached[sx] {
+			continue
+		}
 		if oldestID == "" || sx.lastSeen.Before(oldest) {
 			oldestID, oldest = id, sx.lastSeen
 		}
 	}
+	if oldestID == "" {
+		oldestID = oldestAnyID // every session attached: cap still binds
+	}
 	if oldestID != "" {
 		delete(r.sessions, oldestID)
+	}
+}
+
+// AckSweepTargets returns the clients whose session's bytesReceived has
+// advanced past the last ack actually written to them, and optimistically
+// records the new value as sent. flushLoop calls it on ticks that produced
+// no content frame, then writes a bare ackOnly frame to each target — so
+// input into a silent app (no echo, no output) still acks within one tick.
+// Optimistic recording is deliberate: a failed best-effort write costs one
+// deferred trim (the next content frame, sweep advance, or resume re-syncs),
+// never correctness, because the resume exchange is the authoritative sync.
+func (r *clientRegistry) AckSweepTargets() map[*websocket.Conn]uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var m map[*websocket.Conn]uint64
+	for ws, state := range r.clients {
+		sess := state.session.Load()
+		if sess == nil {
+			continue
+		}
+		if ack := sess.bytesReceived; ack != state.lastAckSent.Load() {
+			if m == nil {
+				m = make(map[*websocket.Conn]uint64)
+			}
+			m[ws] = ack
+			state.lastAckSent.Store(ack)
+		}
+	}
+	return m
+}
+
+// NoteAcksSent records the ack values a dispatched content frame carried to
+// each client (via withClientAck), so the next AckSweepTargets pass does not
+// send a redundant ackOnly for a value the client already received.
+func (r *clientRegistry) NoteAcksSent(acks map[*websocket.Conn]uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for ws, ack := range acks {
+		if state, ok := r.clients[ws]; ok {
+			state.lastAckSent.Store(ack)
+		}
 	}
 }
 

@@ -418,3 +418,74 @@ describe("DEVIATIONS from xterm spec (skipped — see report)", () => {
     expect(sent).toEqual([`${ESC}[M\x20\x23\x23`]);
   });
 });
+
+describe("motion dedup: identical same-cell reports are suppressed (matches xterm.js)", () => {
+  it("a drag inside one cell reports once; crossing a cell boundary reports again", () => {
+    const { term, sent } = setup();
+    enableSGR(1002);
+    term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
+    const afterPress = sent.length;
+    // Three moves inside the same 8x16 cell (cell 1,1), left button held.
+    for (const x of [1, 3, 5]) {
+      term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: x, clientY: 8 }));
+    }
+    expect(sent.length).toBe(afterPress + 1); // one motion report, two dupes suppressed
+    // Crossing into the next cell reports again.
+    term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: 12, clientY: 8 }));
+    expect(sent.length).toBe(afterPress + 2);
+    expect(sent.at(-1)).toBe(expectedSGR(0 + MOTION, 2, 1, false));
+  });
+
+  it("a new press resets the dedup so the first motion of the next gesture reports", () => {
+    const { term, sent } = setup();
+    enableSGR(1002);
+    term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
+    term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: 4, clientY: 8 }));
+    term.dispatchEvent(new MouseEvent("mouseup", { button: 0, clientX: 4, clientY: 8 }));
+    const afterFirstGesture = sent.length;
+    term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
+    term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: 4, clientY: 8 }));
+    // Same cell as the previous gesture's motion — but a new gesture must report.
+    expect(sent.length).toBe(afterFirstGesture + 2); // press + motion
+  });
+});
+
+describe("init returns an idempotent disposer", () => {
+  it("dispose detaches the listeners so no further events report", () => {
+    const term = document.createElement("div");
+    const sent: string[] = [];
+    const dispose = initMouse({
+      send: (data) => sent.push(data),
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => term,
+    });
+    enableSGR(1000);
+    term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
+    expect(sent.length).toBe(1);
+    dispose();
+    term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
+    expect(sent.length).toBe(1); // detached: nothing new
+    dispose(); // idempotent: second call is a no-op
+    expect(sent.length).toBe(1);
+  });
+
+  it("a stale disposer from a superseded init does not detach the new element", () => {
+    const sent: string[] = [];
+    const handlerFor = (el: HTMLElement): MouseInputHandler => ({
+      send: (data) => sent.push(data),
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => el,
+    });
+    const first = document.createElement("div");
+    const staleDispose = initMouse(handlerFor(first));
+    const second = document.createElement("div");
+    initMouse(handlerFor(second)); // supersedes; auto-detaches `first`
+    enableSGR(1000);
+    staleDispose(); // must NOT touch the second element's listeners
+    second.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
+    expect(sent.length).toBe(1);
+    // The superseded element was auto-detached at re-init.
+    first.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
+    expect(sent.length).toBe(1);
+  });
+});

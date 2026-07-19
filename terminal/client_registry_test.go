@@ -2,6 +2,7 @@ package terminal
 
 import (
 	"bytes"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -142,7 +143,7 @@ func TestRegistry_ConcurrentResolveIncrementSnapshot(t *testing.T) {
 			for i := range iters {
 				state := &clientState{}
 				sessionID := "session-" + string(rune('A'+id)) + "-" + string(rune('0'+i%10))
-				_ = r.ResolveSession(state, sessionID)
+				_, _ = r.ResolveSession(state, sessionID)
 				r.IncrementReceived(state, 42)
 				_ = r.Snapshot()
 			}
@@ -170,7 +171,7 @@ func TestRegistry_ConcurrentResolveSharedSession(t *testing.T) {
 				if i%3 == 0 {
 					sid = "alt-session"
 				}
-				_ = r.ResolveSession(state, sid)
+				_, _ = r.ResolveSession(state, sid)
 				r.IncrementReceived(state, 10)
 			}
 		}()
@@ -264,5 +265,177 @@ func TestRemove_returnsDepartedSize(t *testing.T) {
 	r.mu.Unlock()
 	if present {
 		t.Errorf("Remove: connection still registered after removal")
+	}
+}
+
+// TestResolveSession_createdFlagAndLastSeenRefresh pins the two ResolveSession
+// behaviors the ledger-loss protocol depends on: a key miss reports
+// created=true (handleResume turns that plus claimed sentBytes into the
+// resumeAck ledgerLost flag), and a key HIT refreshes lastSeen so an attached
+// but input-idle client (a pure viewer reconnecting) never ages into the GC
+// window merely because IncrementReceived never ran for it.
+func TestResolveSession_createdFlagAndLastSeenRefresh(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+
+	_, created := r.ResolveSession(&clientState{}, "sid")
+	if !created {
+		t.Errorf("first ResolveSession(sid): created=false, want true (key miss)")
+	}
+
+	// Age the session, then hit it again: created must be false and lastSeen
+	// must be refreshed to ~now.
+	r.mu.Lock()
+	r.sessions["sid"].lastSeen = time.Now().Add(-59 * time.Minute)
+	r.mu.Unlock()
+
+	_, created = r.ResolveSession(&clientState{}, "sid")
+	if created {
+		t.Errorf("second ResolveSession(sid): created=true, want false (key hit)")
+	}
+	r.mu.Lock()
+	age := time.Since(r.sessions["sid"].lastSeen)
+	r.mu.Unlock()
+	if age > time.Minute {
+		t.Errorf("key hit left lastSeen %v old; want refreshed to ~now", age.Round(time.Second))
+	}
+}
+
+// TestGCSkipsAttachedSessions verifies gcIdleSessions never reclaims a ledger
+// attached to a live client: two sessions idle past the 60-minute window, one
+// attached to a registered client — the attached one survives the sweep, the
+// orphan is deleted.
+func TestGCSkipsAttachedSessions(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+	attachedSess := &sessionState{lastSeen: time.Now().Add(-61 * time.Minute), bytesReceived: 3}
+	orphanSess := &sessionState{lastSeen: time.Now().Add(-61 * time.Minute), bytesReceived: 5}
+	r.sessions["attached"] = attachedSess
+	r.sessions["orphan"] = orphanSess
+	ws := &websocket.Conn{}
+	state := r.Add(ws)
+	state.session.Store(attachedSess)
+
+	// Resolving an unknown session id triggers the opportunistic GC sweep.
+	r.ResolveSession(&clientState{}, "fresh")
+
+	r.mu.Lock()
+	_, attachedPresent := r.sessions["attached"]
+	_, orphanPresent := r.sessions["orphan"]
+	r.mu.Unlock()
+	if !attachedPresent {
+		t.Errorf("GC reclaimed a session attached to a live client; want it retained")
+	}
+	if orphanPresent {
+		t.Errorf("GC retained an unattached idle session; want it reclaimed")
+	}
+}
+
+// TestEvictOldestSession_prefersUnattached verifies the cap eviction picks the
+// oldest UNATTACHED victim when the globally-oldest session is attached to a
+// live client: an abuser minting ids can then only evict abandoned ledgers,
+// never a connected client's resume state.
+func TestEvictOldestSession_prefersUnattached(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+
+	// Oldest overall: attached to a live client.
+	attachedSess := &sessionState{lastSeen: time.Now().Add(-50 * time.Minute)}
+	r.sessions["attached-oldest"] = attachedSess
+	ws := &websocket.Conn{}
+	state := r.Add(ws)
+	state.session.Store(attachedSess)
+
+	// Second-oldest: unattached — the expected victim.
+	r.sessions["unattached-victim"] = &sessionState{lastSeen: time.Now().Add(-40 * time.Minute)}
+
+	// Fill to the cap so the next create must evict.
+	for i := 0; len(r.sessions) < maxResumeSessions; i++ {
+		r.sessions[fmt.Sprintf("filler-%d", i)] = &sessionState{lastSeen: time.Now()}
+	}
+
+	r.ResolveSession(&clientState{}, "overflow") // cap+1 → eviction
+
+	r.mu.Lock()
+	_, attachedPresent := r.sessions["attached-oldest"]
+	_, victimPresent := r.sessions["unattached-victim"]
+	total := len(r.sessions)
+	r.mu.Unlock()
+	if !attachedPresent {
+		t.Errorf("cap eviction removed the attached session; want the oldest unattached victim instead")
+	}
+	if victimPresent {
+		t.Errorf("cap eviction kept the oldest unattached session; want it evicted")
+	}
+	if total > maxResumeSessions {
+		t.Errorf("session count %d exceeds cap %d after eviction", total, maxResumeSessions)
+	}
+}
+
+// TestAckSweepTargets_recordsOptimisticallyAndHonorsNoteAcksSent pins the ack
+// sweep's bookkeeping: a session whose bytesReceived advanced past lastAckSent
+// is a target exactly once (optimistic record), a session already covered by a
+// dispatched content frame (NoteAcksSent) is skipped, and a session-less
+// client is never a target.
+func TestAckSweepTargets_recordsOptimisticallyAndHonorsNoteAcksSent(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+	ws := &websocket.Conn{}
+	state := r.Add(ws)
+	r.ResolveSession(state, "sid")
+	r.Add(&websocket.Conn{}) // session-less client: never a target
+
+	r.IncrementReceived(state, 5)
+	targets := r.AckSweepTargets()
+	if got := targets[ws]; got != 5 || len(targets) != 1 {
+		t.Fatalf("AckSweepTargets after +5 input = %v, want map[%p:5] with exactly one entry", targets, ws)
+	}
+	if again := r.AckSweepTargets(); len(again) != 0 {
+		t.Errorf("second AckSweepTargets = %v, want empty (optimistic record must stick)", again)
+	}
+
+	// A content frame carried the next value: NoteAcksSent must suppress the sweep.
+	r.IncrementReceived(state, 4) // bytesReceived now 9
+	r.NoteAcksSent(map[*websocket.Conn]uint64{ws: 9})
+	if after := r.AckSweepTargets(); len(after) != 0 {
+		t.Errorf("AckSweepTargets after NoteAcksSent(9) = %v, want empty", after)
+	}
+}
+
+// TestPerSenderResumeKeysKeepIndependentLedgers pins the server half of the
+// P1 per-sender resume-key contract: two clients attached to ONE managed
+// session resume with distinct keys (`<sid>#<instanceA>` / `<sid>#<instanceB>`,
+// minted client-side), and the registry — which keys ledgers by the resume
+// string verbatim — must give each its own bytesReceived. The pre-P1 shared
+// key acked the COMBINED total to both devices, so device A's applyAck
+// trimmed unacked bytes the server had only received from B (silent input
+// loss on A's next resume). Trace from the judgement (A: 120 sent / 100
+// received; B: 50): A's ack must stay 100 — leaving its 20 unacked bytes in
+// its outbox for retransmission — no matter how much B sends.
+func TestPerSenderResumeKeysKeepIndependentLedgers(t *testing.T) {
+	r := newClientRegistry(slog.Default())
+	wsA, wsB := &websocket.Conn{}, &websocket.Conn{}
+	stateA := r.Add(wsA)
+	stateB := r.Add(wsB)
+	defer r.Remove(wsA)
+	defer r.Remove(wsB)
+
+	ackA, createdA := r.ResolveSession(stateA, "sess-1#instance-A")
+	ackB, createdB := r.ResolveSession(stateB, "sess-1#instance-B")
+	if !createdA || !createdB {
+		t.Fatalf("fresh per-sender keys must create distinct ledgers (createdA=%v createdB=%v)", createdA, createdB)
+	}
+	if ackA != 0 || ackB != 0 {
+		t.Fatalf("fresh ledgers must start at zero (ackA=%d ackB=%d)", ackA, ackB)
+	}
+
+	// A sends 120 bytes but the server receives only 100 before the drop;
+	// B sends 50. Each increments ITS OWN ledger.
+	r.IncrementReceived(stateA, 100)
+	r.IncrementReceived(stateB, 50)
+
+	// A's resume acks A's ledger (100), not the combined 150: its 20 unacked
+	// bytes stay in its outbox and retransmit. B's resume acks 50.
+	if ack, created := r.ResolveSession(stateA, "sess-1#instance-A"); created || ack != 100 {
+		t.Errorf("A's resume = (ack %d, created %v), want (100, false): B's input must not advance A's ledger", ack, created)
+	}
+	if ack, created := r.ResolveSession(stateB, "sess-1#instance-B"); created || ack != 50 {
+		t.Errorf("B's resume = (ack %d, created %v), want (50, false)", ack, created)
 	}
 }

@@ -67,10 +67,10 @@ func (s *Screen) handleXTGetTcap(query []byte) {
 		}
 		if name == "Co" || name == "colors" {
 			// Reply value is the hex encoding of the decimal string "256".
-			s.Response = fmt.Appendf(s.Response, "\x1bP1+r%s=%s\x1b\\", part, encodeHexString("256"))
+			s.response = fmt.Appendf(s.response, "\x1bP1+r%s=%s\x1b\\", part, encodeHexString("256"))
 			continue
 		}
-		s.Response = fmt.Appendf(s.Response, "\x1bP0+r%s\x1b\\", part)
+		s.response = fmt.Appendf(s.response, "\x1bP0+r%s\x1b\\", part)
 	}
 }
 
@@ -118,7 +118,7 @@ func encodeHexString(s string) string {
 	return string(out)
 }
 
-// handleDecrqss processes a DECRQSS query and appends the response to s.Response.
+// handleDecrqss processes a DECRQSS query and appends the response to s.response.
 // Valid response: DCS 1 $ r <data> ST
 // Invalid response: DCS 0 $ r ST
 //
@@ -128,47 +128,47 @@ func (s *Screen) handleDecrqss(query []byte) {
 	switch q {
 	case "m": // SGR
 		data := sgrParamsString(s.style)
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%sm\x1b\\", data)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%sm\x1b\\", data)
 	case "r": // DECSTBM (scroll region)
 		top := s.scrollTop + 1
 		bottom := s.scrollBottom + 1
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%d;%dr\x1b\\", top, bottom)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%d;%dr\x1b\\", top, bottom)
 	case " q": // DECSCUSR (cursor style)
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%d q\x1b\\", s.CursorStyle)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%d q\x1b\\", s.CursorStyle)
 	case "\"q": // DECSCA (character protection) — report current attribute
 		ps := 0
 		if s.curProtected {
 			ps = 1
 		}
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%d\"q\x1b\\", ps)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%d\"q\x1b\\", ps)
 	case "\"p": // DECSCL (conformance level) — report the tracked level
 		level := s.conformanceLevel
 		if level == 0 {
 			level = 65
 		}
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%d;1\"p\x1b\\", level)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%d;1\"p\x1b\\", level)
 	case "s": // DECSLRM (left/right margins) — report the active margins
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%d;%ds\x1b\\", s.leftBound()+1, s.rightBound()+1)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%d;%ds\x1b\\", s.leftBound()+1, s.rightBound()+1)
 	case "t": // DECSLPP (lines per page) — report the tracked value, else the height
 		lpp := s.linesPerPage
 		if lpp == 0 {
 			lpp = s.Height
 		}
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%dt\x1b\\", lpp)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%dt\x1b\\", lpp)
 	case "*|": // DECSNLS (lines per screen) — report the tracked value, else the height
 		lps := s.linesPerScreen
 		if lps == 0 {
 			lps = s.Height
 		}
-		s.Response = fmt.Appendf(s.Response, "\x1bP1$r%d*|\x1b\\", lps)
+		s.response = fmt.Appendf(s.response, "\x1bP1$r%d*|\x1b\\", lps)
 	case "*x": // DECSACE (attribute change extent) — not tracked; report default
-		s.Response = append(s.Response, "\x1bP1$r0*x\x1b\\"...)
+		s.response = append(s.response, "\x1bP1$r0*x\x1b\\"...)
 	case "$}": // DECSASD (active status display) — main display (0)
-		s.Response = append(s.Response, "\x1bP1$r0$}\x1b\\"...)
+		s.response = append(s.response, "\x1bP1$r0$}\x1b\\"...)
 	case "$~": // DECSSDT (status display type) — none (0)
-		s.Response = append(s.Response, "\x1bP1$r0$~\x1b\\"...)
+		s.response = append(s.response, "\x1bP1$r0$~\x1b\\"...)
 	default:
 		// Unrecognized query
-		s.Response = append(s.Response, "\x1bP0$r\x1b\\"...)
+		s.response = append(s.response, "\x1bP0$r\x1b\\"...)
 	}
 }

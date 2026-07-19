@@ -138,9 +138,11 @@ func (s *Screen) dispatchOsc() {
 		// captured into Progress. See handleOsc9.
 		s.handleOsc9(data)
 	case 52:
-		// OSC 52 — clipboard. SET only (kiro-cli uses this to copy); the query
-		// form is denied (letting a remote app read the clipboard is a
-		// data-exfiltration risk most terminals disable).
+		// OSC 52 — clipboard. SET always works (kiro-cli uses this to copy);
+		// the query form is denied by default (letting a remote app read the
+		// clipboard is a data-exfiltration risk most terminals disable) and
+		// answered only when AllowScreenReport opts in — see handleOsc52's
+		// gated read-back of the engine-side selection buffer.
 		s.handleOsc52(data)
 	case 104:
 		// OSC 104 — reset one or all OSC 4 palette overrides.
@@ -261,7 +263,7 @@ func (s *Screen) handleOscPalette(data string) {
 		if spec == "?" {
 			rgb := s.colorToWire(Color{Type: 2, Val: uint8(idx)})
 			r, g, b := rgbChannels(rgb)
-			s.Response = fmt.Appendf(s.Response, "\x1b]4;%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
+			s.response = fmt.Appendf(s.response, "\x1b]4;%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
 				idx, r, r, g, g, b, b)
 			continue
 		}
@@ -273,7 +275,7 @@ func (s *Screen) handleOscPalette(data string) {
 			s.paletteOverride = make(map[uint8]int32)
 		}
 		s.paletteOverride[uint8(idx)] = rgb
-		s.PaletteChanged = true
+		s.paletteChanged = true
 	}
 }
 
@@ -305,7 +307,7 @@ func (s *Screen) handleOscSpecialColor(data string) {
 func (s *Screen) setOrQuerySpecialColor(osc, num, idx int, spec string) {
 	if spec == "?" {
 		r, g, b := rgbChannels(s.specialColorRGB(idx))
-		s.Response = fmt.Appendf(s.Response, "\x1b]%d;%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
+		s.response = fmt.Appendf(s.response, "\x1b]%d;%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
 			osc, num, r, r, g, g, b, b)
 		return
 	}
@@ -362,7 +364,7 @@ func (s *Screen) handleOscPaletteReset(data string) {
 	}
 	if data == "" {
 		s.paletteOverride = nil
-		s.PaletteChanged = true
+		s.paletteChanged = true
 		return
 	}
 	for p := range strings.SplitSeq(data, ";") {
@@ -372,7 +374,7 @@ func (s *Screen) handleOscPaletteReset(data string) {
 		}
 		if _, ok := s.paletteOverride[uint8(idx)]; ok {
 			delete(s.paletteOverride, uint8(idx))
-			s.PaletteChanged = true
+			s.paletteChanged = true
 		}
 	}
 }
@@ -407,7 +409,7 @@ func (s *Screen) handleOsc52(data string) {
 		// Strip C0/C1/DEL from the echoed target list: the reply is injected
 		// into the PTY as input, so a CR/LF in an attacker-set target would
 		// inject a command line (same hardening as encodeTitle / XTGETTCAP).
-		s.Response = fmt.Appendf(s.Response, "\x1b]52;%s;%s\x1b\\", stripControlRunes(targets), enc)
+		s.response = fmt.Appendf(s.response, "\x1b]52;%s;%s\x1b\\", stripControlRunes(targets), enc)
 		return
 	}
 	// A base64 payload sets the selection (and pushes it to the browser
@@ -415,7 +417,7 @@ func (s *Screen) handleOsc52(data string) {
 	// per xterm's "neither a base64 string nor ?" rule.
 	if decoded, ok := decodeBase64Lenient(payload); ok && len(decoded) > 0 {
 		s.selectionData = decoded
-		s.PendingClipboard = decoded
+		s.pendingClipboard = decoded
 		return
 	}
 	s.selectionData = nil
@@ -536,7 +538,7 @@ func (s *Screen) handleOscColor(id int, data string) {
 		if spec == "?" {
 			r, g, b := rgbChannels(s.dynColor(slot))
 			// xterm reports 16-bit-per-channel; duplicate each 8-bit value.
-			s.Response = fmt.Appendf(s.Response, "\x1b]%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
+			s.response = fmt.Appendf(s.response, "\x1b]%d;rgb:%02x%02x/%02x%02x/%02x%02x\x1b\\",
 				slot, r, r, g, g, b, b)
 			continue
 		}

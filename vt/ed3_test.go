@@ -14,11 +14,11 @@ import (
 func TestED3RaisesScrollbackClearedNotScreen(t *testing.T) {
 	s := New(5, 20)
 	s.Write([]byte("hello"))
-	if s.ScrollbackCleared {
+	if s.scrollbackCleared {
 		t.Fatal("ScrollbackCleared set before ED3")
 	}
 	s.Write([]byte("\x1b[3J"))
-	if !s.ScrollbackCleared {
+	if !s.scrollbackCleared {
 		t.Fatal("CSI 3 J must set ScrollbackCleared")
 	}
 	if got := strings.TrimRight(s.RowString(0), " "); got != "hello" {
@@ -32,7 +32,7 @@ func TestED2ErasesScreenNoScrollbackSignal(t *testing.T) {
 	s := New(5, 20)
 	s.Write([]byte("hello"))
 	s.Write([]byte("\x1b[2J"))
-	if s.ScrollbackCleared {
+	if s.scrollbackCleared {
 		t.Fatal("CSI 2 J must not set ScrollbackCleared")
 	}
 	if got := strings.TrimRight(s.RowString(0), " "); got != "" {

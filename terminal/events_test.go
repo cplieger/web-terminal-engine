@@ -22,6 +22,15 @@ func inputClassifier(msg string) (string, bool) {
 	return "", false
 }
 
+// computeStatusFromHandler adapts the diffStatuses split for the state-machine
+// tests: capture h's status inputs (the production phase-2 read) and run the
+// tracker state machine on them, as one call.
+func (m *SessionManager) computeStatusFromHandler(h *Handler, tr *statusTracker) string {
+	in := statusRaw{handler: h}
+	in.read()
+	return m.computeStatus(&in, tr)
+}
+
 func handlerOf(t *testing.T, m *SessionManager, id string) *Handler {
 	t.Helper()
 	m.mu.Lock()
@@ -48,17 +57,17 @@ func TestComputeStatusLatchesInput(t *testing.T) {
 
 	// A prompt followed by a needs-input notification: latched input.
 	h.handlePTYData([]byte("Allow? \x1b]9;Permission required\x07"))
-	if st := m.computeStatus(h, tr); st != StatusInput {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusInput {
 		t.Fatalf("after notification, status = %q, want %q", st, StatusInput)
 	}
 	// No resume: the latch persists across sweeps.
-	if st := m.computeStatus(h, tr); st != StatusInput {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusInput {
 		t.Fatalf("latch did not persist, status = %q, want %q", st, StatusInput)
 	}
 	// The turn resumes: an active progress signal (OSC 9;4;3) clears the latch
 	// and reports working.
 	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
-	if st := m.computeStatus(h, tr); st != StatusWorking {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusWorking {
 		t.Fatalf("after resume progress, status = %q, want %q", st, StatusWorking)
 	}
 }
@@ -76,11 +85,11 @@ func TestComputeStatusDoneSupersedesInput(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("\x1b]9;Permission required\x07"))
-	if st := m.computeStatus(h, tr); st != StatusInput {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusInput {
 		t.Fatalf("precondition: status = %q, want %q", st, StatusInput)
 	}
 	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
-	if st := m.computeStatus(h, tr); st != StatusDone {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusDone {
 		t.Fatalf("done did not supersede input latch; status = %q, want %q", st, StatusDone)
 	}
 }
@@ -99,11 +108,11 @@ func TestComputeStatusWorkingFromProgress(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
-	if st := m.computeStatus(h, tr); st != StatusWorking {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusWorking {
 		t.Fatalf("progress 3: status = %q, want %q", st, StatusWorking)
 	}
 	h.handlePTYData([]byte("\x1b]9;4;0\x07"))
-	if st := m.computeStatus(h, tr); st != StatusIdle {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusIdle {
 		t.Fatalf("progress 0 with no latch: status = %q, want %q", st, StatusIdle)
 	}
 }
@@ -121,16 +130,16 @@ func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
-	if st := m.computeStatus(h, tr); st != StatusDone {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusDone {
 		t.Fatalf("after done notification: status = %q, want %q", st, StatusDone)
 	}
 	// Persists across a quiet sweep (no progress, no output-driven flip).
-	if st := m.computeStatus(h, tr); st != StatusDone {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusDone {
 		t.Fatalf("done latch did not persist: status = %q, want %q", st, StatusDone)
 	}
 	// Next turn starts working, clearing the done latch.
 	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
-	if st := m.computeStatus(h, tr); st != StatusWorking {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusWorking {
 		t.Fatalf("next working phase: status = %q, want %q", st, StatusWorking)
 	}
 }
@@ -151,7 +160,7 @@ func TestComputeStatusNoWorkingFromOutput(t *testing.T) {
 	tr := &statusTracker{}
 
 	h.handlePTYData([]byte("some output"))
-	if st := m.computeStatus(h, tr); st != StatusIdle {
+	if st := m.computeStatusFromHandler(h, tr); st != StatusIdle {
 		t.Fatalf("output with no OSC 9;4 progress: status = %q, want %q (no output-activity fallback)", st, StatusIdle)
 	}
 }
@@ -208,7 +217,7 @@ func TestComputeStatusExited(t *testing.T) {
 	for !h.Exited() && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
-	if st := m.computeStatus(h, &statusTracker{}); st != StatusExited {
+	if st := m.computeStatusFromHandler(h, &statusTracker{}); st != StatusExited {
 		t.Fatalf("status = %q, want %q", st, StatusExited)
 	}
 }
@@ -476,5 +485,73 @@ func TestBroadcastDropsSlowSubscriber(t *testing.T) {
 	}
 	if _, ok := <-ch; ok {
 		t.Fatal("channel not closed after drop; want closed once buffered events drained")
+	}
+}
+
+// TestDiffStatusesWedgedHandlerDoesNotStallManager pins the lock split in
+// diffStatuses / List / snapshot: a handler stuck under its own h.mu (a wedged
+// PTY callback, a stalled classifier input) stalls only the paths that must
+// read THAT handler's state (the sweep, a List over it) — never the manager
+// lock itself. Pre-split, those paths held m.mu across the handler getters
+// 4×/s, so one stuck handler froze every m.mu path (create, close, title PUT,
+// WS attach, SSE subscribe) for as long as it stayed stuck.
+func TestDiffStatusesWedgedHandlerDoesNotStallManager(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(m.Shutdown)
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := handlerOf(t, m, id)
+
+	// Wedge the handler: hold its h.mu so every status getter blocks. Both the
+	// sweep and a List() must genuinely block on it (they read handler state).
+	h.mu.Lock()
+	unwedged := false
+	defer func() {
+		if !unwedged {
+			h.mu.Unlock()
+		}
+	}()
+	sweepDone := make(chan struct{})
+	listDone := make(chan struct{})
+	go func() {
+		_ = m.diffStatuses() // blocks in phase 2 on the wedged handler
+		close(sweepDone)
+	}()
+	go func() {
+		_ = m.List() // blocks in its handler-read phase on the wedged handler
+		close(listDone)
+	}()
+	select {
+	case <-sweepDone:
+		t.Fatal("diffStatuses returned while the handler was wedged; the test lost its premise")
+	case <-listDone:
+		t.Fatal("List returned while the handler was wedged; the test lost its premise")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// The manager lock must stay available while both are stuck: a pure-m.mu
+	// path (the title PUT) completes promptly.
+	titleDone := make(chan struct{})
+	go func() {
+		m.SetSessionTitle(id, "still responsive")
+		close(titleDone)
+	}()
+	select {
+	case <-titleDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetSessionTitle blocked while a handler was wedged: a handler getter is being called under m.mu again")
+	}
+
+	// Unwedge; both stuck paths complete.
+	h.mu.Unlock()
+	unwedged = true
+	for name, ch := range map[string]chan struct{}{"diffStatuses": sweepDone, "List": listDone} {
+		select {
+		case <-ch:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s did not finish after the handler was released", name)
+		}
 	}
 }

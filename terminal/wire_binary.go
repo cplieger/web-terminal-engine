@@ -6,7 +6,7 @@
 // endian fixed-width fields; no length-prefixed dictionary keys, no
 // repeated string identifiers.
 //
-//	[1B] msg_type:    0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard
+//	[1B] msg_type:    0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard, 7=ackOnly
 //	[8B] inputAck:    uint64  (server-confirmed bytesReceived for this session)
 //
 //	If msg_type == screen:
@@ -37,6 +37,20 @@
 //	                    instead of being papered over.
 //	  [8B] committed    uint64 (absolute index of the next line to commit)
 //	  [8B] oldestIndex  uint64 (absolute index of the oldest retained line)
+//	  [1B] serverWireVersion uint8 (the server's wireProtocolVersion, so the
+//	                    client can surface a stale-bundle skew; length-gated
+//	                    optional tail, absent on pre-tier servers)
+//	  [1B] ackFlags     uint8 (bit0 = ledgerLost: the resume key missed the
+//	                    registry while the client claimed sentBytes > 0 — the
+//	                    server cannot vouch for any previously sent input, so
+//	                    the client must drop-and-notify instead of replaying;
+//	                    same length-gated tail as serverWireVersion)
+//
+//	If msg_type == ackOnly:
+//	  inputAck above carries the value; no body. Sent from the flush tick
+//	  when input was applied but no content frame carried the advanced ack
+//	  (input into a no-echo read), so acks never depend on output. Older
+//	  clients ignore the unknown opcode (back-compatible, no version bump).
 //
 //	row payload:
 //	  [2B] num_runs    uint16
@@ -62,7 +76,7 @@ import (
 	"encoding/binary"
 	"unicode/utf8"
 
-	"github.com/cplieger/web-terminal-engine/v2/vt"
+	"github.com/cplieger/web-terminal-engine/v3/vt"
 )
 
 const (
@@ -76,20 +90,52 @@ const (
 	// write to the system clipboard. New opcodes are back-compatible (older
 	// clients ignore unknown message types), so no wireProtocolVersion bump.
 	wireMsgClipboard byte = 6
+	// wireMsgAckOnly carries a bare inputAck for input that produced no output
+	// frame within a flush tick (e.g. typing into `read -s`), so the client's
+	// outbox trims promptly even with a silent app. Back-compatible new opcode
+	// (older clients ignore unknown message types), so no version bump.
+	wireMsgAckOnly byte = 7
 
-	// wireProtocolVersion is the binary-protocol revision. The client sends
-	// it in the resume control message; handleControl warns when it differs
-	// from a connecting client so a stale cached bundle after a breaking
-	// change surfaces in the logs rather than mis-decoding silently. Bump on
-	// any breaking change to a frame layout or control-message shape. Mirrors
-	// WIRE_PROTOCOL_VERSION in web/src/wire-binary.ts.
+	// WireProtocolVersion is the current binary-protocol revision. The client
+	// sends it in the resume control message so the server can enforce its
+	// declared compatibility floor and expose stale pairings. Bump it on any
+	// breaking change to a frame layout or control-message shape. It mirrors
+	// WIRE_PROTOCOL_VERSION in web/src/wire-compatibility.ts and is exported as
+	// release metadata for Go consumers.
 	//
 	// v3: the modes frame gained a trailing kbdFlags byte (kitty keyboard
 	// protocol). The change is decoder-tolerant both ways (an older client
 	// ignores the extra byte; a newer client defaults kbdFlags to 0 for an
-	// older server's shorter frame), but a version mismatch still warns so a
-	// stale bundle that predates kitty support surfaces in the logs.
-	wireProtocolVersion = 3
+	// older server's shorter frame).
+	//
+	// v4: typed client→server framing. Text messages carry control JSON;
+	// messages carry control JSON; binary messages carry PTY input with the
+	// full byte alphabet. Negotiated in-band per connection: a binary
+	// bootstrap resume declaring protocolVersion >= 4 ARMS the connection,
+	// the resumeAck tail proves the server's revision to the client, and one
+	// text `upgrade` control LATCHES typed mode. The v3 sentinel path
+	// (0x00-prefixed binary controls) is accepted indefinitely pre-latch, so
+	// the bump is the negotiation signal, not a compatibility break — v3
+	// clients and version-silent clients are fully supported.
+	WireProtocolVersion = 4
+
+	// MinSupportedClientWireVersion is the oldest explicitly declared client
+	// revision this server accepts. A version-silent client (0) remains
+	// supported; a declared lower revision is refused with
+	// WireIncompatibleCloseCode. Higher revisions warn but continue because a
+	// future revision alone does not prove that its v4-compatible baseline is
+	// unusable. Exported as directional release metadata for Go consumers.
+	MinSupportedClientWireVersion = 3
+
+	// Internal aliases keep the wire encoder and negotiation implementation
+	// concise while the exported names above form the release metadata API.
+	wireProtocolVersion           = WireProtocolVersion
+	minSupportedClientWireVersion = MinSupportedClientWireVersion
+
+	// typedFramingMinVersion is the first protocol revision with typed
+	// client→server framing; a resume declaring at least this ARMS the
+	// connection for the text-control latch.
+	typedFramingMinVersion = 4
 
 	// wireAckOffset is the byte offset of the inputAck field in
 	// every server→client frame. Used by withClientAck to patch the
@@ -108,6 +154,13 @@ const (
 	modeFlagAppKeypad      byte = 1 << 4
 	modeFlagReverseVideo   byte = 1 << 5
 	modeFlagMousePixels    byte = 1 << 6
+
+	// resumeAckFlagLedgerLost is bit0 of the resumeAck ackFlags byte: set when
+	// the resume key missed the registry while the client claimed sent bytes
+	// (idle GC or cap eviction reclaimed the ledger). The client responds with
+	// its designed loss semantic — drop the outbox and notify — instead of
+	// guessing from an ambiguous received=0.
+	resumeAckFlagLedgerLost byte = 1 << 0
 )
 
 // encodeScreenMsg builds a binary screen frame containing only the
@@ -181,13 +234,39 @@ func encodeScrollMsg(ack, firstIndex uint64, lines [][]vt.WireRun) []byte {
 // is the absolute index of the oldest retained line. The client uses
 // epoch to detect a server restart and (oldestIndex, committed) to
 // detect a history-eviction gap on resume.
-func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64) []byte {
-	buf := make([]byte, 0, 33)
+//
+// The trailing [serverWireVersion, ackFlags] pair is the frame's third
+// length-gated tail (>= 35 bytes): serverWireVersion lets the client surface
+// a stale-bundle protocol skew ("reload required") instead of leaving the
+// mismatch server-log-only, and ackFlags bit0 (ledgerLost) tells a resuming
+// client its input ledger no longer exists so it must drop-and-notify rather
+// than replay (see resumeAckFlagLedgerLost). Older clients ignore the extra
+// bytes; newer clients treat a shorter frame as "tail absent".
+func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64, ledgerLost bool) []byte {
+	buf := make([]byte, 0, 35)
 	buf = append(buf, wireMsgResumeAck)
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
 	buf = binary.LittleEndian.AppendUint64(buf, uint64(epochNanos)) // #nosec G115 -- epochNanos is always positive
 	buf = binary.LittleEndian.AppendUint64(buf, committed)
 	buf = binary.LittleEndian.AppendUint64(buf, oldestIndex)
+	buf = append(buf, wireProtocolVersion)
+	var flags byte
+	if ledgerLost {
+		flags |= resumeAckFlagLedgerLost
+	}
+	buf = append(buf, flags)
+	return buf
+}
+
+// encodeAckOnly builds a bare-ack frame (type + inputAck, no body). Emitted by
+// the flush tick's ack sweep for clients whose session ledger advanced without
+// any content frame carrying the new value — typically input into a no-echo
+// read — so outbox trimming (and therefore loss-free resume accounting) never
+// depends on the app producing output.
+func encodeAckOnly(ack uint64) []byte {
+	buf := make([]byte, 0, 9)
+	buf = append(buf, wireMsgAckOnly)
+	buf = binary.LittleEndian.AppendUint64(buf, ack)
 	return buf
 }
 

@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "tag": "v2.8.0",
+    "commit": "92aa8d4ef83482289eadae35b4055fc410d67f18",
+    "wireProtocolVersion": 3
+  },
+  "encoding": "base64",
+  "fixtures": {
+    "modes": "AwAAAAAAAAAAJeoDAQ==",
+    "pong": "BQAAAAAAAAAA",
+    "resumeack": "AgcAAAAAAAAA0gKWSQAAAADIAAAAAAAAAAoAAAAAAAAA",
+    "screen": "AAAAAAAAAAAAZAAAAAAAAAABAAIAAwACAAIEAAABAAIAYWL//////////wAA/////wAAAgABAAIAY2T//////////wAA/////wAA",
+    "scroll": "AQAAAAAAAAAAMgAAAAAAAAACAAEAAgBoMP//////////AAD/////AAABAAIAaDH//////////wAA/////wAA",
+    "title": "BAAAAAAAAAAACwBoZWxsbyB3b3JsZA=="
+  }
+}

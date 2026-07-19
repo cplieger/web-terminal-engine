@@ -15,7 +15,7 @@ export {
   WIRE_INCOMPATIBLE_CLOSE_CODE,
   WIRE_PROTOCOL_VERSION,
 } from "./wire-compatibility.js";
-export type { WireIncompatibility } from "./wire-compatibility.js";
+export type { WireCompatibility, WireIncompatibility } from "./wire-compatibility.js";
 export { controlFrame, CONTROL_FRAME_PREFIX } from "./wire.js";
 export { wsURL } from "./wsurl.js";
 export { WS_PATH, SESSIONS_PATH, SESSION_EVENTS_PATH } from "./routes.js";

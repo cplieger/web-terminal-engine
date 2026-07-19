@@ -88,34 +88,56 @@ describe("render.bind / rebuild (per-tab store swap)", () => {
     expect(render.boundStore()).toBe(other);
   });
 
-  it("rebuilds viewport-first: the live-window row paints in the first frame", async () => {
-    const s = new LineStore();
-    const N = 700; // > MAX_ROWS_PER_FRAME (300)
-    s.applyScroll(
-      scrollMsg(
-        0,
-        Array.from({ length: N }, (_, i) => `h${i}`),
-      ),
-    );
-    s.applyScreen(screenMsg(N, [row("LIVE")], [0]));
+  it("rebuilds viewport-first: the live-window row paints in the first frame", () => {
+    // Pump animation frames by hand: a real-timer tick() can span a variable
+    // number of rAF callbacks on a loaded CI runner, making "exactly one
+    // frame" racy. Capturing the callbacks makes each pump exactly one flush.
+    const frames: FrameRequestCallback[] = [];
+    const realRaf = globalThis.requestAnimationFrame;
+    const realCaf = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      frames.push(cb);
+      return frames.length;
+    };
+    globalThis.cancelAnimationFrame = (id: number) => {
+      void id; // captured frames are never cancelled in this test
+    };
+    try {
+      const s = new LineStore();
+      const N = 700; // > MAX_ROWS_PER_FRAME (300)
+      s.applyScroll(
+        scrollMsg(
+          0,
+          Array.from({ length: N }, (_, i) => `h${i}`),
+        ),
+      );
+      s.applyScreen(screenMsg(N, [row("LIVE")], [0]));
 
-    render.bind(s);
-    await tick(); // exactly one frame
+      render.bind(s);
+      frames.shift()?.(performance.now()); // exactly one frame
 
-    // Even though 700 scrollback rows exceed one frame's budget, the live
-    // window row builds first, so it is present after a single frame.
-    const liveRow = outputEl.querySelector(`[data-abs="${String(N)}"]`);
-    expect(liveRow).not.toBeNull();
-    expect((liveRow?.textContent ?? "").trim()).toBe("LIVE");
+      // Even though 700 scrollback rows exceed one frame's budget, the live
+      // window row builds first, so it is present after a single frame.
+      const liveRow = outputEl.querySelector(`[data-abs="${String(N)}"]`);
+      expect(liveRow).not.toBeNull();
+      expect((liveRow?.textContent ?? "").trim()).toBe("LIVE");
 
-    // The deepest scrollback has not all been built yet (budgeted across frames).
-    expect(outputEl.querySelector(`[data-abs="0"]`)).toBeNull();
+      // The deepest scrollback has not all been built yet (budgeted across frames).
+      expect(outputEl.querySelector(`[data-abs="0"]`)).toBeNull();
 
-    // Let the remaining frames drain; everything lands exactly once.
-    for (let i = 0; i < 15 && outputEl.querySelector(`[data-abs="0"]`) === null; i++) {
-      await tick();
+      // Let the remaining frames drain one at a time; everything lands exactly once.
+      for (let i = 0; i < 15 && outputEl.querySelector(`[data-abs="0"]`) === null; i++) {
+        const cb = frames.shift();
+        if (!cb) {
+          break;
+        }
+        cb(performance.now());
+      }
+      expect(outputEl.querySelector(`[data-abs="0"]`)).not.toBeNull();
+    } finally {
+      globalThis.requestAnimationFrame = realRaf;
+      globalThis.cancelAnimationFrame = realCaf;
     }
-    expect(outputEl.querySelector(`[data-abs="0"]`)).not.toBeNull();
   });
 
   it("rebuilds a store that is in the alternate screen into the alt grid", async () => {

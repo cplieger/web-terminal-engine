@@ -1,11 +1,13 @@
-// Command testserver backs the typed-framing e2e test: a real terminal
+// Command e2etestserver backs the typed-framing e2e test: a real terminal
 // Handler (running /bin/cat) plus a minimal harness page, listening on an
-// ephemeral 127.0.0.1 port printed to stdout. The Playwright test spawns it,
-// drives the REAL browser client against it, and kills it when done; the
-// stdin watchdog exits the server if the test process dies without cleanup.
+// ephemeral 127.0.0.1 port printed to stdout. The Playwright test spawns it
+// (`go run ./internal/e2etestserver` from the repo root), drives the REAL
+// browser client against it, and kills it when done; the stdin watchdog
+// exits the server if the test process dies without cleanup.
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -29,7 +31,8 @@ func main() {
 		_, _ = io.WriteString(w, harnessPage)
 	})
 
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	var lc net.ListenConfig
+	ln, err := lc.Listen(context.Background(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}

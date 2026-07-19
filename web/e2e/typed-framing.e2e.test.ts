@@ -49,9 +49,10 @@ declare const WTE: {
   decodeWireBinary: (b: ArrayBuffer) => unknown;
 };
 
-// The test server is its own tiny Go module (web/go.mod carves web/ out of
-// the root module), so `go run .` executes from its directory.
-const testserverDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "testserver");
+// The test server lives in the ROOT Go module (internal/e2etestserver), so
+// `go run ./internal/e2etestserver` executes from the repo root — web/ itself
+// stays carved out of the module by the web-ignore stub go.mod.
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
 let server: ChildProcess | null = null;
 let baseURL = "";
@@ -59,8 +60,8 @@ let bundle = "";
 
 test.beforeAll(async () => {
   bundle = await bundleEngine();
-  server = spawn("go", ["run", "."], {
-    cwd: testserverDir,
+  server = spawn("go", ["run", "./internal/e2etestserver"], {
+    cwd: repoRoot,
     stdio: ["pipe", "pipe", "inherit"],
   });
   baseURL = await new Promise<string>((resolve, reject) => {

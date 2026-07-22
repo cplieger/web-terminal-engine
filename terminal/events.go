@@ -270,8 +270,8 @@ func (m *SessionManager) unsubscribe(ch chan statusEvent) {
 }
 
 // snapshot returns the current status of every session for the initial sync a
-// new subscriber receives, using the tracker's computed status when available
-// (else the coarse liveness status).
+// new subscriber receives, via the same refinedStatus read List serves (the two
+// sources must agree; see refinedStatus).
 //
 // Two-phase like diffStatuses and List: manager state under m.mu, handler
 // getters (Exited/Progress/Title, each taking h.mu) after it is released.
@@ -301,10 +301,7 @@ func (m *SessionManager) snapshot() []statusEvent {
 	out := make([]statusEvent, 0, len(items))
 	for i := range items {
 		it := &items[i]
-		it.ev.Status = it.lastStatus
-		if it.ev.Status == "" {
-			it.ev.Status = statusOf(it.handler)
-		}
+		it.ev.Status = refinedStatus(it.lastStatus, it.handler)
 		it.ev.Title = effectiveTitle(it.handler.Title(), it.ev.ClientTitle)
 		it.ev.ReportsActivity = it.handler.Progress() >= 0 || it.latched
 		out = append(out, it.ev)

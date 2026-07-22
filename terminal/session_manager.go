@@ -221,32 +221,36 @@ func logID(id string) string {
 // List returns all sessions sorted by creation time.
 //
 // Two-phase like diffStatuses: manager state (session set, client titles,
-// tracker latches) is captured under m.mu, then the handler getters (Title /
+// tracker state) is captured under m.mu, then the handler getters (Title /
 // Exited / Progress — each takes that handler's h.mu) run after m.mu is
 // released, so one wedged handler stalls only this call, never every manager
 // path.
 func (m *SessionManager) List() []SessionInfo {
 	type listItem struct {
-		handler *Handler
-		info    SessionInfo
-		latched bool
+		lastStatus string
+		handler    *Handler
+		info       SessionInfo
+		latched    bool
 	}
 	m.mu.Lock()
 	items := make([]listItem, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		tr := m.trackers[s.id]
-		items = append(items, listItem{
+		it := listItem{
 			info:    SessionInfo{ID: s.id, ClientTitle: s.clientTitle, CreatedAt: s.createdAt},
 			handler: s.handler,
-			latched: tr != nil && tr.latched != "",
-		})
+		}
+		if tr := m.trackers[s.id]; tr != nil {
+			it.lastStatus = tr.lastStatus
+			it.latched = tr.latched != ""
+		}
+		items = append(items, it)
 	}
 	m.mu.Unlock()
 
 	out := make([]SessionInfo, 0, len(items))
 	for i := range items {
 		it := &items[i]
-		it.info.Status = statusOf(it.handler)
+		it.info.Status = refinedStatus(it.lastStatus, it.handler)
 		it.info.Title = effectiveTitle(it.handler.Title(), it.info.ClientTitle)
 		// reportsActivity mirrors the status stream: sticky once any OSC 9;4
 		// progress has been seen (Progress() >= 0), or a notification latched.
@@ -492,11 +496,22 @@ func (m *SessionManager) maybeReap() {
 	}
 }
 
-// statusOf computes a session's coarse status from process liveness. The status
-// stream (events.go) refines a live process into working/idle/needs-input.
-func statusOf(h *Handler) string {
+// refinedStatus computes a session's status for a point-in-time read (List and
+// the SSE snapshot) from the sweep's last computed status: that value carries
+// the working/done/input refinement, so GET /api/sessions agrees with what the
+// status stream pushes. Both sources MUST agree — a reloading client paints its
+// activity dots from whichever answers last, and when List still reported the
+// coarse liveness status a reload visibly downgraded a latched done/input dot
+// back to idle until the next real transition. Process exit is checked live and
+// always wins (it is definitive, while lastStatus can lag a sweep tick behind);
+// an empty lastStatus (created within the current sweep tick) is the
+// new-session default, idle.
+func refinedStatus(lastStatus string, h *Handler) string {
 	if h.Exited() {
 		return StatusExited
+	}
+	if lastStatus != "" {
+		return lastStatus
 	}
 	return StatusIdle
 }

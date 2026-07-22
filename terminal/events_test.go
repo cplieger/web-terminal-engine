@@ -201,6 +201,86 @@ func TestReportsActivitySticky(t *testing.T) {
 	}
 }
 
+// TestListCarriesRefinedStatus is the reload regression guard: GET
+// /api/sessions must report the same refined status the SSE stream pushes.
+// List used to compute only coarse liveness (idle/exited) and ignored the
+// tracker, so a page reload — whose stream-open reconcile GETs the list and
+// repaints every tab dot from it — visibly downgraded a latched done/input dot
+// back to the hollow idle state until the next real status transition.
+func TestListCarriesRefinedStatus(t *testing.T) {
+	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
+	t.Cleanup(m.Shutdown)
+	m.stopSweep() // drive the sweep by hand, deterministically
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	statusInList := func() string {
+		t.Helper()
+		for _, info := range m.List() {
+			if info.ID == id {
+				return info.Status
+			}
+		}
+		t.Fatalf("session %s not in List()", id)
+		return ""
+	}
+
+	// Before any sweep has computed a status: the coarse new-session default.
+	if got := statusInList(); got != StatusIdle {
+		t.Fatalf("fresh session List status = %q, want %q", got, StatusIdle)
+	}
+
+	// A turn completes: progress clears, the done notification latches, and one
+	// sweep records it. The list must then agree with what the stream pushes.
+	handlerOf(t, m, id).handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
+	_ = m.diffStatuses()
+	if got := statusInList(); got != StatusDone {
+		t.Fatalf("after swept done notification, List status = %q, want %q", got, StatusDone)
+	}
+
+	// The next turn starts working: the latch clears and the list follows.
+	handlerOf(t, m, id).handlePTYData([]byte("\x1b]9;4;3\x07"))
+	_ = m.diffStatuses()
+	if got := statusInList(); got != StatusWorking {
+		t.Fatalf("after resume progress, List status = %q, want %q", got, StatusWorking)
+	}
+}
+
+// TestListExitedWinsOverStaleSweptStatus verifies live process exit outranks
+// the sweep's last computed status in List: a session whose process died since
+// the last sweep reports exited immediately, never an up-to-a-tick-stale
+// done/working.
+func TestListExitedWinsOverStaleSweptStatus(t *testing.T) {
+	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
+	t.Cleanup(m.Shutdown)
+	m.stopSweep()
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := handlerOf(t, m, id)
+	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+	_ = m.diffStatuses() // the sweep records done
+
+	// The process dies with no further sweep: exit must win over the stale done.
+	h.Shutdown()
+	deadline := time.Now().Add(2 * time.Second)
+	for !h.Exited() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !h.Exited() {
+		t.Fatal("process did not exit after handler Shutdown")
+	}
+	for _, info := range m.List() {
+		if info.ID == id && info.Status != StatusExited {
+			t.Fatalf("List status = %q, want %q (exit outranks the stale swept status)", info.Status, StatusExited)
+		}
+	}
+}
+
 // TestComputeStatusExited verifies an exited process reports exited regardless
 // of activity or latch.
 func TestComputeStatusExited(t *testing.T) {

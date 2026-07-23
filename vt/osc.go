@@ -33,6 +33,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/cplieger/runesafe"
 )
 
 // decodeTitle applies the XTSMTITLE set-mode to an incoming OSC 0/1/2 title
@@ -222,9 +224,16 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// sanitizeNotification strips C0/C1 control runes (including newlines) from an
-// OSC 9 message and clamps it to maxNotificationLen runes, so the stored text is
-// safe to place in a struct field, a log line, or a status event.
+// sanitizeNotification drops every rune of runesafe's unsafe classes — C0
+// controls (newlines included) + DEL, C1 controls, the Unicode Bidi_Control
+// set (Trojan-Source reordering), and U+2028/U+2029 (JS line terminators) —
+// from an OSC 9 message and clamps it to maxNotificationLen runes, so the
+// stored text is safe to place in a struct field, a log line, or a status
+// event. The class definition is runesafe's, not a local list: this function
+// used to hand-roll C0/C1 only, and the missed Bidi/2028-29 classes reached
+// every consumer's classifier and log attributes (the drift the shared
+// predicate exists to prevent). Dropping (not space-replacing) is a composed
+// policy on runesafe.IsUnsafe, keeping the historical output shape.
 func sanitizeNotification(data string) string {
 	var b strings.Builder
 	n := 0
@@ -232,8 +241,7 @@ func sanitizeNotification(data string) string {
 		if n >= maxNotificationLen {
 			break
 		}
-		// Drop C0 (0x00-0x1F, DEL 0x7F) and C1 (0x80-0x9F) control runes.
-		if r < 0x20 || r == 0x7f || (r >= 0x80 && r <= 0x9f) {
+		if runesafe.IsUnsafe(r, false) {
 			continue
 		}
 		b.WriteRune(r)

@@ -3,6 +3,8 @@ package vt
 import (
 	"strings"
 	"testing"
+
+	"github.com/cplieger/runesafe"
 )
 
 func TestOSC2SetsTitleBEL(t *testing.T) {
@@ -247,17 +249,37 @@ func TestOSC9EmptyIgnored(t *testing.T) {
 }
 
 func TestSanitizeNotification(t *testing.T) {
-	// C0 (tab, newline), DEL (0x7f) stripped; printable kept.
-	if got := sanitizeNotification("done\tnow\x7f\n!"); got != "donenow!" {
-		t.Fatalf("sanitizeNotification = %q, want %q", got, "donenow!")
+	cases := []struct {
+		name, in, want string
+	}{
+		{"c0 + del stripped, printable kept", "done\tnow\x7f\n!", "donenow!"},
+		{"c1 controls stripped", "a\u0085b\u009cc", "abc"},
+		// The classes the hand-rolled C0/C1 loop used to pass (the u07
+		// deferral finding): Bidi_Control reordering runes and the JS line
+		// terminators must not survive into log lines or status events.
+		{"bidi controls stripped", "ok\u202etxt.exe\u202cend", "oktxt.exeend"},
+		{"bidi isolates + alm stripped", "\u2066x\u2069\u061cy\u200e\u200f", "xy"},
+		{"js line terminators stripped", "one\u2028two\u2029three", "onetwothree"},
+		{"empty is empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := sanitizeNotification(tc.in); got != tc.want {
+				t.Errorf("sanitizeNotification(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 	// Clamped to maxNotificationLen runes.
 	long := strings.Repeat("x", maxNotificationLen+50)
 	if got := len([]rune(sanitizeNotification(long))); got != maxNotificationLen {
 		t.Fatalf("clamp: rune length = %d, want %d", got, maxNotificationLen)
 	}
-	if got := sanitizeNotification(""); got != "" {
-		t.Fatalf("empty sanitizeNotification = %q, want empty", got)
+	// Every surviving rune is safe under the shared policy — the invariant
+	// the classifier hook and consumer log attributes rely on.
+	for _, r := range sanitizeNotification("a\x1b[31m\u202e\u2028b\u009f") {
+		if runesafe.IsUnsafe(r, false) {
+			t.Fatalf("unsafe rune %U survived sanitizeNotification", r)
+		}
 	}
 }
 

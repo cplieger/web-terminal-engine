@@ -32,7 +32,7 @@ REGIONAL_INDICATORS = set(range(0x1F1E6, 0x1F1FF + 1))
 
 
 def fetch(url: str) -> str:
-    with urllib.request.urlopen(url) as resp:  # noqa: S310 - unicode.org, pinned path
+    with urllib.request.urlopen(url) as resp:
         return resp.read().decode("utf-8")
 
 
@@ -117,7 +117,7 @@ def main() -> None:
     )
 
     src = WIDTH_GO.read_text(encoding="utf-8")
-    pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.S)
+    pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.DOTALL)
     if not pattern.search(src):
         sys.exit(f"markers not found in {WIDTH_GO}")
     WIDTH_GO.write_text(pattern.sub(lambda _: region, src, count=1), encoding="utf-8")

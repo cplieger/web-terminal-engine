@@ -11,7 +11,7 @@
 
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).
 
-A standalone library that bridges a PTY to a browser WebSocket. The Go packages provide a VT100/VT500 screen buffer with SGR support and a WebSocket-based terminal session handler with reconnect, scrollback replay, and adaptive ping. The TypeScript package provides the browser-side renderer, keyboard mapper, mouse encoder, and binary wire decoder. No app-specific dependencies — only the standard library, `github.com/coder/websocket`, and `github.com/creack/pty`.
+A standalone library that bridges a PTY to a browser WebSocket. The Go packages provide a VT100/VT500 screen buffer with SGR support and a WebSocket-based terminal session handler with reconnect, scrollback replay, and adaptive ping. The TypeScript package provides the browser-side renderer, keyboard mapper, mouse encoder, and binary wire decoder. No app-specific dependencies; only the standard library, `github.com/coder/websocket`, `github.com/creack/pty`, and `github.com/cplieger/runesafe`.
 
 ## Install
 
@@ -80,31 +80,6 @@ The Go server and TypeScript client communicate over WebSocket frames rather tha
 
 Client → server input for DEC modes (SGR 1006 mouse, focus reporting, application keypad) is encoded by the TS `mouse` / `keyboard` modules and consumed server-side by `vt`. For VT/DEC features intentionally absent from the wire, see [Unsupported by Design](#unsupported-by-design).
 
-## Disclaimer
-
-This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
-
-This project was built with AI-assisted tooling using [Claude](https://claude.com), [GPT](https://openai.com), and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
-
-## License
-
-GPL-3.0 — see [LICENSE](LICENSE).
-
-## Related projects
-
-The web-terminal family builds on this engine:
-
-- [`@cplieger/web-terminal-ui`](https://github.com/cplieger/web-terminal-ui) — the
-  reference touch-first browser UI for the TypeScript renderer.
-- [`web-terminal-server`](https://github.com/cplieger/web-terminal-server) — a
-  ready-to-run container that bridges a PTY command to the browser over HTTP +
-  WebSocket.
-
-Apps built on the engine:
-
-- [`vibekit`](https://github.com/cplieger/vibekit)
-- [`web-terminal-kiro`](https://github.com/cplieger/web-terminal-kiro)
-
 ## Unsupported by Design
 
 The following VT/DEC features are **intentionally not implemented**. Input bytes for these sequences are consumed (not echoed or half-rendered) and produce no visible effect, except where a row notes a performed side effect. This is a deliberate design choice — not a TODO.
@@ -123,3 +98,33 @@ The following VT/DEC features are **intentionally not implemented**. Input bytes
 > **Note on device queries:** several report/query sequences sharing the DCS or CSI parsers **are** supported for conformance. **DECRQSS** (`DCS $ q … ST`) answers SGR (`m`), scroll region (`r`), cursor style (`SP q`), protection (`" q`), conformance level (`" p`), left/right margins (`s`) and lines-per-page/screen (`t`, `* |`), replying `DCS 0 $ r ST` for anything else. **XTGETTCAP** (`DCS + q … ST`) answers the color-count capability (256). **DECRQCRA** (rectangular-area checksum) and **OSC 52** clipboard read-back are answered only when `Screen.AllowScreenReport` is enabled — both inject their reply into the PTY, so they default off. The VT model is validated against the [esctest2](https://github.com/ThomasDickey/esctest2) conformance suite (see CONTRIBUTING).
 >
 > **Note on the kitty keyboard protocol:** the [progressive-enhancement](https://sw.kovidgoyal.net/kitty/keyboard-protocol/) negotiation **is** implemented — `CSI ? u` (query) is answered, and `CSI > u` / `CSI < u` / `CSI = u` (push / pop / set) manage per-screen flag stacks — so an app that queries for keyboard enhancement (e.g. crossterm/Codex) detects support. Only the **disambiguate** flag (`0x1`) is honored: the current flag is synced to the client, which then encodes unambiguous `CSI u` key events (Escape, Ctrl/Alt combinations, functional keys, and the keypad's `KP_*` navigation codes) while plain text still flows as text. The other flags — report-event-types (`0x2`), report-alternate-keys (`0x4`), report-all-keys (`0x8`), report-associated-text (`0x10`) — are masked off (`0x8`/`0x10` are incompatible with the browser's hidden-textarea/IME input model); the query reports only the honored flag, so an app that needs a masked-off one detects the gap and falls back. This is distinct from the kitty **image** protocol, which is unsupported (see the graphics row above).
+
+## Related projects
+
+The web-terminal family builds on this engine:
+
+- [`@cplieger/web-terminal-ui`](https://github.com/cplieger/web-terminal-ui) — the
+  reference touch-first browser UI for the TypeScript renderer.
+- [`web-terminal-server`](https://github.com/cplieger/web-terminal-server) — a
+  ready-to-run container that bridges a PTY command to the browser over HTTP +
+  WebSocket.
+
+Apps built on the engine:
+
+- [`vibekit`](https://github.com/cplieger/vibekit)
+- [`web-terminal-kiro`](https://github.com/cplieger/web-terminal-kiro)
+
+## Contributing
+
+Issues and PRs are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+conventions and how to run the checks locally.
+
+## Disclaimer
+
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
+
+This project was built with AI-assisted tooling using [Claude](https://claude.com), [GPT](https://openai.com), and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
+
+## License
+
+GPL-3.0. See [LICENSE](LICENSE).

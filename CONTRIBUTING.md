@@ -89,7 +89,7 @@ CI (`.github/workflows/ci.yaml`) detects both surfaces and runs Go and TypeScrip
 
 - **Tests live beside the code** (`*_test.go`, `*.test.ts`). The suites rely on fuzz and adversarial tests. Extend the fuzz corpus for parser or codec changes instead of adding only a happy path.
 - **Public API is a contract.** Exported Go symbols and TypeScript package exports are documented in the READMEs. Keep them synchronized when adding or renaming public symbols.
-- **Keep dependencies small.** The Go side uses the standard library, `coder/websocket`, and `creack/pty`; the TypeScript package has zero runtime dependencies.
+- **Keep dependencies small.** The Go side uses the standard library, `coder/websocket`, `creack/pty`, and `cplieger/runesafe`; the TypeScript package has zero runtime dependencies.
 
 ## Publishing model
 

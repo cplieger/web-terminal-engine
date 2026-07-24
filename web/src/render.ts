@@ -249,7 +249,7 @@ export function init(opts: {
   }
   flushDrainedThisPass = 0;
   renderNoProgressStreak = 0;
-  startCursorBlink();
+  syncCursorBlink();
 }
 
 /**
@@ -739,7 +739,11 @@ function flushRenderInner(): void {
   cursorCol = win.cursorCol;
   cursorHidden = win.cursorHidden;
   cursorStyleVal = win.cursorStyle;
-  setCursorBlink(win.cursorBlink);
+  blinkEnabled = win.cursorBlink;
+  // Reconcile the blink interval with the fresh cursor state (blink mode and
+  // DECTCM visibility may both have changed this frame); no-op when the
+  // resulting mode is unchanged.
+  syncCursorBlink();
 
   // Alt screen: render the ephemeral grid instead of the absolute buffer.
   // Returning here skips the dirtyLines queueing below — safe by invariant:
@@ -954,8 +958,20 @@ function stickToBottomIfFollowing(): void {
 
 // --- Cursor blink ---
 const CURSOR_BLINK_MS = 530;
+// While the application hides the cursor (DECTCM — e.g. a full-screen TUI
+// that paints its own cursor cell, like an agent front-end), the fast toggle
+// would only restyle a display:none overlay, so the interval downshifts to
+// this slow re-check: still polling for the cursor's return (a self-healing
+// backstop even if a transition frame were somehow missed — the flush hook is
+// the primary, instant restart), at a fraction of the 530ms blink's wakeups.
+// For agent consumers the hidden-cursor state is the session's steady state.
+const CURSOR_RECHECK_MS = 4000;
 let blinkInterval: ReturnType<typeof setInterval> | null = null;
 let blinkEnabled = true;
+// What the running interval (if any) is configured as. syncCursorBlink()
+// reconfigures only on mode change, so it is safe to call on every flush.
+type BlinkMode = "off" | "idle" | "fast";
+let blinkMode: BlinkMode = "off";
 
 // hiddenDoc reports whether the page is currently background/hidden. The blink
 // interval is gated on it: rAF-driven flushes already freeze in a hidden tab,
@@ -965,25 +981,42 @@ function hiddenDoc(): boolean {
   return typeof document !== "undefined" && document.visibilityState === "hidden";
 }
 
-function startCursorBlink(): void {
-  if (blinkInterval !== null || !blinkEnabled || hiddenDoc()) {
-    return;
+// desiredBlinkMode folds the three gates into an interval mode: no timer at
+// all when blinking is disabled or the page is hidden (both have event-driven
+// restarts — the next mode frame's flush and visibilitychange), the fast
+// phase toggle when the cursor is visible, and the slow re-check while the
+// application hides it.
+function desiredBlinkMode(): BlinkMode {
+  if (!blinkEnabled || hiddenDoc()) {
+    return "off";
   }
-  // The blink class lives on termWrap: the caret overlay is a termWrap child
-  // (not inside output), and the `.cursor-blink-off .term-cursor` descendant
-  // selector must reach it.
-  termWrap.classList.remove("cursor-blink-off");
-  blinkInterval = setInterval(() => {
-    termWrap.classList.toggle("cursor-blink-off");
-  }, CURSOR_BLINK_MS);
+  return cursorHidden ? "idle" : "fast";
 }
 
-function stopCursorBlink(): void {
+// syncCursorBlink reconciles the interval with the current gate state; every
+// mode change resets the phase to solid. Called from the flush (blink mode +
+// DECTCM state), the visibilitychange listener, init(), and the idle re-check
+// itself. The blink class lives on termWrap: the caret overlay is a termWrap
+// child (not inside output), and the `.cursor-blink-off .term-cursor`
+// descendant selector must reach it.
+function syncCursorBlink(): void {
+  const mode = desiredBlinkMode();
+  if (mode === blinkMode) {
+    return;
+  }
+  blinkMode = mode;
   if (blinkInterval !== null) {
     clearInterval(blinkInterval);
     blinkInterval = null;
   }
   termWrap.classList.remove("cursor-blink-off");
+  if (mode === "fast") {
+    blinkInterval = setInterval(() => {
+      termWrap.classList.toggle("cursor-blink-off");
+    }, CURSOR_BLINK_MS);
+  } else if (mode === "idle") {
+    blinkInterval = setInterval(syncCursorBlink, CURSOR_RECHECK_MS);
+  }
 }
 
 // Pause the interval while hidden; resume (cursor solid, phase reset) when the
@@ -995,31 +1028,11 @@ if (typeof document !== "undefined") {
     if ((termWrap as HTMLElement | undefined) === undefined) {
       return;
     }
-    if (hiddenDoc()) {
-      // Stop the timer only: blinkEnabled keeps the server-driven state so
-      // foregrounding can restart without waiting for the next mode frame.
-      if (blinkInterval !== null) {
-        clearInterval(blinkInterval);
-        blinkInterval = null;
-      }
-      termWrap.classList.remove("cursor-blink-off");
-      return;
-    }
-    startCursorBlink();
+    // blinkEnabled/cursorHidden keep their server-driven state across a
+    // background stint, so foregrounding restores the right mode without
+    // waiting for the next frame.
+    syncCursorBlink();
   });
-}
-
-/** Called from the flush when cursorBlink state changes. */
-function setCursorBlink(enabled: boolean): void {
-  if (enabled === blinkEnabled) {
-    return;
-  }
-  blinkEnabled = enabled;
-  if (enabled) {
-    startCursorBlink();
-  } else {
-    stopCursorBlink();
-  }
 }
 
 // --- Font metrics & sizing ---

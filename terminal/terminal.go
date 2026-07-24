@@ -45,6 +45,16 @@ const (
 	defaultRows   = 30
 	flushInterval = 50 * time.Millisecond
 
+	// redrawSettleQuiet / redrawSettleCap parameterize the redraw-settle hold
+	// (armRedrawSettle): after a size change, flushes stay held until the
+	// child's redraw output has been quiet for redrawSettleQuiet, but never
+	// longer than redrawSettleCap in total. Quiet must exceed the child's
+	// inter-chunk rendering gaps (kiro-cli brackets its reprint in many small
+	// DEC 2026 batches, milliseconds apart); the cap bounds the freeze when a
+	// resize lands mid-stream and the output never goes quiet.
+	redrawSettleQuiet = 150 * time.Millisecond
+	redrawSettleCap   = time.Second
+
 	// healDebounce is how long the handler waits after a client disconnects
 	// before relaxing the shared screen to the smallest size the remaining
 	// clients need. It absorbs a brief reconnect (iOS wake, network blip): a
@@ -264,15 +274,20 @@ type Handler struct {
 	// dirty is the flush scheduler's wakeup: 1-buffered so any number of
 	// markDirty pokes coalesce into one pending signal. flushLoop sleeps on
 	// it when idle — no ticker, no periodic wakeups (P4).
-	dirty            chan struct{}
-	healTimer        *time.Timer
-	pendingClipboard []byte
-	command          []string
-	cfg              handlerConfig
-	bootEpoch        int64
-	lastActivity     atomic.Int64
-	mu               sync.Mutex
-	started          atomic.Bool
+	dirty     chan struct{}
+	healTimer *time.Timer
+	// redrawSettleUntil / redrawLastData implement the redraw-settle hold
+	// (armRedrawSettle / redrawHoldUntil). Both guarded by h.mu; a zero
+	// redrawSettleUntil means the hold is inactive.
+	redrawSettleUntil time.Time
+	redrawLastData    time.Time
+	pendingClipboard  []byte
+	command           []string
+	cfg               handlerConfig
+	bootEpoch         int64
+	lastActivity      atomic.Int64
+	mu                sync.Mutex
+	started           atomic.Bool
 	// sizeEstablished is latched true once the PTY has real dimensions (the
 	// eager start's default size, or a client resize) and never cleared: the
 	// flush builder emits nothing before it, so clients never see a frame
@@ -619,6 +634,11 @@ func (h *Handler) handlePTYData(data []byte) {
 	h.lastActivity.Store(time.Now().UnixNano())
 	var resp []byte
 	h.mu.Lock()
+	if !h.redrawSettleUntil.IsZero() {
+		// Redraw-settle hold armed (post-resize): every PTY byte is redraw
+		// output, so it extends the quiet window (redrawHoldUntil).
+		h.redrawLastData = time.Now()
+	}
 	h.screen.Write(data) //nolint:errcheck // screen.Write always returns nil
 	if h.screen.TakeScrollbackCleared() {
 		// ED3 (erase scrollback): the app discarded its saved lines (kiro-cli
@@ -680,9 +700,10 @@ type flushFrame struct {
 // buildFrame computes the next outbound frame under h.mu. Returns a nil frame
 // if there is nothing to send (no resize yet, flush held, no attached
 // clients, or no changed rows and no scroll lines). holdUntil is non-zero
-// when a DEC 2026 synchronized-output hold is active — the scheduler arms a
-// retry at that deadline so a final held redraw with no subsequent PTY byte
-// still flushes (a trigger-only scheduler would strand it).
+// when a flush hold is active — a DEC 2026 synchronized-output hold or the
+// post-resize redraw-settle hold — and the scheduler arms a retry at that
+// deadline so a final held redraw with no subsequent PTY byte still flushes
+// (a trigger-only scheduler would strand it).
 // retainSuspendedScrollback drains lines produced with no attached clients into
 // the retained main-screen history. The caller holds h.mu. One-shot signals
 // deliberately remain pending for the next attach.
@@ -721,8 +742,16 @@ func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 	if h.screen.IsFlushHeld() {
 		holdUntil = h.screen.FlushHoldUntil
 	}
+	// The redraw-settle hold (armRedrawSettle) gates frames exactly like a
+	// DEC 2026 hold but is immune to the child's ESU; fold its deadline in so
+	// the scheduler arms a retry at whichever hold lapses last.
+	if hu := h.redrawHoldUntil(time.Now()); hu.After(holdUntil) {
+		holdUntil = hu
+	}
 	committedBefore := h.scrollback.Committed()
-	frame = h.builder.Build(h.screen, h.sizeEstablished, clients, committedBefore)
+	if holdUntil.IsZero() {
+		frame = h.builder.Build(h.screen, h.sizeEstablished, clients, committedBefore)
+	}
 	if frame != nil && len(frame.scrollLines) > 0 {
 		h.scrollback.Append(frame.scrollLines)
 	}
@@ -1422,10 +1451,54 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) {
 	h.applySize(cols, rows, "resize received")
 }
 
-// applySize resizes the PTY and the shared VT screen and holds flushes over the
-// SIGWINCH redraw window so clients don't see the child's transient
-// cleared-screen state (released by the child's CSI ?2026l or the 1s deadline).
-// Shared by the live resize path and the disconnect heal.
+// armRedrawSettle starts the redraw-settle hold: flushes stay suppressed until
+// the child's redraw output has been quiet for redrawSettleQuiet, capped at
+// redrawSettleCap from now. Caller holds h.mu.
+//
+// This exists because the screen-level flush hold (vt.Screen.HoldFlush) cannot
+// hide a SIGWINCH redraw: it shares its deadline with DEC 2026, and the
+// child's first CSI ?2026l (ESU) clears it. kiro-cli brackets its post-resize
+// transcript reprint in many small BSU/ESU chunks, so the first chunk released
+// the resize hold milliseconds in, and every subsequent flush pass streamed a
+// mid-reprint window to the clients — on a phone, seconds of history visibly
+// churning through the screen after each keyboard/rotation resize. The settle
+// hold is handler-level state the child's escape sequences cannot touch: the
+// redraw is over when the child goes quiet, not when it closes a bracket.
+func (h *Handler) armRedrawSettle(now time.Time) {
+	h.redrawSettleUntil = now.Add(redrawSettleCap)
+	// The arm itself counts as activity so the hold lasts at least
+	// redrawSettleQuiet even if the child's first redraw byte is still in
+	// flight (SIGWINCH delivery latency); flushing before it arrives would
+	// show the pre-redraw reflowed screen — the state the hold exists to hide.
+	h.redrawLastData = now
+}
+
+// redrawHoldUntil returns the moment the redraw-settle hold lapses, or the
+// zero time when it is inactive, settled (quiet long enough), or capped.
+// Lapsing disarms the hold. Caller holds h.mu.
+func (h *Handler) redrawHoldUntil(now time.Time) time.Time {
+	if h.redrawSettleUntil.IsZero() {
+		return time.Time{}
+	}
+	deadline := h.redrawLastData.Add(redrawSettleQuiet)
+	if h.redrawSettleUntil.Before(deadline) {
+		deadline = h.redrawSettleUntil
+	}
+	if !now.Before(deadline) {
+		h.redrawSettleUntil = time.Time{}
+		return time.Time{}
+	}
+	return deadline
+}
+
+// applySize resizes the PTY and the shared VT screen and, when the dimensions
+// actually change, holds flushes over the SIGWINCH redraw window so clients
+// don't see the child's transient cleared-screen / mid-reprint states. The
+// hold releases when the redraw output settles (see armRedrawSettle). A
+// same-size call (a client reconnect re-sending its size) arms nothing: the
+// kernel suppresses SIGWINCH for an unchanged winsize, so there is no redraw
+// to hide and live output must not stall. Shared by the live resize path and
+// the disconnect heal.
 func (h *Handler) applySize(cols, rows int, reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1436,6 +1509,7 @@ func (h *Handler) applySize(cols, rows int, reason string) {
 	// passes MinLiveSize values). Idempotent for the live path, which already
 	// clamped in handleResize.
 	cols, rows = clampResize(cols, rows)
+	sizeChanged := cols != h.screen.Width || rows != h.screen.Height
 	if err := pty.Setsize(h.ptmx, &pty.Winsize{
 		// #nosec G115 -- clampResize bounds cols/rows to [minResize, maxResize<=1000], >0, just above; no uint16 overflow. gosec can't see through the helper.
 		Cols: uint16(cols), Rows: uint16(rows),
@@ -1443,7 +1517,9 @@ func (h *Handler) applySize(cols, rows int, reason string) {
 		h.cfg.logger.Debug("terminal: resize", "error", err)
 	}
 	h.screen.Resize(rows, cols)
-	h.screen.HoldFlush(time.Now().Add(time.Second))
+	if sizeChanged {
+		h.armRedrawSettle(time.Now())
+	}
 	h.cfg.logger.Info("terminal: "+reason, "rows", rows, "cols", cols)
 	h.sizeEstablished = true
 	h.builder.Reset()

@@ -451,20 +451,186 @@ func TestHandleResize_rowsAboveMinNotFloored(t *testing.T) {
 	}
 }
 
-// TestHandleResize_holdsFlushOnSuccessfulStart verifies that after a
-// successful first start, handleResize runs the post-start path including
-// HoldFlush so the SIGWINCH redraw window is hidden from the client.
-func TestHandleResize_holdsFlushOnSuccessfulStart(t *testing.T) {
+// TestApplySize_sizeChangeArmsRedrawSettle verifies the redraw-settle hold
+// arms exactly when the dimensions change: the first start seeds the screen
+// size (ensureStarted), so the first handleResize is a same-size applySize and
+// must NOT arm (no SIGWINCH fires for an unchanged winsize, so there is no
+// redraw to hide and live output must not stall); a second resize to a
+// different size must arm.
+func TestApplySize_sizeChangeArmsRedrawSettle(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Shutdown()
 
 	h.handleResize(&clientState{}, 100, 40)
+	h.mu.Lock()
+	afterFirst := h.redrawHoldUntil(time.Now())
+	h.mu.Unlock()
+	if !afterFirst.IsZero() {
+		t.Errorf("first resize (size seeded by ensureStarted): redrawHoldUntil = %v, want zero (same-size applySize must not arm)", afterFirst)
+	}
+
+	h.handleResize(&clientState{}, 90, 30)
+	h.mu.Lock()
+	afterChange := h.redrawHoldUntil(time.Now())
+	h.mu.Unlock()
+	if afterChange.IsZero() {
+		t.Error("size-changing resize: redrawHoldUntil = zero, want a future deadline (the SIGWINCH redraw window must be held)")
+	}
+
+	// Re-applying the SAME size while armed must not matter either way, and a
+	// later same-size resize after settle must not re-arm.
+	h.mu.Lock()
+	h.redrawSettleUntil = time.Time{} // settle
+	h.mu.Unlock()
+	h.handleResize(&clientState{}, 90, 30)
+	h.mu.Lock()
+	afterSame := h.redrawHoldUntil(time.Now())
+	h.mu.Unlock()
+	if !afterSame.IsZero() {
+		t.Errorf("same-size resize after settle: redrawHoldUntil = %v, want zero", afterSame)
+	}
+}
+
+// TestRedrawSettle_ESUDoesNotRelease pins the regression that motivated the
+// settle hold: kiro-cli brackets its post-resize transcript reprint in many
+// small DEC 2026 BSU/ESU chunks, and the first chunk's ESU used to clear the
+// screen-level resize hold (vt.Screen.ReleaseFlush zeroes FlushHoldUntil), so
+// every flush pass between brackets streamed a mid-reprint window — visible
+// history churn on every phone keyboard/rotation resize. The handler-level
+// hold must survive the ESU.
+func TestRedrawSettle_ESUDoesNotRelease(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	defer h.Shutdown()
+
+	h.handleResize(&clientState{}, 100, 40)
+	h.handleResize(&clientState{}, 90, 30) // size change: arms the settle hold
+
+	// Child starts its redraw: one small synchronized bracket, then more
+	// output between brackets.
+	h.handlePTYData([]byte("\x1b[?2026h" + "chunk 1 of transcript\r\n" + "\x1b[?2026l"))
 
 	h.mu.Lock()
-	held := h.screen.IsFlushHeld()
+	screenHeld := h.screen.IsFlushHeld()
+	redrawHold := h.redrawHoldUntil(time.Now())
 	h.mu.Unlock()
-	if !held {
-		t.Errorf("handleResize: IsFlushHeld()=false after a successful start; HoldFlush must run")
+	if screenHeld {
+		t.Error("screen-level hold survived ESU; expected ReleaseFlush to clear it (2026 semantics)")
+	}
+	if redrawHold.IsZero() {
+		t.Fatal("redraw-settle hold released by the child's ESU; mid-reprint frames would stream to clients again")
+	}
+}
+
+// TestRedrawSettle_releasesOnQuietAndExtendsOnOutput verifies the two release
+// dynamics: continued PTY output extends the quiet deadline, and quiet for
+// redrawSettleQuiet releases (and disarms) the hold.
+func TestRedrawSettle_releasesOnQuietAndExtendsOnOutput(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	defer h.Shutdown()
+
+	h.handleResize(&clientState{}, 100, 40)
+	h.handleResize(&clientState{}, 90, 30)
+
+	h.handlePTYData([]byte("redraw output"))
+	h.mu.Lock()
+	d1 := h.redrawHoldUntil(time.Now())
+	h.mu.Unlock()
+	if d1.IsZero() {
+		t.Fatal("hold must be active right after redraw output")
+	}
+
+	time.Sleep(redrawSettleQuiet / 2)
+	h.handlePTYData([]byte("more redraw output"))
+	h.mu.Lock()
+	d2 := h.redrawHoldUntil(time.Now())
+	h.mu.Unlock()
+	if !d2.After(d1) {
+		t.Errorf("continued output must extend the quiet deadline: first %v, after more output %v", d1, d2)
+	}
+
+	time.Sleep(redrawSettleQuiet + 30*time.Millisecond)
+	h.mu.Lock()
+	d3 := h.redrawHoldUntil(time.Now())
+	armed := !h.redrawSettleUntil.IsZero()
+	h.mu.Unlock()
+	if !d3.IsZero() {
+		t.Errorf("quiet for > redrawSettleQuiet must release the hold; got deadline %v", d3)
+	}
+	if armed {
+		t.Error("a lapsed hold must disarm (redrawSettleUntil cleared), not report zero while staying armed")
+	}
+}
+
+// TestRedrawSettle_capBoundsContinuousOutput verifies the hard ceiling: output
+// that never goes quiet (a resize landing mid-stream) is held at most until
+// the cap, never until the stream pauses.
+func TestRedrawSettle_capBoundsContinuousOutput(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	defer h.Shutdown()
+
+	now := time.Now()
+	h.mu.Lock()
+	h.armRedrawSettle(now)
+	// Simulate a stream still writing at the cap: last data is fresh, but the
+	// cap deadline has passed.
+	h.redrawSettleUntil = now.Add(-time.Millisecond)
+	h.redrawLastData = now
+	d := h.redrawHoldUntil(now)
+	h.mu.Unlock()
+	if !d.IsZero() {
+		t.Errorf("cap passed with fresh output: redrawHoldUntil = %v, want zero (the cap must win over the quiet window)", d)
+	}
+
+	// And below the cap, the earlier of (quiet deadline, cap) governs.
+	h.mu.Lock()
+	h.armRedrawSettle(now)
+	h.redrawSettleUntil = now.Add(10 * time.Millisecond) // cap sooner than quiet
+	h.redrawLastData = now
+	d = h.redrawHoldUntil(now)
+	h.mu.Unlock()
+	if want := now.Add(10 * time.Millisecond); !d.Equal(want) {
+		t.Errorf("cap sooner than quiet: redrawHoldUntil = %v, want the cap %v", d, want)
+	}
+}
+
+// TestRedrawSettle_buildFrameHeldThenSettles drives the observable contract
+// end to end on the real handlePTYData -> buildFrame path: while the settle
+// hold is active buildFrame emits nothing and returns the retry deadline; once
+// the redraw goes quiet the next pass emits one frame carrying the settled
+// window and, when the redraw began with ED3 (kiro-cli's reprint signature),
+// the scrollbackCleared signal — the client swaps old content for new in one
+// atomic repaint instead of watching the reprint stream through.
+func TestRedrawSettle_buildFrameHeldThenSettles(t *testing.T) {
+	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h.sizeEstablished = true
+	h.registry.Add(&websocket.Conn{}) // attached client: the render path, not zero-client suspension
+
+	h.mu.Lock()
+	h.armRedrawSettle(time.Now())
+	h.mu.Unlock()
+
+	// The redraw: ED3 (discard scrollback) then reprinted content.
+	h.handlePTYData([]byte("\x1b[3J"))
+	h.handlePTYData([]byte("reprinted transcript line"))
+
+	frame, holdUntil := h.buildFrame()
+	if frame != nil {
+		t.Fatalf("buildFrame emitted a mid-redraw frame while the settle hold is active (changed=%d)", len(frame.changed))
+	}
+	if holdUntil.IsZero() || !holdUntil.After(time.Now()) {
+		t.Fatalf("held pass must return a future retry deadline; got %v", holdUntil)
+	}
+
+	time.Sleep(redrawSettleQuiet + 30*time.Millisecond)
+	frame, holdUntil = h.buildFrame()
+	if !holdUntil.IsZero() {
+		t.Fatalf("hold must have lapsed after quiet; got retry deadline %v", holdUntil)
+	}
+	if frame == nil {
+		t.Fatal("settled pass must emit the accumulated redraw as one frame")
+	}
+	if !frame.scrollbackCleared {
+		t.Error("the settled frame must carry the pending ED3 scrollbackCleared signal (one atomic old-for-new swap on the client)")
 	}
 }
 
@@ -1048,7 +1214,14 @@ func TestHealSize_growsSurvivorAfterBindingClientLeaves(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Shutdown()
 
-	phoneConn, deskConn := new(websocket.Conn), new(websocket.Conn)
+	// Real (throwaway-server) conns, not zero-value fakes: the handler is
+	// started, so its flush scheduler is live and may dispatch to every
+	// registered conn at any moment — a write to a zero-value websocket.Conn
+	// segfaults. (The old unconditional 1s resize hold merely masked this.)
+	phoneConn, _, cleanupPhone := dualConn(t)
+	defer cleanupPhone()
+	deskConn, _, cleanupDesk := dualConn(t)
+	defer cleanupDesk()
 	phone := h.registry.Add(phoneConn)
 	desk := h.registry.Add(deskConn)
 
@@ -1084,8 +1257,12 @@ func TestMaybeHealSize_onlyArmsForTheBindingClient(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Shutdown()
 
-	st := h.registry.Add(new(websocket.Conn))
-	h.handleResize(st, 40, 20) // shared screen is now 40x20
+	// No registered client: the started handler's flush scheduler dispatches
+	// to every registered conn, and a write to a zero-value websocket.Conn
+	// segfaults (the old unconditional 1s resize hold merely masked this).
+	// maybeHealSize needs none — it compares the departed size (its args)
+	// against the screen; handleResize accepts an unregistered state.
+	h.handleResize(&clientState{}, 40, 20) // shared screen is now 40x20
 
 	// A non-binding departure (size != current screen) arms nothing.
 	h.maybeHealSize(120, 40)

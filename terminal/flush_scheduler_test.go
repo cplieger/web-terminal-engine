@@ -274,3 +274,58 @@ func TestFlushScheduler_heldRedrawFlushesAtDeadline(t *testing.T) {
 	// further PTY bytes. Allow generous slack for CI.
 	readFrameWithin(t, results, 3*time.Second)
 }
+
+// TestFlushScheduler_resizeReprintHeldUntilSettled drives the full kiro-cli
+// post-resize choreography through the real scheduler and a live WebSocket:
+// a size change (SIGWINCH), then ED3 + the transcript reprinted in several
+// small DEC 2026 BSU/ESU brackets. Pre-fix, the first bracket's ESU cleared
+// the screen-level resize hold, so every inter-bracket flush pass streamed a
+// mid-reprint window — the "whole history visibly churns through the screen"
+// glitch on every phone keyboard/rotation resize. The settle hold must keep
+// the wire QUIET across the whole reprint and deliver the settled result as
+// one post-quiet batch.
+func TestFlushScheduler_resizeReprintHeldUntilSettled(t *testing.T) {
+	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+	t.Cleanup(h.Shutdown)
+	if err := h.StartEager(); err != nil {
+		t.Fatalf("StartEager: %v", err)
+	}
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	//nolint:bodyclose // coder/websocket Dial nils resp.Body on success
+	ws, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws", nil)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer ws.Close(websocket.StatusNormalClosure, "") // #nosec G104 -- test cleanup
+	results := startWSReader(t, ws)
+
+	// Pre-reprint content on screen; let the attach burst + echo settle.
+	h.handlePTYData([]byte("old transcript line\r\n"))
+	readUntilQuiet(t, results, 200*time.Millisecond)
+
+	// The phone keyboard opens: a size CHANGE arms the settle hold.
+	h.handleResize(&clientState{}, 100, 24)
+
+	// kiro-cli's redraw: ED3, then the transcript in small 2026 brackets with
+	// inter-bracket gaps well under redrawSettleQuiet. Each gap is asserted
+	// frame-free: pre-fix the first ESU released the hold and the next
+	// 50ms-cadence pass leaked a mid-reprint frame into exactly these windows.
+	h.handlePTYData([]byte("\x1b[3J"))
+	for range 3 {
+		h.handlePTYData([]byte("\x1b[?2026h" + "reprint chunk\r\n" + "\x1b[?2026l"))
+		assertNoFrame(t, results, 40*time.Millisecond)
+	}
+
+	// Reprint done: the settled batch must land once quiet elapses.
+	start := time.Now()
+	readFrameWithin(t, results, redrawSettleQuiet+2*time.Second)
+	if elapsed := time.Since(start); elapsed > redrawSettleCap {
+		t.Fatalf("settled frame took %v after the last reprint byte, want <= cap %v", elapsed, redrawSettleCap)
+	}
+}

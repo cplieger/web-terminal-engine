@@ -125,13 +125,17 @@ const rowEls = new Map<number, HTMLDivElement>();
 let trimMarkerEl: HTMLDivElement | null = null;
 
 // Rows awaiting a DOM (re)build, processed in budgeted batches across frames.
-// A session restore (kiro-cli's /chat) or a `cat bigfile` dumps thousands of
-// lines in one wire frame; building them all in a single rAF janks or, on a
-// constrained device, hangs the tab. The store still ingests the whole burst
-// at once (it is cheap, pure data); the renderer drains this queue at most
-// MAX_ROWS_PER_FRAME per frame and reschedules until it is empty, so each
-// frame stays short and the terminal fills smoothly. The cursor row is always
-// built regardless of the budget so the caret never lags.
+// A session restore (kiro-cli's /chat), a post-resize transcript reprint, or a
+// `cat bigfile` dumps thousands of lines in one wire frame; building them all
+// in a single rAF janks or, on a constrained device, hangs the tab. The store
+// still ingests the whole burst at once (it is cheap, pure data); the renderer
+// drains this queue at most MAX_ROWS_PER_FRAME per frame and reschedules until
+// it is empty, so each frame stays short. The drain is VIEWPORT-FIRST each
+// frame (see flushRenderInner): live-window rows build before any scrollback
+// backlog, and scrollback drains newest->oldest so the backlog fills upward,
+// above the bottom-pinned viewport — offscreen — instead of visibly streaming
+// through it. The cursor row is always built regardless of the budget so the
+// caret never lags.
 const renderQueue = new Set<number>();
 const MAX_ROWS_PER_FRAME = 300;
 
@@ -779,12 +783,31 @@ function flushRenderInner(): void {
     renderQueue.delete(newCursorAbs);
   }
 
-  // Drain up to MAX_ROWS_PER_FRAME queued rows this frame; the rest carry over
-  // to the next frame (scheduled below) so one big burst never blocks paint.
-  // flushDrainedThisPass doubles as the per-frame budget counter and the
-  // forward-progress signal the error-path reschedule reads (it was reset to 0
-  // at entry and nothing between there and here touches it).
+  // Drain up to MAX_ROWS_PER_FRAME queued rows this frame, viewport-first;
+  // the rest carry over to the next frame (scheduled below) so one big burst
+  // never blocks paint. Live-window rows build first (ascending), then the
+  // scrollback backlog newest->oldest, so the backlog fills upward above the
+  // bottom-pinned viewport — offscreen. A Set's insertion order did the
+  // opposite under load: a multi-thousand-row backlog (a resume replay,
+  // kiro-cli's post-resize transcript reprint, `cat bigfile`) queued ahead of
+  // freshly-dirtied window rows, so the visible screen either churned through
+  // history or froze (only the force-built cursor row moving) for seconds on
+  // a slow device while the backlog drained. flushDrainedThisPass doubles as
+  // the per-frame budget counter and the forward-progress signal the
+  // error-path reschedule reads (it was reset to 0 at entry and nothing
+  // between there and here touches it).
+  const inWindow: number[] = [];
+  const belowWindow: number[] = [];
   for (const abs of renderQueue) {
+    if (abs >= win.base) {
+      inWindow.push(abs);
+    } else {
+      belowWindow.push(abs);
+    }
+  }
+  inWindow.sort((a, b) => a - b);
+  belowWindow.sort((a, b) => b - a);
+  for (const abs of [...inWindow, ...belowWindow]) {
     if (flushDrainedThisPass >= MAX_ROWS_PER_FRAME) {
       break;
     }

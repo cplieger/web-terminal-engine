@@ -289,9 +289,11 @@ func (s *Screen) DrainScrollback() [][]WireRun {
 
 // HoldFlush requests that the flush loop skip flushing the screen until
 // the given time. Used to hide partial state during atomic batches —
-// callers include CSI ?2026h ("synchronized output mode") and the resize
-// handler (covers the SIGWINCH redraw window). Subsequent calls extend
-// the hold but never shorten it.
+// the caller is CSI ?2026h ("synchronized output mode"). Subsequent calls
+// extend the hold but never shorten it. (The resize/SIGWINCH redraw window
+// is hidden by the terminal handler's own settle hold, not this one: this
+// hold is cleared by the child's next CSI ?2026l, which would expose the
+// rest of a bracketed multi-chunk redraw.)
 func (s *Screen) HoldFlush(until time.Time) {
 	if until.After(s.FlushHoldUntil) {
 		s.FlushHoldUntil = until

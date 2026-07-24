@@ -6,7 +6,7 @@
 // oscillation fix), history + window render in one absolute-ordered list, and
 // re-delivery never duplicates a row.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as render from "./render.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
@@ -216,6 +216,89 @@ describe("render (store-backed, brick 3)", () => {
     const list = absList(outputEl);
     // Every line landed exactly once, contiguous and ascending 0..N-1.
     expect(list).toEqual(Array.from({ length: N }, (_, i) => i));
+  });
+});
+
+describe("render: viewport-first drain (backlog never starves the window)", () => {
+  let outputEl: HTMLDivElement;
+  let termWrap: HTMLDivElement;
+
+  // Deterministic frames: callbacks queue and the test pumps them one at a
+  // time, so "what did the FIRST frame build" is observable (a real/tick()
+  // driven rAF can run several frames per await).
+  let rafQueue: FrameRequestCallback[] = [];
+  let rafId = 0;
+  let realRaf: typeof requestAnimationFrame;
+  let realCaf: typeof cancelAnimationFrame;
+
+  function pumpOneFrame(): void {
+    const batch = rafQueue;
+    rafQueue = [];
+    for (const cb of batch) {
+      cb(performance.now());
+    }
+  }
+
+  beforeEach(() => {
+    realRaf = globalThis.requestAnimationFrame;
+    realCaf = globalThis.cancelAnimationFrame;
+    rafQueue = [];
+    rafId = 0;
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
+      rafQueue.push(cb);
+      return ++rafId;
+    }) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = (() => undefined) as typeof cancelAnimationFrame;
+
+    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
+    termWrap = document.getElementById("term") as HTMLDivElement;
+    outputEl = document.getElementById("term-output") as HTMLDivElement;
+    render.init({ output: outputEl, termWrap });
+    render.updateFontMetrics();
+  });
+
+  afterEach(() => {
+    globalThis.requestAnimationFrame = realRaf;
+    globalThis.cancelAnimationFrame = realCaf;
+  });
+
+  const has = (abs: number): boolean => outputEl.querySelector(`[data-abs="${abs}"]`) !== null;
+
+  it("builds every live-window row in the first frame and fills the backlog newest-first", () => {
+    // The starving order: a large history backlog is queued BEFORE the window
+    // rows (kiro-cli's post-resize transcript reprint, a resume replay racing
+    // the screen frame, sustained `cat`). Insertion-order draining built the
+    // oldest 300 history rows first and left the visible window — bar the
+    // force-built cursor row — stale for seconds on a slow device, the
+    // "history churns through the screen on every phone resize" symptom.
+    const N = 500; // history backlog, abs 0..499
+    render.handleScroll(
+      scrollMsg(
+        0,
+        Array.from({ length: N }, (_, i) => `h${i}`),
+      ),
+    );
+    render.handleScreen(
+      screenMsg(N, [row("w0"), row("w1"), row("w2"), row("w3"), row("w4")], [0, 1, 2, 3, 4]),
+    );
+
+    pumpOneFrame();
+
+    // Every window row (abs 500..504) is on screen after ONE frame — not just
+    // the cursor row.
+    for (let abs = N; abs < N + 5; abs++) {
+      expect(has(abs), `window row ${abs} must build in frame 1`).toBe(true);
+    }
+    // The backlog fills newest-first (upward, offscreen above the pinned
+    // viewport): the newest history row is built, the oldest is still pending.
+    expect(has(N - 1), "newest history row must build before older ones").toBe(true);
+    expect(has(0), "oldest history row must wait for a later frame").toBe(false);
+
+    // Drain the rest; the reorder must lose and duplicate nothing.
+    for (let i = 0; i < 15 && outputEl.children.length < N + 5; i++) {
+      pumpOneFrame();
+    }
+    expect(absList(outputEl)).toEqual(Array.from({ length: N + 5 }, (_, i) => i));
   });
 });
 

@@ -422,6 +422,21 @@ func (h *Handler) Progress() int {
 	return h.screen.Progress
 }
 
+// statusSnapshot returns the status-relevant screen state — the OSC 9;4
+// progress state, the last OSC 9 notification message and its sequence, and
+// the OSC 0/2 window title — under a SINGLE lock acquisition, so the status
+// sweep's per-session snapshot is internally consistent. Reading the same
+// fields through the individual getters (Progress, Notification, Title) takes
+// the lock once per call, and a PTY chunk parsed between two of those calls
+// can pair a stale active progress with a fresh turn-end notification — the
+// inconsistent pairing computeStatus must not see (its fresh-latch precedence
+// guards the state machine; this getter removes the torn read).
+func (h *Handler) statusSnapshot() (progress int, notifMsg string, notifSeq uint64, title string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.screen.Progress, h.screen.Notification, h.screen.NotificationSeq, h.screen.Title
+}
+
 // StartEager starts the child process now at a default size, rather than lazily
 // on the first client message. A session manager calls this at Create time so a
 // new session's process (and its activity signal) exist from creation; the first

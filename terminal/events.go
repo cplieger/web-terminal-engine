@@ -97,12 +97,14 @@ type statusRaw struct {
 }
 
 // read fills the handler-derived fields (diffStatuses phase 2). It takes only
-// the handler's own locks — never the manager's.
+// the handler's own locks — never the manager's. The screen-derived fields
+// (progress, notification, title) come from ONE lock acquisition
+// (statusSnapshot), so a PTY chunk parsed mid-read cannot pair a stale active
+// progress with a fresh turn-end notification (the torn snapshot that lost a
+// done latch).
 func (it *statusRaw) read() {
 	it.exited = it.handler.Exited()
-	it.progress = it.handler.Progress()
-	it.notifMsg, it.notifSeq = it.handler.Notification()
-	it.oscTitle = it.handler.Title()
+	it.progress, it.notifMsg, it.notifSeq, it.oscTitle = it.handler.statusSnapshot()
 }
 
 // diffStatuses recomputes every session's status and returns the events for
@@ -183,9 +185,10 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 
 // computeStatus derives a session's status from the handler inputs captured in
 // diffStatuses's lock-free phase. Callers hold m.mu (it mutates the tracker's
-// latch state, which snapshot() reads under m.mu). Precedence: exited, then
-// working (OSC 9;4 progress active), then a latched notification state
-// (needs-input or done), then idle (the default / new-session / at-rest state).
+// latch state, which snapshot() reads under m.mu). Precedence: exited, then a
+// notification classified in THIS sweep (a fresh latch), then working (OSC 9;4
+// progress active), then a latch from an earlier sweep, then idle (the
+// default / new-session / at-rest state).
 // Working comes ONLY from OSC 9;4 progress — never from raw output activity — so
 // a program that reports no progress never flaps to working merely because the
 // user is typing at its prompt (the reveal gate then keeps its dot hidden).
@@ -193,12 +196,21 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) string 
 	if in.exited {
 		return StatusExited
 	}
-	m.applyNotification(in, tr)
+	latchedNow := m.applyNotification(in, tr)
 	// A progress-reporting program (kiro-cli, Claude Code) drives working from
 	// its OSC 9;4 progress: an active state (1 value, 3 indeterminate) means the
-	// agent is working. A new working phase supersedes a prior done/needs-input
-	// latch.
-	if in.progress == 1 || in.progress == 3 {
+	// agent is working. A new working phase supersedes a latch from an EARLIER
+	// sweep (a new turn starting clears the stale done/input dot) — but never
+	// one applied in THIS sweep: at a turn boundary the snapshot can pair the
+	// fresh "Response complete" / "Permission required" notification with a
+	// progress value that still reads active (the notification flushed a chunk
+	// ahead of the progress-off), and clearing the just-set latch here would
+	// consume the notification for good (notifSeen has advanced) — the next
+	// sweep then lands on idle and the tab's done/input dot is silently lost.
+	// Honoring the fresh latch is self-correcting: if the agent truly is still
+	// working, the next sweep has no new notification and its active progress
+	// clears the latch then.
+	if (in.progress == 1 || in.progress == 3) && !latchedNow {
 		tr.latched = ""
 		return StatusWorking
 	}
@@ -211,20 +223,25 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) string 
 }
 
 // applyNotification updates the tracker's latch from a new OSC 9 notification
-// via the consumer's classifier, if any. The classified state (StatusInput or
-// StatusDone) is latched; it persists until the next working phase clears it
-// (see computeStatus). An unclassified message leaves the latch unchanged.
-func (m *SessionManager) applyNotification(in *statusRaw, tr *statusTracker) {
+// via the consumer's classifier, if any, and reports whether this call latched
+// a state — so computeStatus can give a notification classified in the current
+// sweep precedence over a concurrently captured active progress value. The
+// classified state (StatusInput or StatusDone) persists until a LATER sweep's
+// working phase clears it (see computeStatus). An unclassified message leaves
+// the latch unchanged.
+func (m *SessionManager) applyNotification(in *statusRaw, tr *statusTracker) bool {
 	if m.classifier == nil {
-		return
+		return false
 	}
 	if in.notifSeq <= tr.notifSeen {
-		return
+		return false
 	}
 	tr.notifSeen = in.notifSeq
 	if cls, ok := m.classifier(in.notifMsg); ok {
 		tr.latched = cls
+		return true
 	}
+	return false
 }
 
 func (m *SessionManager) broadcast(ev *statusEvent) {

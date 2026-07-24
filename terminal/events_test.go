@@ -144,6 +144,78 @@ func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
 	}
 }
 
+// TestComputeStatusFreshLatchOutranksActiveProgress pins the turn-boundary
+// race fix: when one sweep's snapshot pairs a NEW classified notification with
+// a progress value that still reads active (kiro-cli flushes "Response
+// complete" a chunk ahead of the OSC 9;4;0 progress-off, and a sweep tick
+// lands in the gap), the fresh latch wins — done/input, not working — and
+// persists once progress clears. The old code consumed the notification and
+// destroyed the just-set latch in the same call, landing every later sweep on
+// idle: the intermittently blank (hollow) tab dot at turn end. The poisoned
+// pairing cannot be produced through handlePTYData (a chunk parses atomically
+// under h.mu), so the snapshot is constructed directly.
+func TestComputeStatusFreshLatchOutranksActiveProgress(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  string
+		want string
+	}{
+		{name: "turn-end done", msg: "Response complete", want: StatusDone},
+		{name: "needs-input", msg: "Permission required", want: StatusInput},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
+			t.Cleanup(m.Shutdown)
+			tr := &statusTracker{}
+
+			// Sweep N: the poisoned snapshot — fresh notification, progress
+			// still reading active.
+			in := &statusRaw{progress: 3, notifMsg: tc.msg, notifSeq: 1}
+			if st := m.computeStatus(in, tr); st != tc.want {
+				t.Errorf("poisoned snapshot: status = %q, want %q", st, tc.want)
+			}
+			// Sweep N+1: progress cleared, nothing new — the latch persists
+			// (the old code landed here on idle).
+			in = &statusRaw{progress: 0, notifMsg: tc.msg, notifSeq: 1}
+			if st := m.computeStatus(in, tr); st != tc.want {
+				t.Errorf("after progress clears: status = %q, want %q", st, tc.want)
+			}
+		})
+	}
+}
+
+// TestComputeStatusStaleLatchStillClearedByWorking verifies the fresh-latch
+// precedence lasts one sweep only (self-correcting): when progress remains
+// active on the NEXT sweep with no new notification — the agent genuinely kept
+// working, e.g. a queued follow-up turn — the now-stale latch clears and the
+// session reports working, exactly as before the fix.
+func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
+	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
+	t.Cleanup(m.Shutdown)
+	tr := &statusTracker{}
+
+	in := &statusRaw{progress: 3, notifMsg: "Response complete", notifSeq: 1}
+	if st := m.computeStatus(in, tr); st != StatusDone {
+		t.Fatalf("poisoned snapshot: status = %q, want %q", st, StatusDone)
+	}
+	// Same active progress, no new notification: the latch is stale now and
+	// the genuine working phase supersedes it.
+	if st := m.computeStatus(in, tr); st != StatusWorking {
+		t.Fatalf("next sweep: status = %q, want %q", st, StatusWorking)
+	}
+	if tr.latched != "" {
+		t.Fatalf("latch = %q, want cleared", tr.latched)
+	}
+	// That working phase later ends with no notification replay: idle is
+	// correct (in production the queued turn's own end brings its own
+	// "Response complete" with a new sequence).
+	in = &statusRaw{progress: 0, notifMsg: "Response complete", notifSeq: 1}
+	if st := m.computeStatus(in, tr); st != StatusIdle {
+		t.Fatalf("after the working phase ends: status = %q, want %q", st, StatusIdle)
+	}
+}
+
 // TestComputeStatusNoWorkingFromOutput verifies a program that never reports
 // OSC 9;4 progress stays idle even while producing output: working now comes
 // ONLY from OSC 9;4, so a plain shell under web-terminal-server never flaps to

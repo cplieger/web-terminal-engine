@@ -474,4 +474,78 @@ describe("cursor-blink visibility gate", () => {
       vi.useRealTimers();
     }
   });
+
+  it("downshifts to a slow re-check while the application hides the cursor (DECTCM)", async () => {
+    const frame = (over: { cursorHidden?: boolean }) =>
+      buildScreenFrame({
+        cursorRow: 0,
+        cursorCol: 0,
+        screenHeight: 2,
+        changed: [{ idx: 0, runs: [{ text: " ".repeat(10), attr: 0 }] }],
+        ...over,
+      });
+    await flushFrame(frame({}));
+
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      // Re-arm the visible-cursor blink interval under the fake clock.
+      setVisibility("hidden");
+      setVisibility("visible");
+      vi.advanceTimersByTime(530);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(true);
+
+      // The application hides the cursor: the fast toggle stops and the phase
+      // resets to solid — the overlay is display:none, so restyling it twice a
+      // second is pure waste (an agent TUI hides the cursor for the whole
+      // session). The interval downshifts to the slow re-check instead.
+      await flushFrame(frame({ cursorHidden: true }));
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(false);
+      // Across many blink periods — including several slow re-check fires —
+      // the phase class never toggles.
+      vi.advanceTimersByTime(530 * 16);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(false);
+
+      // The cursor re-shows: blinking resumes from the solid phase.
+      await flushFrame(frame({ cursorHidden: false }));
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(false);
+      vi.advanceTimersByTime(530);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops the interval entirely while the application disables blink, resumes on re-enable", async () => {
+    const frame = (over: { cursorBlink?: boolean }) =>
+      buildScreenFrame({
+        cursorRow: 0,
+        cursorCol: 0,
+        screenHeight: 2,
+        changed: [{ idx: 0, runs: [{ text: " ".repeat(10), attr: 0 }] }],
+        ...over,
+      });
+    await flushFrame(frame({}));
+
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      setVisibility("hidden");
+      setVisibility("visible");
+      vi.advanceTimersByTime(530);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(true);
+
+      // Blink disabled (DECSCUSR steady / mode 12 reset): solid cursor, no
+      // timer at all.
+      await flushFrame(frame({ cursorBlink: false }));
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(false);
+      vi.advanceTimersByTime(530 * 16);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(false);
+
+      // Re-enabled: blinking resumes.
+      await flushFrame(frame({ cursorBlink: true }));
+      vi.advanceTimersByTime(530);
+      expect(termWrap.classList.contains("cursor-blink-off")).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

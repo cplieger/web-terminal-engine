@@ -2,6 +2,7 @@ package vt
 
 import (
 	"bytes"
+	"log"
 	"log/slog"
 	"strings"
 	"testing"
@@ -557,8 +558,16 @@ func TestCSIPrivateMarkerRouting(t *testing.T) {
 // TestUnhandledCSILogs verifies an unhandled CSI final byte emits the
 // "unhandled CSI" log line.
 func TestUnhandledCSILogs(t *testing.T) {
-	old := slog.Default()
-	defer slog.SetDefault(old)
+	// slog.SetDefault also redirects the standard log package and skips that
+	// redirect for slog's own default handler, so reinstalling the previous
+	// logger does not undo it; the writer and flags go back explicitly, slog
+	// first. Not parallel: the default logger is a process global.
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
 
 	var buf bytes.Buffer
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))

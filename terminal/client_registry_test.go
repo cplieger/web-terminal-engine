@@ -3,6 +3,7 @@ package terminal
 import (
 	"bytes"
 	"fmt"
+	"log"
 	"log/slog"
 	"strings"
 	"sync"
@@ -52,16 +53,60 @@ func TestResolveSession_retainsRecentSession(t *testing.T) {
 	}
 }
 
+// captureLogs makes a Debug-level text handler over a fresh buffer slog's
+// default for the test's duration and returns the buffer. Callers must be
+// serial (no t.Parallel): the default logger is a process global.
+//
+// slog.SetDefault also points the standard log package at the installed
+// handler, and it skips that redirect when the logger being installed carries
+// slog's own default handler. Reinstalling the previous logger therefore does
+// not undo the redirect, so the writer and flags are saved and restored
+// explicitly. slog goes back first: reinstalling a previous handler that is not
+// slog's default re-runs the redirect and would overwrite a log restore done
+// before it. The cleanup is t.Cleanup rather than defer so it also runs when a
+// subtest of the caller fails.
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	buf := &bytes.Buffer{}
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+	return buf
+}
+
+// TestCaptureLogsRestoresLogGlobals pins the restore in captureLogs: the swap
+// redirects the standard log package's writer and zeroes its flags, and the
+// cleanup must put both back. Without it, one test silences slog for the rest of
+// the package, because slog's own default handler writes through log.Output.
+func TestCaptureLogsRestoresLogGlobals(t *testing.T) {
+	wantWriter, wantFlags := log.Writer(), log.Flags()
+
+	t.Run("swap", func(t *testing.T) {
+		captureLogs(t)
+		if log.Writer() == wantWriter {
+			t.Fatal("captureLogs did not redirect log.Writer(); the restore under test would guard nothing")
+		}
+	})
+
+	if got := log.Writer(); got != wantWriter {
+		t.Errorf("log.Writer() after captureLogs cleanup = %T(%p), want the original %T(%p)", got, got, wantWriter, wantWriter)
+	}
+	if got := log.Flags(); got != wantFlags {
+		t.Errorf("log.Flags() after captureLogs cleanup = %d, want %d", got, wantFlags)
+	}
+}
+
 // TestResolveSession_GCLogsOnlyWhenSessionHadBytes verifies the GC sweep emits
 // the "gc'd idle session with received bytes" info log only when the evicted
 // session actually received input; a zero-byte session is GC'd silently. The
 // log lets operators correlate user-visible "my input vanished" reports with
 // the eviction.
 func TestResolveSession_GCLogsOnlyWhenSessionHadBytes(t *testing.T) {
-	old := slog.Default()
-	defer slog.SetDefault(old)
-	var buf bytes.Buffer
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	buf := captureLogs(t)
 
 	const logMsg = "gc'd idle session with received bytes"
 

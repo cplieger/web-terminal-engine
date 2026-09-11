@@ -222,9 +222,12 @@ type titleSources struct {
 // client asked us to remember; then the server's own inference (foreground
 // process / cwd / command).
 //
-// For the two shipping consumers the last two rungs never compete — the generic
-// preset pushes no client title, and the agent's program always sets some OSC
-// title — so their relative order matters only to a future third consumer.
+// The last two rungs DO compete for one shipping consumer, so their order is a
+// live decision rather than a future one: the generic preset pushes no client
+// title, but an agent host that pushes one through SetSessionTitle competes with
+// auto directly, because the program it runs may set no OSC title at all. The
+// earlier note here claimed the agent's program always sets one; measured, it
+// does not, which leaves the osc rung permanently empty for that consumer.
 //
 // Pure by design: the OSC title comes from a handler getter (h.mu) and the other
 // three from manager state (m.mu), and every caller (List, snapshot,

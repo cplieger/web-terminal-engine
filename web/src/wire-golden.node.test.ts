@@ -91,6 +91,37 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     expect(m.ledgerLost).toBe(false);
   });
 
+  it("decodes the server-focus resumeAck frame", () => {
+    // ackFlags bit2. Read SEPARATELY from the other three, which is why there is
+    // one single-bit fixture per bit: a shifted bit switches one capability off
+    // with nothing else to show it.
+    const m = decodeWireBinary(load("resumeack-serverfocus"));
+    expect(m?.type).toBe("resumeAck");
+    if (m?.type !== "resumeAck") {
+      return;
+    }
+    expect(m.serverWireVersion).toBe(4);
+    expect(m.serverFocus).toBe(true);
+    expect(m.ledgerLost).toBe(false);
+    expect(m.historyPaging).toBe(false);
+    expect(m.ephemeralInput).toBe(false);
+  });
+
+  it("decodes the ephemeral-input resumeAck frame", () => {
+    // ackFlags bit3, the capability that keeps mouse reports out of the reliable
+    // outbox. A client that mis-reads it silently loses every report post-latch.
+    const m = decodeWireBinary(load("resumeack-ephemeralinput"));
+    expect(m?.type).toBe("resumeAck");
+    if (m?.type !== "resumeAck") {
+      return;
+    }
+    expect(m.serverWireVersion).toBe(4);
+    expect(m.ephemeralInput).toBe(true);
+    expect(m.ledgerLost).toBe(false);
+    expect(m.historyPaging).toBe(false);
+    expect(m.serverFocus).toBe(false);
+  });
+
   it("decodes the ackOnly frame", () => {
     const m = decodeWireBinary(load("ackonly"));
     expect(m?.type).toBe("ackOnly");

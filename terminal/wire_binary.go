@@ -40,11 +40,17 @@
 //	  [1B] serverWireVersion uint8 (the server's wireProtocolVersion, so the
 //	                    client can surface a stale-bundle skew; length-gated
 //	                    optional tail, absent on pre-tier servers)
-//	  [1B] ackFlags     uint8 (bit0 = ledgerLost: the resume key missed the
-//	                    registry while the client claimed sentBytes > 0 — the
-//	                    server cannot vouch for any previously sent input, so
-//	                    the client must drop-and-notify instead of replaying;
-//	                    same length-gated tail as serverWireVersion)
+//	  [1B] ackFlags     uint8 capability/condition bits, same length-gated tail
+//	                    as serverWireVersion:
+//	                      bit0 ledgerLost:     the resume key missed the registry
+//	                                           while the client claimed
+//	                                           sentBytes > 0, so the client must
+//	                                           drop-and-notify instead of replaying
+//	                      bit1 historyPaging:  demand-paged scrollback is served
+//	                      bit2 serverFocus:    the server derives the DEC 1004
+//	                                           answer from the `focus` control
+//	                      bit3 ephemeralInput: the `ephemeralInput` control is
+//	                                           served
 //
 //	If msg_type == ackOnly:
 //	  inputAck above carries the value; no body. Sent from the flush tick
@@ -173,7 +179,60 @@ const (
 	// unsupported: the client keeps its legacy resident-tail cap and never sends
 	// a history control. See docs/paged-scrollback.md §4.5.
 	resumeAckFlagHistoryPaging byte = 1 << 1
+
+	// resumeAckFlagServerFocus is bit2 of the resumeAck ackFlags byte: the
+	// server DERIVES the DEC 1004 answer for this session (attachment state,
+	// every attached client's reported focus, and its own keep-unfocused
+	// declaration) and honors the `focus` control. The client reports its
+	// terminal widget's focus with that control and writes no focus bytes of its
+	// own. An unset bit (or a server too old to carry the length-gated tail)
+	// reads as unsupported: the client keeps writing CSI I / CSI O as ordinary
+	// PTY input while the application has 1004 enabled.
+	resumeAckFlagServerFocus byte = 1 << 2
+
+	// resumeAckFlagEphemeralInput is bit3 of the resumeAck ackFlags byte: the
+	// server serves the `ephemeralInput` control, an UNCOUNTED best-effort input
+	// channel (see ephemeralInputControl). The client sends mouse reports there
+	// instead of through the reliable outbox. An unset bit (or an absent tail)
+	// reads as unsupported and the client falls back to reliable input, because
+	// a text control this server does not recognize is dropped post-latch and
+	// the report would vanish entirely.
+	resumeAckFlagEphemeralInput byte = 1 << 3
 )
+
+// resumeAckFlags is the resumeAck ackFlags byte in labelled form. It is a struct
+// rather than four bool parameters on encodeResumeAck because four adjacent
+// same-typed arguments are transposable at every call site, and it is not a bare
+// byte because that would move the bit constants out of this file and into the
+// caller.
+type resumeAckFlags struct {
+	// LedgerLost sets resumeAckFlagLedgerLost.
+	LedgerLost bool
+	// HistoryPaging sets resumeAckFlagHistoryPaging.
+	HistoryPaging bool
+	// ServerFocus sets resumeAckFlagServerFocus.
+	ServerFocus bool
+	// EphemeralInput sets resumeAckFlagEphemeralInput.
+	EphemeralInput bool
+}
+
+// bits packs the flags into the ackFlags byte.
+func (f resumeAckFlags) bits() byte {
+	var b byte
+	if f.LedgerLost {
+		b |= resumeAckFlagLedgerLost
+	}
+	if f.HistoryPaging {
+		b |= resumeAckFlagHistoryPaging
+	}
+	if f.ServerFocus {
+		b |= resumeAckFlagServerFocus
+	}
+	if f.EphemeralInput {
+		b |= resumeAckFlagEphemeralInput
+	}
+	return b
+}
 
 // WireEnd is one half of a Go-server / TS-client pairing as WirePairIncompatibility
 // judges it: the revision that half speaks, and the minimum peer revision it
@@ -375,29 +434,19 @@ func encodeScrollMsg(ack, firstIndex uint64, lines [][]vt.WireRun) []byte {
 // The trailing [serverWireVersion, ackFlags] pair is the frame's third
 // length-gated tail (>= 35 bytes): serverWireVersion lets the client surface
 // a stale-bundle protocol skew ("reload required") instead of leaving the
-// mismatch server-log-only, and ackFlags carries bit0 (ledgerLost — tells a
-// resuming client its input ledger no longer exists so it must drop-and-notify
-// rather than replay; see resumeAckFlagLedgerLost) and bit1 (historyPaging —
-// declares demand-paged scrollback, see resumeAckFlagHistoryPaging). Older
-// clients ignore the extra bytes, and one that reads the tail masks only the
-// bits it knows; newer clients treat a shorter frame as "tail absent", which
-// reads as no paging.
-func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64, ledgerLost, historyPaging bool) []byte {
+// mismatch server-log-only, and ackFlags carries the four bits documented on
+// resumeAckFlags (ledgerLost, historyPaging, serverFocus, ephemeralInput).
+// Older clients ignore the extra bytes, and one that reads the tail masks only
+// the bits it knows; newer clients treat a shorter frame as "tail absent",
+// which reads as every bit clear.
+func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64, flags resumeAckFlags) []byte {
 	buf := make([]byte, 0, 35)
 	buf = append(buf, wireMsgResumeAck)
 	buf = binary.LittleEndian.AppendUint64(buf, ack)
 	buf = binary.LittleEndian.AppendUint64(buf, uint64(epochNanos)) // #nosec G115 -- epochNanos is always positive
 	buf = binary.LittleEndian.AppendUint64(buf, committed)
 	buf = binary.LittleEndian.AppendUint64(buf, oldestIndex)
-	buf = append(buf, wireProtocolVersion)
-	var flags byte
-	if ledgerLost {
-		flags |= resumeAckFlagLedgerLost
-	}
-	if historyPaging {
-		flags |= resumeAckFlagHistoryPaging
-	}
-	buf = append(buf, flags)
+	buf = append(buf, wireProtocolVersion, flags.bits())
 	return buf
 }
 

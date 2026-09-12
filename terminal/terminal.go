@@ -220,6 +220,17 @@ const (
 	// unrecognized and returns, which is exactly the "not supported" answer a
 	// newer client infers from the resumeAck's missing capability bit.
 	ctlTypeHistory = "history"
+	// ctlTypeFocus reports whether the client's terminal widget is focused. Like
+	// `resize` it is a property of the attached viewer folded into session state;
+	// the server derives the DEC 1004 answer from every client's report (see
+	// focusReportLocked). Honored only by a server that declares
+	// resumeAckFlagServerFocus, so an older one leaves the client writing the
+	// legacy focus bytes itself.
+	ctlTypeFocus = "focus"
+	// ctlTypeEphemeralInput carries BEST-EFFORT input the server does not count
+	// against the resume ledger (see ephemeralInputControl). Declared with
+	// resumeAckFlagEphemeralInput.
+	ctlTypeEphemeralInput = "ephemeralInput"
 
 	// defaultScrollbackCapacity is the number of scrollback lines the server
 	// retains for replay and for demand-paged history requests. It is the
@@ -435,8 +446,9 @@ func WithOnProcessExit(fn func(error)) Option {
 // keep=false reproduces the no-option default — real focus reporting, which is
 // what a generic terminal wants (vim, etc.) — so a consumer can thread its own
 // flag instead of conditionally appending the option. Later options win: the
-// last WithKeepUnfocused in the option list decides. The browser client is
-// expected to emit no focus bytes of its own when the hold is enabled.
+// last WithKeepUnfocused in the option list decides. The hold is one clause of
+// the server's DEC 1004 derivation, which also reads the attachment state and
+// every attached client's reported focus.
 func WithKeepUnfocused(keep bool) Option {
 	return func(c *handlerConfig) { c.keepUnfocused = keep }
 }
@@ -493,6 +505,9 @@ type clientState struct {
 	// resume pair above. time.Time carries a *Location, so it sits up here
 	// beside the others (fieldalignment).
 	historyLast time.Time
+	// ephemeralLast/ephemeralTokens are the per-socket `ephemeralInput` bucket
+	// (see takeEphemeralToken), the same read-loop-owned shape again.
+	ephemeralLast time.Time
 	// lastAckSent is the most recent inputAck value actually written to this
 	// socket (stamped on a content frame by dispatchFrame, sent bare by a
 	// no-frame scheduler pass's ackOnly sweep, or carried by handleResume's
@@ -512,6 +527,13 @@ type clientState struct {
 	// historyTokens is the history bucket's fill; its timestamp half
 	// (historyLast) lives beside the session pointer above.
 	historyTokens float64
+	// ephemeralTokens is the ephemeral-input bucket's fill; its timestamp half
+	// (ephemeralLast) lives beside the session pointer above.
+	ephemeralTokens float64
+	// focused is whether this client reports its terminal widget focused (the
+	// `focus` control). Guarded by clientRegistry.mu like cols/rows; the
+	// aggregate the DEC 1004 derivation reads is AnyClientFocused.
+	focused bool
 	// writeMu serializes the two CONTENT-frame writers to this socket: the
 	// flush dispatcher's per-client payload loop (dispatchFrame) and
 	// handleResume's snapshot+batch. coder/websocket serializes individual
@@ -702,7 +724,6 @@ type Handler struct {
 	sizeEstablished          bool
 	scrollbackClearedPending bool
 	paletteChangedPending    bool
-	lastFocusReporting       bool
 	// redrawCoalesceNow marks the one flush pass that must build a FULL repaint
 	// because the redraw-settle cap lapsed while the child was still writing
 	// (see redrawHoldUntil). Consumed by buildFrame. Guarded by h.mu.
@@ -710,6 +731,10 @@ type Handler struct {
 	// autoTitleWarned makes the automatic-title probe's failure note once-per-
 	// session rather than once-per-sweep (see probeAutoTitle). Guarded by h.mu.
 	autoTitleWarned bool
+	// focusTold is the DEC 1004 state this session's process has been told, so
+	// the derivation writes on transitions only (see focusReportLocked).
+	// Guarded by h.mu.
+	focusTold toldFocus
 }
 
 // NewHandler returns a terminal handler. command is the argv to spawn
@@ -1364,28 +1389,6 @@ func (h *Handler) readLoop(ctx context.Context) {
 	}
 }
 
-// focusOutSeq is the DEC 1004 focus-out report (ESC [ O). Written to the PTY
-// under WithKeepUnfocused when the process enables focus reporting.
-var focusOutSeq = []byte("\x1b[O")
-
-// focusOutOnEnable returns focusOutSeq when WithKeepUnfocused is set and focus
-// reporting just rose from disabled to enabled since the last call, else nil. It
-// updates the tracked last state, so it fires once per enable edge (a process
-// that toggles 1004 off then on is re-pinned to unfocused). The caller holds
-// h.mu and writes the returned bytes to the PTY outside the lock.
-func (h *Handler) focusOutOnEnable() []byte {
-	if !h.cfg.keepUnfocused {
-		return nil
-	}
-	now := h.screen.FocusReporting
-	rising := now && !h.lastFocusReporting
-	h.lastFocusReporting = now
-	if rising {
-		return focusOutSeq
-	}
-	return nil
-}
-
 // handlePTYData feeds raw PTY output to the screen under h.mu and writes
 // any query response back outside the lock so a slow write never stalls
 // goroutines waiting on h.mu.
@@ -1416,10 +1419,11 @@ func (h *Handler) handlePTYData(data []byte) {
 		h.pendingClipboard = clip
 	}
 	resp = h.screen.TakeResponse()
-	// Keep-unfocused: if the process just enabled focus reporting, pin it to
-	// unfocused so a focus-gated notifier keeps emitting (see WithKeepUnfocused).
-	if fo := h.focusOutOnEnable(); fo != nil {
-		resp = append(resp, fo...)
+	// The screen write above may have changed the 1004 mode, so re-derive: on
+	// the enable edge this reports the session's CURRENT focus state. Read under
+	// h.mu like every other trigger (see reportFocus).
+	if seq := h.focusReportLocked(h.registry.AnyClientFocused()); len(seq) > 0 {
+		resp = append(resp, seq...)
 	}
 	h.mu.Unlock()
 	// PTY output is the primary dirty source: wake the flush scheduler.
@@ -1909,6 +1913,10 @@ type controlMsg struct {
 	HaveThrough *int64    `json:"haveThrough"`
 	Type        string    `json:"type"`
 	SessionID   SessionID `json:"sessionId,omitempty"`
+	// Data carries an `ephemeralInput` payload: the input bytes as a JSON string.
+	// An ESC is \u001b, so every escape sequence this channel exists for is
+	// expressible.
+	Data string `json:"data,omitempty"`
 	// ReplayMax bounds the resume replay to the newest N missing lines, so an
 	// attach costs at most the client's own residency however deep the ring is.
 	// Decoded as RawMessage and parsed FIELD-LOCALLY (parseReplayMax) because
@@ -1935,6 +1943,10 @@ type controlMsg struct {
 	// current revision warns but continues because it may retain this server's
 	// compatible baseline.
 	ProtocolVersion int `json:"protocolVersion,omitempty"`
+	// Focused carries a `focus` control: whether the client's terminal widget is
+	// focused. A plain bool, because the client always writes the field and a
+	// missing one reading as unfocused needs no separate arm.
+	Focused bool `json:"focused,omitempty"`
 }
 
 // handleWS upgrades to WebSocket, spawns the configured command in a
@@ -1963,9 +1975,17 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	// — under the old ticker the next tick delivered it; the event-driven
 	// loop needs the poke (this also ends any zero-client suspension).
 	h.markDirty()
+	// Re-derive the DEC 1004 answer for the new attachment. It cannot change it
+	// today — a socket starts unfocused, so AnyClientFocused is unmoved — but the
+	// trigger set stays complete rather than resting on that invariant, and the
+	// write is transition-gated so a no-op costs no report.
+	h.reportFocus()
 
 	defer func() {
 		dCols, dRows := h.registry.Remove(ws)
+		// A departing client can drop the session's focus to nobody, and it
+		// emits no focus-out of its own on the way out.
+		h.reportFocus()
 		h.maybeHealSize(dCols, dRows)
 		ws.Close(h.exitAwareCloseCode(), "") // #nosec G104 -- best-effort
 	}()
@@ -2314,6 +2334,12 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 	case ctlTypeHistory:
 		d.known = true
 		h.historyControl(ws, state, &c)
+	case ctlTypeFocus:
+		d.known = true
+		h.focusControl(state, c.Focused)
+	case ctlTypeEphemeralInput:
+		d.known = true
+		h.ephemeralInputControl(state, &c)
 	case ctlTypeUpgrade:
 		// The v4 transition control: recognizing it is what latches typed
 		// framing in the read loop; nothing else to do.
@@ -2550,8 +2576,13 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	defer cancel()
 
 	// resumeAck first so the client can trim its outbox and learn the
-	// history bounds (for gap detection) before the replay lands.
-	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest, ledgerLost, paging)) //nolint:errcheck // best-effort
+	// history bounds (for gap detection) before the replay lands. ServerFocus
+	// and EphemeralInput are unconditionally true for this build: like
+	// historyPagingDeclared's handler half, this handler serves both controls,
+	// and WithKeepUnfocused is one clause of the focus derivation rather than a
+	// gate on the declaration.
+	flags := resumeAckFlags{LedgerLost: ledgerLost, HistoryPaging: paging, ServerFocus: true, EphemeralInput: true}
+	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest, flags)) //nolint:errcheck // best-effort
 	state.lastAckSent.Store(ack)
 
 	// Resend current modes/title inline (before the window/replay) so input

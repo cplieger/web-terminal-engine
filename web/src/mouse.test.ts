@@ -35,9 +35,20 @@
 //                no report, was b=65 (wheel-down). preventDefault stays
 //                unconditional, which is also what xterm.js's wheel handler
 //                does: report nothing, still swallow the gesture.
+//
+// NOT COVERED HERE any more: DEC 1004 focus reporting. Focus is transport state
+// the server derives (attachment + every client's reported focus + its own
+// keep-unfocused declaration), so it moved to `connection.setClientFocus` and
+// its tests to connection-ephemeral.test.ts.
 
-import { describe, it, expect, beforeEach } from "vitest";
-import { encodeSGR, init as initMouse, type MouseInputHandler } from "./mouse.js";
+import { describe, it, expect, beforeEach, vi } from "vitest";
+import {
+  encodeSGR,
+  init as initMouse,
+  resyncGesture,
+  disarmGesture,
+  type MouseInputHandler,
+} from "./mouse.js";
 import * as modes from "./modes.js";
 
 const ESC = "\x1b";
@@ -59,9 +70,25 @@ beforeEach(() => {
   modes.setModes(true, false, false, false, 0, false, false, false);
 });
 
+// Motion is coalesced to one report per animation frame (press, release and
+// wheel are not), so a motion assertion has to cross a frame boundary. Real
+// headless Chromium, so requestAnimationFrame is real and needs no fake timer.
+const nextFrame = (): Promise<void> =>
+  new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      resolve();
+    });
+  });
+
 // SGR 1006 on with the given tracking mode; focus + pixels off.
 function enableSGR(mode: number): void {
   modes.setModes(true, false, true, false, mode, false, false, false);
+}
+
+// Tracking off with the SGR encoding still on: what an application leaves behind
+// when it resets 1002 without resetting 1006.
+function disableTracking(): void {
+  modes.setModes(true, false, true, false, 0, false, false, false);
 }
 
 // The fixture element is never attached to the document, so its
@@ -73,7 +100,10 @@ function setup(): { term: HTMLDivElement; sent: string[] } {
   const term = document.createElement("div");
   const sent: string[] = [];
   const handler: MouseInputHandler = {
-    send: (data) => sent.push(data),
+    sendReport: (data) => {
+      sent.push(data);
+      return true;
+    },
     cellSize: () => ({ width: 8, height: 16 }),
     termElement: () => term,
   };
@@ -114,6 +144,7 @@ interface BtnCase {
 }
 interface DragCase {
   name: string;
+  button: number;
   buttons: number;
   shift?: boolean | undefined;
   ctrl?: boolean | undefined;
@@ -231,27 +262,38 @@ describe("button-byte composition via init() event path — release (SGR 1006)",
   it.each(cases)("release: $name -> b=$b, final=m", ({ button, shift, ctrl, alt, b }) => {
     enableSGR(1002);
     const { term, sent } = setup();
+    // The press is part of the fixture: a release is reported only for a press
+    // that was delivered, because a release whose press never arrived is its own
+    // desync — the application never learned the button went down.
+    term.dispatchEvent(makeMouse("mousedown", { button }));
     term.dispatchEvent(makeMouse("mouseup", { button, shift, ctrl, alt }));
-    expect(sent).toEqual([expectedSGR(b, 3, 3, true)]);
+    expect(sent).toEqual([expectedSGR(button, 3, 3, false), expectedSGR(b, 3, 3, true)]);
   });
 });
 
 describe("button-byte composition via init() event path — drag/motion (SGR 1006)", () => {
   // Held button is read from the DOM `buttons` bitmask (1=left, 4=middle, 2=right).
-  // Motion adds +32 to the button code.
+  // Motion adds +32 to the button code. The gesture's press is part of the
+  // fixture: a drag reports a held button only while the application believes that
+  // button is down, which is what a delivered press establishes.
   const cases: DragCase[] = [
-    { name: "left held", buttons: 1, b: 0 + MOTION },
-    { name: "middle held", buttons: 4, b: 1 + MOTION },
-    { name: "right held", buttons: 2, b: 2 + MOTION },
-    { name: "left held + Shift", buttons: 1, shift: true, b: 0 + SHIFT + MOTION },
+    { name: "left held", button: 0, buttons: 1, b: 0 + MOTION },
+    { name: "middle held", button: 1, buttons: 4, b: 1 + MOTION },
+    { name: "right held", button: 2, buttons: 2, b: 2 + MOTION },
+    { name: "left held + Shift", button: 0, buttons: 1, shift: true, b: 0 + SHIFT + MOTION },
   ];
 
-  it.each(cases)("drag (mode 1002): $name -> b=$b", ({ buttons, shift, ctrl, alt, b }) => {
-    enableSGR(1002);
-    const { term, sent } = setup();
-    term.dispatchEvent(makeMouse("mousemove", { buttons, shift, ctrl, alt }));
-    expect(sent).toEqual([expectedSGR(b, 3, 3, false)]);
-  });
+  it.each(cases)(
+    "drag (mode 1002): $name -> b=$b",
+    async ({ button, buttons, shift, ctrl, alt, b }) => {
+      enableSGR(1002);
+      const { term, sent } = setup();
+      term.dispatchEvent(makeMouse("mousedown", { button, buttons }));
+      term.dispatchEvent(makeMouse("mousemove", { buttons, shift, ctrl, alt }));
+      await nextFrame();
+      expect(sent.at(-1)).toBe(expectedSGR(b, 3, 3, false));
+    },
+  );
 });
 
 describe("Shift bypass: Shift+press reserves the gesture for native selection (xterm convention)", () => {
@@ -352,44 +394,23 @@ describe("mode gating (DECSET 1000/1002/1003)", () => {
     expect(sent).toEqual([]);
   });
 
-  it("button-event (1002) reports motion while a button is held", () => {
+  it("button-event (1002) reports motion while a button is held", async () => {
     enableSGR(1002);
     const { term, sent } = setup();
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
     term.dispatchEvent(makeMouse("mousemove", { buttons: 1 }));
-    expect(sent).toEqual([expectedSGR(0 + MOTION, 3, 3, false)]);
+    await nextFrame();
+    expect(sent.at(-1)).toBe(expectedSGR(0 + MOTION, 3, 3, false));
   });
 
-  it("any-event (1003) motion with no button → b=35 (no-button 3 + motion 32)", () => {
+  it("any-event (1003) motion with no button → b=35 (no-button 3 + motion 32)", async () => {
     // Spec: bare hover in any-event tracking reports the "no button" code 3
     // plus the motion bit 32. (Was a bug — code 0 read as a left-drag; fixed.)
     enableSGR(1003);
     const { term, sent } = setup();
     term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
+    await nextFrame();
     expect(sent).toEqual([expectedSGR(3 + MOTION, 3, 3, false)]);
-  });
-});
-
-describe("focus reporting (DEC 1004): CSI I on focus-in, CSI O on focus-out", () => {
-  it("emits CSI I when focus reporting is enabled", () => {
-    modes.setModes(true, false, true, true, 1002, false, false, false); // focus ON
-    const { term, sent } = setup();
-    term.dispatchEvent(new Event("focusin"));
-    expect(sent).toEqual([`${ESC}[I`]);
-  });
-
-  it("emits CSI O when focus reporting is enabled", () => {
-    modes.setModes(true, false, true, true, 1002, false, false, false);
-    const { term, sent } = setup();
-    term.dispatchEvent(new Event("focusout"));
-    expect(sent).toEqual([`${ESC}[O`]);
-  });
-
-  it("emits nothing when focus reporting is disabled", () => {
-    modes.setModes(true, false, true, false, 1002, false, false, false); // focus OFF
-    const { term, sent } = setup();
-    term.dispatchEvent(new Event("focusin"));
-    term.dispatchEvent(new Event("focusout"));
-    expect(sent).toEqual([]);
   });
 });
 
@@ -439,7 +460,7 @@ describe("DEVIATIONS from xterm spec (skipped — see report)", () => {
 });
 
 describe("motion dedup: identical same-cell reports are suppressed (matches xterm.js)", () => {
-  it("a drag inside one cell reports once; crossing a cell boundary reports again", () => {
+  it("a drag inside one cell reports once; crossing a cell boundary reports again", async () => {
     const { term, sent } = setup();
     enableSGR(1002);
     term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
@@ -448,22 +469,28 @@ describe("motion dedup: identical same-cell reports are suppressed (matches xter
     for (const x of [1, 3, 5]) {
       term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: x, clientY: 8 }));
     }
+    await nextFrame();
     expect(sent.length).toBe(afterPress + 1); // one motion report, two dupes suppressed
     // Crossing into the next cell reports again.
     term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: 12, clientY: 8 }));
+    await nextFrame();
     expect(sent.length).toBe(afterPress + 2);
     expect(sent.at(-1)).toBe(expectedSGR(0 + MOTION, 2, 1, false));
   });
 
-  it("a new press resets the dedup so the first motion of the next gesture reports", () => {
+  it("a new press resets the dedup so the first motion of the next gesture reports", async () => {
     const { term, sent } = setup();
     enableSGR(1002);
     term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
     term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: 4, clientY: 8 }));
+    // The frame boundary is required: a release CANCELS a motion still pending
+    // for the frame, because the button event carries a newer position.
+    await nextFrame();
     term.dispatchEvent(new MouseEvent("mouseup", { button: 0, clientX: 4, clientY: 8 }));
     const afterFirstGesture = sent.length;
     term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
     term.dispatchEvent(new MouseEvent("mousemove", { buttons: 1, clientX: 4, clientY: 8 }));
+    await nextFrame();
     // Same cell as the previous gesture's motion — but a new gesture must report.
     expect(sent.length).toBe(afterFirstGesture + 2); // press + motion
   });
@@ -474,7 +501,10 @@ describe("init returns an idempotent disposer", () => {
     const term = document.createElement("div");
     const sent: string[] = [];
     const dispose = initMouse({
-      send: (data) => sent.push(data),
+      sendReport: (data) => {
+        sent.push(data);
+        return true;
+      },
       cellSize: () => ({ width: 8, height: 16 }),
       termElement: () => term,
     });
@@ -491,7 +521,10 @@ describe("init returns an idempotent disposer", () => {
   it("a stale disposer from a superseded init does not detach the new element", () => {
     const sent: string[] = [];
     const handlerFor = (el: HTMLElement): MouseInputHandler => ({
-      send: (data) => sent.push(data),
+      sendReport: (data) => {
+        sent.push(data);
+        return true;
+      },
       cellSize: () => ({ width: 8, height: 16 }),
       termElement: () => el,
     });
@@ -506,5 +539,367 @@ describe("init returns an idempotent disposer", () => {
     // The superseded element was auto-detached at re-init.
     first.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
     expect(sent.length).toBe(1);
+  });
+});
+
+// A handler whose sendReport reports a given delivery outcome, so the pairing
+// rule can be exercised from both sides. `false` is what the connection returns
+// when there was no live socket to send on.
+function setupDelivering(delivered: boolean): { term: HTMLDivElement; sent: string[] } {
+  const term = document.createElement("div");
+  const sent: string[] = [];
+  initMouse({
+    sendReport: (data) => {
+      sent.push(data);
+      return delivered;
+    },
+    cellSize: () => ({ width: 8, height: 16 }),
+    termElement: () => term,
+  });
+  return { term, sent };
+}
+
+// A handler whose delivery outcome can change between events, which is the shape
+// of an ordinary connection blip: the press reaches a live socket and the release
+// does not.
+function setupToggling(): {
+  term: HTMLDivElement;
+  sent: string[];
+  deliver: (ok: boolean) => void;
+} {
+  const term = document.createElement("div");
+  const sent: string[] = [];
+  let delivered = true;
+  initMouse({
+    sendReport: (data) => {
+      sent.push(data);
+      return delivered;
+    },
+    cellSize: () => ({ width: 8, height: 16 }),
+    termElement: () => term,
+  });
+  return {
+    term,
+    sent,
+    deliver: (ok) => {
+      delivered = ok;
+    },
+  };
+}
+
+describe("gesture pairing: a release belongs to a press that was delivered", () => {
+  it("does not report the release of a press that was refused", () => {
+    // A release whose press never arrived is its own desync: the application was
+    // never told the button went down, so a bare release is a lie about a
+    // gesture it did not see. The refused press is still ATTEMPTED (it is in
+    // `sent`); what must not follow is the release.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(false);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    const afterPress = sent.length;
+
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
+
+    expect(sent.length).toBe(afterPress);
+  });
+
+  it("reports the release of a press that was delivered", () => {
+    // The control for the case above: the pairing rule must not swallow the
+    // release of an ordinary gesture.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
+
+    expect(sent).toEqual([expectedSGR(0, 3, 3, false), expectedSGR(0, 3, 3, true)]);
+  });
+
+  it("keeps the gesture when the release itself was refused", () => {
+    // The likeliest trigger of all: the socket dies mid-drag, the user lets go
+    // while it is down, and the release is refused. Dropping the record here is
+    // what leaves the application holding the button for the rest of the session,
+    // because resyncGesture reads `pressed` and would find nothing.
+    enableSGR(1002);
+    const { term, sent, deliver } = setupToggling();
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    deliver(false);
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
+    const afterRefusedRelease = sent.length;
+
+    deliver(true);
+    resyncGesture();
+
+    expect(sent.slice(afterRefusedRelease)).toEqual([expectedSGR(0, 3, 3, true)]);
+  });
+
+  it("keeps the gesture when the release could not be hit-tested", () => {
+    // Same permanent desync through a different door: a cell size that goes
+    // degenerate between the press and the release (an unmeasured re-layout)
+    // reports nothing, so the record has to survive that too.
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    enableSGR(1002);
+    const term = document.createElement("div");
+    const sent: string[] = [];
+    let cell = { width: 8, height: 16 };
+    initMouse({
+      sendReport: (data) => {
+        sent.push(data);
+        return true;
+      },
+      cellSize: () => cell,
+      termElement: () => term,
+    });
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    cell = { width: 0, height: 0 };
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
+    expect(sent).toEqual([expectedSGR(0, 3, 3, false)]);
+
+    cell = { width: 8, height: 16 };
+    resyncGesture();
+
+    expect(sent.slice(1)).toEqual([expectedSGR(0, 3, 3, true)]);
+  });
+
+  it("still reports a delivered gesture's release once a Shift-press has set the bypass", () => {
+    // A plain press on one button followed by a Shift-press on another sets the
+    // bypass mid-gesture. The first button's release belongs to a gesture the
+    // application DID see, so it is still owed — and leaving it recorded instead
+    // is the stuck drag again.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    term.dispatchEvent(makeMouse("mousedown", { button: 2, buttons: 3, shift: true }));
+
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 2 }));
+
+    expect(sent).toEqual([expectedSGR(0, 3, 3, false), expectedSGR(0, 3, 3, true)]);
+    const afterRelease = sent.length;
+    resyncGesture(); // nothing left recorded
+    expect(sent.length).toBe(afterRelease);
+  });
+
+  it("does not report a drag for a press that was refused", async () => {
+    // Mode 1002 motion means "a button is held", and the application never saw
+    // this one go down. Reporting it starts a drag the application cannot end,
+    // because the pairing rule above then suppresses its release.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(false);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    const afterPress = sent.length;
+
+    term.dispatchEvent(makeMouse("mousemove", { clientX: 32, clientY: 32, buttons: 1 }));
+    await nextFrame();
+
+    expect(sent.length).toBe(afterPress);
+  });
+
+  it("reports bare motion, not a drag, for a refused press under any-event tracking", async () => {
+    // 1003 reports motion whatever the buttons are doing, so the truthful report
+    // is xterm's "no button" code 3 rather than a held-button drag.
+    enableSGR(1003);
+    const { term, sent } = setupDelivering(false);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    const afterPress = sent.length;
+
+    term.dispatchEvent(makeMouse("mousemove", { clientX: 32, clientY: 32, buttons: 1 }));
+    await nextFrame();
+
+    expect(sent.slice(afterPress)).toEqual([expectedSGR(3 + MOTION, 5, 3, false)]);
+  });
+});
+
+describe("resyncGesture: an in-flight gesture is cancelled, not replayed", () => {
+  it("synthesizes exactly one release for a button the last reading says is up", () => {
+    // Reporting PRESENT state, which is what RFB and Guacamole do implicitly with
+    // their next message. The modifier bits are deliberately absent: this is not
+    // a replay of the release that was missed.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1, ctrl: true }));
+    // A later event is the only reading of button state the DOM offers.
+    term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
+    const afterPress = sent.length;
+
+    resyncGesture();
+
+    expect(sent.slice(afterPress)).toEqual([expectedSGR(0, 3, 3, true)]);
+    resyncGesture(); // the record is cleared, so a second call adds nothing
+    expect(sent.slice(afterPress)).toEqual([expectedSGR(0, 3, 3, true)]);
+  });
+
+  it("leaves a button the last reading says is still down alone", () => {
+    // It genuinely is down: synthesizing a release here would end a drag the
+    // user is still making.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    const afterPress = sent.length;
+
+    resyncGesture();
+
+    expect(sent.length).toBe(afterPress);
+  });
+
+  it("synthesizes nothing for a press that was refused", () => {
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(false);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
+    const afterPress = sent.length;
+
+    resyncGesture();
+
+    expect(sent.length).toBe(afterPress);
+  });
+
+  it("synthesizes nothing once the application has turned tracking off", () => {
+    // The release lands after the application reset 1002, so onMouseUp cannot
+    // discharge the record — and an SGR release written now is not mouse input at
+    // all: nothing is asking for it, so the PTY reads it as ordinary keystrokes.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    disableTracking();
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
+    const afterPress = sent.length;
+
+    resyncGesture();
+
+    expect(sent.length).toBe(afterPress);
+  });
+
+  it("forgets the gesture at the release, so a re-enable before the next resync is clean", () => {
+    // The sequence with no resync while tracking was off: the application resets
+    // 1002, the user lets go, the application enables 1002 again, and only then
+    // does the socket come back. The release is where tracking-off is observed, so
+    // the record dies there; carried to the resync it would describe a press this
+    // application never saw. tmux does the same at attach, clearing
+    // mouse_drag_flag as it disables the modes (tty.c, tty_start_tty).
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    disableTracking();
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
+    const afterPress = sent.length;
+
+    enableSGR(1002);
+    resyncGesture();
+
+    expect(sent.length).toBe(afterPress);
+  });
+
+  it("keeps the gesture when its own release is refused", () => {
+    // Same answer onMouseUp gives to the same question: only a DELIVERED release
+    // ends the gesture. Forgetting a refused one leaves the application holding a
+    // button with nothing left that could cancel it.
+    enableSGR(1002);
+    const { term, sent, deliver } = setupToggling();
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
+    const afterPress = sent.length;
+
+    deliver(false);
+    resyncGesture();
+    deliver(true);
+    resyncGesture();
+
+    // Both at the PRESS's cell, which is where makeMouse's default coordinates land.
+    expect(sent.slice(afterPress)).toEqual([
+      expectedSGR(0, 3, 3, true),
+      expectedSGR(0, 3, 3, true),
+    ]);
+  });
+});
+
+describe("disarmGesture: a session switch forgets the gesture", () => {
+  it("reports nothing itself and leaves nothing for the next resync", () => {
+    // The record belongs to the session that saw the press, and this module is per
+    // TERMINAL while sessions multiplex over it. Emitting the release on the way
+    // out is not available either: the switch is what makes that session
+    // unreachable from here.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
+    const afterPress = sent.length;
+
+    disarmGesture();
+    expect(sent.length).toBe(afterPress);
+
+    resyncGesture();
+    expect(sent.length).toBe(afterPress);
+  });
+});
+
+describe("coalescing: motion is one report per frame, buttons and wheel are not", () => {
+  it("coalesces three moves in one frame to the LATEST report", () => {
+    enableSGR(1003);
+    const { term, sent } = setupDelivering(true);
+    for (const clientX of [0, 8, 16]) {
+      term.dispatchEvent(makeMouse("mousemove", { clientX, clientY: 0, buttons: 0 }));
+    }
+
+    // Synchronously: nothing yet. This is the assertion the pre-coalescing
+    // implementation fails, and under DEC 1016 it is three reports per frame
+    // because the cell dedup cannot see a pixel change.
+    expect(sent).toEqual([]);
+  });
+
+  it("emits the latest coalesced motion on the next frame", async () => {
+    enableSGR(1003);
+    const { term, sent } = setupDelivering(true);
+    for (const clientX of [0, 8, 16]) {
+      term.dispatchEvent(makeMouse("mousemove", { clientX, clientY: 0, buttons: 0 }));
+    }
+
+    await nextFrame();
+
+    expect(sent).toEqual([expectedSGR(3 + MOTION, 3, 1, false)]);
+  });
+
+  it("reports a press synchronously, before any frame boundary", () => {
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    expect(sent).toEqual([expectedSGR(0, 3, 3, false)]);
+  });
+
+  it("reports a release synchronously, before any frame boundary", () => {
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+    term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
+    expect(sent.at(-1)).toBe(expectedSGR(0, 3, 3, true));
+  });
+
+  it("reports every wheel notch synchronously", () => {
+    // A wheel report is a NOTCH COUNT against a screen, so coalescing wheel
+    // loses scroll distance — xterm.js expands one WheelEvent into N discrete
+    // reports for exactly that reason.
+    enableSGR(1002);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeWheel({ deltaY: -1 }));
+    term.dispatchEvent(makeWheel({ deltaY: -1 }));
+    term.dispatchEvent(makeWheel({ deltaY: 1 }));
+    expect(sent).toEqual([
+      expectedSGR(64, 3, 3, false),
+      expectedSGR(64, 3, 3, false),
+      expectedSGR(65, 3, 3, false),
+    ]);
+  });
+
+  it("drops a motion still pending when a press supersedes it", async () => {
+    // A button event CANCELS rather than flushes: it carries a newer position,
+    // so order is correct by construction and the superseded motion is exactly
+    // what coalescing is entitled to drop.
+    enableSGR(1003);
+    const { term, sent } = setupDelivering(true);
+    term.dispatchEvent(makeMouse("mousemove", { clientX: 0, clientY: 0, buttons: 0 }));
+    term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
+
+    await nextFrame();
+
+    expect(sent).toEqual([expectedSGR(0, 3, 3, false)]);
   });
 });

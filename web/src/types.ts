@@ -120,6 +120,23 @@ export interface ResumeAckMessage {
    */
   historyPaging?: boolean;
   /**
+   * The server DECLARES that it owns DEC 1004 focus for this session: it derives
+   * the answer from attachment state, every attached client's reported focus and
+   * its own keep-unfocused declaration, and honors the `focus` control. Report
+   * the terminal widget's focus with `connection.setClientFocus` and write no
+   * focus bytes. Absent (or false) means the server does not, and the client
+   * writes CSI I / CSI O itself while the application has 1004 enabled.
+   */
+  serverFocus?: boolean;
+  /**
+   * The server DECLARES that it serves the `ephemeralInput` control: a
+   * best-effort input channel it does not count against the resume ledger, for
+   * input whose value expires (mouse reports). Absent (or false) means the
+   * server does not, and `connection.sendEphemeral` falls back to reliable
+   * input rather than dropping the report.
+   */
+  ephemeralInput?: boolean;
+  /**
    * The server's wire-protocol revision (third length-gated tail, absent on
    * older servers). A value OUTSIDE the client's supported range means one
    * side runs a stale bundle/binary; the connection module warns and fires
@@ -258,6 +275,20 @@ export type ControlMessage =
    */
   | { type: "history"; fromAbs: number; maxLines: number }
   | { type: "ping" }
+  /**
+   * The terminal widget's focus, reported so the server can derive the DEC 1004
+   * answer for the whole session (it sees every attached client, a socket dying
+   * without a focus-out, and its own keep-unfocused declaration; the browser sees
+   * none of that). Sent only to a server that declared `serverFocus`.
+   */
+  | { type: "focus"; focused: boolean }
+  /**
+   * Best-effort input the server does not count against the resume ledger:
+   * mouse reports, whose value expires because they describe a screen that may
+   * since have been repainted. Carried as a JSON string, so an ESC is \u001b.
+   * Sent only to a server that declared `ephemeralInput`.
+   */
+  | { type: "ephemeralInput"; data: string }
   /**
    * v4 typed-framing transition (see WIRE_PROTOCOL_VERSION in
    * wire-compatibility.ts): the first

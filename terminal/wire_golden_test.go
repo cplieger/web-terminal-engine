@@ -31,16 +31,23 @@ func goldenFrames() map[string][]byte {
 		"screen": encodeScreenMsg(100, 3, 1, 2, 0, []int{0, 2}, screenRows, 2, false, true, false, false, false),
 		// scroll: two history lines starting at absolute index 50.
 		"scroll": encodeScrollMsg(0, 50, [][]vt.WireRun{row("h0"), row("h1")}),
-		// resumeAck: ack=7, epoch, committed=200, oldest=10, ledger intact,
-		// paging NOT declared; carries the third length-gated tail
-		// (serverWireVersion + ackFlags).
-		"resumeack": encodeResumeAck(7, 1234567890, 200, 10, false, false),
+		// resumeAck: ack=7, epoch, committed=200, oldest=10, no flags set;
+		// carries the third length-gated tail (serverWireVersion + ackFlags).
+		"resumeack": encodeResumeAck(7, 1234567890, 200, 10, resumeAckFlags{}),
 		// resumeAck with the ledger-lost flag set (ackFlags bit0).
-		"resumeack-ledgerlost": encodeResumeAck(7, 1234567890, 200, 10, true, false),
+		"resumeack-ledgerlost": encodeResumeAck(7, 1234567890, 200, 10, resumeAckFlags{LedgerLost: true}),
 		// resumeAck with the history-paging capability declared (ackFlags bit1),
 		// the demand-paged-scrollback signal. Independent of bit0, so the pair
 		// pins that a client reads the bits separately.
-		"resumeack-historypaging": encodeResumeAck(7, 1234567890, 200, 10, false, true),
+		"resumeack-historypaging": encodeResumeAck(7, 1234567890, 200, 10, resumeAckFlags{HistoryPaging: true}),
+		// resumeAck with the server-owns-focus capability declared (ackFlags
+		// bit2). One fixture per bit, each with every other bit clear, is what
+		// pins each bit's POSITION independently: a shift in any one of them
+		// changes exactly one fixture.
+		"resumeack-serverfocus": encodeResumeAck(7, 1234567890, 200, 10, resumeAckFlags{ServerFocus: true}),
+		// resumeAck with the ephemeral-input capability declared (ackFlags bit3),
+		// independent of the other three for the same reason.
+		"resumeack-ephemeralinput": encodeResumeAck(7, 1234567890, 200, 10, resumeAckFlags{EphemeralInput: true}),
 		// ackOnly: bare ack (type + inputAck, no body), ack=42.
 		"ackonly": encodeAckOnly(42),
 		// clipboard (opcode 6): OSC 52 text for the system clipboard. Fixture

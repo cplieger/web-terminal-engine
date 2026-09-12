@@ -2216,6 +2216,9 @@ export function updateFontMetrics(): void {
   const measuredW = measureCellWidth();
   cellWidth = Math.round(measuredW);
   cellHeight = parseFloat(cs.lineHeight) || 17;
+  // The column count is derived from the cell, so the cache gridSize reads is
+  // stale as of this call.
+  measuredCols = 0;
   defaultSpacing = cellWidth - measuredW;
   output.style.letterSpacing = `${defaultSpacing}px`;
   document.documentElement.style.setProperty("--char-w", `${cellWidth}px`);
@@ -2249,6 +2252,13 @@ export function updateFontMetrics(): void {
 const MIN_COLS = 20;
 const MIN_ROWS = 5;
 
+// The column count of the most recent measurement, which is the count the
+// resize announce carried to the server. gridSize() reads it instead of
+// measuring, because it is called on every raw mousemove while an application
+// tracks motion and computeSize() costs a computed-style read plus two layout
+// reads. 0 until the first measurement.
+let measuredCols = 0;
+
 /**
  * Compute the integer (cols, rows) the terminal element can fit at current
  * font metrics, clamped to a minimum of 20×5. Used to decide what dimensions
@@ -2262,7 +2272,34 @@ export function computeSize(): { cols: number; rows: number } {
   const contentH = termWrap.clientHeight - padY;
   const cols = Math.max(MIN_COLS, Math.floor(contentW / cellWidth));
   const rows = Math.max(MIN_ROWS, Math.floor(contentH / cellHeight));
+  measuredCols = cols;
   return { cols, rows };
+}
+
+/**
+ * The dimensions of the grid currently ON SCREEN — what
+ * `mouse.MouseInputHandler.gridSize` wants, so a pointer resolves against the
+ * rows the reader is actually looking at.
+ *
+ * Deliberately not `computeSize()`, whose rows are the size this client WOULD
+ * like: the server's screen is last-writer-wins across every attached client
+ * and relaxes to the smallest on disconnect, so a second attached device — or
+ * any local resize before the next screen frame lands — leaves the measured
+ * height describing a grid nothing is painting. The row hit test anchors on this
+ * number rather than merely clamping to it, so a disagreement of N shifts every
+ * reported row by N. The alt grid keeps its own height, and a TUI runs there.
+ *
+ * Columns stay the measured count: the store has none to answer with (a row's
+ * trailing blank cells are trimmed off the wire) and the axis only bounds a
+ * report, where over-reporting costs nothing.
+ *
+ * Rows are 0 until the first screen frame lands, which the mouse module treats
+ * as "no grid yet" and refuses to report against — the honest answer, since
+ * nothing knows the screen's height before the server describes it.
+ */
+export function gridSize(): { cols: number; rows: number } {
+  const rows = store.isAlt() ? store.getAltRows().length : store.getWindow().height;
+  return { cols: measuredCols > 0 ? measuredCols : computeSize().cols, rows };
 }
 
 // rowTopInTermWrap returns a row element's top in termWrap's coordinate space
@@ -2347,6 +2384,16 @@ export function getCursorPx(): { left: number; top: number; cellH: number } {
     top: Math.round(rowTopFor(cursorAbs)),
     cellH: cellHeight,
   };
+}
+
+/**
+ * The measured pixel size of one cell — what `mouse.MouseInputHandler.cellSize`
+ * wants. Only meaningful once `updateFontMetrics` has measured this terminal's
+ * font; before that it answers the module's power-on fallback, not the font in
+ * use.
+ */
+export function cellSize(): { width: number; height: number } {
+  return { width: cellWidth, height: cellHeight };
 }
 
 // --- Caret overlay ---

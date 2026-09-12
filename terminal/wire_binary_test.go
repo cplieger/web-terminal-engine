@@ -423,3 +423,51 @@ func TestAppendRowRuns_multipleRunsInOneRow(t *testing.T) {
 		t.Fatalf("trailing bytes: consumed %d of %d", off, len(buf))
 	}
 }
+
+// TestResumeAckFlags_bits pins each capability bit's POSITION independently and
+// then all four together, because the client masks them one at a time: a shifted
+// bit silently switches one capability off (or on) with nothing to say so.
+//
+// The expected values are the wire positions the frame-layout comment publishes
+// and the TS decoder masks: bit0 ledgerLost, bit1 historyPaging, bit2
+// serverFocus, bit3 ephemeralInput.
+func TestResumeAckFlags_bits(t *testing.T) {
+	tests := []struct {
+		name  string
+		flags resumeAckFlags
+		want  byte
+	}{
+		{"none", resumeAckFlags{}, 0x00},
+		{"ledgerLost alone", resumeAckFlags{LedgerLost: true}, 0x01},
+		{"historyPaging alone", resumeAckFlags{HistoryPaging: true}, 0x02},
+		{"serverFocus alone", resumeAckFlags{ServerFocus: true}, 0x04},
+		{"ephemeralInput alone", resumeAckFlags{EphemeralInput: true}, 0x08},
+		{
+			"all four",
+			resumeAckFlags{LedgerLost: true, HistoryPaging: true, ServerFocus: true, EphemeralInput: true},
+			0x0f,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.flags.bits(); got != tc.want {
+				t.Errorf("resumeAckFlags%+v.bits() = %#02x, want %#02x", tc.flags, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestEncodeResumeAck_carriesTheFlagsByte pins that the encoder puts the packed
+// byte in the tail's last position, which is the only place a client reads it.
+func TestEncodeResumeAck_carriesTheFlagsByte(t *testing.T) {
+	buf := encodeResumeAck(7, 1, 2, 3, resumeAckFlags{ServerFocus: true, EphemeralInput: true})
+	if len(buf) != 35 {
+		t.Fatalf("resumeAck frame = %d bytes, want 35 (type + ack + epoch + committed + oldest + version + flags)", len(buf))
+	}
+	if got := buf[33]; got != wireProtocolVersion {
+		t.Errorf("serverWireVersion byte = %d, want %d", got, wireProtocolVersion)
+	}
+	if got, want := buf[34], byte(0x0c); got != want {
+		t.Errorf("ackFlags byte = %#02x, want %#02x (serverFocus | ephemeralInput)", got, want)
+	}
+}

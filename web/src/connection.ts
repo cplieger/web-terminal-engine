@@ -43,6 +43,7 @@ import * as modes from "./modes.js";
 // end of the gap fills.
 import { PAGE_SIZE } from "./store.js";
 import * as render from "./render.js";
+import * as mouse from "./mouse.js";
 import type { ControlMessage, ScrollMessage, ServerMessage } from "./types.js";
 import { INITIAL_DELAY_MS, nextBackoffDelay } from "./reconnect.js";
 
@@ -304,6 +305,48 @@ function newHistoryState(): HistoryState {
 
 let history: HistoryState = newHistoryState();
 
+/**
+ * The capabilities the server DECLARED on this socket's resume ack. Per-socket
+ * for the same reason as HistoryState: a carried-over capability would send a
+ * control to a server that never declared it, and post-latch an unrecognized
+ * text control is tolerated and DROPPED — so the message would vanish silently.
+ */
+interface ServerCaps {
+  /** ackFlags bit3: the server serves the `ephemeralInput` control. */
+  ephemeralInput: boolean;
+  /** ackFlags bit2: the server derives the DEC 1004 answer from `focus`. */
+  serverFocus: boolean;
+}
+
+let caps: ServerCaps = { ephemeralInput: false, serverFocus: false };
+
+/**
+ * Whether the consumer's terminal widget is focused. Per PAGE, not per socket:
+ * it is the widget's own state and must survive a reconnect, because the new
+ * socket has to be told the CURRENT value.
+ */
+let clientFocused = false;
+
+/**
+ * The focus value THIS socket has been told, or null when it has been told
+ * nothing. Per socket, so a reconnect re-asserts focus instead of suppressing it
+ * as a repeat.
+ */
+let focusReported: boolean | null = null;
+
+/**
+ * The 1004 state last seen in a modes frame on this socket, for the fallback
+ * path's enable-edge detection. Per socket: a fresh socket is re-announced its
+ * modes, and the edge has to be detected against nothing rather than against the
+ * previous socket's last value.
+ */
+let lastFocusReportingSeen = false;
+
+/** WebSocket.OPEN. Spelled out because a test's fake constructor has no statics. */
+const WS_OPEN = 1;
+
+const ephemeralEncoder = new TextEncoder();
+
 /** Cancel both timers and release single-flight. */
 function clearHistoryTimers(): void {
   if (history.dataTimer !== null) {
@@ -317,14 +360,19 @@ function clearHistoryTimers(): void {
 }
 
 /**
- * Reset the fetch state for a new socket: capability, single-flight, pacing and
- * the adaptive budget all go together, atomically. Splitting them is how a
- * client ends up paging against a server that never declared it, or bursting
- * into a depleted server bucket.
+ * Reset everything a new socket must not inherit: the fetch state (capability,
+ * single-flight, pacing and the adaptive budget), the declared server
+ * capabilities, and the focus reporting latches. All of it goes together,
+ * atomically. Splitting them is how a client ends up paging against a server
+ * that never declared it, bursting into a depleted server bucket, or holding a
+ * focus report back from the new socket as a repeat of what the old one was told.
  */
-function resetHistoryForSocket(): void {
+function resetForNewSocket(): void {
   clearHistoryTimers();
   history = newHistoryState();
+  caps = { ephemeralInput: false, serverFocus: false };
+  focusReported = null;
+  lastFocusReportingSeen = false;
 }
 
 /**
@@ -642,6 +690,74 @@ function textControl(msg: ControlMessage): string {
   return JSON.stringify(msg);
 }
 
+/**
+ * sendEphemeral delivers BEST-EFFORT input. Where the server declared
+ * `ephemeralInput` it sends only on a live socket, never queues, never
+ * retransmits, and never touches `outbox`, `outboxBytes`, `bytesSent`,
+ * `bytesAcked` or `onOutboxFull`; where it did NOT, the report falls back to
+ * reliable input, so it can be retransmitted after a resume and describe a
+ * screen since repainted. Returns whether it was sent; on false the caller's
+ * contract is to FORGET the event, because a mouse report carries no sequence
+ * number. Refusing on a closing socket is what xterm.js's AttachAddon and ttyd
+ * both do.
+ */
+export function sendEphemeral(text: string): boolean {
+  if (connState.status !== "connected" || connState.sock.readyState !== WS_OPEN) {
+    return false;
+  }
+  if (!connState.upgraded || !caps.ephemeralInput) {
+    // Fall back to RELIABLE input rather than dropping the report. An
+    // unrecognized text control is tolerated and dropped post-latch, so the
+    // report would vanish entirely, and total silence is a worse failure than a
+    // stale report: a third-party or mid-upgrade server keeps a working mouse.
+    // What is DEGRADED on this path: the report rides the reliable outbox, so a
+    // click made before a disconnect is retransmitted after the resume has
+    // repainted the screen.
+    return sendBinary(ephemeralEncoder.encode(text));
+  }
+  connState.sock.send(textControl({ type: "ephemeralInput", data: text }));
+  return true;
+}
+
+/**
+ * setClientFocus reports whether the consumer's terminal widget is focused.
+ *
+ * Focus is STATE, so it is reconciled rather than replayed: the latest value
+ * wins, a repeat of the value already reported sends nothing, a report made
+ * while no socket is live is dropped rather than queued, and a reconnect
+ * re-asserts the current one. Where the server declared `serverFocus` this sends
+ * the `focus` control and the server derives the DEC 1004 answer for the whole
+ * session; otherwise the client writes the legacy CSI I / CSI O itself, and only
+ * while the application has 1004 enabled.
+ */
+export function setClientFocus(focused: boolean): void {
+  clientFocused = focused;
+  if (connState.status !== "connected") {
+    // A focus report is never QUEUED. The fallback path below writes through the
+    // RELIABLE outbox, so a report made while the socket is down would be
+    // retransmitted on reconnect and re-assert a focus the widget may since have
+    // lost, which is the replay this whole derivation exists to remove. Nothing
+    // is lost by dropping it: both the resumeAck and the 1004 enable edge
+    // re-report the current value on the new socket.
+    return;
+  }
+  if (focused === focusReported) {
+    return;
+  }
+  focusReported = focused;
+  if (caps.serverFocus && connState.upgraded) {
+    sendControl({ type: "focus", focused });
+    return;
+  }
+  if (!modes.isFocusReporting()) {
+    return;
+  }
+  // The legacy path, and it rides the RELIABLE outbox: a focus report can be
+  // retransmitted after a blip, re-asserting a state that may no longer be true.
+  // That is one of the things the server-owned path fixes.
+  sendBinary(ephemeralEncoder.encode(focused ? "\x1b[I" : "\x1b[O"));
+}
+
 function sendControl(msg: ControlMessage): void {
   if (connState.status !== "connected") {
     return;
@@ -881,7 +997,7 @@ function teardown(): void {
     }
   }
   stopHeartbeat();
-  resetHistoryForSocket();
+  resetForNewSocket();
   cb?.clearSolicited?.();
   cancelScheduledReconnect();
   connState = { status: "disconnected" };
@@ -1337,7 +1453,7 @@ export function connect(): void {
       // exact values, so the replay-jump prediction must be computed from them
       // — never from store state, which a frame arriving between send and ack
       // could have moved, masking a real jump (docs/paged-scrollback.md §4.5).
-      resetHistoryForSocket();
+      resetForNewSocket();
       const sentHaveThrough = cb?.getHaveThrough?.() ?? -1;
       // ALWAYS a number. A consumer may ask for fewer lines than the protocol
       // ceiling, but it cannot opt OUT of the bound: the server clamps to the
@@ -1551,6 +1667,18 @@ export function connect(): void {
       // nothing ever sent, and the store keeps its compatibility tail cap.
       history.paging = msg.historyPaging === true;
       history.acked = true;
+      // The other two capabilities off the same tail, and the focus re-report
+      // for this socket. Placed here — with the capability handling, BEFORE the
+      // ledger-lost / session-forgotten early returns — for the same reason
+      // onResumeTransition is: a ledger loss is not a capability event, and the
+      // long-absence attach that loses its ledger still needs its focus state
+      // asserted on the new socket.
+      caps = {
+        ephemeralInput: msg.ephemeralInput === true,
+        serverFocus: msg.serverFocus === true,
+      };
+      focusReported = null;
+      setClientFocus(clientFocused);
       // The store's ONE ack transition, dispatched BEFORE the early returns
       // below. A ledger loss is not a capability event, and the long-absence
       // attach that loses its ledger is exactly the one carrying a replay jump
@@ -1604,6 +1732,12 @@ export function connect(): void {
         connState.status === "connected" && connState.sock === sock && connState.upgraded,
         st,
       );
+      // The transport answers for itself here, as it does for focus: the resume is
+      // complete, `upgraded` and `caps` are both set, so this is the first instant
+      // a best-effort report can leave. A gesture still recorded from before the
+      // gap is cancelled now, or the application holds that button for the rest of
+      // the session. Inert until a consumer has called `mouse.init`.
+      mouse.resyncGesture();
       return;
     }
     if (msg.type === "ackOnly") {
@@ -1632,6 +1766,18 @@ export function connect(): void {
       };
       st.modes = snap;
       modes.applySnapshot(snap);
+      if (!caps.serverFocus) {
+        // The 1004 ENABLE edge on the fallback path. An application that enables
+        // focus reporting while the tab is already focused otherwise gets nothing
+        // until the user clicks away; xterm.js's _reportFocus reports the current
+        // state at that instant, and this client did not.
+        const rising = msg.focusReporting && !lastFocusReportingSeen;
+        lastFocusReportingSeen = msg.focusReporting;
+        if (rising) {
+          focusReported = null;
+          setClientFocus(clientFocused);
+        }
+      }
       if (typeof msg.inputAck === "number") {
         applyAck(st, msg.inputAck);
       }
@@ -1715,7 +1861,7 @@ export function connect(): void {
       // The fetch state belonged to THIS socket: kill its timers so neither
       // fires against a dead socket, and release the solicited window so the
       // store stops admitting lines below its stale-re-send watermark.
-      resetHistoryForSocket();
+      resetForNewSocket();
       cb?.clearSolicited?.();
       if (ev.code === WIRE_INCOMPATIBLE_CLOSE_CODE) {
         const reason =

@@ -144,7 +144,8 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     //   >= 17 bytes: + serverEpoch (restart detection)
     //   >= 33 bytes: + committed + oldestIndex (resume gap detection)
     //   >= 35 bytes: + serverWireVersion + ackFlags (bit0 = ledgerLost,
-    //                  bit1 = historyPaging). Unknown bits are IGNORED, which
+    //                  bit1 = historyPaging, bit2 = serverFocus,
+    //                  bit3 = ephemeralInput). Unknown bits are IGNORED, which
     //                  is what lets the server add capabilities here without a
     //                  protocol bump.
     let serverEpoch: number | undefined;
@@ -153,6 +154,8 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     let serverWireVersion: number | undefined;
     let ledgerLost: boolean | undefined;
     let historyPaging: boolean | undefined;
+    let serverFocus: boolean | undefined;
+    let ephemeralInput: boolean | undefined;
     if (buf.byteLength >= 17) {
       serverEpoch = c.u64();
     }
@@ -165,6 +168,8 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
       const ackFlags = c.u8();
       ledgerLost = (ackFlags & 1) !== 0;
       historyPaging = (ackFlags & 2) !== 0;
+      serverFocus = (ackFlags & 4) !== 0;
+      ephemeralInput = (ackFlags & 8) !== 0;
     }
     const msg: ResumeAckMessage = { type: "resumeAck", received: inputAck };
     if (serverEpoch !== undefined) {
@@ -184,6 +189,12 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     }
     if (historyPaging !== undefined) {
       msg.historyPaging = historyPaging;
+    }
+    if (serverFocus !== undefined) {
+      msg.serverFocus = serverFocus;
+    }
+    if (ephemeralInput !== undefined) {
+      msg.ephemeralInput = ephemeralInput;
     }
     return msg;
   }

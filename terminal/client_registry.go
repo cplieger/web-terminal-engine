@@ -3,6 +3,7 @@ package terminal
 import (
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -24,6 +25,11 @@ type clientRegistry struct {
 	sessions map[SessionID]*sessionState
 	logger   *slog.Logger
 	mu       sync.Mutex
+	// anyFocused mirrors "some registered client reports its widget focused" so
+	// the DEC 1004 derivation reads it with one load. handlePTYData reads it once
+	// per PTY chunk, and r.mu is the lock the flush dispatcher, IncrementReceived
+	// and every attach already contend for.
+	anyFocused atomic.Bool
 }
 
 // newClientRegistry returns an initialized registry. The logger receives
@@ -42,6 +48,7 @@ func (r *clientRegistry) Add(ws *websocket.Conn) *clientState {
 	state := &clientState{}
 	r.mu.Lock()
 	r.clients[ws] = state
+	r.refreshAnyFocusedLocked()
 	r.mu.Unlock()
 	return state
 }
@@ -70,6 +77,7 @@ func (r *clientRegistry) Remove(ws *websocket.Conn) (cols, rows int) {
 		}
 	}
 	delete(r.clients, ws)
+	r.refreshAnyFocusedLocked()
 	r.mu.Unlock()
 	return cols, rows
 }
@@ -83,6 +91,38 @@ func (r *clientRegistry) RecordSize(state *clientState, cols, rows int) {
 	state.cols = cols
 	state.rows = rows
 	r.mu.Unlock()
+}
+
+// SetClientFocus stores whether one client reports its terminal widget focused.
+// Per-socket like RecordSize, because focus is a property of the viewer and
+// several devices share one session. Guarded by r.mu.
+func (r *clientRegistry) SetClientFocus(state *clientState, focused bool) {
+	r.mu.Lock()
+	state.focused = focused
+	r.refreshAnyFocusedLocked()
+	r.mu.Unlock()
+}
+
+// refreshAnyFocusedLocked recomputes the focus aggregate from the client set.
+// Every mutation of a client's focus, and every attach and detach, runs it, so
+// the cached value cannot drift from the map. The caller MUST hold r.mu.
+func (r *clientRegistry) refreshAnyFocusedLocked() {
+	for _, st := range r.clients {
+		if st.focused {
+			r.anyFocused.Store(true)
+			return
+		}
+	}
+	r.anyFocused.Store(false)
+}
+
+// AnyClientFocused reports whether at least one registered socket says its
+// terminal widget is focused. With no client attached it is false, which is also
+// the answer the DEC 1004 derivation owes an unattached session — so
+// "attached && anyFocused" collapses into this one predicate and the caller
+// needs no separate attachment test. One atomic load: it is read per PTY chunk.
+func (r *clientRegistry) AnyClientFocused() bool {
+	return r.anyFocused.Load()
 }
 
 // MinLiveSize returns the smallest cols and smallest rows across all currently

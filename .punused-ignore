@@ -54,6 +54,22 @@ method (*SessionManager).Create
 constant StatusInput
 constant StatusDone
 
+# --- Secondary-activity surface: published API with no in-module caller by
+# construction. WithSessionActivity is the option a HOST passes to supply the
+# value, SessionActivity is what its getter returns, and the three Activity*
+# constants are the closed set that getter chooses from -- so every reference is
+# in a consumer module, invisible to punused, exactly like the classifier pair
+# above.
+#
+# SessionActivity itself is deliberately NOT listed: measured, punused does not
+# report it, because non-test engine code names the type (the manager's own field
+# and the sweep's per-session input) and that is a reference. An entry for it
+# would match nothing and read as stale.
+function WithSessionActivity
+constant ActivityWorking
+constant ActivityWaiting
+constant ActivityInput
+
 # --- Handler functional options: published API, all wired in a consumer's
 # session factory. punused sees only this repo's own option tests.
 #

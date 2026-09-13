@@ -25,6 +25,10 @@
 //    forwarded rather than dropped or thrown on.
 // 9. The session-end split: "exited" (an ordinary end) and "crashed" (a non-zero
 //    or signalled exit) are both admitted by the status union and both parse.
+// 10. The secondary activity pair (`activity` + `activityCount`): a host-reported
+//    background state carried beside the turn status. It survives the parse, an
+//    absent pair reads as undefined rather than as a state, and an unknown value
+//    from a newer server is forwarded rather than dropped.
 
 import { describe, it, expect, vi } from "vitest";
 
@@ -281,6 +285,57 @@ describe("connectStatusStream", () => {
       expect(got.status).toBe("throttled");
       expect(got.id).toBe("abc123");
       expect(got.progressValue).toBe(40);
+    });
+  });
+
+  // The secondary activity pair. It is a SECOND channel, not a second spelling
+  // of `status`: the server derives it from whatever the host reports about a
+  // background task, so it can say "input" on a session whose turn is done. The
+  // client's only job is to carry it through unchanged.
+  describe("secondary activity fields", () => {
+    it("carries the state and its count through the parse", () => {
+      const onStatus = vi.fn();
+      const { fake } = mountFake({ onStatus });
+      // A finished turn with a background task still blocked on the user: the two
+      // channels disagree, which is the whole reason there are two.
+      const ev: SessionStatus = { ...sample, status: "done", activity: "input", activityCount: 3 };
+
+      fake.emit("message", JSON.stringify(ev));
+
+      const got = onStatus.mock.calls[0]![0] as SessionStatus;
+      expect(got.activity).toBe("input");
+      expect(got.activityCount).toBe(3);
+      expect(got.status).toBe("done");
+    });
+
+    it("reports an absent pair as undefined rather than as a state", () => {
+      const onStatus = vi.fn();
+      const { fake } = mountFake({ onStatus });
+      // A server that reports no secondary activity at all (or one predating the
+      // field). Neither key is present, so neither may read as a live value.
+      fake.emit("message", JSON.stringify(sample));
+
+      const got = onStatus.mock.calls[0]![0] as SessionStatus;
+      expect(got.activity).toBeUndefined();
+      expect(got.activityCount).toBeUndefined();
+    });
+
+    it("forwards an UNKNOWN activity state from a newer server", () => {
+      const onStatus = vi.fn();
+      const { fake } = mountFake({ onStatus });
+      // The set is closed for this release, not for every release. Dropping the
+      // frame would lose the session's title and removal signal with it, so the
+      // value is forwarded and the consumer renders nothing for what it cannot
+      // name.
+      const raw = JSON.stringify({ ...sample, activity: "queued", activityCount: 1 });
+
+      expect(() => {
+        fake.emit("message", raw);
+      }).not.toThrow();
+
+      const got = onStatus.mock.calls[0]![0] as SessionStatus;
+      expect(got.activity).toBe("queued");
+      expect(got.activityCount).toBe(1);
     });
   });
 

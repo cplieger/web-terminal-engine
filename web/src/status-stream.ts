@@ -74,6 +74,21 @@ export interface SessionInfo {
    *  only when this is set; a program that emits no OSC 9 signal (a plain shell)
    *  keeps its tab dot hidden. */
   readonly reportsActivity?: boolean;
+  /** the session's SECONDARY activity: a host-reported background activity that
+   *  OUTLIVES the turn, carried beside `status` and never merged into it. The
+   *  closed set is `"working"` (a background task is running), `"waiting"`
+   *  (stopped and resumable, nobody is being asked) and `"input"` (a background
+   *  task is blocked on the user); absent or an empty string means no secondary
+   *  activity, and a consumer must tolerate an UNKNOWN value from a newer server
+   *  by rendering nothing for it.
+   *
+   *  Typed `string`, deliberately NOT a union like `status`: that union's own doc
+   *  already admits it must tolerate values outside itself, which forces a cast at
+   *  every forward-compatible site. Absent from a server that reports none. */
+  readonly activity?: string;
+  /** how many sources produced `activity`: >= 1 whenever `activity` is non-empty,
+   *  0 when it is empty or the host does not count them. */
+  readonly activityCount?: number;
 }
 
 /** SessionStatus is one session's current status as carried on the status

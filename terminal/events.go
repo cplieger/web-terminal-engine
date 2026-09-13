@@ -86,6 +86,13 @@ type statusEvent struct {
 	// second client learns of a rename (or its removal) made elsewhere. Not
 	// carried on a Removed event.
 	PinnedTitle string `json:"pinnedTitle"`
+	// Activity is the session's SECONDARY activity state (see SessionActivity).
+	// Never omitempty: "" is not a legal state, so the empty string IS the absence
+	// and a sentinel would encode the same fact twice. It is ORTHOGONAL to Status
+	// — never in computeStatus's precedence, never in tracker.latched, never an
+	// input to ReportsActivity, which stays the PRIMARY dot's reveal gate. A change
+	// in this value alone emits an event, like ProgressValue below.
+	Activity string `json:"activity"`
 	// Notification is the OSC 9 notification message captured for this session,
 	// carried on the event so a consumer with NO status classifier still RECEIVES
 	// it: "no classifier" means "I map notifications myself", not "discard them".
@@ -107,7 +114,10 @@ type statusEvent struct {
 	// that has reported no percentage is not a session at 0%, so the field must
 	// not be omitempty. A change in this value alone emits an event, or a
 	// consumer's determinate bar would stay at the first value it ever saw.
-	ProgressValue   int  `json:"progressValue"`
+	ProgressValue int `json:"progressValue"`
+	// ActivityCount is how many sources produced Activity: >= 1 whenever Activity
+	// is non-empty, 0 when it is empty or the host does not count.
+	ActivityCount   int  `json:"activityCount"`
 	Removed         bool `json:"removed,omitempty"`
 	ReportsActivity bool `json:"reportsActivity"`
 }
@@ -124,7 +134,10 @@ type statusTracker struct {
 	lastClientTitle string // last emitted raw client title (to detect a title-only PUT)
 	lastPinnedTitle string // last emitted raw pinned name (to detect a rename / clear)
 	latched         string // "", StatusInput, or StatusDone
-	notifSeen       uint64
+	// lastActivity is the last emitted secondary activity state. Without it the
+	// field changes silently and only surfaces when something else moves.
+	lastActivity string
+	notifSeen    uint64
 	// notifDelivered is the last notification sequence CARRIED on an event.
 	// Separate from notifSeen, which only advances when a classifier consumed the
 	// message: delivery is unconditional, so the two would otherwise disagree for
@@ -140,8 +153,11 @@ type statusTracker struct {
 	// brand-new tracker, same as lastProgressValue: that only means a session
 	// already at position 0 does not count its position as changed on its first
 	// sweep, which emits anyway because the status itself moves off "".
-	lastOrder   int
-	lastReports bool // last emitted reportsActivity (to detect a false->true flip)
+	lastOrder int
+	// lastActivityCount is lastActivity's count half; without it a 2 -> 3 change
+	// under one state emits nothing.
+	lastActivityCount int
+	lastReports       bool // last emitted reportsActivity (to detect a false->true flip)
 }
 
 // autoTitleConfirm is how long a foreground process must hold the terminal
@@ -225,6 +241,13 @@ type statusRaw struct {
 	id        SessionID
 	notifMsg  string
 	oscTitle  string
+	// activity is the consumer's secondary activity for this session, read in
+	// PHASE 2 — the opposite of what the order field below says for itself, so the
+	// difference is worth stating. order is MANAGER state phase 2 can invalidate;
+	// this is FOREIGN state, and phase 3 would hold m.mu across a consumer
+	// callback. Its staleness is bounded by one sweep and self-correcting, since
+	// nothing the manager does can invalidate it behind the tracker's back.
+	activity SessionActivity
 	// autoProbe is the foreground-process probe result for this sweep: the
 	// candidate pgid plus the name/cwd it resolves to. Read in phase 2 (procfs +
 	// one ioctl, no locks held) and folded into the confirmation window in
@@ -305,9 +328,11 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 	}
 	m.mu.Unlock()
 
-	// Phase 2: read handler inputs lock-free (per-handler h.mu only).
+	// Phase 2: read handler inputs lock-free (per-handler h.mu only), plus the
+	// consumer's secondary activity, which must not be read under m.mu either.
 	for i := range items {
 		items[i].read()
+		items[i].activity = m.sessionActivity(items[i].id)
 	}
 	if hold := testDiffPhaseHold.Load(); hold != nil {
 		(*hold)()
@@ -400,10 +425,14 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	// it. A close shifts every later position down one and so emits for each of
 	// those sessions, which is bounded by the tab count and costs one small frame
 	// each.
+	// The secondary activity is in here for the percentage's reason: it moves
+	// nothing else, so without a clause of its own the client's mark never updates.
 	// A fresh notification always emits, since delivering the event IS the point.
 	if status == tr.lastStatus && title == tr.lastTitle && clientTitle == tr.lastClientTitle &&
 		pinnedTitle == tr.lastPinnedTitle && reports == tr.lastReports &&
-		it.progressValue == tr.lastProgressValue && it.order == tr.lastOrder && !notifNew {
+		it.progressValue == tr.lastProgressValue && it.order == tr.lastOrder &&
+		it.activity.State == tr.lastActivity && it.activity.Count == tr.lastActivityCount &&
+		!notifNew {
 		return statusEvent{}, false
 	}
 	tr.lastStatus = status
@@ -413,6 +442,8 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	tr.lastReports = reports
 	tr.lastProgressValue = it.progressValue
 	tr.lastOrder = it.order
+	tr.lastActivity = it.activity.State
+	tr.lastActivityCount = it.activity.Count
 	// A copy, not &it.order: it points into diffStatuses' phase-1 slice, and an
 	// event that outlives the sweep must not alias the sweep's own scratch state.
 	pos := it.order
@@ -420,6 +451,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 		ID: it.id, Status: status, Title: title, ClientTitle: clientTitle,
 		PinnedTitle: pinnedTitle, CreatedAt: it.createdAt, ReportsActivity: reports,
 		ProgressValue: it.progressValue, Order: &pos,
+		Activity: it.activity.State, ActivityCount: it.activity.Count,
 	}
 	// A notification rides along on the sweep that first observes it, and only
 	// that sweep: it is an event, so replaying it on a later status-only change
@@ -655,6 +687,11 @@ func (m *SessionManager) snapshot() []statusEvent {
 		})
 		it.ev.ProgressValue = sc.progressValue
 		it.ev.ReportsActivity = sc.progress >= 0 || it.latched
+		// Post-lock, for the reason statusRaw.activity gives, and carried here or a
+		// reload shows no mark until the value next changes.
+		act := m.sessionActivity(it.ev.ID)
+		it.ev.Activity = act.State
+		it.ev.ActivityCount = act.Count
 		out = append(out, *it)
 	}
 	// Same order List serves, for the same reason it sorts at all: this is an

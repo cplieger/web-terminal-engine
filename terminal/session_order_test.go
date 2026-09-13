@@ -789,6 +789,38 @@ func TestStatusEventOrderOnTheWire(t *testing.T) {
 	}
 }
 
+// TestStatusEventActivityOnTheWire pins the JSON for the secondary activity, and
+// specifically its ABSENCE. Both fields are always present: "" is not a legal
+// state, so the empty string IS the absence, and an older client reads a benign
+// default rather than a missing key it has to guess about. Omitempty here would
+// make "no secondary activity" and "a field this server does not have" the same
+// bytes.
+func TestStatusEventActivityOnTheWire(t *testing.T) {
+	absent, err := json.Marshal(statusEvent{ID: "s1", Status: StatusIdle})
+	if err != nil {
+		t.Fatalf("marshal absent: %v", err)
+	}
+	if !strings.Contains(string(absent), `"activity":""`) {
+		t.Errorf("event with no secondary activity = %s, want it to carry \"activity\":\"\"", absent)
+	}
+	if !strings.Contains(string(absent), `"activityCount":0`) {
+		t.Errorf("event with no secondary activity = %s, want it to carry \"activityCount\":0", absent)
+	}
+
+	live, err := json.Marshal(statusEvent{
+		ID: "s1", Status: StatusIdle, Activity: ActivityInput, ActivityCount: 3,
+	})
+	if err != nil {
+		t.Fatalf("marshal live: %v", err)
+	}
+	if !strings.Contains(string(live), `"activity":"input"`) {
+		t.Errorf("event with a secondary activity = %s, want it to carry \"activity\":\"input\"", live)
+	}
+	if !strings.Contains(string(live), `"activityCount":3`) {
+		t.Errorf("event with a secondary activity = %s, want it to carry \"activityCount\":3", live)
+	}
+}
+
 // TestSetOrderRouteRejectsAMalformedEnvelope covers the shapes a client bug
 // produces rather than a stale view. Each must be a 400 the caller can see, not a
 // 204 that reports success for a request the server did not understand — which is

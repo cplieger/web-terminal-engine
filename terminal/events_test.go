@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -777,4 +778,192 @@ func TestReportsActivityAgreesAcrossReadPaths(t *testing.T) {
 			t.Errorf("List ReportsActivity = %v, want true: state 0 is a cleared signal, not an absent one", got)
 		}
 	})
+}
+
+// activitySource is a settable WithSessionActivity source: a test moves the
+// value and sweeps, the way a host's own watcher would. Guarded, because the
+// manager may read it from the sweep goroutine.
+type activitySource struct {
+	byID map[SessionID]SessionActivity
+	mu   sync.Mutex
+}
+
+func newActivitySource() *activitySource {
+	return &activitySource{byID: make(map[SessionID]SessionActivity)}
+}
+
+func (s *activitySource) set(id SessionID, act SessionActivity) {
+	s.mu.Lock()
+	s.byID[id] = act
+	s.mu.Unlock()
+}
+
+func (s *activitySource) read(id SessionID) SessionActivity {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.byID[id]
+}
+
+// trackerOf returns a session's tracker, so a test can assert on state the
+// public surface deliberately does not expose (the needs-input/done latch).
+func trackerOf(t *testing.T, m *SessionManager, id SessionID) *statusTracker {
+	t.Helper()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tr := m.trackers[id]
+	if tr == nil {
+		t.Fatalf("session %s has no tracker; the sweep has not seen it yet", LogID(id))
+	}
+	return tr
+}
+
+// TestSessionActivityReachesEveryReadPath verifies the secondary activity a host
+// supplies through WithSessionActivity reaches all three surfaces a client reads:
+// the status sweep's event, the SSE initial-sync snapshot (a reload repaints from
+// it, so a mark absent there disappears until the value next changes), and the
+// REST list. It also pins the no-source default: unset, both fields are zero,
+// which is the state every existing consumer stays in.
+func TestSessionActivityReachesEveryReadPath(t *testing.T) {
+	src := newActivitySource()
+	m := NewSessionManager(catFactory, WithSessionActivity(src.read))
+	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep() // drive the sweep by hand, deterministically
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	src.set(id, SessionActivity{State: ActivityWorking, Count: 2})
+
+	ev := eventFor(t, m.diffStatuses(), id)
+	if ev.Activity != ActivityWorking || ev.ActivityCount != 2 {
+		t.Errorf("status event Activity = %q count = %d, want %q / 2",
+			ev.Activity, ev.ActivityCount, ActivityWorking)
+	}
+
+	snapped := false
+	for _, sev := range m.snapshot() {
+		if sev.ID != id {
+			continue
+		}
+		snapped = true
+		if sev.Activity != ActivityWorking || sev.ActivityCount != 2 {
+			t.Errorf("snapshot Activity = %q count = %d, want %q / 2",
+				sev.Activity, sev.ActivityCount, ActivityWorking)
+		}
+	}
+	if !snapped {
+		t.Errorf("snapshot omitted session %s, so the fields it carries are unobservable", LogID(id))
+	}
+
+	listed := false
+	for _, info := range m.List() {
+		if info.ID != id {
+			continue
+		}
+		listed = true
+		if info.Activity != ActivityWorking || info.ActivityCount != 2 {
+			t.Errorf("List Activity = %q count = %d, want %q / 2",
+				info.Activity, info.ActivityCount, ActivityWorking)
+		}
+	}
+	if !listed {
+		t.Errorf("List omitted session %s", LogID(id))
+	}
+
+	// No source installed: the fields stay zero rather than inventing a state.
+	plain := NewSessionManager(catFactory)
+	t.Cleanup(func() { shutdownManager(t, plain) })
+	plain.stopSweep()
+	plainID, err := plain.Create()
+	if err != nil {
+		t.Fatalf("Create (no source): %v", err)
+	}
+	nilEv := eventFor(t, plain.diffStatuses(), plainID)
+	if nilEv.Activity != "" || nilEv.ActivityCount != 0 {
+		t.Errorf("with no activity source, status event Activity = %q count = %d, want \"\" / 0",
+			nilEv.Activity, nilEv.ActivityCount)
+	}
+}
+
+// TestSweepEmitsOnActivityChangeAlone is the emission proof: a secondary activity
+// change moves nothing else about the session — not its status, not a title, not
+// the percentage — so unless the sweep's change-detection conjunction has a
+// clause of its own for it, the value changes silently and a client's mark stays
+// at whatever it first saw. Deleting either clause (state or count) from
+// sweepSession must turn this red.
+func TestSweepEmitsOnActivityChangeAlone(t *testing.T) {
+	src := newActivitySource()
+	m := NewSessionManager(catFactory, WithSessionActivity(src.read))
+	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep()
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Settle: the first sweep emits because the status itself moves off "", then a
+	// quiet manager must emit nothing, or every assertion below is vacuous.
+	_ = eventFor(t, m.diffStatuses(), id)
+	if quiet := m.diffStatuses(); len(quiet) != 0 {
+		t.Fatalf("a quiet manager emitted %d events, want 0", len(quiet))
+	}
+
+	src.set(id, SessionActivity{State: ActivityInput, Count: 1})
+	if ev := eventFor(t, m.diffStatuses(), id); ev.Activity != ActivityInput {
+		t.Errorf("after the state appeared, event Activity = %q, want %q", ev.Activity, ActivityInput)
+	}
+	if quiet := m.diffStatuses(); len(quiet) != 0 {
+		t.Errorf("the sweep after the change emitted %d events, want 0 (the value was not recorded as delivered)",
+			len(quiet))
+	}
+
+	// The COUNT alone: same state, more sources. Without its own clause the tally
+	// a client renders is stuck at 1 for the life of the run.
+	src.set(id, SessionActivity{State: ActivityInput, Count: 3})
+	if ev := eventFor(t, m.diffStatuses(), id); ev.ActivityCount != 3 {
+		t.Errorf("after the count changed, event ActivityCount = %d, want 3", ev.ActivityCount)
+	}
+
+	// Withdrawal is a change too: the host stops reporting, and the mark has to be
+	// told to go away.
+	src.set(id, SessionActivity{})
+	ev := eventFor(t, m.diffStatuses(), id)
+	if ev.Activity != "" || ev.ActivityCount != 0 {
+		t.Errorf("after withdrawal, event Activity = %q count = %d, want \"\" / 0",
+			ev.Activity, ev.ActivityCount)
+	}
+}
+
+// TestRemovedEventCarriesNoActivity verifies a removed session reports no
+// secondary activity. The session is gone, so there is nothing left to be busy;
+// carrying the last value would leave a client that reads the fields before it
+// checks Removed painting a mark on a tab it is about to drop.
+func TestRemovedEventCarriesNoActivity(t *testing.T) {
+	src := newActivitySource()
+	m := NewSessionManager(catFactory, WithSessionActivity(src.read))
+	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep()
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	src.set(id, SessionActivity{State: ActivityWorking, Count: 1})
+	if ev := eventFor(t, m.diffStatuses(), id); ev.Activity != ActivityWorking {
+		t.Fatalf("precondition: event Activity = %q, want %q", ev.Activity, ActivityWorking)
+	}
+
+	if !m.Close(id) {
+		t.Fatalf("Close(%s) = false, want true", LogID(id))
+	}
+	ev := eventFor(t, m.diffStatuses(), id)
+	// The removal marker first, or the assertions below pass on a live event.
+	if !ev.Removed {
+		t.Fatalf("event for the closed session has Removed = false, want true")
+	}
+	if ev.Activity != "" || ev.ActivityCount != 0 {
+		t.Errorf("removed event Activity = %q count = %d, want \"\" / 0",
+			ev.Activity, ev.ActivityCount)
+	}
 }

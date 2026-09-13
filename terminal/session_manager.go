@@ -87,6 +87,9 @@ type SessionInfo struct {
 	// rather than only seeing its effect.
 	PinnedTitle string `json:"pinnedTitle"`
 	Status      string `json:"status"`
+	// Activity is the session's SECONDARY activity state ("" when none), carried
+	// beside Status and never merged into it. See SessionActivity.
+	Activity string `json:"activity"`
 	// Order is the session's position in the display order every viewer shares:
 	// 0-based, dense, and unique across the live set. It exists because the
 	// order is a property of the SESSION SET rather than of one browser, so two
@@ -105,7 +108,10 @@ type SessionInfo struct {
 	// absent and present-and-zero are different answers, and 0 is the FRONT of the
 	// strip, so a consumer that read 0 there would be told a closing session had
 	// just become the first tab.
-	Order           int  `json:"order"`
+	Order int `json:"order"`
+	// ActivityCount is how many sources produced Activity: >= 1 whenever Activity
+	// is non-empty, 0 when it is empty or the host does not count.
+	ActivityCount   int  `json:"activityCount"`
 	ReportsActivity bool `json:"reportsActivity"`
 }
 
@@ -140,6 +146,23 @@ const (
 	StatusWarning = "warning"
 )
 
+// Secondary activity states: a host-reported background activity that OUTLIVES
+// the turn, orthogonal to Status. Generic on purpose — the engine has no concept
+// of what produces one.
+const (
+	ActivityWorking = "working" // a background task is running
+	ActivityWaiting = "waiting" // stopped and resumable; nobody is being asked
+	ActivityInput   = "input"   // a background task is blocked on the user
+)
+
+// SessionActivity is a session's secondary activity: the folded state ("" for
+// none) and how many sources produced it (0 when the host does not count).
+// Count is >= 1 whenever State is non-empty.
+type SessionActivity struct {
+	State string
+	Count int
+}
+
 // ManagerOption configures a SessionManager.
 type ManagerOption func(*managerConfig)
 
@@ -147,6 +170,7 @@ type managerConfig struct {
 	logger       *slog.Logger
 	originPolicy *OriginPolicy
 	classifier   func(string) (string, bool)
+	activity     func(SessionID) SessionActivity
 	idleWindow   time.Duration
 }
 
@@ -184,6 +208,17 @@ func WithManagerOriginPolicy(p *OriginPolicy) ManagerOption {
 // process waits) until the turn resumes or a done message clears it.
 func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
 	return func(c *managerConfig) { c.classifier = fn }
+}
+
+// WithSessionActivity supplies a per-session SECONDARY activity state, carried
+// to clients beside Status and never merged into it. The engine PULLS: fn is
+// called once per session on each status sweep, on each List (GET
+// /api/sessions), and on each new SSE subscriber's initial sync — different
+// goroutines, so it must be SAFE FOR CONCURRENT USE, must not block and must not
+// perform I/O. Return the zero SessionActivity for a session with none; unset
+// (the default) leaves every session's activity empty.
+func WithSessionActivity(fn func(id SessionID) SessionActivity) ManagerOption {
+	return func(c *managerConfig) { c.activity = fn }
 }
 
 // Field order is pointer-scan optimal (govet fieldalignment): the struct ends
@@ -257,6 +292,10 @@ type SessionManager struct {
 	trackers     map[SessionID]*statusTracker
 	subs         map[chan statusEvent]struct{}
 	classifier   func(string) (string, bool)
+	// activity is the consumer's source (nil when unset). Set once in
+	// NewSessionManager and never mutated, which is what makes the lock-free read
+	// in diffStatuses phase 2 safe.
+	activity     func(SessionID) SessionActivity
 	reaperCancel context.CancelFunc
 	sweepCancel  context.CancelFunc
 	// loopsDone closes once reapLoop and sweepLoop have both returned, so
@@ -314,6 +353,7 @@ func NewSessionManager(factory func(id SessionID) *Handler, opts ...ManagerOptio
 		trackers:     make(map[SessionID]*statusTracker),
 		subs:         make(map[chan statusEvent]struct{}),
 		classifier:   cfg.classifier,
+		activity:     cfg.activity,
 		idleSince:    time.Now(),
 		idleWindow:   cfg.idleWindow,
 	}
@@ -550,6 +590,17 @@ func (m *SessionManager) SetSessionOrder(ids []SessionID) bool {
 	return true
 }
 
+// sessionActivity reads the WithSessionActivity source for id, or the zero value
+// when none is installed. Call it only where m.mu is NOT held: the source is
+// consumer code, and holding the manager lock across it would let one slow
+// callback stall every manager path.
+func (m *SessionManager) sessionActivity(id SessionID) SessionActivity {
+	if m.activity == nil {
+		return SessionActivity{}
+	}
+	return m.activity(id)
+}
+
 // List returns all sessions in compareSessionOrder: the shared display order,
 // then oldest first, then id.
 //
@@ -602,7 +653,12 @@ func (m *SessionManager) List() []SessionInfo {
 		})
 		// reportsActivity mirrors the status stream: sticky once any OSC 9;4
 		// progress has been seen (Progress() >= 0), or a notification latched.
+		// The secondary activity below is deliberately NOT an input here: folding
+		// it in would reveal the PRIMARY dot for a background task.
 		it.info.ReportsActivity = it.handler.Progress() >= 0 || it.latched
+		act := m.sessionActivity(it.info.ID)
+		it.info.Activity = act.State
+		it.info.ActivityCount = act.Count
 	}
 	slices.SortFunc(items, func(a, b listItem) int {
 		return compareSessionOrder(

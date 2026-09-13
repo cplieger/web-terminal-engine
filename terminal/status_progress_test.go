@@ -379,3 +379,81 @@ func TestDiffStatusesEmitsOnProgressValueChange(t *testing.T) {
 		t.Errorf("advanced value: event ProgressValue = %d, want 60", ev.ProgressValue)
 	}
 }
+
+// TestSessionActivityIsOrthogonalToStatus pins the two invariants nothing
+// structural enforces, because the secondary activity shares a struct and a
+// vocabulary with the turn status and a later edit could easily fold one into the
+// other.
+//
+// It must not enter computeStatus's five-level precedence and must not touch
+// tracker.latched: the state a host reports about a BACKGROUND task says nothing
+// about whose turn it is, so a run blocked on the user must not make the tab
+// claim the turn is blocked. And it must not feed ReportsActivity, which is the
+// PRIMARY dot's reveal gate — revealing that dot for a background task is exactly
+// the compounding a second, independent mark exists to avoid.
+//
+// The source is pinned at "input", the most attention-seeking secondary state,
+// for every stage.
+func TestSessionActivityIsOrthogonalToStatus(t *testing.T) {
+	src := newActivitySource()
+	m := NewSessionManager(catFactory,
+		WithStatusClassifier(inputClassifier), WithSessionActivity(src.read))
+	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep()
+
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	src.set(id, SessionActivity{State: ActivityInput, Count: 2})
+	h := handlerOf(t, m, id)
+
+	// A session that has emitted no OSC 9 at all. Its turn is at rest and its
+	// primary dot is hidden, whatever the host reports beside it.
+	ev := eventFor(t, m.diffStatuses(), id)
+	if ev.Status != StatusIdle {
+		t.Errorf("with a secondary %q and no OSC 9, event Status = %q, want %q",
+			ActivityInput, ev.Status, StatusIdle)
+	}
+	if ev.ReportsActivity {
+		t.Errorf("with a secondary %q and no OSC 9, event ReportsActivity = true, want false "+
+			"(the secondary state must not reveal the primary dot)", ActivityInput)
+	}
+	if tr := trackerOf(t, m, id); tr.latched != "" {
+		t.Errorf("with a secondary %q, tracker.latched = %q, want \"\"", ActivityInput, tr.latched)
+	}
+	if ev.Activity != ActivityInput {
+		t.Fatalf("event Activity = %q, want %q; the source is not reaching the sweep, so "+
+			"every assertion here is vacuous", ev.Activity, ActivityInput)
+	}
+
+	// A turn finishes. The done latch is the turn's own answer and outranks
+	// nothing here: both values stand side by side.
+	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
+	ev = eventFor(t, m.diffStatuses(), id)
+	if ev.Status != StatusDone {
+		t.Errorf("after a done notification, event Status = %q, want %q (the secondary state "+
+			"must not win the turn status)", ev.Status, StatusDone)
+	}
+	if tr := trackerOf(t, m, id); tr.latched != StatusDone {
+		t.Errorf("after a done notification, tracker.latched = %q, want %q", tr.latched, StatusDone)
+	}
+	if ev.Activity != ActivityInput || ev.ActivityCount != 2 {
+		t.Errorf("after a done notification, event Activity = %q count = %d, want %q / 2 "+
+			"(the turn status must not clear the secondary state)", ev.Activity, ev.ActivityCount, ActivityInput)
+	}
+
+	// The next turn starts working. The progress channel clears the latch as it
+	// always does, and still does not touch the secondary state.
+	h.handlePTYData([]byte("\x1b]9;4;3\x07"))
+	ev = eventFor(t, m.diffStatuses(), id)
+	if ev.Status != StatusWorking {
+		t.Errorf("after resume progress, event Status = %q, want %q", ev.Status, StatusWorking)
+	}
+	if tr := trackerOf(t, m, id); tr.latched != "" {
+		t.Errorf("after resume progress, tracker.latched = %q, want \"\"", tr.latched)
+	}
+	if ev.Activity != ActivityInput {
+		t.Errorf("after resume progress, event Activity = %q, want %q", ev.Activity, ActivityInput)
+	}
+}

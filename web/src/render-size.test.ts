@@ -245,3 +245,45 @@ describe("replayMaxForResume bounds the resume replay", () => {
     expect(render.replayMaxForResume()).toBe(90);
   });
 });
+
+describe("a frame at the size this client announced fits the box it measured", () => {
+  it("renders no row wider than the content box computeSize divided", () => {
+    // A 505x300 padding box with 10px on every side leaves a 485x280 content
+    // box; at the stub's 8px cell and the element's 17px line that is 60 columns
+    // and 16 rows (485/8 = 60.625, and a partial column is not a column). 505
+    // rather than 500 so the division does NOT come out even: an exact one would
+    // hide a Math.floor -> Math.ceil regression.
+    attachSized({ clientWidth: 505, clientHeight: 300, padding: "10px" });
+    const { cols, rows } = render.computeSize();
+
+    // ASCII only: a wide glyph's spacer cell is consumed in the DOM, so a
+    // text-length measure would undercount its columns.
+    const content: WireRun[][] = [];
+    const changed: number[] = [];
+    for (let i = 0; i < rows; i++) {
+      content.push([{ t: "M".repeat(cols), f: -1, b: -1, a: 0, uc: -1 }]);
+      changed.push(i);
+    }
+    const msg: ScreenMessage = {
+      type: "screen",
+      base: 0,
+      rows: content,
+      cursor: [0, 0],
+      changed,
+      cursorHidden: true,
+      cursorStyle: 0,
+      cursorBlink: false,
+    };
+    render.handleScreen(msg);
+
+    const widths = Array.from(
+      output.querySelectorAll(".term-row"),
+      (el) => [...(el.textContent ?? "")].length,
+    );
+
+    expect(widths).toEqual(new Array(rows).fill(cols));
+    // 485 is stated rather than read back out of computeSize(), so the
+    // expectation cannot follow the production formula wherever it goes.
+    expect(cols * render.cellSize().width).toBeLessThanOrEqual(485);
+  });
+});

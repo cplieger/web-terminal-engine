@@ -11,12 +11,14 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
 	"github.com/cplieger/web-terminal-engine/v5/vt"
+	"github.com/creack/pty"
 )
 
 // waitPatience bounds every test-owned poll in this package: how long a test
@@ -502,6 +504,74 @@ func TestApplySize_sizeChangeArmsRedrawSettle(t *testing.T) {
 	if !afterSame.IsZero() {
 		t.Errorf("same-size resize after settle: redrawHoldUntil = %v, want zero", afterSame)
 	}
+}
+
+// TestApplySize_ptyAndScreenAgreeOnTheAppliedSize reads the ptmx winsize back
+// and pins it against the VT screen's own dimensions, on both outcomes of the
+// TIOCSWINSZ. The screen models what the child paints and the child's width
+// comes from TIOCGWINSZ on the PTY, so a screen that disagrees with its PTY is
+// a session rendering at a width nothing on the wire is written for — and on a
+// shrink vt.Screen.resizeWidth drops each row's tail, so the disagreement
+// destroys output rather than merely misplacing it. Nothing else in the package
+// reads the PTY back, which is what let a failed ioctl move the screen anyway.
+func TestApplySize_ptyAndScreenAgreeOnTheAppliedSize(t *testing.T) {
+	t.Run("applied", func(t *testing.T) {
+		h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+		defer h.Close()
+
+		// The first resize starts the process, so pty.StartWithSize sets the
+		// winsize and pty.Setsize is never exercised. The second is the one
+		// under test.
+		h.handleResize(&clientState{}, 100, 40)
+		h.handleResize(&clientState{}, 90, 30)
+
+		h.mu.Lock()
+		ws, err := pty.GetsizeFull(h.ptmx)
+		screenW, screenH := h.screen.Width, h.screen.Height
+		h.mu.Unlock()
+		if err != nil {
+			t.Fatalf("Setup: pty.GetsizeFull(h.ptmx): %v", err)
+		}
+
+		if int(ws.Cols) != screenW || int(ws.Rows) != screenH {
+			t.Errorf("after handleResize(90, 30): pty winsize = %dx%d, screen = %dx%d, want them equal",
+				ws.Cols, ws.Rows, screenW, screenH)
+		}
+		// Agreement alone would also hold with both sides stuck at the size the
+		// first resize seeded.
+		if int(ws.Cols) != 90 || int(ws.Rows) != 30 {
+			t.Errorf("after handleResize(90, 30): pty winsize = %dx%d, want 90x30", ws.Cols, ws.Rows)
+		}
+	})
+
+	t.Run("refused", func(t *testing.T) {
+		// Hand-built state: applySize reads h.ptmx under h.mu but readLoop reads
+		// it without the lock, so swapping the field on a started handler is a
+		// data race. An ioctl on a regular file returns ENOTTY.
+		h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
+		defer h.Close()
+
+		notATTY, err := os.Create(filepath.Join(t.TempDir(), "notatty"))
+		if err != nil {
+			t.Fatalf("Setup: os.Create: %v", err)
+		}
+
+		h.mu.Lock()
+		h.ptmx = notATTY
+		wantW, wantH := h.screen.Width, h.screen.Height
+		h.mu.Unlock()
+		h.started.Store(true)
+
+		h.applySize(100, 40, "test")
+
+		h.mu.Lock()
+		gotW, gotH := h.screen.Width, h.screen.Height
+		h.mu.Unlock()
+		if gotW != wantW || gotH != wantH {
+			t.Errorf("applySize(100, 40) with a PTY that cannot take the ioctl: screen = %dx%d, want %dx%d unchanged",
+				gotW, gotH, wantW, wantH)
+		}
+	})
 }
 
 // TestRedrawSettle_ESUDoesNotRelease pins the regression that motivated the

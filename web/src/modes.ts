@@ -11,7 +11,6 @@
 //   - paste handling: wraps in \e[200~..\e[201~ only when
 //     bracketedPaste is on; otherwise sends raw text.
 //   - mouse.ts: encodes mouse events only when mouseMode > 0.
-//   - focus reporting: sends ESC[I / ESC[O when focusReporting is on.
 //
 // Defaults: bracketedPaste starts true because most modern shells
 // (bash 4.4+, zsh, fish) enable it immediately on startup via

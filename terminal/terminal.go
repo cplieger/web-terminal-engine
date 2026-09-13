@@ -41,9 +41,15 @@ import (
 )
 
 const (
-	wsReadLimit   = 64 * 1024
-	ptyReadBuf    = 4096
-	defaultCols   = 120
+	wsReadLimit = 64 * 1024
+	ptyReadBuf  = 4096
+	// defaultCols is the width a session is spawned at before any client has said
+	// how wide it is, and it is the FLOOR of what a client may ask for on purpose:
+	// too wide and the excess renders past the viewport's right edge, where
+	// overflow-x: hidden and white-space: pre clip it unreachably; too narrow and
+	// the child merely wraps early, losing nothing. Keep it at or below
+	// minResizeCols so the spawn width can never exceed a real client's.
+	defaultCols   = minResizeCols
 	defaultRows   = 30
 	flushInterval = 50 * time.Millisecond
 
@@ -2754,13 +2760,22 @@ func (h *Handler) applySize(cols, rows int, reason string) {
 	// passes MinLiveSize values). Idempotent for the live path, which already
 	// clamped in handleResize.
 	cols, rows = clampResize(cols, rows)
-	sizeChanged := cols != h.screen.Width || rows != h.screen.Height
 	if err := pty.Setsize(h.ptmx, &pty.Winsize{
 		// #nosec G115 -- clampResize bounds cols/rows to [minResize, maxResize<=1000], >0, just above; no uint16 overflow. gosec can't see through the helper.
 		Cols: uint16(cols), Rows: uint16(rows),
 	}); err != nil {
-		h.cfg.logger.Debug("terminal: resize", "error", err)
+		// The PTY keeps the winsize it had, so the child never learns the new one
+		// and keeps painting at the width it last read. Moving the screen anyway
+		// models a width nothing on the wire is written for, and a width shrink
+		// DROPS each row's tail (vt.Screen.resizeWidth), so the disagreement
+		// destroys output.
+		h.cfg.logger.Warn("terminal: "+reason+" not applied",
+			"error", err,
+			"cols", h.screen.Width, "rows", h.screen.Height,
+			"requested_cols", cols, "requested_rows", rows)
+		return
 	}
+	sizeChanged := cols != h.screen.Width || rows != h.screen.Height
 	h.screen.Resize(rows, cols)
 	if sizeChanged {
 		h.armRedrawSettle(time.Now())

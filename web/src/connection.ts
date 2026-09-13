@@ -334,14 +334,6 @@ let clientFocused = false;
  */
 let focusReported: boolean | null = null;
 
-/**
- * The 1004 state last seen in a modes frame on this socket, for the fallback
- * path's enable-edge detection. Per socket: a fresh socket is re-announced its
- * modes, and the edge has to be detected against nothing rather than against the
- * previous socket's last value.
- */
-let lastFocusReportingSeen = false;
-
 /** WebSocket.OPEN. Spelled out because a test's fake constructor has no statics. */
 const WS_OPEN = 1;
 
@@ -362,17 +354,16 @@ function clearHistoryTimers(): void {
 /**
  * Reset everything a new socket must not inherit: the fetch state (capability,
  * single-flight, pacing and the adaptive budget), the declared server
- * capabilities, and the focus reporting latches. All of it goes together,
- * atomically. Splitting them is how a client ends up paging against a server
- * that never declared it, bursting into a depleted server bucket, or holding a
- * focus report back from the new socket as a repeat of what the old one was told.
+ * capabilities, and the focus latch. All of it goes together, atomically.
+ * Splitting them is how a client ends up paging against a server that never
+ * declared it, bursting into a depleted server bucket, or holding a focus report
+ * back from the new socket as a repeat of what the old one was told.
  */
 function resetForNewSocket(): void {
   clearHistoryTimers();
   history = newHistoryState();
   caps = { ephemeralInput: false, serverFocus: false };
   focusReported = null;
-  lastFocusReportingSeen = false;
 }
 
 /**
@@ -727,35 +718,29 @@ export function sendEphemeral(text: string): boolean {
  * while no socket is live is dropped rather than queued, and a reconnect
  * re-asserts the current one. Where the server declared `serverFocus` this sends
  * the `focus` control and the server derives the DEC 1004 answer for the whole
- * session; otherwise the client writes the legacy CSI I / CSI O itself, and only
- * while the application has 1004 enabled.
+ * session; where it did not, the report is dropped.
  */
 export function setClientFocus(focused: boolean): void {
   clientFocused = focused;
   if (connState.status !== "connected") {
-    // A focus report is never QUEUED. The fallback path below writes through the
-    // RELIABLE outbox, so a report made while the socket is down would be
-    // retransmitted on reconnect and re-assert a focus the widget may since have
-    // lost, which is the replay this whole derivation exists to remove. Nothing
-    // is lost by dropping it: both the resumeAck and the 1004 enable edge
-    // re-report the current value on the new socket.
+    // Focus is STATE, so a report with no socket to carry it is DROPPED rather
+    // than held: the widget's value may change again before the next socket
+    // exists, and a held report would assert a focus it may since have lost.
+    // Nothing is lost by dropping it — the resumeAck re-reports the current
+    // value on the new socket.
+    return;
+  }
+  if (!caps.serverFocus || !connState.upgraded) {
+    // A server that does not derive the answer gets NO report, because the client
+    // never writes the DEC 1004 bytes itself. Nothing is lost by dropping it: the
+    // resumeAck re-reports the current value once the capabilities are known.
     return;
   }
   if (focused === focusReported) {
     return;
   }
   focusReported = focused;
-  if (caps.serverFocus && connState.upgraded) {
-    sendControl({ type: "focus", focused });
-    return;
-  }
-  if (!modes.isFocusReporting()) {
-    return;
-  }
-  // The legacy path, and it rides the RELIABLE outbox: a focus report can be
-  // retransmitted after a blip, re-asserting a state that may no longer be true.
-  // That is one of the things the server-owned path fixes.
-  sendBinary(ephemeralEncoder.encode(focused ? "\x1b[I" : "\x1b[O"));
+  sendControl({ type: "focus", focused });
 }
 
 function sendControl(msg: ControlMessage): void {
@@ -1766,18 +1751,6 @@ export function connect(): void {
       };
       st.modes = snap;
       modes.applySnapshot(snap);
-      if (!caps.serverFocus) {
-        // The 1004 ENABLE edge on the fallback path. An application that enables
-        // focus reporting while the tab is already focused otherwise gets nothing
-        // until the user clicks away; xterm.js's _reportFocus reports the current
-        // state at that instant, and this client did not.
-        const rising = msg.focusReporting && !lastFocusReportingSeen;
-        lastFocusReportingSeen = msg.focusReporting;
-        if (rising) {
-          focusReported = null;
-          setClientFocus(clientFocused);
-        }
-      }
       if (typeof msg.inputAck === "number") {
         applyAck(st, msg.inputAck);
       }

@@ -230,8 +230,9 @@ const (
 	// `resize` it is a property of the attached viewer folded into session state;
 	// the server derives the DEC 1004 answer from every client's report (see
 	// focusReportLocked). Honored only by a server that declares
-	// resumeAckFlagServerFocus, so an older one leaves the client writing the
-	// legacy focus bytes itself.
+	// resumeAckFlagServerFocus; against an older one the client DROPS the report
+	// rather than writing the focus bytes itself, so a session's answer is always
+	// one party's to give.
 	ctlTypeFocus = "focus"
 	// ctlTypeEphemeralInput carries BEST-EFFORT input the server does not count
 	// against the resume ledger (see ephemeralInputControl). Declared with

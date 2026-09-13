@@ -16,8 +16,9 @@
 //
 // Refusing to send on a dead socket is what xterm.js's AttachAddon does (returns
 // false rather than sending) and what ttyd does (returns early unless the socket
-// is open). Reporting the current focus when an application ENABLES DEC 1004 is
-// what xterm.js's _reportFocus does.
+// is open). Focus is the other way around: the client writes no DEC 1004 bytes at
+// all, so the wire assertions for it are assertions of ABSENCE, and the ledger
+// counter is what makes an absence observable rather than merely unasserted.
 //
 // Drives the REAL connection module with a fake global WebSocket, the same shape
 // connection-outbox.test.ts uses.
@@ -351,67 +352,63 @@ describe("connection: who reports focus", () => {
     expect(controlsOfType(next, "focus")).toEqual([{ type: "focus", focused: true }]);
   });
 
-  it("writes the legacy DEC 1004 bytes when the server declared nothing", () => {
+  it("writes no DEC 1004 bytes where the server declared no capability", () => {
+    // The pre-5.1.0 server: no `serverFocus` bit, and the application has 1004
+    // enabled, so the removed fallback would have written the bytes right here.
     const sock = openSession(0);
     sock.fireMessage(modesFrame({ focusReporting: true }));
-    const beforeFocusIn = inputSent(sock).length;
 
     setClientFocus(true);
+    setClientFocus(false);
 
     expect(controlsOfType(sock, "focus")).toEqual([]);
-    expect(inputSent(sock).slice(beforeFocusIn)).toEqual(["\x1b[I"]);
-    setClientFocus(false);
-    expect(inputSent(sock).slice(beforeFocusIn)).toEqual(["\x1b[I", "\x1b[O"]);
-  });
-
-  it("writes nothing on the legacy path while the application has 1004 off", () => {
-    const sock = openSession(0);
-    sock.fireMessage(modesFrame({ focusReporting: false }));
-
-    setClientFocus(true);
-
     expect(inputSent(sock)).toEqual([]);
+    // The COUNTER too, not just the absent frame: a byte written here would ride
+    // the RELIABLE outbox, so it would also be retransmitted after a blip.
+    const next = reconnectAcking(0, 0);
+    expect(resumeSentBytes(next)).toBe(0);
   });
 
-  it("reports the current focus on the 1004 enable edge (the legacy path)", () => {
-    // An application that enables focus reporting while the tab is ALREADY
-    // focused otherwise learns nothing until the user clicks away.
-    const sock = openSession(0);
+  it("writes no DEC 1004 bytes in the window before the resumeAck lands", () => {
+    // The window a MATCHED server still has: `resetForNewSocket` clears the
+    // declared capabilities, and the socket is `connected` a full round trip
+    // before the resumeAck restores them. The modes singleton is per PAGE rather
+    // than per socket, so it still reads 1004-enabled from the previous socket
+    // — which is exactly why "capability unknown" must not be read as
+    // "capability absent" and answered with a byte.
+    openSession(ACK_FLAG_SERVER_FOCUS);
+    sockets[sockets.length - 1]!.fireMessage(modesFrame({ focusReporting: true }));
+    expect(modes.isFocusReporting()).toBe(true);
+    reconnectNow();
+    const pending = sockets[sockets.length - 1]!;
+    pending.fireOpen(); // connected, and the ack has NOT arrived
+
     setClientFocus(true);
-    expect(inputSent(sock)).toEqual([]); // 1004 still off: nothing to say
 
-    sock.fireMessage(modesFrame({ focusReporting: true }));
+    expect(inputSent(pending)).toEqual([]);
+    expect(controlsOfType(pending, "focus")).toEqual([]);
 
-    expect(inputSent(sock)).toEqual(["\x1b[I"]);
+    // And dropping it is lossless: the ack re-reports the current value once the
+    // real capabilities are known.
+    pending.fireMessage(resumeAckFrame({ flags: ACK_FLAG_SERVER_FOCUS }));
+    expect(controlsOfType(pending, "focus")).toEqual([{ type: "focus", focused: true }]);
   });
 
-  it("does not re-report when a modes frame repeats an already-enabled 1004", () => {
-    const sock = openSession(0);
-    sock.fireMessage(modesFrame({ focusReporting: true }));
-    const afterEnable = inputSent(sock).length;
-
-    sock.fireMessage(modesFrame({ focusReporting: true }));
-
-    expect(inputSent(sock).length).toBe(afterEnable);
-  });
-
-  it("queues no focus report while the socket is down", () => {
-    // Focus is STATE. The legacy write goes through the RELIABLE outbox, so a
-    // report made while the socket is down would be retransmitted on reconnect
-    // and assert a focus the widget may since have lost. Assert the COUNTER: the
-    // dropped report must add no outbox entry, and the new socket is told the
-    // current value by the resume instead.
-    const sock = openSession(0);
-    sock.fireMessage(modesFrame({ focusReporting: true }));
+  it("records a focus change made while the socket is down and re-asserts the latest", () => {
+    // Focus is STATE, so a report with no socket to carry it is DROPPED rather
+    // than held — but the VALUE is still recorded, and the next socket is told
+    // the current one. Assert the value, because that is what a lost `focus`
+    // control would silently invert: the new server would derive its answer from
+    // the state before the user clicked away.
+    openSession(ACK_FLAG_SERVER_FOCUS);
     setClientFocus(true);
     disconnect();
 
     setClientFocus(false); // the user clicks away with no socket to say it on
 
-    const next = reconnectAcking(0, 0);
-    // Two 3-byte reports were written while connected (the resume's own, then
-    // the focus-in); a queued third would make this 9.
-    expect(resumeSentBytes(next)).toBe(6);
+    const next = reconnectAcking(0, ACK_FLAG_SERVER_FOCUS);
+    expect(controlsOfType(next, "focus")).toEqual([{ type: "focus", focused: false }]);
+    expect(inputSent(next)).toEqual([]);
   });
 });
 

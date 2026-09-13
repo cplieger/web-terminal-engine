@@ -186,8 +186,9 @@ const (
 	// declaration) and honors the `focus` control. The client reports its
 	// terminal widget's focus with that control and writes no focus bytes of its
 	// own. An unset bit (or a server too old to carry the length-gated tail)
-	// reads as unsupported: the client keeps writing CSI I / CSI O as ordinary
-	// PTY input while the application has 1004 enabled.
+	// reads as unsupported: the client still writes no focus bytes, it simply
+	// DROPS the report, because a client-written CSI I would override a
+	// keep-unfocused policy it cannot see.
 	resumeAckFlagServerFocus byte = 1 << 2
 
 	// resumeAckFlagEphemeralInput is bit3 of the resumeAck ackFlags byte: the

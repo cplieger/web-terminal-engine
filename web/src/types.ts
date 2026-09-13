@@ -122,10 +122,12 @@ export interface ResumeAckMessage {
   /**
    * The server DECLARES that it owns DEC 1004 focus for this session: it derives
    * the answer from attachment state, every attached client's reported focus and
-   * its own keep-unfocused declaration, and honors the `focus` control. Report
-   * the terminal widget's focus with `connection.setClientFocus` and write no
-   * focus bytes. Absent (or false) means the server does not, and the client
-   * writes CSI I / CSI O itself while the application has 1004 enabled.
+   * its own keep-unfocused declaration, and honors the `focus` control. Absent
+   * (or false) means the server does not, and the report is DROPPED — the client
+   * writes no focus bytes in either case, because one client cannot answer for a
+   * session two devices may be attached to and a client-written CSI I would
+   * override a keep-unfocused policy it cannot see. Report the terminal widget's
+   * focus with `connection.setClientFocus` regardless of this bit.
    */
   serverFocus?: boolean;
   /**

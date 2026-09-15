@@ -309,6 +309,36 @@ function rowEqual(a: WireRun[], b: WireRun[]): boolean {
   return true;
 }
 
+/**
+ * The client's model of one terminal: lines keyed by absolute index, the live
+ * screen window sliding along the tail, and the change set a renderer drains each
+ * frame. Holds no DOM and reads no globals, so a consumer may own several (one
+ * per tab) and bind whichever is visible.
+ *
+ * Applying is idempotent by absolute index, which is what makes re-delivery —
+ * resume replay, a doubled frame from a zombie socket — incapable of duplicating
+ * a row. The apply methods enforce the store's invariants themselves and refuse
+ * rather than throw: a frame that violates one is dropped, so a malformed or
+ * misordered stream degrades to missing content, never to an exception in the
+ * middle of a render. A drop is not reported either, so a caller that needs to
+ * know what the store holds asks it (oldestIndex, highestIndex, retainedRanges)
+ * instead of tracking what it sent.
+ *
+ * What the caller must hold up:
+ *
+ * - Feed the store every frame the server sends, in arrival order, and pass
+ *   `viewportAbs`/`following` where a method asks for them. The store never
+ *   infers where the reader is; the renderer is the only layer that knows.
+ * - Drain with drainChanges once per frame and apply the result. Nothing is
+ *   re-reported, so a skipped drain loses the notification, not the content.
+ * - Treat every reader (getLine, forEachLine, getAltRows) as a view onto live
+ *   state: the runs are the store's own, valid until the next apply, and are not
+ *   to be mutated.
+ *
+ * Residency is a HISTORY budget floored at the live window, so a small cap keeps
+ * the full screen and simply retains no scrollback; the constructor documents the
+ * difference between supplying one and letting the engine choose.
+ */
 export class LineStore {
   private lines = new Map<number, WireRun[]>();
   private oldest = -1; // lowest retained absolute index (-1 = empty)

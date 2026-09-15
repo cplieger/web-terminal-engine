@@ -139,6 +139,11 @@ export interface EventSourceLike {
 /** EventSourceFactory builds an EventSourceLike for a URL. */
 export type EventSourceFactory = (url: string) => EventSourceLike;
 
+/** StatusStream is the handle connectStatusStream returns: the consumer's only
+ *  hold on a live stream, and close is the whole of it — everything else the
+ *  stream does is reported through the callbacks. Closing is final and there is
+ *  no reopen; it cancels a scheduled reconnect as well as the current stream, so
+ *  a consumer that wants status back calls connectStatusStream again. */
 export interface StatusStream {
   /** Closes the stream and stops reconnection. */
   close: () => void;

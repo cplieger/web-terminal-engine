@@ -1662,6 +1662,19 @@ function flushRenderInner(): void {
 // scrollTop belongs to `.term`, so any ABSOLUTE pixel value would need the
 // rowTopInTermWrap conversion and would be one padding off without it. A
 // difference cancels the space out.
+
+/**
+ * A saved reading position, in the only terms that survive the content growing
+ * underneath it: which line the reader had at the top of the viewport, where on
+ * screen that row sat, and whether they were following the tail.
+ *
+ * Effectively opaque to the consumer — read one out of the renderer and hand the
+ * same value back to restore it; the fields are documented because JSR publishes
+ * them, not because a caller should compute one. A memory is only meaningful to
+ * the store it was taken from, since `abs` names a line in THAT index space, and
+ * a restore is re-asserted until the named row has been built rather than
+ * applied once.
+ */
 export interface ViewMemory {
   /** Absolute line index of the content row at the viewport top. */
   abs: number;

@@ -416,8 +416,18 @@ function loadOrCreateSessionId(): string {
   }
 }
 
-// Exported for unit testing of the RNG fallback. Not part of the
-// stable client API surface; callers use loadOrCreateSessionId.
+/**
+ * generateSessionId mints a fresh session id: a `crypto.randomUUID` where that
+ * exists, otherwise 16 CSPRNG bytes as hex (128 bits, the fallback for a
+ * non-secure-context origin). Throws when neither is available rather than
+ * falling back to a weaker source — the caller gets no id, not a guessable one.
+ *
+ * Never returns an id already in use: nothing here reads storage, so a caller
+ * that wants the tab's existing session must go through loadOrCreateSessionId.
+ *
+ * Exported for unit testing of the RNG fallback. Not part of the
+ * stable client API surface; callers use loadOrCreateSessionId.
+ */
 export function generateSessionId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -438,6 +448,30 @@ export function generateSessionId(): string {
   throw new Error("vterm: no cryptographically secure RNG available for session id");
 }
 
+/**
+ * Callbacks is everything this module needs from its consumer, handed to init
+ * once. Four members are required because no other layer can answer them: where
+ * a decoded frame goes (onMessage), the two socket-lifecycle edges the UI has to
+ * reflect (onOpen, onClose), and the terminal's current geometry (computeSize,
+ * which must return integer cols/rows > 0 — the server FLOORS an out-of-range
+ * resize rather than dropping it).
+ *
+ * The optional members are two different kinds. The notifications
+ * (onConnecting, onOutboxFull, onProcessExit, onServerRestart, the two wire
+ * callbacks) each change what the module DOES when wired, and every one says how
+ * in its own comment; absence is the documented legacy treatment, never a
+ * failure. The resume and history members (getHaveThrough, getReplayMax,
+ * onResumeTransition, onResumeBounds, onHistoryReply, noteSolicited,
+ * clearSolicited, onHistoryRetry) are engine-owned — supply nothing and the
+ * renderer answers them itself (engineDefaults below). getReplayMax is the one
+ * override that is expected.
+ *
+ * Every member is called, never captured: the module reads the current one at
+ * each event, so an implementation may depend on state that changes between
+ * calls (a bound store, a viewport in flight). A consumer callback that throws
+ * propagates out of the module's handler, with the single exception of
+ * initialSize, which is isolated (readInitialSize) because it runs mid-open.
+ */
 export interface Callbacks {
   onMessage(msg: ServerMessage): void;
   onOpen(): void;
@@ -603,6 +637,17 @@ function engineDefaults(): Partial<Callbacks> {
   };
 }
 
+/**
+ * init installs the consumer's callbacks and the WS path. It must run before
+ * connect/setSession, and before any sendBinary the consumer expects to reach a
+ * server — the module holds one set of callbacks for the whole page, so a second
+ * call REPLACES them rather than adding to them.
+ *
+ * `wsPath` is read here only, and only when present: a later init that omits it
+ * leaves the path an earlier one set, so an established socket's endpoint is not
+ * silently reinterpreted. Every other member is looked up per event, so a
+ * replacement takes effect on the next one without reconnecting.
+ */
 export function init(callbacks: Callbacks): void {
   // Consumer last: an explicit member wins, an absent one gets the engine's own.
   // The alternative, leaving them absent, is not neutral — the resume send reads
@@ -788,6 +833,19 @@ function readInitialSize(): { cols: number; rows: number } | null {
   return { cols: size.cols, rows: size.rows };
 }
 
+/**
+ * sendResize measures the terminal through Callbacks.computeSize and announces
+ * it to the server. Call it whenever the geometry may have changed (a window
+ * resize, a font-metric update, the soft keyboard opening); it is cheap to call
+ * speculatively because a size equal to the last one SENT is dropped, and the
+ * consumer therefore needs no dedup of its own.
+ *
+ * A no-op when no socket is connected, and the size is not queued for later. A
+ * fresh socket clears the dedup baseline as it opens, so the consumer's next
+ * call after a reconnect always goes out; a consumer that can measure itself at
+ * that moment should wire Callbacks.initialSize instead, which is announced
+ * before the resume and therefore brings the snapshot back at this geometry.
+ */
 export function sendResize(): void {
   if (connState.status !== "connected" || !cb) {
     return;
@@ -988,6 +1046,21 @@ function teardown(): void {
   connState = { status: "disconnected" };
 }
 
+/**
+ * reconnectNow replaces whatever socket exists with a fresh one immediately,
+ * skipping the backoff schedule. This is the call for an event that says the
+ * transport may be stale even though it does not look it — a tab becoming
+ * visible, a pageshow, a device waking — because a socket the OS froze during
+ * sleep keeps reading OPEN while frames printed meanwhile never arrive.
+ *
+ * Safe to call in any state and at any rate: the resume protocol aligns by
+ * absolute line index, so reconnecting over a healthy socket costs one handshake
+ * and delivers no duplicate output. Per-session resume state (outbox, byte
+ * counters) survives, so unacked input is retransmitted rather than dropped.
+ *
+ * Refused, silently, once the peer has been ruled wire-incompatible: that
+ * verdict is terminal for the page and only an explicit disconnect clears it.
+ */
 export function reconnectNow(): void {
   if (connState.status === "incompatible") {
     return;
@@ -1320,6 +1393,22 @@ export function disconnect(): void {
   teardown();
 }
 
+/**
+ * connect opens the WebSocket and starts the module: after init, this is the one
+ * call a consumer needs, and everything that follows (backoff reconnects, the
+ * heartbeat, resume) is driven from here. It returns as soon as the socket is
+ * created — readiness is reported through Callbacks.onOpen, and a connect that
+ * never opens is failed by a 10s timeout that reports onClose and schedules a
+ * retry, so a caller never has to time it out itself.
+ *
+ * At most one socket exists per module, whatever the call pattern: an existing
+ * connecting/connected socket is aborted and closed, and a backoff reconnect
+ * already scheduled is cancelled, so a stray second call cannot leave two
+ * sockets delivering the same session's output twice. Resume state is untouched,
+ * so the new socket picks the session up where the old one left it.
+ *
+ * A no-op once the peer has been ruled wire-incompatible.
+ */
 export function connect(): void {
   if (connState.status === "incompatible") {
     return;

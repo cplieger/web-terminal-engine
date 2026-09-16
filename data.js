@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
   "lastUpdate": 1789518679290,
-  "repoUrl": "https://github.com/cplieger/ci",
+  "repoUrl": "https://github.com/cplieger/web-terminal-engine",
   "entries": {
     "Benchmark": [
       {
@@ -198,19 +198,19 @@ window.BENCHMARK_DATA = {
       {
         "commit": {
           "author": {
-            "name": "Christopher Plieger",
+            "name": "cplieger",
             "username": "cplieger",
             "email": "917744+cplieger@users.noreply.github.com"
           },
           "committer": {
-            "name": "GitHub",
-            "username": "web-flow",
-            "email": "noreply@github.com"
+            "name": "Christopher Plieger",
+            "username": "cplieger",
+            "email": "917744+cplieger@users.noreply.github.com"
           },
-          "id": "d34f4d66d9b0502ee912cd650306671ec71ff3d9",
-          "message": "chore(deps): update benchmark-action/github-action-benchmark action to v1.22.2 (#615)",
-          "timestamp": "2026-09-15T11:02:29Z",
-          "url": "https://github.com/cplieger/ci/commit/d34f4d66d9b0502ee912cd650306671ec71ff3d9"
+          "id": "8ccdc858da94b96ff6a3827d7dd451635f649e44",
+          "message": "docs: document the TS client's connection and store contracts\n\nDoc comments on the connection, index, render, status-stream and store modules.\nThe substantive additions record what a caller cannot infer from a signature:\nwhat `generateSessionId` falls back to and when it throws rather than returning\na weak id, and the store and render contracts around the absolute-index model.\n\nNo executable line changes.",
+          "timestamp": "2026-09-15T13:39:46Z",
+          "url": "https://github.com/cplieger/web-terminal-engine/commit/8ccdc858da94b96ff6a3827d7dd451635f649e44"
         },
         "date": 1789518678907,
         "tool": "customSmallerIsBetter",

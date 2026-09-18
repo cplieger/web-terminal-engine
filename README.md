@@ -1,10 +1,6 @@
 # web-terminal-engine
 
-[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal-engine/v5.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal-engine/v5)
-[![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-engine)](https://www.npmjs.com/package/@cplieger/web-terminal-engine)
-[![JSR](https://jsr.io/badges/@cplieger/web-terminal-engine)](https://jsr.io/@cplieger/web-terminal-engine)
-[![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/mutation.json)](https://github.com/cplieger/web-terminal-engine/issues?q=label%3Agremlins-tracker)
-[![Mutation (TS)](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/mutation-ts.json)](https://github.com/cplieger/web-terminal-engine/issues?q=label%3Astryker-tracker)
+[![Go Reference](https://pkg.go.dev/badge/github.com/cplieger/web-terminal-engine/v5.svg)](https://pkg.go.dev/github.com/cplieger/web-terminal-engine/v5) [![npm](https://img.shields.io/npm/v/@cplieger/web-terminal-engine)](https://www.npmjs.com/package/@cplieger/web-terminal-engine) [![JSR](https://jsr.io/badges/@cplieger/web-terminal-engine)](https://jsr.io/@cplieger/web-terminal-engine) [![Mutation](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/mutation.json)](https://github.com/cplieger/web-terminal-engine/issues?q=label%3Agremlins-tracker) [![Mutation (TS)](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/web-terminal-engine/badges/mutation-ts.json)](https://github.com/cplieger/web-terminal-engine/issues?q=label%3Astryker-tracker)
 
 > Cross-language terminal emulator and session engine (Go) with browser renderer (TypeScript).
 

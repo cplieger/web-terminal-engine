@@ -38,6 +38,11 @@
 # create() instead, because handleCreate echoes the full SessionInfo it stored
 # rather than re-deriving it, so Create reads as test-only here. Deleting an
 # exported method of a published v3 module would be a semver-major break.
+# (*SessionManager).StatusLatch / WithdrawStatusLatch: the compare-and-swap pair
+# web-terminal-kiro's pending-interaction poller uses to clear a needs-input
+# latch once kiro-cli's own record shows the ask settled (nothing on the PTY
+# byte stream reports that falling edge). Covered in-repo by
+# terminal/status_latch_test.go; the production caller is in another MODULE.
 function NewSessionManager
 function WithManagerLogger
 function WithStatusClassifier
@@ -46,6 +51,8 @@ function WithIdleReaper
 method (*SessionManager).MountAPI
 method (*SessionManager).Shutdown
 method (*SessionManager).Create
+method (*SessionManager).StatusLatch
+method (*SessionManager).WithdrawStatusLatch
 
 # --- Status vocabulary: published API, consumer web-terminal-kiro. These are the
 # string constants its injected status classifier RETURNS

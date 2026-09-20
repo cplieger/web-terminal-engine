@@ -138,6 +138,7 @@ type statusTracker struct {
 	// field changes silently and only surfaces when something else moves.
 	lastActivity string
 	notifSeen    uint64
+	latchSeq     uint64
 	// notifDelivered is the last notification sequence CARRIED on an event.
 	// Separate from notifSeen, which only advances when a classifier consumed the
 	// message: delivery is unconditional, so the two would otherwise disagree for
@@ -377,11 +378,11 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 }
 
 // testDiffPhaseHold, when non-nil, is invoked by diffStatuses between phase 2 and
-// phase 3. Test-only (session_order_test.go): phase 2 runs lock-free and can block
-// on a wedged handler getter, so that gap is where manager state legitimately
-// changes underneath a sweep in flight, and holding the sweep open at exactly that
-// instant is the only way to drive the case deterministically. Atomic for the same
-// reason as testResumeBatchHold. Never set in production.
+// phase 3. Test-only: phase 2 runs lock-free and can block on a wedged handler
+// getter, so that gap is where manager state legitimately changes underneath a
+// sweep in flight, and holding the sweep open at exactly that instant is the only
+// way to drive the case deterministically. Atomic for the same reason as
+// testResumeBatchHold. Never set in production.
 var testDiffPhaseHold atomic.Pointer[func()]
 
 // sweepSession runs one session's tracker state machine and change detection
@@ -586,6 +587,7 @@ func (m *SessionManager) applyNotification(in *statusRaw, tr *statusTracker) boo
 	tr.notifSeen = in.notifSeq
 	if cls, ok := m.classifier(in.notifMsg); ok {
 		tr.latched = cls
+		tr.latchSeq = in.notifSeq
 		return true
 	}
 	return false

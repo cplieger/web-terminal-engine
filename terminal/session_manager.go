@@ -737,6 +737,43 @@ func (m *SessionManager) ClearSessionPinnedTitle(id SessionID) bool {
 	return m.SetSessionPinnedTitle(id, "")
 }
 
+// StatusLatch reports the notification status latched for a session ("" when
+// none) and the notification sequence that set it (0 when none). ok is false
+// for an unknown session or one no sweep has tracked yet.
+func (m *SessionManager) StatusLatch(id SessionID) (status string, seq uint64, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tr := m.trackers[id]
+	if tr == nil {
+		return "", 0, false
+	}
+	if tr.latched == "" {
+		return "", 0, true
+	}
+	return tr.latched, tr.latchSeq, true
+}
+
+// WithdrawStatusLatch clears a session's latched status when it still equals
+// want AND was set by notification sequence seq. It refuses (false) an unknown
+// session, an empty or different latch, a want that is not StatusInput or
+// StatusDone, and a latch a newer notification has re-set since seq. It never
+// touches the OSC 9;4 progress state: the next sweep recomputes the status from
+// progress alone (idle, or warning/failed/working if the program reports one)
+// and emits it on the status stream.
+func (m *SessionManager) WithdrawStatusLatch(id SessionID, want string, seq uint64) bool {
+	if want != StatusInput && want != StatusDone {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	tr := m.trackers[id]
+	if tr == nil || tr.latched != want || tr.latchSeq != seq {
+		return false
+	}
+	tr.latched = ""
+	return true
+}
+
 // Shutdown stops the manager's loops, ends every session, and waits for their
 // teardown to finish, bounded by ctx. It returns an error wrapping ctx.Err() when
 // the budget expired with teardowns outstanding, naming how many, and nil when

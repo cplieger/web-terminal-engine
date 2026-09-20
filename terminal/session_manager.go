@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -304,20 +305,13 @@ type SessionManager struct {
 	// after both loops are counted.
 	loopsDone chan struct{}
 	idleSince time.Time
-	// order is the display order every viewer shares: session ids, and exactly
-	// the keys of sessions. Maintained at the four sites that change the session
-	// set (create appends, Close removes, the reaper and Shutdown clear it) so a
-	// rank lookup never has to reconcile the two.
-	//
-	// A slice rather than a position field on session: a reorder then writes one
-	// value instead of renumbering every session, and there is no gap to reclaim
-	// when a session in the middle closes. It is not persisted, because it does
-	// not outlive what it orders — sessions are PTY children of this process.
-	//
-	// Placed last among the pointer-bearing fields on purpose: its trailing len
-	// and cap words are scalars, so ending the struct's pointer-scan range at its
-	// data pointer keeps 16 bytes out of the GC's scan (govet fieldalignment).
+	// order is the display order every viewer shares: session ids, exactly the
+	// keys of sessions, maintained at the four sites that change the set (create
+	// appends, Close removes, the reaper and Shutdown clear). A slice rather than
+	// a position per session: a reorder writes one value and a close leaves no
+	// gap. Not persisted, because it does not outlive the PTY children it orders.
 	order         []SessionID
+	layout        PaneLayout
 	wg            sync.WaitGroup
 	mu            sync.Mutex
 	subsMu        sync.Mutex
@@ -355,6 +349,7 @@ func NewSessionManager(factory func(id SessionID) *Handler, opts ...ManagerOptio
 		classifier:   cfg.classifier,
 		activity:     cfg.activity,
 		idleSince:    time.Now(),
+		layout:       defaultPaneLayout(),
 		idleWindow:   cfg.idleWindow,
 	}
 	if m.idleWindow > 0 {
@@ -427,6 +422,10 @@ func (m *SessionManager) create() (SessionInfo, error) {
 	// arranged its tabs keeps that arrangement; only the new id moves.
 	m.order = append(m.order, id)
 	order := len(m.order) - 1
+	if m.layout.Left == nil && m.layout.Right == nil {
+		m.layout.Left = &id
+		m.layout.Selected = PaneLeft
+	}
 	n := len(m.sessions)
 	m.created++
 	m.mu.Unlock()
@@ -590,6 +589,158 @@ func (m *SessionManager) SetSessionOrder(ids []SessionID) bool {
 	return true
 }
 
+// PaneSide names one of the two display panes a viewer can show.
+type PaneSide string
+
+// PaneLeft and PaneRight are the only PaneSide values a layout accepts.
+const (
+	PaneLeft  PaneSide = "left"
+	PaneRight PaneSide = "right"
+)
+
+func (s PaneSide) valid() bool { return s == PaneLeft || s == PaneRight }
+
+func (s PaneSide) other() PaneSide {
+	if s == PaneLeft {
+		return PaneRight
+	}
+	return PaneLeft
+}
+
+// PaneLayout is the split-view arrangement every viewer of this manager shares.
+type PaneLayout struct {
+	// Left and Right are the sessions shown in each pane; nil is an empty pane.
+	Left  *SessionID `json:"left"`
+	Right *SessionID `json:"right"`
+	// Selected is the pane that receives typing; its session is the active tab.
+	Selected PaneSide `json:"selected"`
+	// Handle is the left pane's share of the pane row, 0 to 1. 0.5 when Open is false.
+	Handle float64 `json:"handle"`
+	// Open is whether the split is shown. When false, Left is the one shown session.
+	Open bool `json:"open"`
+}
+
+func defaultPaneLayout() PaneLayout {
+	return PaneLayout{Handle: 0.5, Selected: PaneLeft}
+}
+
+func (l *PaneLayout) shown(side PaneSide) *SessionID {
+	if side == PaneRight {
+		return l.Right
+	}
+	return l.Left
+}
+
+func (l *PaneLayout) show(side PaneSide, id SessionID) {
+	if side == PaneRight {
+		l.Right = &id
+		return
+	}
+	l.Left = &id
+}
+
+func (l *PaneLayout) invalidShape() string {
+	switch {
+	case !l.Selected.valid():
+		return "selected must be left or right"
+	case math.IsNaN(l.Handle) || l.Handle < 0 || l.Handle > 1:
+		return "handle must be between 0 and 1"
+	case !l.Open && (l.Right != nil || l.Selected != PaneLeft):
+		return "a closed split has no right pane and selects the left"
+	case l.Left != nil && l.Right != nil && *l.Left == *l.Right:
+		return "left and right name the same session"
+	case l.shown(l.Selected) == nil && l.shown(l.Selected.other()) != nil:
+		return "selected rests on an empty pane while the other pane shows a session"
+	}
+	return ""
+}
+
+// LayoutVerdict is SetPaneLayout's answer.
+type LayoutVerdict int
+
+// LayoutOK means the record was stored; LayoutInvalid, that it breaks a
+// consistency rule; LayoutStale, that a side names a session that is not live.
+const (
+	LayoutOK LayoutVerdict = iota
+	LayoutInvalid
+	LayoutStale
+)
+
+// clonePaneLayout copies l with fresh allocations for its sides, which are
+// pointers a body or a reader could write through, as SetSessionOrder's slice.
+func clonePaneLayout(l PaneLayout) PaneLayout {
+	l.Left, l.Right = cloneID(l.Left), cloneID(l.Right)
+	return l
+}
+
+func cloneID(p *SessionID) *SessionID {
+	if p == nil {
+		return nil
+	}
+	return new(*p)
+}
+
+// SetPaneLayout replaces the pane layout every viewer shares, storing a copy
+// with Handle forced to 0.5 when Open is false; a refusal names the first rule
+// that failed. LayoutStale is separate from LayoutInvalid because its cure
+// differs: as for the order's 409, the caller re-lists and sends again.
+func (m *SessionManager) SetPaneLayout(l PaneLayout) (verdict LayoutVerdict, reason string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if shape := l.invalidShape(); shape != "" {
+		return LayoutInvalid, shape
+	}
+	if len(m.sessions) > 0 && l.shown(l.Selected) == nil {
+		return LayoutInvalid, "selected rests on an empty pane while a session is live"
+	}
+	for _, id := range []*SessionID{l.Left, l.Right} {
+		if id == nil {
+			continue
+		}
+		if _, live := m.sessions[*id]; !live {
+			return LayoutStale, "layout names a session that is not live"
+		}
+	}
+	if !l.Open {
+		l.Handle = 0.5
+	}
+	m.layout = clonePaneLayout(l)
+	return LayoutOK, ""
+}
+
+// PaneLayout returns a copy of the pane layout every viewer shares. The record
+// is read at load and never pushed on the status stream: statusEvent is one
+// event per session, and a layout is not a session.
+func (m *SessionManager) PaneLayout() PaneLayout {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return clonePaneLayout(m.layout)
+}
+
+// dropFromLayoutLocked empties the panes showing id, moves Selected to a shown
+// pane and refills an emptied record from the order: an interim record, valid
+// until the client's next write replaces it. Caller holds m.mu.
+func (m *SessionManager) dropFromLayoutLocked(id SessionID) {
+	l := &m.layout
+	if l.Left != nil && *l.Left == id {
+		l.Left = nil
+	}
+	if l.Right != nil && *l.Right == id {
+		l.Right = nil
+	}
+	if l.shown(l.Selected) == nil && l.shown(l.Selected.other()) != nil {
+		l.Selected = l.Selected.other()
+	}
+	if l.Left != nil || l.Right != nil {
+		return
+	}
+	if len(m.order) == 0 {
+		m.layout = defaultPaneLayout()
+		return
+	}
+	l.show(l.Selected, m.order[0])
+}
+
 // sessionActivity reads the WithSessionActivity source for id, or the zero value
 // when none is installed. Call it only where m.mu is NOT held: the source is
 // consumer code, and holding the manager lock across it would let one slow
@@ -687,6 +838,7 @@ func (m *SessionManager) Close(id SessionID) bool {
 	if ok {
 		delete(m.sessions, id)
 		m.dropFromOrderLocked(id)
+		m.dropFromLayoutLocked(id)
 		m.closed++
 	}
 	m.mu.Unlock()
@@ -803,6 +955,7 @@ func (m *SessionManager) Shutdown(ctx context.Context) error {
 	}
 	m.sessions = make(map[SessionID]*session)
 	m.order = nil
+	m.layout = defaultPaneLayout()
 	loopsDone := m.loopsDone
 	m.mu.Unlock()
 	for _, s := range victims {
@@ -872,13 +1025,14 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 
 // RESTHandler serves the session REST API: POST SessionsPath (create),
 // GET SessionsPath (list), PUT /api/sessions/order (set the shared display
-// order), DELETE /api/sessions/{id} (close),
+// order), GET + PUT /api/sessions/layout (read / set the shared pane layout),
+// DELETE /api/sessions/{id} (close),
 // PUT /api/sessions/{id}/title (set the client-derived automatic title), and
 // PUT + DELETE /api/sessions/{id}/pinned-title (set / clear the user's name).
 //
-// The order route is a literal segment where the others take an {id}, which
-// ServeMux prefers over a wildcard, and no session id can collide with it
-// (ids are hex).
+// The order and layout routes are literal segments where the others take an
+// {id}, which ServeMux prefers over a wildcard, and no session id can collide
+// with them (ids are hex).
 // Its internal patterns are absolute, so it only functions on the SessionsPath +
 // SessionsSubtreePath mounts — MountSessionRoutes / MountAPI perform them
 // (the route-set contract lives there); exported so consumer tests can stub it.
@@ -898,6 +1052,8 @@ func (m *SessionManager) RESTHandler() http.Handler {
 	mux.HandleFunc("POST /api/sessions", m.handleCreate)
 	mux.HandleFunc("GET /api/sessions", m.handleList)
 	mux.HandleFunc("PUT /api/sessions/order", m.handleSetOrder)
+	mux.HandleFunc("GET /api/sessions/layout", m.handleGetLayout)
+	mux.HandleFunc("PUT /api/sessions/layout", m.handleSetLayout)
 	mux.HandleFunc("DELETE /api/sessions/{id}", m.handleDelete)
 	mux.HandleFunc("PUT /api/sessions/{id}/title", m.handleSetTitle)
 	mux.HandleFunc("PUT /api/sessions/{id}/pinned-title", m.handleSetPinnedTitle)
@@ -942,6 +1098,26 @@ func (m *SessionManager) handleSetOrder(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	http.Error(w, "order must name every live session exactly once", http.StatusConflict)
+}
+
+func (m *SessionManager) handleGetLayout(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, m.PaneLayout())
+}
+
+func (m *SessionManager) handleSetLayout(w http.ResponseWriter, r *http.Request) {
+	l, ok := decodeLayoutBody(w, r)
+	if !ok {
+		return
+	}
+	verdict, reason := m.SetPaneLayout(l)
+	switch verdict {
+	case LayoutOK:
+		w.WriteHeader(http.StatusNoContent)
+	case LayoutStale:
+		http.Error(w, reason, http.StatusConflict)
+	default:
+		http.Error(w, reason, http.StatusBadRequest)
+	}
 }
 
 func (m *SessionManager) handleDelete(w http.ResponseWriter, r *http.Request) {
@@ -1066,6 +1242,39 @@ func decodeOrderBody(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 	return *body.Order, true
 }
 
+const maxLayoutBodyBytes = 1024
+
+func decodeLayoutBody(w http.ResponseWriter, r *http.Request) (PaneLayout, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxLayoutBodyBytes)
+	var body struct {
+		Left     *string  `json:"left"`
+		Right    *string  `json:"right"`
+		Selected *string  `json:"selected"`
+		Handle   *float64 `json:"handle"`
+		Open     *bool    `json:"open"`
+	}
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return PaneLayout{}, false
+	}
+	if body.Open == nil || body.Handle == nil || body.Selected == nil {
+		http.Error(w, "body must carry open, handle and selected", http.StatusBadRequest)
+		return PaneLayout{}, false
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		http.Error(w, "unexpected data after the body", http.StatusBadRequest)
+		return PaneLayout{}, false
+	}
+	return PaneLayout{
+		Left:     (*SessionID)(body.Left),
+		Right:    (*SessionID)(body.Right),
+		Selected: PaneSide(*body.Selected),
+		Handle:   *body.Handle,
+		Open:     *body.Open,
+	}, true
+}
+
 // Title-length bounds, per source. A client-derived title can legitimately be a
 // whole submitted line, so it keeps the historical 512; a hand-typed name past
 // ~40 characters is never visible in a tab chip, so 128 is generous while
@@ -1149,6 +1358,7 @@ func (m *SessionManager) maybeReap() {
 	}
 	m.sessions = make(map[SessionID]*session)
 	m.order = nil
+	m.layout = defaultPaneLayout()
 	m.reaped += uint64(len(victims))
 	m.mu.Unlock()
 	for _, s := range victims {
@@ -1191,10 +1401,10 @@ func newSessionID() (SessionID, error) {
 	return SessionID(hex.EncodeToString(b[:])), nil
 }
 
-// writeJSON writes a session-surface JSON response. Its only two callers are the
-// responses that carry session ids in full — handleCreate (201, the new id) and
-// handleList (200, every live id) — which is why no-store is set here rather than
-// left to each consumer.
+// writeJSON writes a session-surface JSON response. Its only callers are the
+// responses that carry session ids in full — handleCreate (201, the new id),
+// handleList (200, every live id) and handleGetLayout (200, the shown ids) —
+// which is why no-store is set here rather than left to each consumer.
 //
 // A session id IS a capability: it is the credential /ws attaches and resumes
 // with, which is why this package refuses to log one whole (see LogID). A 200/201
@@ -1211,7 +1421,7 @@ func newSessionID() (SessionID, error) {
 // This is the surface's one UNCONDITIONAL setter, and the difference from
 // withNoStore is deliberate: that wrapper yields to a Cache-Control an outer
 // consumer already set, because the responses it covers carry no credential and
-// only their URL is sensitive. These two bodies CONTAIN the id, so their
+// only their URL is sensitive. These bodies CONTAIN session ids, so their
 // prohibition is not the consumer's to relax, and the value is written whatever
 // an outer stack asked for.
 func writeJSON(w http.ResponseWriter, status int, v any) {

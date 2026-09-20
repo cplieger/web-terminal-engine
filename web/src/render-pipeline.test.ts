@@ -1,17 +1,15 @@
-// Full-pipeline integration test: feeds REAL the host application PTY bytes captured
-// from a working session through the WS binary decoder and the renderer,
-// then validates the resulting DOM matches the expected post-keystroke
-// state.
-//
-// The captured bytes were collected from /tmp/wscap2.txt (a real
-// session). This test exercises the same code path the browser
-// would, with one exception: instead of arriving over a WebSocket, the
-// frames are decoded directly from base64-encoded bytes.
+// Full-pipeline integration: PTY bytes captured from a real session go through
+// the WS binary decoder and the renderer, and the DOM is checked against the
+// expected post-keystroke state. The one difference from the browser's path is
+// that the frames are decoded from base64 rather than arriving over a socket.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import { decodeWireBinary } from "./wire-binary.js";
 import type { ScreenMessage } from "./types.js";
+
+let render: Renderer;
 
 // A real Canvas2D measures whatever font the machine has installed, so
 // measureText is declared here and render computes cell widths from a fixed
@@ -28,30 +26,12 @@ HTMLCanvasElement.prototype.getContext = function fakeGetContext(): unknown {
   return ctx;
 } as typeof HTMLCanvasElement.prototype.getContext;
 
-// Helper to build a binary screen frame with the given parameters,
-// matching the layout in internal/terminal/wire_binary.go.
-//
-//   [1B] msg_type = 0
-//   [8B] inputAck (uint64 LE)
-//   [8B] base (uint64 LE) — absolute index of row 0 (wire v2)
-//   [2B] cursor_row (uint16 LE)
-//   [2B] cursor_col (uint16 LE)
-//   [2B] screen_height (uint16 LE)
-//   [2B] num_changed (uint16 LE)
-//   [1B] cursor_style
-//   [1B] cursor_flags
-//   For each changed row:
-//     [2B] row_idx (uint16 LE)
-//     [2B] num_runs (uint16 LE)
-//     For each run:
-//       [2B] text_byte_len (uint16 LE)
-//       [N B] text utf-8
-//       [4B] fg (int32 LE, -1 = default)
-//       [4B] bg (int32 LE, -1 = default)
-//       [2B] attrs (uint16 LE)
-//       [4B] uc (int32 LE)
-//
-// The cursor_flags byte: bit 0 = hidden, bit 1 = bell, bit 2 = blink.
+// A binary screen frame as terminal/wire_binary.go lays it out: [1B] type 0,
+// [8B] inputAck, [8B] base (absolute index of row 0), [2B] cursor_row, [2B]
+// cursor_col, [2B] screen_height, [2B] num_changed, [1B] cursor_style, [1B]
+// cursor_flags (bit 0 hidden, bit 1 bell, bit 2 blink); per changed row [2B]
+// row_idx, [2B] num_runs; per run [2B] text_byte_len, the utf-8 text, [4B] fg,
+// [4B] bg (-1 = default), [2B] attrs, [4B] uc. All integers little-endian.
 interface Run {
   text: string;
   fg?: number;
@@ -165,14 +145,11 @@ async function flushFrame(buf: ArrayBuffer): Promise<void> {
 
 describe("full pipeline: binary frame -> decoder -> renderer", () => {
   let outputEl: HTMLDivElement;
-  let termWrap: HTMLDivElement;
 
   beforeEach(() => {
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.resetScreen();
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 
@@ -430,7 +407,6 @@ function expectInverseAtCol(
 }
 
 describe("cursor-blink visibility gate", () => {
-  let outputEl: HTMLDivElement;
   let termWrap: HTMLDivElement;
 
   // setVisibility shadows the page's visibility state (a test cannot background
@@ -443,11 +419,9 @@ describe("cursor-blink visibility gate", () => {
 
   beforeEach(() => {
     setVisibility("visible");
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.resetScreen();
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 

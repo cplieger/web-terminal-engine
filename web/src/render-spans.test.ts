@@ -1,34 +1,23 @@
-// Row-span construction: what render.ts paints for a run, and what it must NOT
-// paint. Two properties the existing attribute tier cannot express, because it
-// only ever asserts the POSITIVE direction of one attribute at a time:
-//
-//   - A default run (SGR 0, default colors) must paint NOTHING. An attribute
-//     that leaked on by itself is invisible to a per-attribute test — every
-//     "bold renders bold" assertion still passes when everything is bold.
-//   - Cell-width compensation. A terminal cell is a fixed box, so a glyph the
-//     font draws at any other advance is padded with letter-spacing to exactly
-//     one cell (`cellWidth - measured`). That is why render.ts measures every
-//     glyph per font VARIANT: a bold or italic face has its own advances, and
-//     measuring the regular face for them lays the row out on the wrong grid.
-//
-// The font model below is therefore deliberately NOT uniform: one glyph is
-// drawn narrower than a cell and the bold/italic faces are wider than the
-// regular one, which is the ordinary state of affairs for a real font and the
-// only condition under which the compensation is observable at all. Expected
-// values come from the spec (a glyph occupies its cell; a Wide glyph occupies
-// two), not from reading render.ts.
+// Row-span construction: what a run paints and what it must NOT paint, the two
+// properties a per-attribute tier cannot express. A default run (SGR 0, default
+// colors) paints NOTHING, since a leaked attribute is invisible to every "bold
+// renders bold" assertion. Cell-width compensation pads a glyph drawn at any
+// other advance to exactly one cell (`cellWidth - measured`), measured per font
+// VARIANT because a bold or italic face has its own advances. The font model is
+// therefore NOT uniform, one glyph narrower than a cell and the bold/italic faces
+// wider, the only condition under which the compensation is observable.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import { cssColor } from "./test-helpers/spec-colors.js";
 import type { ScreenMessage, WireRun } from "./types.js";
 
-// --- The font model ---------------------------------------------------------
-//
-// A monospace face whose advance is half the font size, with three deviations a
-// real font also has: `i` is drawn narrow, and the bold and italic faces are
-// wider than the regular one. `fontPx` is the CSS font-size the stubbed
-// computed style reports, so a font CHANGE moves every advance at once.
+// The font model: a monospace face whose advance is half the font size, with
+// three deviations a real font also has: `i` is drawn narrow, and the bold and
+// italic faces are wider than the regular one. `fontPx` is the CSS font-size
+// the stubbed computed style reports, so a font CHANGE moves every advance at
+// once.
 let fontPx = 16;
 const cellOf = (px: number): number => px / 2;
 
@@ -125,15 +114,16 @@ function restoreStubs(): void {
 
 let output: HTMLDivElement;
 let termWrap: HTMLDivElement;
+let render: Renderer;
 
 function attach(): void {
-  document.body.innerHTML = `<div class="term"><div class="term-output"></div></div>`;
-  termWrap = document.querySelector<HTMLDivElement>(".term")!;
-  output = document.querySelector<HTMLDivElement>(".term-output")!;
+  const fx = createEngineFixture();
+  termWrap = fx.termWrap;
+  output = fx.output;
+  render = fx.engine.renderer;
   termWrap.style.fontSize = `${String(fontPx)}px`;
   termWrap.style.fontFamily = "monospace";
   termWrap.style.lineHeight = "17px";
-  render.init({ output, termWrap });
   render.updateFontMetrics();
 }
 
@@ -297,15 +287,11 @@ describe("cell-width compensation", () => {
 
 describe("a font change re-measures every glyph", () => {
   it("recomputes widths for both the regular and the bold face", () => {
-    // Every measurement render.ts holds is keyed to the font it was taken
-    // with: a per-code-point fast cache, a per-(face, glyph) map, and one
-    // measuring context per face. A restyle (zoom, a web font finishing load,
-    // a theme change) invalidates all three, and a consumer signals it by
-    // calling updateFontMetrics. Anything left behind lays the new font out on
-    // the old font's grid.
-    //
-    // At a 16px font: the cell is 8px, `i` is drawn at 4px (padded by 4px) and
-    // bold `i` at 6px (padded by 2px).
+    // Every measurement is keyed to the font it was taken with (a per-code-point
+    // cache, a per-(face, glyph) map, one measuring context per face), and a
+    // restyle signalled through updateFontMetrics invalidates all three; anything
+    // left behind lays the new font out on the old grid. At a 16px font the cell
+    // is 8px, `i` is drawn at 4px (padded by 4px) and bold `i` at 6px (by 2px).
     const before = renderRow([run("i"), run("i", { a: 1 })]);
     expect(before[0]!.style.letterSpacing).toBe("4px");
     expect(before[1]!.style.letterSpacing).toBe("2px");

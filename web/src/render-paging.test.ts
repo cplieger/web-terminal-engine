@@ -1,29 +1,18 @@
 // The renderer's DEMAND-PAGING half (docs/paged-scrollback.md §5.4-5.5): the
-// fetch controller (when a request fires, where it is anchored, and the guards
-// that keep it dormant) and the gap markers (a projection of the store's
-// geometry, so a gap that heals from either edge updates without any caller
-// knowing which edge moved).
-//
-// Drives the REAL render.ts in a real browser, with the transport replaced by
-// spies — this layer's job is deciding WHAT to ask for, not sending it.
+// fetch controller (when a request fires, where it is anchored, the guards that
+// keep it dormant) and the gap markers, a projection of the store's geometry
+// that heals from either edge. The transport is replaced by spies, since this
+// layer decides WHAT to ask for; the parked-reader seam is the injected scroll
+// controller, a real one with the two methods the renderer reads at call time
+// replaced on the instance.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import * as render from "./render.js";
-import * as scroll from "./scroll.js";
+import { createModeState } from "./modes.js";
+import { createRenderer, type Renderer } from "./render.js";
+import { createScrollController, type ScrollController } from "./scroll.js";
 import { PAGE_SIZE, PREFETCH_THRESHOLD } from "./store.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
-
-// A real browser's ESM module namespace is non-configurable, so `vi.spyOn` on a
-// module export cannot install itself: the property is not redefinable. The
-// emulator ran behind a transform that rewrote exports into configurable
-// getters, which is why these spies used to work without this line.
-//
-// `spy: true` asks vitest for the module with its exports wrapped in spies that
-// CALL THROUGH by default, so nothing is stubbed out wholesale — the same
-// scroll.ts runs, and only the exports a test explicitly overrides behave
-// differently. render.ts imports the same mocked module, which is what makes
-// this the parked-reader seam these tests need.
-vi.mock("./scroll.js", { spy: true });
 
 const CELL_PX = 8;
 
@@ -79,26 +68,32 @@ interface Requests {
 let reqs: Requests;
 let budget: number;
 let output: HTMLElement;
+let render: Renderer;
+let scroll: ScrollController;
 
 function initRender(opts: { wireTransport?: boolean } = {}): void {
   document.body.innerHTML = `<div class="term"><div class="term-wrap"><div class="term-output"></div></div></div>`;
   const termWrap = document.querySelector<HTMLElement>(".term-wrap")!;
   output = document.querySelector<HTMLElement>(".term-output")!;
   installCanvasStub();
-  render.resetScreen();
-  render.init({
-    output,
-    termWrap,
-    ...(opts.wireTransport === false
-      ? {}
-      : {
-          requestHistory: (fromAbs: number, maxLines: number): boolean => {
-            reqs.calls.push([fromAbs, maxLines]);
-            return true;
-          },
-          historyBudget: (): number => budget,
-        }),
-  });
+  scroll = registerForDispose(createScrollController({ scrollEl: termWrap }));
+  render = registerForDispose(
+    createRenderer({
+      output,
+      termWrap,
+      scroll,
+      modes: createModeState(),
+      ...(opts.wireTransport === false
+        ? {}
+        : {
+            requestHistory: (fromAbs: number, maxLines: number): boolean => {
+              reqs.calls.push([fromAbs, maxLines]);
+              return true;
+            },
+            historyBudget: (): number => budget,
+          }),
+    }),
+  );
   render.updateFontMetrics();
 }
 
@@ -120,20 +115,12 @@ const ROW_PX = 17;
 let nativeOffsetTop: PropertyDescriptor | undefined;
 
 /**
- * Park the reader on the row at `abs`.
- *
- * The renderer finds the top visible row by binary-searching the rows' offsets,
- * and this model declares them: rows sit in ascending `data-abs` order, one row
- * tall each, with the scroll offset on the target row. A real browser reports
- * real offsets, but they derive from whatever height the test's own fixture
- * markup happens to lay out at, which is not the uniform grid the search is
- * being tested against.
- *
- * The patch is contained to elements the model describes — those carrying
- * `data-abs` — and everything else falls through to the browser's real
- * `offsetTop`. A prototype patch reaches every element in the page for the rest
- * of the file, the runner's own DOM included, so answering only for the rows
- * keeps the blast radius to the thing under test.
+ * Parks the reader on the row at `abs`. The renderer binary-searches the rows'
+ * offsets for the top visible row, and this model declares them (ascending
+ * `data-abs`, one row tall each, the offset on the target row) because real
+ * offsets derive from whatever the fixture markup lays out at, not the uniform
+ * grid under test. The patch answers only for elements carrying `data-abs`;
+ * everything else, the runner's own DOM included, keeps the real `offsetTop`.
  */
 function parkViewportAt(abs: number): void {
   nativeOffsetTop ??= Object.getOwnPropertyDescriptor(HTMLElement.prototype, "offsetTop");
@@ -482,11 +469,10 @@ describe("render: paging constants", () => {
 
 describe("render: the top-of-store marker", () => {
   // Three honest statements about the history above what is held
-  // (docs/paged-scrollback.md §5.4), where there used to be one. A bounded resume
-  // replay routinely lands a client above index 0 with the server still holding
-  // the rest, and the single `hasTrimmedHistory()` predicate then either said
-  // NOTHING — presenting a partial transcript as the beginning of the session —
-  // or said "trimmed" about history the trigger was about to fetch.
+  // (docs/paged-scrollback.md §5.4). A bounded resume replay routinely lands a
+  // client above index 0 with the server still holding the rest, and a single
+  // "trimmed" predicate either says NOTHING, presenting a partial transcript as
+  // the session's beginning, or says "trimmed" about history about to be fetched.
   beforeEach(() => {
     reqs = { calls: [] };
     budget = PAGE_SIZE;

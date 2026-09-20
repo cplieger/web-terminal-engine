@@ -5,8 +5,11 @@
 // re-delivery never duplicates a row.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
+
+let render: Renderer;
 
 interface FakeCtx {
   font: string;
@@ -68,10 +71,10 @@ describe("render (store-backed, brick 3)", () => {
   let termWrap: HTMLDivElement;
 
   beforeEach(() => {
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 
@@ -231,7 +234,6 @@ describe("render (store-backed, brick 3)", () => {
 
 describe("render: viewport-first drain (backlog never starves the window)", () => {
   let outputEl: HTMLDivElement;
-  let termWrap: HTMLDivElement;
 
   // Deterministic frames: callbacks queue and the test pumps them one at a
   // time, so "what did the FIRST frame build" is observable (a real/tick()
@@ -260,10 +262,9 @@ describe("render: viewport-first drain (backlog never starves the window)", () =
     }) as typeof requestAnimationFrame;
     globalThis.cancelAnimationFrame = (() => undefined) as typeof cancelAnimationFrame;
 
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 
@@ -317,10 +318,10 @@ describe("render: cursor-row tracking across frames (selective rebuild)", () => 
   let termWrap: HTMLDivElement;
 
   beforeEach(() => {
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 

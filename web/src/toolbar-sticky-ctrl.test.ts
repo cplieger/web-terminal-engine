@@ -1,16 +1,15 @@
-// Two edges of the toolbar's sticky-Ctrl state machine that toolbar.test.ts
-// leaves open: the same-value write, and multi-char input under kitty
-// disambiguate.
-//
-// setCtrlArmed is edge-triggered on purpose — a consumer wires onCtrlChange to
-// its own UI, and a notification per call rather than per CHANGE makes that UI
-// flicker and can loop if the consumer writes the state back. The same-value
-// path still repaints, which is what normalises a scaffold whose kb-ctrl shipped
-// with the wrong aria-pressed.
+// Two edges of the toolbar's sticky-Ctrl state machine: the same-value write
+// and multi-char input under kitty disambiguate. setCtrlArmed is edge-triggered
+// because a consumer wires onCtrlChange to its own UI, and a notification per
+// call rather than per CHANGE makes that UI flicker and can loop when the
+// consumer writes the state back. The same-value path still repaints, which
+// normalises a scaffold whose kb-ctrl shipped with the wrong aria-pressed.
 
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { bindMobileToolbar } from "./toolbar.js";
-import * as modes from "./modes.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
+
+const modes = createModeState();
 
 /** A toolbar scaffold: the ctrl button is the only one these tests press. */
 function makeToolbar(): { toolbar: HTMLElement; ctrl: HTMLElement } {
@@ -26,15 +25,8 @@ function makeToolbar(): { toolbar: HTMLElement; ctrl: HTMLElement } {
 
 describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
   beforeEach(() => {
-    // All nine mode params explicit: setModes leaves omitted optionals alone and
-    // the suite runs with isolate:false, so a kitty flag left by another file is
-    // a real hazard.
-    modes.setModes(true, false, false, false, 0, false, false, false, 0);
+    modes.applySnapshot(POWER_ON_MODES);
     document.body.innerHTML = "";
-  });
-
-  afterEach(() => {
-    modes.setModes(true, false, false, false, 0, false, false, false, 0);
   });
 
   it("notifies only on a change, not on a same-value write", () => {
@@ -42,6 +34,7 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
     const onCtrlChange = vi.fn();
     const ctrl = bindMobileToolbar({
       toolbar: fixture.toolbar,
+      modes,
       send: vi.fn(),
       onCtrlChange,
     });
@@ -66,7 +59,7 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
     // armed until the first real toggle.
     fixture.ctrl.setAttribute("aria-pressed", "true");
     fixture.ctrl.classList.add("armed");
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
 
     ctrl.setCtrlArmed(false);
 
@@ -81,9 +74,9 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
     // as CSI-u from the FIRST codepoint, which for a paste would replace the
     // whole string with one control sequence — losing the paste and typing a
     // control character the user never pressed.
-    modes.setModes(true, false, false, false, 0, false, false, false, 1);
+    modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
     const fixture = makeToolbar();
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
     ctrl.setCtrlArmed(true);
 
     const out = ctrl.applyStickyCtrl("hello");
@@ -96,9 +89,9 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
   });
 
   it("encodes a single char as CSI-u under kitty disambiguate", () => {
-    modes.setModes(true, false, false, false, 0, false, false, false, 1);
+    modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
     const fixture = makeToolbar();
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
     ctrl.setCtrlArmed(true);
 
     const out = ctrl.applyStickyCtrl("s");

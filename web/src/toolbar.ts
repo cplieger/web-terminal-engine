@@ -1,25 +1,18 @@
 // On-screen mobile keyboard toolbar: a DOM widget (button lookup, ARIA
 // painting, a listener registry, sticky-Ctrl state) wiring touch buttons to a
-// terminal send sink. Split out of keyboard.ts (2026-07): that module is the
-// pure key-ENCODING layer (KeyboardEvent -> wire bytes), and a DOM widget
-// buried in it made both harder to navigate. The wire encodings themselves
-// stay in keyboard.ts — this module consumes its exported logical-key homes
-// (plainCursorKeySeq / plainEscapeSeq / kittyCtrlCharSeq / ctrlByteFor), so
-// the toolbar cannot drift from the physical-key path (the equivalence
-// fixtures in toolbar.test.ts pin the two byte-for-byte).
-//
-// This was duplicated across vibekit and web-terminal-kiro — same wire
-// sequences, same sticky-Ctrl semantics, same DECCKM nuance — so it lives in
-// the engine.
+// terminal send sink. The wire encodings live in keyboard.ts; this module
+// consumes its logical-key homes (plainCursorKeySeq, plainEscapeSeq,
+// kittyCtrlCharSeq, ctrlByteFor) so the toolbar cannot drift from the
+// physical-key path, which toolbar.test.ts pins byte-for-byte.
 
 import {
   ctrlByteFor,
+  type KeyboardModes,
   kittyCtrlCharSeq,
   kittyDisambiguateActive,
   plainCursorKeySeq,
   plainEscapeSeq,
 } from "./keyboard.js";
-import { isApplicationCursor } from "./modes.js";
 
 /**
  * Default DOM ids for the on-screen mobile keyboard toolbar buttons,
@@ -67,6 +60,11 @@ export interface BindMobileToolbarOptions {
    * to the same `send`.
    */
   readonly send: (bytes: string) => void;
+  /**
+   * The mode state of the terminal the toolbar types into, read at each press:
+   * the arrow and Escape bytes depend on its kitty and DECCKM bits.
+   */
+  readonly modes: KeyboardModes;
   /** Optional id overrides. Missing keys fall back to defaults. */
   readonly ids?: MobileToolbarIds;
   /**
@@ -79,14 +77,11 @@ export interface BindMobileToolbarOptions {
 /** Returned from `bindMobileToolbar`; manages sticky-Ctrl state and tear-down. */
 export interface MobileToolbarController {
   /**
-   * Apply sticky-Ctrl to a piece of input text.
-   *   - When NOT armed: returns `text` unchanged.
-   *   - Armed AND `text.length === 1`: returns the matching Ctrl byte
-   *     (`ctrlByteFor(text)`), or the original char when no mapping
-   *     exists. Always disarms.
-   *   - Armed AND longer (e.g. paste, IME commit): returns `text`
-   *     unchanged and disarms — applying Ctrl to a multi-char string
-   *     would garble it.
+   * Apply sticky-Ctrl to a piece of input text. Not armed: `text` unchanged.
+   * Armed and one character: the matching Ctrl byte (`ctrlByteFor`), or the
+   * character when none exists. Armed and longer (paste, IME commit): `text`
+   * unchanged, since Ctrl over a multi-character string would garble it.
+   * Every armed call disarms.
    */
   applyStickyCtrl(text: string): string;
   /** Programmatically arm/disarm Ctrl. Updates the toolbar button visuals (`.armed` class + `aria-pressed`) + fires `onCtrlChange`. */
@@ -98,17 +93,12 @@ export interface MobileToolbarController {
 }
 
 /**
- * Wire a mobile / touch toolbar of on-screen keyboard buttons (Ctrl,
- * arrows, Tab, Enter, Esc, plus a collapse toggle) to a vterm send
- * sink.
- *
- * Each button's `pointerdown` is intercepted with `preventDefault()`
- * so the press never fires a focus change or scroll on the host page.
- *
- * Arrow keys and Escape emit exactly what an unmodified physical key press
- * emits: the shared logical-key encodings live in keyboard.ts
- * (plainCursorKeySeq honors kitty disambiguate over DECCKM, then DECCKM's
- * SS3 form; plainEscapeSeq is CSI 27 u under kitty, bare ESC otherwise).
+ * Wire a mobile / touch toolbar of on-screen keyboard buttons (Ctrl, arrows,
+ * Tab, Enter, Esc, plus a collapse toggle) to a vterm send sink. Each button's
+ * `pointerdown` is intercepted with `preventDefault()` so the press never
+ * fires a focus change or scroll on the host page. Arrow keys and Escape emit
+ * exactly what an unmodified physical key press emits, through the shared
+ * encodings in keyboard.ts.
  */
 export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbarController {
   const ids = { ...DEFAULT_TOOLBAR_IDS, ...opts.ids };
@@ -134,18 +124,12 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
       return;
     }
     ctrlBtn.classList.toggle("armed", on);
-    // Keep the ARIA toggle state in sync with the visual `.armed` class so
-    // assistive tech announces the sticky-Ctrl button as pressed/unpressed.
-    // The scaffold ships kb-ctrl as `aria-pressed="false"`; consumers used to
-    // own this in their own setCtrlArmed before delegating the toolbar here.
     ctrlBtn.setAttribute("aria-pressed", on ? "true" : "false");
   }
 
   function setCtrlArmed(on: boolean): void {
     if (armed === on) {
-      // Still update visuals defensively (e.g. after dispose was called
-      // and someone re-armed via setCtrlArmed) — but skip the change
-      // notification to keep onCtrlChange edge-triggered.
+      // Repaint without notifying, so onCtrlChange stays edge-triggered.
       paintCtrlBtn(on);
       return;
     }
@@ -156,10 +140,12 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
 
   // Arrow buttons emit exactly what an unmodified physical arrow press emits
   // (the toolbar.test.ts equivalence fixtures pin the two paths together).
-  // Mode bits come from the module-global state — the toolbar's source until
-  // P3 threads per-session modes through it.
   function arrowSeq(letter: "A" | "B" | "C" | "D"): string {
-    return plainCursorKeySeq(letter, kittyDisambiguateActive(), isApplicationCursor());
+    return plainCursorKeySeq(
+      letter,
+      kittyDisambiguateActive(opts.modes),
+      opts.modes.isApplicationCursor(),
+    );
   }
 
   // Listener registry so dispose() can detach them all.
@@ -225,7 +211,7 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
     setCtrlArmed(false);
     // The shared logical-Escape encoding (CSI 27 u under kitty disambiguate,
     // bare ESC otherwise) — same single home the physical path uses.
-    opts.send(plainEscapeSeq(kittyDisambiguateActive()));
+    opts.send(plainEscapeSeq(kittyDisambiguateActive(opts.modes)));
   });
 
   function applyStickyCtrl(text: string): string {
@@ -238,7 +224,7 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
       // spec's UNSHIFTED codepoint (shift folded into the modifier),
       // byte-identical with the physical-keyboard path: Ctrl+':' is 59;6u
       // from both, never 58;5u.
-      if (kittyDisambiguateActive()) {
+      if (kittyDisambiguateActive(opts.modes)) {
         const seq = kittyCtrlCharSeq(text);
         if (seq !== null) {
           return seq;

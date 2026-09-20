@@ -3,7 +3,7 @@ package terminal
 import (
 	"testing"
 
-	"github.com/cplieger/web-terminal-engine/v5/vt"
+	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
 // The theme is configured on the Handler but reported by the screen, so the only

@@ -12,7 +12,7 @@ import (
 	"testing/iotest"
 	"time"
 
-	"github.com/cplieger/web-terminal-engine/v5/vt"
+	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
 // TestConformance runs the esctest2 suite against the engine's VT and asserts

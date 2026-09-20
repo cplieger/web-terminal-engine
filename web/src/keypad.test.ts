@@ -1,28 +1,16 @@
-// SPEC-FIRST tests for application keypad mode (DECKPAM, enabled by ESC =).
-//
-// Expected sequences are transcribed from the "VT220-Style Function Keys"
-// application-keypad table in
-//   https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-// which maps each numeric-keypad key to an SS3 (ESC O <letter>) sequence in
-// application mode, and to the bare character in numeric mode (DECKPNM):
-//
-//   0..9 -> SS3 p q r s t u v w x y      (p is 0, y is 9)
-//   . -> SS3 n    - -> SS3 m    + -> SS3 k    * -> SS3 j    / -> SS3 o
-//   Enter -> SS3 M
-//
-// Numpad keys are recognised via KeyboardEvent.code ("Numpad0".."Numpad9",
-// "NumpadDecimal", etc.), so every event below sets `code`. A failing
-// assertion is a real deviation from the spec; see the accompanying report.
-//
-// Content transcribed/rephrased from invisible-island.net xterm docs for
-// compliance with licensing restrictions.
+// Application keypad mode (DECKPAM, ESC =). Expected sequences are transcribed
+// from the "VT220-Style Function Keys" application-keypad table at
+// https://invisible-island.net/xterm/ctlseqs/ctlseqs.html: each numeric-keypad
+// key is SS3 (ESC O <letter>) in application mode and the bare character in
+// numeric mode (DECKPNM); 0..9 -> SS3 p..y, . -> n, - -> m, + -> k, * -> j,
+// / -> o, Enter -> M. Numpad keys are recognised by KeyboardEvent.code, so every
+// event sets `code`. Content rephrased for licensing compliance.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { mapKeyboardEvent as mapKeyboardEventRaw, type KeyboardResult } from "./keyboard.js";
-import * as modes from "./modes.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
 
-// These tests drive the module-singleton modes (set via modes.setModes in
-// beforeEach), so bind it here; mapKeyboardEvent now takes modes explicitly.
+const modes = createModeState();
 const mapKeyboardEvent = (e: KeyboardEvent): KeyboardResult => mapKeyboardEventRaw(e, modes);
 
 function ev(init: KeyboardEventInit & { key: string; code: string }): KeyboardEvent {
@@ -38,12 +26,12 @@ function sent(result: KeyboardResult): string {
 
 /** Enable application keypad (DECKPAM): bracketed on, cursor normal, appKeypad on. */
 function enableAppKeypad(): void {
-  modes.setModes(true, false, false, false, 0, true);
+  modes.applySnapshot({ ...POWER_ON_MODES, applicationKeypad: true });
 }
 
 beforeEach(() => {
   // Reset to defaults: application keypad OFF (numeric / DECKPNM).
-  modes.setModes(true, false, false, false, 0, false);
+  modes.applySnapshot(POWER_ON_MODES);
 });
 
 // The full VT220-style application-keypad mapping (spec transcription).

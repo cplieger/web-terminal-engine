@@ -1,61 +1,25 @@
-// Behaviours of render.ts that the existing tiers exercise but never assert.
-// Four areas, each one a contract a reader can check without opening render.ts:
-//
-//   - Row geometry. Every overlay the renderer owns (the caret, the predicted
-//     cursor, and the position it reports to a consumer's IME view) resolves a
-//     row's top in the SCROLL CONTAINER's coordinate space, which is not the
-//     row's `offsetTop`: the stylesheet makes the row container a positioned
-//     element, so rows report offsets in ITS space, and the missing term is the
-//     container's own offset plus any border a wrapper grows. The model below
-//     declares that geometry — non-uniform rows, a positioned row container, a
-//     bordered wrapper — rather than measuring it, because the coordinate
-//     arithmetic IS the subject and a real box would be whatever this file's
-//     fixture markup happens to lay out at.
-//   - The caret's cell ownership. A Wide glyph owns two cells and the caret
-//     covers both; the decision is a measurement against the cell, so its
-//     BOUNDARY and the FACE it measures with are both observable.
-//   - The alternate screen. Entering it replaces the whole scrollback with one
-//     ephemeral grid; leaving it rebuilds from the store. In between, a frame
-//     that repaints a few rows must touch only those rows' DOM.
-//   - Row order and the markers projected into it. `output`'s children are kept
-//     in ascending `data-abs` order, and the gap markers are re-derived from the
-//     store's geometry every flush, so a marker moves when its gap's edge does.
-//
-// Expected numbers come from the layout model declared here, never from running
-// render.ts.
+// Four renderer contracts a reader can check without opening render.ts. Row
+// geometry: every overlay resolves a row's top in the SCROLL CONTAINER's space,
+// which is the row's `offsetTop` plus the positioned row container's offset and
+// any wrapper border; the model declares that geometry because the arithmetic IS
+// the subject. The caret's cell ownership: a Wide glyph owns two cells, so the
+// measurement's BOUNDARY and FACE are observable. The alternate screen: one
+// ephemeral grid in, a rebuild from the store out, and a partial repaint touches
+// only its rows. Row order: ascending `data-abs`, gap markers re-derived per flush.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import * as render from "./render.js";
-import * as scroll from "./scroll.js";
+import { createModeState } from "./modes.js";
+import { createRenderer, type Renderer } from "./render.js";
+import { createScrollController, type ScrollController } from "./scroll.js";
 import { LineStore, PAGE_SIZE } from "./store.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
-// A real browser's ESM module namespace is non-configurable, so `vi.spyOn` on a
-// module export cannot install itself: the property is not redefinable. The
-// emulator ran behind a transform that rewrote exports into configurable
-// getters, which is why these spies used to work without this line.
-//
-// `spy: true` asks vitest for the module with its exports wrapped in spies that
-// CALL THROUGH by default, so nothing is stubbed out wholesale — the same
-// scroll.ts runs, and only the exports a test explicitly overrides behave
-// differently. render.ts imports the same mocked module, which is what makes
-// this the parked-reader seam these tests need.
-//
-// One consequence to know when reading the call-count assertions below: an
-// auto-spy starts recording at module load, and `vi.spyOn` on a property that is
-// already a mock hands back THAT spy rather than a fresh one. So a spy taken
-// mid-test carries whatever the setup above it already did, and every site whose
-// assertion is a COUNT clears it first (`.mockClear()`) to mean what it says —
-// the calls the action under test causes.
-vi.mock("./scroll.js", { spy: true });
-
-// --- The font model ---------------------------------------------------------
-//
-// A monospace face at an 8px cell, with two deviations that make the caret's
-// cell-ownership decision observable: one Wide glyph (two cells) and one glyph
-// drawn at EXACTLY one and a half cells, which is the boundary of the
-// "is this double-width?" test. The bold and italic faces are drawn wider, as
-// a real font's are.
+// The font model: a monospace face at an 8px cell, with two deviations that
+// make the caret's cell-ownership decision observable: one Wide glyph (two
+// cells) and one glyph drawn at EXACTLY one and a half cells, which is the
+// boundary of the "is this double-width?" test. The bold and italic faces are
+// drawn wider, as a real font's are.
 const CELL_PX = 8;
 const LINE_PX = 17;
 const ADVANCE = new Map<string, number>([
@@ -75,16 +39,12 @@ function advance(ch: string, font: string): number {
   return w;
 }
 
-// --- The layout model -------------------------------------------------------
-//
-// termWrap (the positioned scroll container)
-//   └── output (position: relative, offset 7px inside it, 3px top border)
-//         └── one row per line, 13px tall
-//
-// Rows are 13px tall on purpose: the renderer's fallback for a row it has NOT
-// built is uniform-grid arithmetic at the CELL height (17px), so a layout whose
-// rows are a different height is the only one under which "answered from the
-// row element" and "answered from the grid" are distinguishable.
+// The layout model: termWrap (the positioned scroll container) holds output
+// (position: relative, offset 7px inside it, 3px top border), which holds one
+// 13px row per line. Rows are 13px on purpose: the fallback for a row NOT yet
+// built is uniform-grid arithmetic at the CELL height (17px), so only a layout
+// with a different row height distinguishes "answered from the row element"
+// from "answered from the grid".
 const ROW_PX = 13;
 const OUTPUT_OFFSET_TOP = 7;
 const OUTPUT_BORDER_TOP = 3;
@@ -107,13 +67,19 @@ function modelRectRowTop(abs: number, scrollTop: number): number {
 
 let output: HTMLDivElement;
 let termWrap: HTMLDivElement;
+let render: Renderer;
+let scroll: ScrollController;
+let attached = false;
 /** When set, the offset-parent chain never reaches termWrap: what a browser
  *  reports for a row inside a `display: none` subtree. */
 let offsetChainBroken = false;
 /** "sync" runs a scheduled frame on return from the call that scheduled it;
  *  "manual" holds them for runFrame(). */
 let frameMode: "sync" | "manual" = "sync";
-const queuedFrames: FrameRequestCallback[] = [];
+/** Held frames by the handle the stub returned, so a cancel removes the frame
+ *  it names: a disposed renderer's frame must not run as the replacement's. */
+const queuedFrames = new Map<number, FrameRequestCallback>();
+let nextFrameHandle = 0;
 /** History requests the renderer made, as [fromAbs, maxLines]. */
 let requests: [number, number][] = [];
 /** What the transport says it can carry right now. */
@@ -238,15 +204,29 @@ function installStubs(): void {
   // Drive the rAF-batched flush synchronously so each frame renders on return.
   realRAF = globalThis.requestAnimationFrame;
   realCAF = globalThis.cancelAnimationFrame;
+  // The synchronous form returns no handle on purpose: the flush has already
+  // run and cleared its slot by the time the caller would store one.
   globalThis.requestAnimationFrame = ((cb: FrameRequestCallback): number => {
     if (frameMode === "manual") {
-      queuedFrames.push(cb);
-      return undefined as unknown as number;
+      const handle = ++nextFrameHandle;
+      queuedFrames.set(handle, cb);
+      return handle;
     }
     cb(0);
     return undefined as unknown as number;
   }) as typeof globalThis.requestAnimationFrame;
-  globalThis.cancelAnimationFrame = (() => undefined) as typeof globalThis.cancelAnimationFrame;
+  globalThis.cancelAnimationFrame = ((handle: number): void => {
+    queuedFrames.delete(handle);
+  }) as typeof globalThis.cancelAnimationFrame;
+}
+
+function takeFrame(): FrameRequestCallback | undefined {
+  const first = queuedFrames.entries().next().value;
+  if (first === undefined) {
+    return undefined;
+  }
+  queuedFrames.delete(first[0]);
+  return first[1];
 }
 
 /** Run exactly one scheduled frame. Only meaningful in "manual" frame mode,
@@ -254,7 +234,7 @@ function installStubs(): void {
  *  synchronous stub a flush that reschedules itself drains the whole backlog
  *  before returning. */
 function runFrame(): void {
-  const cb = queuedFrames.shift();
+  const cb = takeFrame();
   expect(cb, "a frame must be scheduled").not.toBeUndefined();
   cb!(0);
 }
@@ -262,9 +242,9 @@ function runFrame(): void {
 /** Run every frame scheduled so far, including ones they schedule in turn. */
 function drainFrames(): void {
   let guard = 0;
-  while (queuedFrames.length > 0) {
+  while (queuedFrames.size > 0) {
     expect((guard += 1), "the drain must terminate").toBeLessThan(100);
-    queuedFrames.shift()!(0);
+    takeFrame()!(0);
   }
 }
 
@@ -276,9 +256,14 @@ function restoreStubs(): void {
   globalThis.cancelAnimationFrame = realCAF;
 }
 
-function attach(
-  opts: { padding?: string; onCursorMove?: () => void; paging?: boolean } = {},
-): void {
+interface AttachOpts {
+  padding?: string;
+  onCursorMove?: () => void;
+  paging?: boolean;
+}
+
+/** Attach a renderer to a fresh surface with a known box. */
+function attach(opts: AttachOpts = {}): void {
   document.body.innerHTML = `<div class="term"><div class="term-output"></div></div>`;
   termWrap = document.querySelector<HTMLDivElement>(".term")!;
   output = document.querySelector<HTMLDivElement>(".term-output")!;
@@ -302,20 +287,40 @@ function attach(
       scrollTop = v;
     },
   });
-  render.init({
-    output,
-    termWrap,
-    ...(opts.onCursorMove === undefined ? {} : { onCursorMove: opts.onCursorMove }),
-    ...(opts.paging === true
-      ? {
-          requestHistory: (fromAbs: number, maxLines: number): boolean => {
-            requests.push([fromAbs, maxLines]);
-            return true;
-          },
-          historyBudget: (): number => historyBudget,
-        }
-      : {}),
-  });
+  build(opts);
+}
+
+/** Dispose the current renderer and build its replacement on the SAME surface:
+ *  the boundary a consumer crosses when it re-mounts into elements it kept. */
+function reattach(opts: AttachOpts = {}): void {
+  build(opts);
+}
+
+function build(opts: AttachOpts): void {
+  if (attached) {
+    render.dispose();
+    scroll.dispose();
+  }
+  scroll = registerForDispose(createScrollController({ scrollEl: termWrap }));
+  render = registerForDispose(
+    createRenderer({
+      output,
+      termWrap,
+      scroll,
+      modes: createModeState(),
+      ...(opts.onCursorMove === undefined ? {} : { onCursorMove: opts.onCursorMove }),
+      ...(opts.paging === true
+        ? {
+            requestHistory: (fromAbs: number, maxLines: number): boolean => {
+              requests.push([fromAbs, maxLines]);
+              return true;
+            },
+            historyBudget: (): number => historyBudget,
+          }
+        : {}),
+    }),
+  );
+  attached = true;
   render.updateFontMetrics();
 }
 
@@ -393,7 +398,7 @@ function rowIndices(): number[] {
 beforeEach(() => {
   offsetChainBroken = false;
   frameMode = "sync";
-  queuedFrames.length = 0;
+  queuedFrames.clear();
   requests = [];
   historyBudget = PAGE_SIZE;
   installStubs();
@@ -818,13 +823,21 @@ describe("re-attaching leaves nothing behind", () => {
   });
 
   it("wipes the rows off a surface it re-attaches to", () => {
-    // init is the attachment boundary and installs a fresh store, so nothing
-    // repaints the rows that are on screen: they have to go with the old store.
+    // The replacement installs a fresh store, so nothing repaints the rows that
+    // are on screen: they have to go with the old renderer, and the replacement
+    // must own none of them, or its first frame updates a detached row in place
+    // and paints nothing.
     paint({ rows: [row("a"), row("b")], cursor: [0, 0] });
     runFrame();
     expect(output.children.length).toBe(2);
-    render.init({ output, termWrap });
+
+    reattach();
     expect(output.children.length).toBe(0);
+    expect(render.getHighestIndex()).toBe(-1);
+    paint({ rows: [row("c")], cursor: [0, 0] });
+    runFrame();
+    expect(rowIndices()).toEqual([0]);
+    expect(output.textContent).toBe("c");
   });
 
   it("takes its overlays off the surface it leaves", () => {
@@ -854,8 +867,15 @@ describe("re-attaching leaves nothing behind", () => {
     render.updateFontMetrics();
     expect(render.pendingRestoreAbs()).toBe(1);
 
-    render.init({ output, termWrap });
+    const old = render;
+    reattach();
+    expect(old.pendingRestoreAbs()).toBeNull();
     expect(render.pendingRestoreAbs()).toBeNull();
+    const shift = vi.spyOn(scroll, "adjustForContentShift");
+    paint({ rows: [row("a"), row("b"), row("c")], cursor: [0, 0] });
+    runFrame();
+    expect(render.pendingRestoreAbs()).toBeNull();
+    expect(shift).not.toHaveBeenCalled();
   });
 });
 
@@ -994,10 +1014,10 @@ describe("a request window belongs to the store that opened it", () => {
 });
 
 describe("a resume transition answers the follow question this layer owns", () => {
-  // The store used to derive "is the reader at the tail" from a window
-  // descriptor the transition itself retires. This layer knows, so it answers:
-  // `isUserScrolledUp`, overridden by an armed restore, which means "in history
-  // at the anchor" even while the browser holds a clamped mid-rebuild offset.
+  // The store cannot derive "is the reader at the tail" from a window descriptor
+  // the transition itself retires, so this layer answers: `isUserScrolledUp`,
+  // overridden by an armed restore, which means "in history at the anchor" even
+  // while the browser holds a clamped mid-rebuild offset.
 
   function transition(): { viewportAbs: number; following: boolean } {
     const seen = vi.spyOn(render.boundStore(), "applyResumeAck");
@@ -1046,10 +1066,10 @@ describe("a resume transition answers the follow question this layer owns", () =
 
 describe("an attachment boundary leaves nothing of ours on the old surface", () => {
   it("takes the gap markers off the surface it re-attaches away from", () => {
-    // The markers are renderer-owned children of the row container, and init
-    // swaps that container, so nothing else removes them. One left behind keeps a
-    // torn-down surface's subtree alive and reads, on a surface the consumer may
-    // show again, as a hole in a transcript that has none.
+    // The markers are renderer-owned children of the row container, and a
+    // disposed renderer leaves that container, so nothing else removes them. One
+    // left behind keeps a torn-down surface's subtree alive and reads, on a
+    // surface the consumer may show again, as a hole in a transcript that has none.
     attach({ paging: true });
     render.handleScroll(scrollMsg(0, 5));
     render.handleScroll(scrollMsg(100, 5));
@@ -1070,7 +1090,13 @@ describe("an attachment boundary leaves nothing of ours on the old surface", () 
     runFrame();
     expect(render.pendingRowCount()).toBeGreaterThan(0);
 
-    render.init({ output, termWrap });
+    const old = render;
+    reattach();
+    expect(old.pendingRowCount()).toBe(0);
+    expect(render.pendingRowCount()).toBe(0);
+    paint({ rows: [row("a")], cursor: [0, 0] });
+    drainFrames();
+    expect(rowIndices()).toEqual([0]);
     expect(render.pendingRowCount()).toBe(0);
   });
 });
@@ -1130,7 +1156,7 @@ describe("a store swap starts from the incoming store alone", () => {
     paint({ rows: [row("a"), row("b"), row("c")], cursor: [0, 0] });
     runFrame();
     vi.spyOn(scroll, "currentScrollTop").mockReturnValue(2 * ROW_PX);
-    const shrink = vi.spyOn(scroll, "noteContentShrink").mockClear();
+    const shrink = vi.spyOn(scroll, "noteContentShrink");
 
     render.bind(new LineStore());
     expect(shrink.mock.calls).toEqual([[2 * ROW_PX]]);
@@ -1295,7 +1321,7 @@ describe("a flush that moved nothing corrects nothing", () => {
     // double-compensate there and throw the view the other way.
     paint({ rows: [row("a"), row("b"), row("c")], cursor: [0, 0] });
     parkJustAboveRow2();
-    const shift = vi.spyOn(scroll, "adjustForContentShift").mockClear();
+    const shift = vi.spyOn(scroll, "adjustForContentShift");
 
     paint({ rows: [row("a"), row("b"), row("c2")], changed: [2], cursor: [0, 0] });
     expect(shift.mock.calls).toEqual([[0]]);
@@ -1311,7 +1337,7 @@ describe("a flush that moved nothing corrects nothing", () => {
     parkJustAboveRow2();
     render.updateFontMetrics();
     expect(render.pendingRestoreAbs()).toBe(2);
-    const shift = vi.spyOn(scroll, "adjustForContentShift").mockClear();
+    const shift = vi.spyOn(scroll, "adjustForContentShift");
 
     runFrame();
     expect(render.pendingRestoreAbs()).toBeNull();
@@ -1388,7 +1414,7 @@ describe("leaving the alternate screen is a content shrink like any other", () =
     // auto-follow off.
     render.handleScroll(scrollMsg(0, 5));
     paint({ rows: [row("t0"), row("t1")], base: 5, cursor: [0, 0], altActive: true });
-    const shrink = vi.spyOn(scroll, "noteContentShrink").mockClear();
+    const shrink = vi.spyOn(scroll, "noteContentShrink");
 
     paint({ rows: [row("W5"), row("W6")], base: 5, cursor: [0, 0], altActive: false });
     expect(shrink).toHaveBeenCalledTimes(1);

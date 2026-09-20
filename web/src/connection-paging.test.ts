@@ -1,27 +1,16 @@
-// The connection layer's DEMAND-PAGING half (docs/paged-scrollback.md §4 and
-// §5.1): reading the server's capability off the resumeAck, capturing the values
-// this socket SENT so the store can predict the replay start, the single-flight
-// history request with its token bucket and data timeout, the containment rule
-// that decides whether a reply may take control effects, the RFC-5681-shaped
-// budget ladder, and the pre-ack suppression that keeps a paging client from
-// rendering history the resume batch is about to discard.
-//
-// Drives the REAL connection module with a fake global WebSocket, the same shape
-// connection.test.ts uses.
+// The connection's DEMAND-PAGING half (docs/paged-scrollback.md §4 and §5.1):
+// the capability read off the resumeAck, the values this socket SENT so the
+// store can predict the replay start, the single-flight history request with
+// its token bucket and data timeout, the containment rule that decides whether
+// a reply may take control effects, the RFC-5681-shaped budget ladder, and the
+// pre-ack suppression that keeps a paging client from rendering history the
+// resume batch is about to discard. A fake global WebSocket carries the wire.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  MAX_REPLAY_LINES,
-  connect,
-  disconnect,
-  historyBudget,
-  historyPagingAvailable,
-  historyRequestInFlight,
-  init,
-  requestHistory,
-  setSession,
-} from "./connection.js";
+import { type Connection, createConnection, MAX_REPLAY_LINES } from "./connection.js";
 import { LineStore } from "./store.js";
+import { connectionDeps } from "./test-helpers/connection-fakes.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
 import type { ScrollMessage, ServerMessage } from "./types.js";
 
@@ -99,15 +88,12 @@ function makeMockWebSocket(): typeof WebSocket {
 }
 
 /**
- * A resumeAck frame, mirroring encodeResumeAck (wire_binary.go). The 35-byte
- * form carries the bounds tail plus serverWireVersion + ackFlags, where bit0 is
- * ledgerLost and BIT 1 IS THE PAGING DECLARATION.
- *
- * `noTail` truncates to 17 bytes — a server old enough to report an epoch and
- * nothing else, which is the compatibility path where the client must not
- * invent bounds. The version defaults to the client's own protocol version,
- * because anything lower leaves the socket un-upgraded and history requests are
- * refused on a socket that never negotiated typed framing.
+ * A resumeAck frame as encodeResumeAck (wire_binary.go) writes it: the 35-byte
+ * form carries the bounds tail plus serverWireVersion and ackFlags, bit 0
+ * ledgerLost, BIT 1 THE PAGING DECLARATION. `noTail` truncates to 17 bytes, a
+ * server that answers an epoch and nothing else, where the client must not
+ * invent bounds. The version defaults to the client's own, since anything lower
+ * leaves the socket un-upgraded and history requests refused.
  */
 function resumeAckFrame(opts: {
   received?: number;
@@ -203,6 +189,8 @@ interface Harness {
   }[];
   solicited: [number, number][];
   cleared: number;
+  /** Whether the renderer's solicited window is open right now. */
+  windowOpen: boolean;
   retries: number;
   /**
    * An optional REAL store wired into the reply callbacks, for the one test that
@@ -213,6 +201,36 @@ interface Harness {
 }
 
 let h: Harness;
+let conn: Connection;
+
+/** A request in flight is exactly a solicited window held open on the renderer. */
+function inFlight(): boolean {
+  return h.windowOpen;
+}
+
+/** The renderer the connection drives, recording into the harness. */
+function harnessRenderer(): Partial<ReturnType<typeof connectionDeps>["renderer"]> {
+  return {
+    handleHistoryReply: (msg, raiseFloorTo) => {
+      h.replies.push({ msg, raiseFloorTo });
+      h.store?.applyHistoryScroll(msg, msg.firstIndex);
+    },
+    applyResumeTransition: (t) => h.transitions.push(t),
+    noteSolicited: (lo, hi) => {
+      h.solicited.push([lo, hi]);
+      h.windowOpen = true;
+      h.store?.noteSolicited(lo, hi);
+    },
+    clearSolicited: () => {
+      h.cleared++;
+      h.windowOpen = false;
+      h.store?.clearSolicited();
+    },
+    maybeFetchHistory: () => {
+      h.retries++;
+    },
+  };
+}
 
 /**
  * Just past the 8s history data timeout. Deliberately NOT tens of seconds: the
@@ -224,15 +242,11 @@ const HISTORY_TIMEOUT_SLACK = 9_000;
 
 /** Control frames the socket was asked to send, decoded from their JSON body. */
 /**
- * Every control the client sent, in EITHER encoding — a JSON text frame (what a
- * post-upgrade socket uses) or a v3 0x00-sentinel binary frame (the pre-upgrade
- * bootstrap).
- *
- * Decoding only the binary form is how 29 tests in this file passed against a
- * client that sent its history requests in the wrong encoding entirely: the
- * string sends were invisible here, so the harness saw the frames the code
- * should not have been sending and nothing saw the ones it should. A harness
- * that ignores a whole encoding cannot notice a client choosing it.
+ * Every control the client sent, in EITHER encoding: a JSON text frame (a
+ * post-upgrade socket) or a v3 0x00-sentinel binary frame (the pre-upgrade
+ * bootstrap). Decoding only the binary form let 29 tests here pass against a
+ * client sending its history requests in the wrong encoding: a harness that
+ * ignores a whole encoding cannot notice a client choosing it.
  */
 function controlsSent(sock: MockWS): Record<string, unknown>[] {
   const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
@@ -270,7 +284,7 @@ function historyControls(sock: MockWS): { fromAbs: number; maxLines: number }[] 
 function openSocket(
   opts: { paging?: boolean; committed?: number; oldest?: number; ack?: boolean } = {},
 ): MockWS {
-  connect();
+  conn.connect();
   const sock = sockets[sockets.length - 1]!;
   sock.fireOpen();
   if (opts.ack !== false) {
@@ -296,40 +310,26 @@ describe("connection: history paging", () => {
       transitions: [],
       solicited: [],
       cleared: 0,
+      windowOpen: false,
       retries: 0,
       store: null,
     };
-    init({
-      onMessage: (msg) => h.messages.push(msg),
-      onOpen: () => {
-        /* no-op */
-      },
-      onClose: () => {
-        /* no-op */
-      },
-      computeSize: () => ({ cols: 80, rows: 24 }),
-      onHistoryReply: (msg, raiseFloorTo) => {
-        h.replies.push({ msg, raiseFloorTo });
-        h.store?.applyHistoryScroll(msg, msg.firstIndex);
-      },
-      onResumeTransition: (t) => h.transitions.push(t),
-      noteSolicited: (lo, hi) => {
-        h.solicited.push([lo, hi]);
-        h.store?.noteSolicited(lo, hi);
-      },
-      clearSolicited: () => {
-        h.cleared++;
-        h.store?.clearSolicited();
-      },
-      onHistoryRetry: () => {
-        h.retries++;
-      },
-    });
-    setSession("paging-tests");
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(harnessRenderer()),
+        callbacks: {
+          onMessage: (msg) => h.messages.push(msg),
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+      }),
+    );
+    conn.setSession("paging-tests");
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -337,22 +337,22 @@ describe("connection: history paging", () => {
   describe("capability", () => {
     it("is read from the ack's flag bit, not assumed", () => {
       const sock = openSocket({ paging: true });
-      expect(historyPagingAvailable()).toBe(true);
+      expect(conn.requestHistory(0, 100)).toBe(true);
       expect(h.transitions.at(-1)?.paging).toBe(true);
       expect(sock.close).not.toHaveBeenCalled();
     });
 
     it("stays off for a server that does not declare it", () => {
       const sock = openSocket({ paging: false });
-      expect(historyPagingAvailable()).toBe(false);
-      expect(requestHistory(0, 100)).toBe(false);
+      expect(conn.requestHistory(0, 100)).toBe(false);
       expect(historyControls(sock)).toEqual([]);
     });
 
     it("stays off for a server too old to carry the flags byte", () => {
       const sock = openSocket({ ack: false });
       sock.fireMessage(resumeAckFrame({ noTail: true }));
-      expect(historyPagingAvailable()).toBe(false);
+      expect(conn.requestHistory(0, 100)).toBe(false);
+      expect(historyControls(sock)).toEqual([]);
       // The transition still fires, so the store runs its epoch reset; the
       // bounds are null because inventing zeros would forge a replay jump.
       const t = h.transitions.at(-1);
@@ -370,28 +370,34 @@ describe("connection: history paging", () => {
 
     it("does not survive the socket that declared it", () => {
       const sock = openSocket({ paging: true });
-      expect(historyPagingAvailable()).toBe(true);
+      expect(conn.requestHistory(0, 100)).toBe(true);
       sock.fireClose(1006);
-      expect(historyPagingAvailable()).toBe(false);
-      expect(historyRequestInFlight()).toBe(false);
+      // The replacement has heard nothing from its own server yet.
+      vi.advanceTimersByTime(9_000);
+      const next = sockets[sockets.length - 1]!;
+      expect(next).not.toBe(sock);
+      next.fireOpen();
+      expect(conn.requestHistory(0, 100)).toBe(false);
+      expect(historyControls(next)).toEqual([]);
+      expect(inFlight()).toBe(false);
     });
   });
 
   describe("the resume send", () => {
     it("carries the client's own replayMax and reports the SENT value", () => {
-      init({
-        onMessage: (msg) => h.messages.push(msg),
-        onOpen: () => {
-          /* no-op */
-        },
-        onClose: () => {
-          /* no-op */
-        },
-        computeSize: () => ({ cols: 80, rows: 24 }),
-        getReplayMax: () => 750,
-        onResumeTransition: (t) => h.transitions.push(t),
-      });
-      setSession("paging-tests");
+      conn = registerForDispose(
+        createConnection({
+          ...connectionDeps(harnessRenderer()),
+          callbacks: {
+            onMessage: (msg) => h.messages.push(msg),
+            onOpen: () => undefined,
+            onClose: () => undefined,
+            computeSize: () => ({ cols: 80, rows: 24 }),
+            getReplayMax: () => 750,
+          },
+        }),
+      );
+      conn.setSession("paging-tests");
       const sock = openSocket({ paging: true });
       const resume = controlsSent(sock).find((m) => m["type"] === "resume");
       expect(resume?.["replayMax"]).toBe(750);
@@ -404,21 +410,19 @@ describe("connection: history paging", () => {
       // The server clamps too. Sending an unclamped value and letting the
       // server silently reduce it would desynchronize the jump prediction,
       // which is computed from the sent value.
-      init({
-        onMessage: () => {
-          /* no-op */
-        },
-        onOpen: () => {
-          /* no-op */
-        },
-        onClose: () => {
-          /* no-op */
-        },
-        computeSize: () => ({ cols: 80, rows: 24 }),
-        getReplayMax: () => MAX_REPLAY_LINES * 10,
-        onResumeTransition: (t) => h.transitions.push(t),
-      });
-      setSession("paging-tests");
+      conn = registerForDispose(
+        createConnection({
+          ...connectionDeps(harnessRenderer()),
+          callbacks: {
+            onMessage: () => undefined,
+            onOpen: () => undefined,
+            onClose: () => undefined,
+            computeSize: () => ({ cols: 80, rows: 24 }),
+            getReplayMax: () => MAX_REPLAY_LINES * 10,
+          },
+        }),
+      );
+      conn.setSession("paging-tests");
       const sock = openSocket({ paging: true });
       expect(controlsSent(sock).find((m) => m["type"] === "resume")?.["replayMax"]).toBe(
         MAX_REPLAY_LINES,
@@ -442,16 +446,16 @@ describe("connection: history paging", () => {
   describe("requestHistory", () => {
     it("sends one request and marks the window solicited", () => {
       const sock = openSocket({ paging: true });
-      expect(requestHistory(1000, 500)).toBe(true);
+      expect(conn.requestHistory(1000, 500)).toBe(true);
       expect(historyControls(sock)).toEqual([{ fromAbs: 1000, maxLines: 500 }]);
       expect(h.solicited).toEqual([[1000, 1500]]);
-      expect(historyRequestInFlight()).toBe(true);
+      expect(inFlight()).toBe(true);
     });
 
     it("is single-flight: a second request while one is open is refused", () => {
       const sock = openSocket({ paging: true });
-      expect(requestHistory(1000, 500)).toBe(true);
-      expect(requestHistory(2000, 500)).toBe(false);
+      expect(conn.requestHistory(1000, 500)).toBe(true);
+      expect(conn.requestHistory(2000, 500)).toBe(false);
       expect(historyControls(sock).length).toBe(1);
     });
 
@@ -462,23 +466,23 @@ describe("connection: history paging", () => {
       // handler sets it — the separate `acked` check is belt-and-braces for a
       // future capability source that is not the ack.)
       const sock = openSocket({ ack: false });
-      expect(requestHistory(1000, 500)).toBe(false);
+      expect(conn.requestHistory(1000, 500)).toBe(false);
       expect(historyControls(sock)).toEqual([]);
     });
 
     it("refuses an unsafe or nonsensical range instead of sending it", () => {
       const sock = openSocket({ paging: true });
-      expect(requestHistory(-1, 100)).toBe(false);
-      expect(requestHistory(0, 0)).toBe(false);
-      expect(requestHistory(Number.MAX_SAFE_INTEGER, 100)).toBe(false);
-      expect(requestHistory(1.5, 100)).toBe(false);
+      expect(conn.requestHistory(-1, 100)).toBe(false);
+      expect(conn.requestHistory(0, 0)).toBe(false);
+      expect(conn.requestHistory(Number.MAX_SAFE_INTEGER, 100)).toBe(false);
+      expect(conn.requestHistory(1.5, 100)).toBe(false);
       expect(historyControls(sock)).toEqual([]);
     });
 
     it("clamps the page size to the current budget", () => {
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 10_000);
-      expect(historyControls(sock)[0]?.maxLines).toBe(historyBudget());
+      conn.requestHistory(1000, 10_000);
+      expect(historyControls(sock)[0]?.maxLines).toBe(conn.historyBudget());
     });
 
     it("spends its burst and then paces, asking the consumer to retry", () => {
@@ -487,7 +491,7 @@ describe("connection: history paging", () => {
       // the single-flight slot first.
       let sent = 0;
       for (let i = 0; i < 6; i++) {
-        if (requestHistory(1000 + i * 500, 500)) {
+        if (conn.requestHistory(1000 + i * 500, 500)) {
           sent++;
           sock.fireMessage(scrollFrame(1000 + i * 500, 500));
         }
@@ -499,7 +503,7 @@ describe("connection: history paging", () => {
       // clock run both fires it and refills the bucket.
       vi.advanceTimersByTime(5000);
       expect(h.retries).toBeGreaterThan(0);
-      expect(requestHistory(9000, 500)).toBe(true);
+      expect(conn.requestHistory(9000, 500)).toBe(true);
       expect(historyControls(sock).length).toBe(before + 1);
     });
   });
@@ -507,13 +511,13 @@ describe("connection: history paging", () => {
   describe("reply correlation", () => {
     it("forwards a contained reply, releases the slot AND closes the solicited window", () => {
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       const clearedBefore = h.cleared;
       sock.fireMessage(scrollFrame(1000, 500));
       expect(h.replies.length).toBe(1);
       expect(h.replies[0]?.msg.firstIndex).toBe(1000);
       expect(h.replies[0]?.raiseFloorTo).toBeNull();
-      expect(historyRequestInFlight()).toBe(false);
+      expect(inFlight()).toBe(false);
       // The window is the store's permission to admit lines below its
       // stale-re-send watermark. Left open with no request in flight, a later
       // duplicate or malformed frame in the same range keeps bypassing that
@@ -530,7 +534,7 @@ describe("connection: history paging", () => {
       // received-byte ledger that the client's outbox reconciles against.
       const sock = openSocket({ paging: true });
       const before = rawSent(sock).length;
-      expect(requestHistory(1000, 500)).toBe(true);
+      expect(conn.requestHistory(1000, 500)).toBe(true);
 
       const frames = rawSent(sock).slice(before);
       expect(frames.length).toBe(1);
@@ -560,7 +564,7 @@ describe("connection: history paging", () => {
       h.store = store;
 
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       const clearedBefore = h.cleared; // the socket lifecycle clears too
       sock.fireMessage(scrollFrame(1000, 500));
 
@@ -573,11 +577,11 @@ describe("connection: history paging", () => {
       // Its attempt is still open (the slot is not released either), so the
       // window that authorises the rest of the range has to stay with it.
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       const clearedBefore = h.cleared;
       sock.fireMessage(scrollFrame(1000, 900));
       expect(h.replies.length).toBe(1);
-      expect(historyRequestInFlight()).toBe(true);
+      expect(inFlight()).toBe(true);
       expect(h.cleared).toBe(clearedBefore);
     });
 
@@ -586,18 +590,18 @@ describe("connection: history paging", () => {
       // the bottom of the range, so nothing below the reply's start can ever be
       // served and asking again would burn a token per approach.
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       sock.fireMessage(scrollFrame(1200, 300));
       expect(h.replies[0]?.raiseFloorTo).toBe(1200);
     });
 
     it("reads an empty reply as the whole window being gone", () => {
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       sock.fireMessage(scrollFrame(1000, 0));
       expect(h.replies.length).toBe(1);
       expect(h.replies[0]?.raiseFloorTo).toBe(1500); // the request's end
-      expect(historyRequestInFlight()).toBe(false);
+      expect(inFlight()).toBe(false);
     });
 
     it("does not correlate a frame at the window's exclusive upper edge", () => {
@@ -605,12 +609,12 @@ describe("connection: history paging", () => {
       // at the end index is the NEXT range, so treating it as the reply would
       // release single-flight on content the request never asked for.
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       h.messages.length = 0;
       sock.fireMessage(scrollFrame(1500, 3));
       expect(h.replies.length).toBe(0);
       expect(h.messages.some((m) => m.type === "scroll")).toBe(true);
-      expect(historyRequestInFlight()).toBe(true);
+      expect(inFlight()).toBe(true);
     });
 
     it("does not correlate a frame below the window", () => {
@@ -618,22 +622,22 @@ describe("connection: history paging", () => {
       // committed lines whose firstIndex is the PREVIOUS window base, strictly
       // below the requested range.
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       sock.fireMessage(scrollFrame(500, 3));
       expect(h.replies.length).toBe(0);
-      expect(historyRequestInFlight()).toBe(true);
+      expect(inFlight()).toBe(true);
     });
 
     it("does correlate the window's first and last index", () => {
       // Both inclusive edges are the reply, so the guard cannot be an
       // off-by-one in the other direction either.
       const first = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       first.fireMessage(scrollFrame(1000, 1));
       expect(h.replies.length).toBe(1);
 
       vi.advanceTimersByTime(5000);
-      requestHistory(2000, 500);
+      conn.requestHistory(2000, 500);
       first.fireMessage(scrollFrame(2499, 1));
       expect(h.replies.length).toBe(2);
     });
@@ -642,12 +646,12 @@ describe("connection: history paging", () => {
       // Live committed lines keep flowing while a fetch is open; only frames
       // inside the requested window are that request's reply.
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       h.messages.length = 0;
       sock.fireMessage(scrollFrame(8000, 3));
       expect(h.replies.length).toBe(0);
       expect(h.messages.some((m) => m.type === "scroll")).toBe(true);
-      expect(historyRequestInFlight()).toBe(true); // still waiting
+      expect(inFlight()).toBe(true);
     });
 
     it("does not let an overspilling reply take control effects", () => {
@@ -656,36 +660,36 @@ describe("connection: history paging", () => {
       // but it must not release the slot or grow the budget, or the ladder
       // would be driven by a request that already failed.
       const sock = openSocket({ paging: true });
-      requestHistory(1000, 500);
+      conn.requestHistory(1000, 500);
       sock.fireMessage(scrollFrame(1000, 900)); // spills past 1500
       expect(h.replies.length).toBe(1);
-      expect(historyRequestInFlight()).toBe(true);
+      expect(inFlight()).toBe(true);
     });
   });
 
   describe("the budget ladder", () => {
     it("halves the ceiling and restarts small after a data timeout", () => {
       openSocket({ paging: true });
-      const full = historyBudget();
-      requestHistory(1000, full);
-      expect(historyRequestInFlight()).toBe(true);
+      const full = conn.historyBudget();
+      conn.requestHistory(1000, full);
+      expect(inFlight()).toBe(true);
 
       vi.advanceTimersByTime(HISTORY_TIMEOUT_SLACK); // the data timer fires; the socket stays up
       // The slot is released so the reader is not stuck, the solicited window is
       // withdrawn, and the next attempt is small (RFC 5681's ssthresh shape:
       // remember half of what failed, restart at the floor).
-      expect(historyRequestInFlight()).toBe(false);
+      expect(inFlight()).toBe(false);
       expect(h.cleared).toBeGreaterThan(0);
-      expect(historyBudget()).toBeLessThan(full);
+      expect(conn.historyBudget()).toBeLessThan(full);
       expect(h.retries).toBeGreaterThan(0);
     });
 
     it("grows back toward the remembered ceiling, and never past it", () => {
       const sock = openSocket({ paging: true });
-      const full = historyBudget();
-      requestHistory(1000, full);
+      const full = conn.historyBudget();
+      conn.requestHistory(1000, full);
       vi.advanceTimersByTime(HISTORY_TIMEOUT_SLACK);
-      const floor = historyBudget();
+      const floor = conn.historyBudget();
       expect(floor).toBeLessThan(full);
 
       // Each contained reply doubles the budget; the ceiling caps it. Plain
@@ -693,11 +697,11 @@ describe("connection: history paging", () => {
       const seen: number[] = [floor];
       for (let i = 0; i < 8; i++) {
         vi.advanceTimersByTime(5000); // refill the bucket
-        if (!requestHistory(2000 + i * 200, historyBudget())) {
+        if (!conn.requestHistory(2000 + i * 200, conn.historyBudget())) {
           break;
         }
         sock.fireMessage(scrollFrame(2000 + i * 200, 1));
-        seen.push(historyBudget());
+        seen.push(conn.historyBudget());
       }
       expect(seen[1]).toBeGreaterThan(floor);
       expect(Math.max(...seen)).toBeLessThan(full);

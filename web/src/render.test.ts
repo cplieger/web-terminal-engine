@@ -1,16 +1,15 @@
-// Renders the captured the host application WS frame sequence (typing "abc",
-// space, "d", LEFT, LEFT, "X") through render.handleScreen and
-// inspects the resulting DOM after each step.
-//
-// The bug under test: the visible cursor (the inverse-video character
-// that Ink draws) sometimes does not move when the content of row 19
-// changes by exactly the cursor cell. This test asserts that after
-// each frame, the inverse-styled span sits at the column matching
-// msg.cursor[1].
+// A captured WS frame sequence (typing "abc", space, "d", LEFT, LEFT, "X") goes
+// through renderer.handleScreen and the DOM is inspected after each step. The
+// visible cursor here is the inverse-video character Ink draws, and it must move
+// when row 19 changes by exactly the cursor cell: after each frame the
+// inverse-styled span sits at the column msg.cursor[1] names.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, WireRun } from "./types.js";
+
+let render: Renderer;
 
 // measureChar() in render.ts requires `getContext("2d").measureText`, and a real
 // Canvas2D measures whatever font the machine has installed. A fixed-width
@@ -82,14 +81,11 @@ async function flushFrame(msg: ScreenMessage): Promise<void> {
 
 describe("render: cursor cell updates with inline inverse-video character", () => {
   let outputEl: HTMLDivElement;
-  let termWrap: HTMLDivElement;
 
   beforeEach(() => {
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.resetScreen();
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 
@@ -157,18 +153,12 @@ describe("render: cursor cell updates with inline inverse-video character", () =
   });
 });
 
-// expectInverseAtCol asserts that the row at the given absolute index in the
-// output element has an inverse-styled span containing `expectedChar` whose
-// starting column is `col`. Spans are flat; we reconstruct columns by summing
-// the textContent length of preceding spans.
-//
-// The visible cursor these frames carry is the application's own inverse-video
-// cell (the native cursor is hidden: every frame sets cursorHidden). Per the
-// ANSI spec, inverse video over default colors swaps the theme's default
-// fg/bg; render.ts expresses that as `color: var(--bg); background: var(--text)`
-// (matching the tier-1 assertion in render-attributes.test.ts). Detect the
-// inverse cell by that exact swap — requiring BOTH properties, so a renderer
-// that dropped half the swap (an invisible inverse blank) would fail here.
+// Asserts that the row at absolute index `abs` has an inverse-styled span holding
+// `expectedChar` starting at column `col`; columns are the summed textContent
+// length of the preceding spans. The cursor is the application's own
+// inverse-video cell (every frame sets cursorHidden), and inverse over default
+// colors swaps the theme's fg/bg, `color: var(--bg); background: var(--text)`.
+// BOTH properties are required so a renderer dropping half the swap fails here.
 function expectInverseAtCol(
   output: HTMLElement,
   rowIdx: number,

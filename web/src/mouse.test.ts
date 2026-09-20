@@ -1,55 +1,24 @@
-// SPEC-FIRST mouse input-encoding tests.
-//
-// Expected byte sequences here are derived from the xterm mouse-tracking
-// SPECIFICATION, not from reading mouse.ts. A failing/skip'd case is a real
-// deviation from xterm, not something to massage green.
-//
-// Spec source (verified 2026):
-//   xterm "Control Sequences" — section "Mouse Tracking"
-//   https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-// Cross-checked against the xterm.js reference encoder
-//   (src/common/services/MouseStateService.ts `eventCode`/`SGR`), which
-//   mouse.ts's own doc-comment claims to match.
-//
-// Button byte (event code), per spec:
-//   low 2 bits: 0=MB1(left) 1=MB2(middle) 2=MB3(right) 3=none/release
-//   +4 Shift, +8 Meta, +16 Control  ("added together")
-//   +32 motion (drag/move)
-//   wheel: button 4/5 -> base 0/1 with +64  => up=64, down=65
-// SGR (1006): press/move = CSI < Pb ; Px ; Py M ; release = ...m .
-//   Px/Py are 1-based (upper-left cell = 1,1); the button value is NOT
-//   offset by +32 (that was an X10-only printable-byte trick); a distinct
-//   final char (m) disambiguates which button was released.
-//
-// DEVIATIONS found (see it.skip blocks at the bottom and the report). The
-// [bug] ones have since been FIXED in mouse.ts; their cases are promoted to
-// live tests above and state the spec value they now assert:
-//   D1 [bug→fixed] any-event (1003) motion with no button -> spec 35, was 32
-//   D2 [bug→fixed] aux button (DOM button >=3) -> spec 128/129 (the +128
-//                extended-button bit for X11 8/9), was 0 (left)
-//   D3 [choice]  DOM metaKey (Cmd/Win) -> spec Meta bit +8, got +0
-//                (encoder derives +8 from altKey only; matches xterm.js)
-//   D4 [scope]   normal tracking (1000) w/o SGR -> spec legacy CSI M report,
-//                got nothing (encoder is SGR-1006-only by design)
-//   D5 [bug→fixed] wheel with no vertical delta (horizontal gesture) -> spec
-//                no report, was b=65 (wheel-down). preventDefault stays
-//                unconditional, which is also what xterm.js's wheel handler
-//                does: report nothing, still swallow the gesture.
-//
-// NOT COVERED HERE any more: DEC 1004 focus reporting. Focus is transport state
-// the server derives (attachment + every client's reported focus + its own
-// keep-unfocused declaration), so it moved to `connection.setClientFocus` and
-// its tests to connection-ephemeral.test.ts.
+// Expected byte sequences come from the xterm mouse-tracking specification
+// (ctlseqs "Mouse Tracking", https://invisible-island.net/xterm/ctlseqs/ctlseqs.html),
+// cross-checked against xterm.js's MouseStateService encoder, never from
+// mouse.ts. Button byte: low 2 bits 0=left 1=middle 2=right 3=none/release, +4
+// Shift, +8 Meta, +16 Control, +32 motion, wheel up/down = 64/65. SGR 1006:
+// CSI < Pb ; Px ; Py M for press/move, m for release, 1-based coordinates, no +32
+// offset. Two deliberate deviations sit in it.skip blocks at the bottom; DEC 1004
+// focus is transport state and is tested in connection-ephemeral.test.ts.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
 import {
+  createMouseController,
   encodeSGR,
-  init as initMouse,
-  resyncGesture,
-  disarmGesture,
+  type MouseController,
   type MouseInputHandler,
 } from "./mouse.js";
-import * as modes from "./modes.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
+
+const modes = createModeState();
+let mouse: MouseController;
 
 const ESC = "\x1b";
 
@@ -65,9 +34,7 @@ const expectedSGR = (b: number, col: number, row: number, release: boolean): str
   `${ESC}[<${b};${col};${row}${release ? "m" : "M"}`;
 
 beforeEach(() => {
-  // modes is a module singleton (vitest isolate:false). Reset every flag —
-  // notably the 8th arg (mousePixels) — so nothing leaks between tests.
-  modes.setModes(true, false, false, false, 0, false, false, false);
+  modes.applySnapshot(POWER_ON_MODES);
 });
 
 // Motion is coalesced to one report per animation frame (press, release and
@@ -82,13 +49,13 @@ const nextFrame = (): Promise<void> =>
 
 // SGR 1006 on with the given tracking mode; focus + pixels off.
 function enableSGR(mode: number): void {
-  modes.setModes(true, false, true, false, mode, false, false, false);
+  modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: mode });
 }
 
 // Tracking off with the SGR encoding still on: what an application leaves behind
 // when it resets 1002 without resetting 1006.
 function disableTracking(): void {
-  modes.setModes(true, false, true, false, 0, false, false, false);
+  modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true });
 }
 
 // The fixture element is never attached to the document, so its
@@ -107,7 +74,7 @@ function setup(): { term: HTMLDivElement; sent: string[] } {
     cellSize: () => ({ width: 8, height: 16 }),
     termElement: () => term,
   };
-  initMouse(handler);
+  mouse = registerForDispose(createMouseController({ ...handler, modes }));
   return { term, sent };
 }
 
@@ -374,7 +341,7 @@ describe("coordinates: 1-based cell mapping (spec: upper-left cell = 1,1)", () =
 
 describe("mode gating (DECSET 1000/1002/1003)", () => {
   it("mode 0 (tracking off) emits nothing on press", () => {
-    modes.setModes(true, false, true, false, 0, false, false, false); // SGR on, tracking OFF
+    modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true }); // SGR on, tracking OFF
     const { term, sent } = setup();
     term.dispatchEvent(makeMouse("mousedown", { button: 0 }));
     expect(sent).toEqual([]);
@@ -414,14 +381,11 @@ describe("mode gating (DECSET 1000/1002/1003)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// DEVIATIONS from the xterm spec. Kept as it.skip so the file stays green;
-// each body asserts the SPEC-CORRECT value, so un-skipping reproduces the
-// finding verbatim. Do NOT edit these expectations to pass.
-// ---------------------------------------------------------------------------
+// Deviations from the xterm spec, as it.skip: each body asserts the SPEC value,
+// so un-skipping reproduces the finding verbatim. Do NOT edit them to pass.
 // Aux mouse buttons (DOM back/forward). Spec: xterm encodes the "additional
-// buttons" (X11 8-11) with the +128 extended-button bit — DOM 3 (Back = X11 8)
-// → 128, DOM 4 (Forward = X11 9) → 129. (Was a bug: collapsed to 0 = left.)
+// buttons" (X11 8-11) with the +128 extended-button bit, DOM 3 (Back = X11 8)
+// → 128, DOM 4 (Forward = X11 9) → 129.
 describe("aux buttons → xterm extended-button codes (spec)", () => {
   const cases: BtnCase[] = [
     { name: "Back (DOM 3 = X11 8)", button: 3, b: 128 },
@@ -452,7 +416,7 @@ describe("DEVIATIONS from xterm spec (skipped — see report)", () => {
     // CSI M Cb Cx Cy where each byte is value+32: Cb=0+32=0x20, Cx=3+32=0x23,
     // Cy=3+32=0x23. mouse.ts is SGR-1006-only and emits nothing. [scope —
     // legacy X10/1005/1015 encodings are intentionally unimplemented]
-    modes.setModes(true, false, false, false, 1000, false, false, false); // SGR + pixels OFF
+    modes.applySnapshot({ ...POWER_ON_MODES, mouseMode: 1000 }); // SGR + pixels OFF
     const { term, sent } = setup();
     term.dispatchEvent(makeMouse("mousedown", { button: 0 }));
     expect(sent).toEqual([`${ESC}[M\x20\x23\x23`]);
@@ -496,11 +460,12 @@ describe("motion dedup: identical same-cell reports are suppressed (matches xter
   });
 });
 
-describe("init returns an idempotent disposer", () => {
+describe("dispose is idempotent and scoped to its own element", () => {
   it("dispose detaches the listeners so no further events report", () => {
     const term = document.createElement("div");
     const sent: string[] = [];
-    const dispose = initMouse({
+    const controller = createMouseController({
+      modes,
       sendReport: (data) => {
         sent.push(data);
         return true;
@@ -511,14 +476,14 @@ describe("init returns an idempotent disposer", () => {
     enableSGR(1000);
     term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
     expect(sent.length).toBe(1);
-    dispose();
+    controller.dispose();
     term.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
     expect(sent.length).toBe(1); // detached: nothing new
-    dispose(); // idempotent: second call is a no-op
+    controller.dispose(); // idempotent: second call is a no-op
     expect(sent.length).toBe(1);
   });
 
-  it("a stale disposer from a superseded init does not detach the new element", () => {
+  it("disposing one controller does not detach another element's controller", () => {
     const sent: string[] = [];
     const handlerFor = (el: HTMLElement): MouseInputHandler => ({
       sendReport: (data) => {
@@ -529,14 +494,14 @@ describe("init returns an idempotent disposer", () => {
       termElement: () => el,
     });
     const first = document.createElement("div");
-    const staleDispose = initMouse(handlerFor(first));
+    const firstController = createMouseController({ ...handlerFor(first), modes });
     const second = document.createElement("div");
-    initMouse(handlerFor(second)); // supersedes; auto-detaches `first`
+    mouse = registerForDispose(createMouseController({ ...handlerFor(second), modes }));
     enableSGR(1000);
-    staleDispose(); // must NOT touch the second element's listeners
+    firstController.dispose(); // must NOT touch the second element's listeners
     second.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
     expect(sent.length).toBe(1);
-    // The superseded element was auto-detached at re-init.
+    // The disposed controller's element reports nothing.
     first.dispatchEvent(new MouseEvent("mousedown", { button: 0, clientX: 4, clientY: 8 }));
     expect(sent.length).toBe(1);
   });
@@ -548,14 +513,17 @@ describe("init returns an idempotent disposer", () => {
 function setupDelivering(delivered: boolean): { term: HTMLDivElement; sent: string[] } {
   const term = document.createElement("div");
   const sent: string[] = [];
-  initMouse({
-    sendReport: (data) => {
-      sent.push(data);
-      return delivered;
-    },
-    cellSize: () => ({ width: 8, height: 16 }),
-    termElement: () => term,
-  });
+  mouse = registerForDispose(
+    createMouseController({
+      modes,
+      sendReport: (data) => {
+        sent.push(data);
+        return delivered;
+      },
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => term,
+    }),
+  );
   return { term, sent };
 }
 
@@ -570,14 +538,17 @@ function setupToggling(): {
   const term = document.createElement("div");
   const sent: string[] = [];
   let delivered = true;
-  initMouse({
-    sendReport: (data) => {
-      sent.push(data);
-      return delivered;
-    },
-    cellSize: () => ({ width: 8, height: 16 }),
-    termElement: () => term,
-  });
+  mouse = registerForDispose(
+    createMouseController({
+      modes,
+      sendReport: (data) => {
+        sent.push(data);
+        return delivered;
+      },
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => term,
+    }),
+  );
   return {
     term,
     sent,
@@ -628,7 +599,7 @@ describe("gesture pairing: a release belongs to a press that was delivered", () 
     const afterRefusedRelease = sent.length;
 
     deliver(true);
-    resyncGesture();
+    mouse.resyncGesture();
 
     expect(sent.slice(afterRefusedRelease)).toEqual([expectedSGR(0, 3, 3, true)]);
   });
@@ -642,21 +613,24 @@ describe("gesture pairing: a release belongs to a press that was delivered", () 
     const term = document.createElement("div");
     const sent: string[] = [];
     let cell = { width: 8, height: 16 };
-    initMouse({
-      sendReport: (data) => {
-        sent.push(data);
-        return true;
-      },
-      cellSize: () => cell,
-      termElement: () => term,
-    });
+    mouse = registerForDispose(
+      createMouseController({
+        modes,
+        sendReport: (data) => {
+          sent.push(data);
+          return true;
+        },
+        cellSize: () => cell,
+        termElement: () => term,
+      }),
+    );
     term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
     cell = { width: 0, height: 0 };
     term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
     expect(sent).toEqual([expectedSGR(0, 3, 3, false)]);
 
     cell = { width: 8, height: 16 };
-    resyncGesture();
+    mouse.resyncGesture();
 
     expect(sent.slice(1)).toEqual([expectedSGR(0, 3, 3, true)]);
   });
@@ -675,7 +649,7 @@ describe("gesture pairing: a release belongs to a press that was delivered", () 
 
     expect(sent).toEqual([expectedSGR(0, 3, 3, false), expectedSGR(0, 3, 3, true)]);
     const afterRelease = sent.length;
-    resyncGesture(); // nothing left recorded
+    mouse.resyncGesture(); // nothing left recorded
     expect(sent.length).toBe(afterRelease);
   });
 
@@ -721,10 +695,10 @@ describe("resyncGesture: an in-flight gesture is cancelled, not replayed", () =>
     term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
     const afterPress = sent.length;
 
-    resyncGesture();
+    mouse.resyncGesture();
 
     expect(sent.slice(afterPress)).toEqual([expectedSGR(0, 3, 3, true)]);
-    resyncGesture(); // the record is cleared, so a second call adds nothing
+    mouse.resyncGesture(); // the record is cleared, so a second call adds nothing
     expect(sent.slice(afterPress)).toEqual([expectedSGR(0, 3, 3, true)]);
   });
 
@@ -736,7 +710,7 @@ describe("resyncGesture: an in-flight gesture is cancelled, not replayed", () =>
     term.dispatchEvent(makeMouse("mousedown", { button: 0, buttons: 1 }));
     const afterPress = sent.length;
 
-    resyncGesture();
+    mouse.resyncGesture();
 
     expect(sent.length).toBe(afterPress);
   });
@@ -748,7 +722,7 @@ describe("resyncGesture: an in-flight gesture is cancelled, not replayed", () =>
     term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
     const afterPress = sent.length;
 
-    resyncGesture();
+    mouse.resyncGesture();
 
     expect(sent.length).toBe(afterPress);
   });
@@ -764,7 +738,7 @@ describe("resyncGesture: an in-flight gesture is cancelled, not replayed", () =>
     term.dispatchEvent(makeMouse("mouseup", { button: 0, buttons: 0 }));
     const afterPress = sent.length;
 
-    resyncGesture();
+    mouse.resyncGesture();
 
     expect(sent.length).toBe(afterPress);
   });
@@ -784,7 +758,7 @@ describe("resyncGesture: an in-flight gesture is cancelled, not replayed", () =>
     const afterPress = sent.length;
 
     enableSGR(1002);
-    resyncGesture();
+    mouse.resyncGesture();
 
     expect(sent.length).toBe(afterPress);
   });
@@ -800,9 +774,9 @@ describe("resyncGesture: an in-flight gesture is cancelled, not replayed", () =>
     const afterPress = sent.length;
 
     deliver(false);
-    resyncGesture();
+    mouse.resyncGesture();
     deliver(true);
-    resyncGesture();
+    mouse.resyncGesture();
 
     // Both at the PRESS's cell, which is where makeMouse's default coordinates land.
     expect(sent.slice(afterPress)).toEqual([
@@ -824,10 +798,10 @@ describe("disarmGesture: a session switch forgets the gesture", () => {
     term.dispatchEvent(makeMouse("mousemove", { buttons: 0 }));
     const afterPress = sent.length;
 
-    disarmGesture();
+    mouse.disarmGesture();
     expect(sent.length).toBe(afterPress);
 
-    resyncGesture();
+    mouse.resyncGesture();
     expect(sent.length).toBe(afterPress);
   });
 });

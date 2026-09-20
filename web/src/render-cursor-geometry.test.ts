@@ -1,20 +1,15 @@
-// Caret geometry and shape: where the two overlays land, and what the DECSCUSR
-// style byte turns into on screen.
-//
-// The caret is a single absolutely-positioned element in the scroll container,
-// not a restyled span inside the row, so everything about it is arithmetic over
-// (padding, cell size, column, row) — and every one of those terms is asserted
-// here at a known metric. The predicted-cursor overlay runs the same arithmetic
-// for a consumer echoing keystrokes ahead of the server.
-//
-// Spec: DECSCUSR (`CSI Ps SP q`) — 0/1 blinking block, 2 steady block,
-// 3 blinking underline, 4 steady underline, 5 blinking bar, 6 steady bar. The
-// renderer expresses the three SHAPES as classes (the blink phase is a separate
-// mechanism), so 3 and 4 must both be an underline and 5 and 6 must both be a
-// bar. Cell coordinates are TRUE cells: a Wide glyph owns two of them.
+// Caret geometry and shape. The caret is one absolutely positioned element in
+// the scroll container, so everything about it is arithmetic over padding, cell
+// size, column and row, each asserted at a known metric; the predicted-cursor
+// overlay runs the same arithmetic. Spec: DECSCUSR (`CSI Ps SP q`), 0/1 blinking
+// block, 2 steady block, 3 blinking underline, 4 steady underline, 5 blinking
+// bar, 6 steady bar; the renderer expresses the three SHAPES as classes, so 3
+// and 4 are both an underline and 5 and 6 both a bar. Cell coordinates are TRUE
+// cells: a Wide glyph owns two.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, WireRun } from "./types.js";
 
 const CELL_PX = 8;
@@ -80,19 +75,18 @@ function restoreStubs(): void {
   globalThis.cancelAnimationFrame = realCAF;
 }
 
-let output: HTMLDivElement;
 let termWrap: HTMLDivElement;
+let render: Renderer;
 
-/** Attach the renderer to a fresh surface with a known box. */
+/** Attach a renderer to a fresh surface with a known box. */
 function attach(opts: { padding?: string; lineHeight?: string } = {}): void {
-  document.body.innerHTML = `<div class="term"><div class="term-output"></div></div>`;
-  termWrap = document.querySelector<HTMLDivElement>(".term")!;
-  output = document.querySelector<HTMLDivElement>(".term-output")!;
+  const fx = createEngineFixture();
+  termWrap = fx.termWrap;
+  render = fx.engine.renderer;
   termWrap.style.fontSize = "16px";
   termWrap.style.fontFamily = "monospace";
   termWrap.style.padding = opts.padding ?? "0px";
   termWrap.style.lineHeight = opts.lineHeight ?? "17px";
-  render.init({ output, termWrap });
 }
 
 interface FrameOpts {
@@ -283,11 +277,11 @@ describe("the terminal's padding offsets the overlays", () => {
   });
 
   it("answers the content origin while the cursor has no row at all", () => {
-    // The state a session wipe leaves behind (collapseContentSpaceOverlays): the
-    // cursor is at -1 and the row map is empty, and the consumer's IME view and
-    // hidden textarea are moved from this seam. There the content origin is the
-    // accurate answer, not a row offset — the grid arithmetic that serves every
-    // real row would put them a cell ABOVE the terminal's first line.
+    // The state a session wipe leaves (collapseContentSpaceOverlays): the cursor
+    // at -1 and the row map empty, with the consumer's IME view and textarea
+    // positioned from this seam. There the content origin is the accurate answer,
+    // not a row offset: the grid arithmetic that serves every real row would put
+    // them a cell ABOVE the terminal's first line.
     attach({ padding: "9px" });
     render.updateFontMetrics();
     expect(render.getCursorPx().top).toBe(9);

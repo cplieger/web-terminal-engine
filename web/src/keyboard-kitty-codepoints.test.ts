@@ -1,23 +1,17 @@
-// The kitty protocol's "unicode-key-code" rule, on the inputs the existing
-// keyboard suites do not reach.
-//
-// Spec: the kitty keyboard protocol reports the codepoint of the key's
-// UNSHIFTED (base-layout) value, so an app sees the same number however the
-// glyph was produced — Ctrl+Shift+A and Ctrl+A both report 'a', and a composed
-// Alt/Option character on macOS reports the physical key it came from.
-// (https://sw.kovidgoyal.net/kitty/keyboard-protocol/, "Key codes".)
-// Modifier digit = 1 + bitmask, bitmask 1:Shift 2:Alt 4:Ctrl 8:Meta, the same
-// as the legacy encodings.
-//
-// keyboard.test.ts covers the shifted-symbol table and the lower-case letters;
-// what is left unpinned is the UPPER-case letter range, the empty-string input
-// (the mobile toolbar's sticky-Ctrl path is the only thing that length-checks
-// before calling), the ev.code-derived paths for letters/digits/punctuation, and
-// the ev.key fallback for a key the browser reports no code for.
+// The kitty protocol's "unicode-key-code" rule: the codepoint of the key's
+// UNSHIFTED (base-layout) value, so Ctrl+Shift+A and Ctrl+A both report 'a' and
+// a composed Alt/Option character reports the physical key it came from
+// (https://sw.kovidgoyal.net/kitty/keyboard-protocol/, "Key codes"). Modifier
+// digit = 1 + bitmask, 1:Shift 2:Alt 4:Ctrl 8:Meta. Beyond keyboard.test.ts's
+// shifted symbols and lower-case letters: the UPPER-case range, the empty-string
+// input (the toolbar's sticky-Ctrl path length-checks before calling), the
+// ev.code-derived paths, and the ev.key fallback for a key with no code.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import { kittyCtrlCharSeq, mapKeyboardEvent, type KeyboardResult } from "./keyboard.js";
-import * as modes from "./modes.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
+
+const modes = createModeState();
 
 const ESC = "\x1b";
 const KITTY_DISAMBIGUATE = 1;
@@ -28,12 +22,12 @@ function ev(init: KeyboardEventInit & { key: string; code?: string }): KeyboardE
 
 /** Encode under the kitty disambiguate flag via the injected-modes seam. */
 function underKitty(init: KeyboardEventInit & { key: string; code?: string }): KeyboardResult {
-  modes.setModes(true, false, false, false, 0, false, false, false, KITTY_DISAMBIGUATE);
+  modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: KITTY_DISAMBIGUATE });
   return mapKeyboardEvent(ev(init), modes);
 }
 
 beforeEach(() => {
-  modes.setModes(true, false, false, false, 0, false, false, false, 0);
+  modes.applySnapshot(POWER_ON_MODES);
 });
 
 describe("kittyCtrlCharSeq: the upper-case letter range", () => {
@@ -91,13 +85,17 @@ describe("kitty disambiguate supersedes application-keypad SS3", () => {
     // DECKPAM would send ESC O u for Numpad5. Under the protocol the keypad's
     // TEXT keys stay text (the hidden textarea types them) — the SS3 branch is
     // skipped so keypad keys reach the kitty encoder at all.
-    modes.setModes(true, false, false, false, 0, true, false, false, KITTY_DISAMBIGUATE);
+    modes.applySnapshot({
+      ...POWER_ON_MODES,
+      applicationKeypad: true,
+      keyboardFlags: KITTY_DISAMBIGUATE,
+    });
     expect(mapKeyboardEvent(ev({ key: "5", code: "Numpad5" }), modes)).toEqual({ kind: "ignore" });
   });
 
   it("still SS3-encodes it when the protocol is off", () => {
     // The other half of the pair: with the flag clear, DECKPAM owns the numpad.
-    modes.setModes(true, false, false, false, 0, true, false, false, 0);
+    modes.applySnapshot({ ...POWER_ON_MODES, applicationKeypad: true });
     expect(mapKeyboardEvent(ev({ key: "5", code: "Numpad5" }), modes)).toEqual({
       kind: "send",
       bytes: `${ESC}Ou`,

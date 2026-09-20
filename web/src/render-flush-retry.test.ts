@@ -1,21 +1,15 @@
-// Bounded error-path reschedule (d-u4-1, guarding the l-f28 retry).
-//
-// flushRender's catch reschedules a flush when flushRenderInner throws mid-drain
-// so a partial/transient failure still finishes painting (l-f28). But the drain
-// loop deletes a queued row only AFTER upsertRow succeeds, so a row whose build
-// throws deterministically stays queued: an unbounded catch -> rAF -> throw
-// reschedule would be a ~60fps busy loop, even on an idle session. These tests
-// pin the two required behaviors with a fake requestAnimationFrame (so the "rAF
-// loop" is pumped deterministically, no real frames, no sleeps) and a fake
-// LineStore whose getLine throws on demand:
-//   1. a row that ALWAYS throws -> the reschedule is BOUNDED (it gives up and
-//      stops scheduling frames) rather than looping forever;
-//   2. a row that throws ONCE then succeeds (a transient font/measureText race)
-//      -> the retry still drains the row.
+// The bounded error-path reschedule. flushRender's catch reschedules a flush
+// when flushRenderInner throws mid-drain so a transient failure still finishes
+// painting, but the drain deletes a queued row only AFTER upsertRow succeeds, so
+// a row whose build always throws stays queued and an unbounded reschedule is a
+// ~60fps busy loop on an idle session. With a fake requestAnimationFrame the
+// test pumps and a LineStore whose getLine throws on demand: a row that ALWAYS
+// throws gives up and stops scheduling frames; a row that throws ONCE then
+// succeeds (a font race) is still drained by the retry.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import * as render from "./render.js";
-import { LineStore as RealLineStore } from "./store.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { WireRun } from "./types.js";
 import type { LineStore, StoreChanges, WindowState } from "./store.js";
 
@@ -34,7 +28,6 @@ HTMLCanvasElement.prototype.getContext = function fakeGetContext(): unknown {
   return ctx;
 } as typeof HTMLCanvasElement.prototype.getContext;
 
-// --- Deterministic requestAnimationFrame ---
 // Callbacks are queued, never auto-run; the test pumps them so the reschedule
 // chain is fully deterministic and terminates (or is caught by a safety cap).
 let rafQueue: FrameRequestCallback[] = [];
@@ -104,6 +97,8 @@ function makeFakeStore(target: number, throwCount: number): LineStore {
     // bind() closes the OUTGOING store's solicited window, so every store the
     // renderer is ever bound to must answer this — including a fake.
     clearSolicited: (): void => undefined,
+    // The flush ends in the paging trigger, which asks the bound store for gaps.
+    absentEdgesNear: (): never[] => [],
     getWindow: (): WindowState => win,
     isAlt: (): boolean => false,
     getAltRows: (): WireRun[][] => [],
@@ -131,21 +126,19 @@ function makeFakeStore(target: number, throwCount: number): LineStore {
 
 describe("render: bounded error-path reschedule (d-u4-1)", () => {
   let outputEl: HTMLDivElement;
-  let termWrap: HTMLDivElement;
+  let render: Renderer;
   let errorSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
     realRaf = globalThis.requestAnimationFrame;
     realCaf = globalThis.cancelAnimationFrame;
     installFakeRaf();
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.resetScreen();
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
-    // Discard any flush scheduled during setup; init() already reset pendingFrame
-    // to undefined, so the test's bind() schedules cleanly from a clean slate.
+    // Discard any flush scheduled during setup so the test's bind() schedules
+    // from a clean slate.
     rafQueue = [];
     rafCalls = 0;
     errorSpy = vi.spyOn(console, "error").mockImplementation(() => undefined);
@@ -155,12 +148,6 @@ describe("render: bounded error-path reschedule (d-u4-1)", () => {
     errorSpy.mockRestore();
     globalThis.requestAnimationFrame = realRaf;
     globalThis.cancelAnimationFrame = realCaf;
-    // Re-bind a REAL store: render.ts holds a module-level `store`, vitest runs
-    // with isolate:false, and bind(makeFakeStore(...)) above would otherwise
-    // leave the fake (no applyScreen/applyScroll) bound for whichever test file
-    // shares this worker next — the cross-file "store.applyScreen is not a
-    // function" flake whose failing file moved run to run on main.
-    render.bind(new RealLineStore());
   });
 
   function gaveUp(): boolean {

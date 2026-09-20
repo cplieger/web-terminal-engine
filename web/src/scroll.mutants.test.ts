@@ -1,19 +1,18 @@
-// Five decisions in the scroll controller that the existing suites reach from
-// one side only.
-//
-// Two are the exact edges of a boundary whose other side is already pinned: the
-// clamp epsilon's own value (scroll.test.ts pins a 0.6px residual, which is
-// inside the tolerance either way) and the bottom pin's zero case (every pin
-// test starts with content below). Two are non-writes — the pin that must not
-// touch the offset, and the zero-delta adjust that must not touch the direction
-// baseline — and a non-write is invisible unless the container counts. The last
-// is the unmounted controller: the renderer calls restoreView during bind,
-// before any container exists.
+// Five decisions in the scroll controller reached from one side only elsewhere.
+// Two are exact edges: the clamp epsilon's own value (scroll.test.ts pins a 0.6px
+// residual, inside the tolerance either way) and the bottom pin's zero case. Two
+// are non-writes, the pin that must not touch the offset and the zero-delta
+// adjust that must not touch the direction baseline, invisible unless the
+// container counts. The last is the disposed controller, which a renderer torn
+// down with it may still call restoreView on from a late bind.
 
 import { describe, it, expect, vi } from "vitest";
 
-import * as scroll from "./scroll.js";
+import { createScrollController, type ScrollController } from "./scroll.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { makeClampingScrollEl, makeDeferredClampScrollEl } from "./test-helpers/scroll-fixture.js";
+
+let scroll: ScrollController;
 
 /** A clamping container that COUNTS writes to scrollTop, so a test can tell
  *  "wrote the value it already held" from "did not write". */
@@ -55,10 +54,30 @@ describe("scroll: the container listener registration", () => {
     const f = makeClampingScrollEl(6000, 600);
     const spy = vi.spyOn(f.el, "addEventListener");
 
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
 
     expect(spy).toHaveBeenCalledWith("scroll", expect.any(Function), { passive: true });
     spy.mockRestore();
+  });
+
+  it("dispose removes the listener it registered, and only then", () => {
+    // The registration assertion above has a mirror: a detached controller
+    // must leave nothing on the container, and it is the SAME function that
+    // goes, or the browser keeps the original listener alive.
+    const f = makeClampingScrollEl(6000, 600);
+    const added = vi.spyOn(f.el, "addEventListener");
+    const removed = vi.spyOn(f.el, "removeEventListener");
+    const controller = createScrollController({ scrollEl: f.el });
+    const handler = added.mock.calls[0]![1];
+
+    expect(removed).not.toHaveBeenCalled();
+    controller.dispose();
+
+    expect(removed).toHaveBeenCalledTimes(1);
+    expect(removed.mock.calls[0]![0]).toBe("scroll");
+    expect(removed.mock.calls[0]![1]).toBe(handler);
+    added.mockRestore();
+    removed.mockRestore();
   });
 });
 
@@ -70,7 +89,7 @@ describe("scroll: the clamp epsilon's own edge", () => {
     // so an offset that reads a pixel over is what a correctly reconciled
     // container looks like, and correcting it would write on every shrink pass.
     const f = makeDeferredClampScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(5400); // the maximum: distanceFromBottom is 0
 
     // Force the offset one pixel over. A write would be clamped back, which is
@@ -94,7 +113,7 @@ describe("scroll: the clamp epsilon's own edge", () => {
     // The far side of the same edge, so "uncorrected" above reads as a
     // tolerance and not as a correction that never happens.
     const f = makeDeferredClampScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(5400);
 
     let held = 5402;
@@ -121,7 +140,7 @@ describe("scroll: the bottom pin at zero distance", () => {
     // a real container answers by cancelling any smooth scroll in flight and
     // queueing another scroll event.
     const f = makeCountingScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(5400); // at the bottom, following
     expect(scroll.isUserScrolledUp()).toBe(false);
     expect(f.writes).toEqual([]);
@@ -135,7 +154,7 @@ describe("scroll: the bottom pin at zero distance", () => {
   it("still writes when the following reader has content below", () => {
     // The control: the same call, one pixel of distance, and the pin acts.
     const f = makeCountingScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(5399);
     expect(scroll.isUserScrolledUp()).toBe(false);
 
@@ -155,7 +174,7 @@ describe("scroll: the zero-delta content shift", () => {
     // no movement at all: the reader who scrolled down to the tail would be
     // left holding instead of following.
     const f = makeClampingScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(3000); // scrolled up to read
     expect(scroll.isUserScrolledUp()).toBe(true);
 
@@ -170,36 +189,22 @@ describe("scroll: the zero-delta content shift", () => {
   });
 });
 
-describe("scroll: an unmounted controller", () => {
-  /** The query that makes the import below a distinct URL, and therefore a
-   *  distinct module evaluation. */
-  const FRESH_INSTANCE_QUERY = "unmounted=1";
+describe("scroll: a disposed controller", () => {
+  it("ignores restoreView entirely, including the follow state", () => {
+    // The renderer calls restoreView from bind, which a consumer's teardown
+    // order can run after the controller was disposed. Applying the follow
+    // state there would leave the instance holding a state for a container it
+    // no longer has, and isUserScrolledUp would answer for nothing.
+    const f = makeClampingScrollEl(6000, 600);
+    scroll = createScrollController({ scrollEl: f.el });
+    f.userScrollTo(5400);
+    scroll.dispose();
 
-  it("ignores restoreView entirely, including the follow state", async () => {
-    // The renderer calls restoreView from bind, which can run before any
-    // container is attached. Applying the follow state there would leave the
-    // module holding a state for a container it does not have, and the first
-    // real init would then report a follow change that no user gesture caused.
-    // A fresh module instance is the only way to observe the un-inited state.
-    //
-    // The query bust, not `vi.resetModules()`: the browser's module registry is
-    // URL-keyed, so resetting and re-importing the same specifier returns the
-    // CACHED instance — already inited by the suites above, and the test would
-    // then assert against exactly the state it was written to avoid. The
-    // extension stays `.ts` (the real file) rather than the `.js` the static
-    // imports use, because this specifier is built at runtime and so IS the URL
-    // the browser requests; written `.js`, the evaluation is attributed to a
-    // file that does not exist and coverage silently reports zero for it.
-    // Interpolated rather than written as one literal so tsc treats it as a
-    // runtime specifier instead of trying to resolve `scroll.ts?unmounted=1`.
-    const fresh = (await import(
-      /* @vite-ignore */ `./scroll.ts?${FRESH_INSTANCE_QUERY}`
-    )) as typeof scroll;
+    expect(scroll.isUserScrolledUp()).toBe(false); // follows by default
+    scroll.restoreView({ top: 4200, following: false });
 
-    expect(fresh.isUserScrolledUp()).toBe(false); // follows by default
-    fresh.restoreView({ top: 4200, following: false });
-
-    expect(fresh.isUserScrolledUp()).toBe(false);
-    expect(fresh.currentScrollTop()).toBe(0);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(scroll.currentScrollTop()).toBe(0);
+    expect(f.el.scrollTop).toBe(5400); // no write reached the container
   });
 });

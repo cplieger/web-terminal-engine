@@ -19,14 +19,15 @@ const (
 	SessionsPath = "/api/sessions"
 	// SessionsSubtreePath is the session REST subtree: DELETE /{id} (close),
 	// PUT /{id}/title (set the client-fallback title), PUT + DELETE
-	// /{id}/pinned-title (set / clear the user's name), and PUT /order (set the
-	// shared display order every viewer sees). ServeMux treats the trailing-slash
-	// pattern as a distinct mount, so the REST handler is mounted at both
-	// SessionsPath and this subtree to receive every method.
+	// /{id}/pinned-title (set / clear the user's name), PUT /order (set the
+	// shared display order every viewer sees) and GET + PUT /layout (read / set
+	// the shared pane layout). ServeMux treats the trailing-slash pattern as a
+	// distinct mount, so the REST handler is mounted at both SessionsPath and
+	// this subtree to receive every method.
 	//
-	// /order is a literal segment where its siblings take an {id}. ServeMux
-	// prefers the more specific literal, and no session id can collide with it
-	// (ids are hex), so the two patterns cannot overlap.
+	// /order and /layout are literal segments where their siblings take an
+	// {id}. ServeMux prefers the more specific literal, and no session id can
+	// collide with them (ids are hex), so the patterns cannot overlap.
 	SessionsSubtreePath = "/api/sessions/"
 	// SessionEventsPath is the session status stream (SSE) route. It is a more
 	// specific pattern than SessionsSubtreePath, so ServeMux routes it to the
@@ -74,7 +75,7 @@ const (
 // setting the header in its own outer middleware, which then stays that header's
 // single writer. The package cannot rank a stricter value against a weaker one
 // without parsing directives, so it treats any present value as intentional.
-// writeJSON is the one deliberate exception and overwrites: its two bodies
+// writeJSON is the one deliberate exception and overwrites: its bodies
 // CONTAIN the id, so their prohibition is not the consumer's to relax.
 func withNoStore(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +144,8 @@ type SessionHandlers struct {
 //	SessionsPath        -> h.REST   (POST create, GET list; create-gated)
 //	SessionsSubtreePath -> h.REST   (DELETE /{id}, PUT /{id}/title,
 //	                                 PUT + DELETE /{id}/pinned-title,
-//	                                 PUT /order; create-gated)
+//	                                 PUT /order, GET + PUT /layout;
+//	                                 create-gated)
 //	SessionEventsPath   -> h.Events (status SSE)
 //
 // Exactly these four mounts and no others: the engine's debug or future

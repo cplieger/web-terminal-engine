@@ -1,25 +1,16 @@
-// SECURITY invariant — OSC 8 hyperlink scheme allow-list.
-//
-// xterm OSC 8 (`OSC 8 ; params ; URI ST`) lets an application attach an
-// arbitrary URI to a run of text. A terminal MUST NOT turn every scheme into a
-// clickable link: a `javascript:`, `data:`, `vbscript:`, or `file:` href is a
-// script-injection / local-file vector, so only http/https may become a live
-// anchor. render.ts enforces this in buildRowSpans with `/^https?:\/\//i`.
-//
-// This file fuzzes that gate with adversarial URIs (case, whitespace, control
-// chars, embedded NULs, nested schemes) and asserts the TWO-SIDED invariant on
-// the REAL renderer:
-//   - dangerous scheme  -> zero anchors, and the run text still renders (inert);
-//   - safe http(s) URI  -> exactly one anchor carrying the verbatim href.
-//
-// Spec refs: xterm ctlseqs (OSC 8) and the OSC 8 hyperlink spec's security
-// section (only a safe scheme subset should be actionable):
-// https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda
-// Content was rephrased for compliance with licensing restrictions.
+// The OSC 8 hyperlink scheme allow-list, a SECURITY invariant: OSC 8 lets an
+// application attach any URI to a run, and a `javascript:`, `data:`, `vbscript:`
+// or `file:` href is a script-injection or local-file vector, so only http/https
+// may become a live anchor. Adversarial URIs (case, whitespace, control chars,
+// embedded NULs, nested schemes) drive the REAL renderer and the invariant is
+// two-sided: a dangerous scheme yields zero anchors with the text still rendered,
+// a safe http(s) URI exactly one anchor with the verbatim href. Spec: xterm
+// ctlseqs OSC 8 and https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import fc from "fast-check";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, WireRun } from "./types.js";
 
 // A fixed cell metric: a real Canvas2D measures whatever font the machine has
@@ -34,6 +25,7 @@ HTMLCanvasElement.prototype.getContext = function (): unknown {
 const LINK_TEXT = "linktext";
 
 let output: HTMLDivElement;
+let render: Renderer;
 let realRAF: typeof globalThis.requestAnimationFrame;
 let realCAF: typeof globalThis.cancelAnimationFrame;
 
@@ -53,14 +45,9 @@ beforeEach(() => {
   }) as typeof globalThis.requestAnimationFrame;
   globalThis.cancelAnimationFrame = (() => undefined) as typeof globalThis.cancelAnimationFrame;
 
-  output = document.createElement("div");
-  output.id = "term-output";
-  const termWrap = document.createElement("div");
-  termWrap.id = "term-wrap";
-  termWrap.appendChild(output);
-  document.body.innerHTML = "";
-  document.body.appendChild(termWrap);
-  render.init({ output, termWrap });
+  const fx = createEngineFixture();
+  output = fx.output;
+  render = fx.engine.renderer;
   render.updateFontMetrics();
 });
 
@@ -95,9 +82,8 @@ function anchorsIn(row: HTMLElement): HTMLAnchorElement[] {
   return Array.from(row.querySelectorAll("a"));
 }
 
-// --- Adversarial corpus (durable seeds) ---
-// Specific attack strings that MUST never produce a clickable anchor. Kept as
-// an explicit, human-readable list (DAMP) so a regression names the exact input.
+// Attack strings that MUST never produce a clickable anchor, as an explicit
+// human-readable list so a regression names the exact input.
 const DANGEROUS_SEEDS: readonly string[] = [
   "javascript:alert(1)",
   "data:text/html,<script>alert(1)</script>",

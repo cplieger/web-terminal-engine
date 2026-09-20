@@ -1,28 +1,15 @@
-// The bounds and the pacing around a history request, and the replay bound the
-// resume carries. Three edges the paging suite leaves open, all of them arithmetic
-// that decides what the server sends back:
-//
-// 1. requestHistory's argument guards at their exact boundaries — index 0 is the
-//    oldest line there is, a 1-line page is a legal page, and a range ending
-//    exactly on MAX_SAFE_INTEGER has not overflowed.
-// 2. The token bucket's refill rate and the wait it returns. The client's bucket
-//    is sized to agree with the server's, so the refill is a contract, not a
-//    heuristic: a client that refills faster burns the server's bucket and gets
-//    its requests dropped, and one that under-waits re-asks into an empty bucket
-//    forever.
-// 3. The resume's replayMax at 1 and at 0. The store predicts the replay jump
-//    from the value the socket SENT, so a bound the client mis-clamps strands
-//    the band it predicted wrong (docs/paged-scrollback.md §4.5).
+// The arithmetic around a history request that decides what the server sends
+// back: requestHistory's guards at their exact boundaries (index 0 is the oldest
+// line, a 1-line page is legal, a range ending on MAX_SAFE_INTEGER has not
+// overflowed); the token bucket's refill rate and wait, a contract with the
+// server's bucket (refilling faster gets requests dropped, under-waiting re-asks
+// into an empty bucket forever); and the resume's replayMax at 1 and 0, which the
+// store predicts the replay jump from (docs/paged-scrollback.md §4.5).
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  MAX_REPLAY_LINES,
-  disconnect,
-  historyRequestInFlight,
-  init,
-  requestHistory,
-  setSession,
-} from "./connection.js";
+import { type Connection, createConnection, MAX_REPLAY_LINES } from "./connection.js";
+import { connectionDeps } from "./test-helpers/connection-fakes.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
 
 interface MockWS {
@@ -171,32 +158,38 @@ function historyControls(sock: MockWS): { fromAbs: number; maxLines: number }[] 
 
 let retries: number;
 let session = 0;
+let conn: Connection;
+// Whether the renderer's solicited window is open, which is what a request in flight holds.
+let windowOpen = false;
 
 function baseCallbacks() {
   return {
-    onMessage: () => {
-      /* no-op */
-    },
-    onOpen: () => {
-      /* no-op */
-    },
-    onClose: () => {
-      /* no-op */
-    },
+    onMessage: () => undefined,
+    onOpen: () => undefined,
+    onClose: () => undefined,
     computeSize: () => ({ cols: 80, rows: 24 }),
-    onHistoryReply: () => {
-      /* no-op */
-    },
-    onHistoryRetry: () => {
+  };
+}
+
+/** The renderer the connection drives: it counts the retries and tracks the solicited window. */
+function deps(): ReturnType<typeof connectionDeps> {
+  return connectionDeps({
+    maybeFetchHistory: () => {
       retries++;
     },
-  };
+    noteSolicited: () => {
+      windowOpen = true;
+    },
+    clearSolicited: () => {
+      windowOpen = false;
+    },
+  });
 }
 
 /** A fresh session whose socket is open, acked and paging. */
 function openPagingSocket(opts: { version?: number | undefined } = {}): MockWS {
   session++;
-  setSession(`bounds-${String(session)}`);
+  conn.setSession(`bounds-${String(session)}`);
   const sock = sockets[sockets.length - 1]!;
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame({ paging: true, version: opts.version }));
@@ -208,13 +201,13 @@ function openPagingSocket(opts: { version?: number | undefined } = {}): MockWS {
  * allows only one outstanding request at a time.
  */
 function spendBurst(sock: MockWS): void {
-  requestHistory(1000, 2);
+  conn.requestHistory(1000, 2);
   sock.fireMessage(scrollFrame(1000, 2));
-  requestHistory(2000, 2);
+  conn.requestHistory(2000, 2);
   sock.fireMessage(scrollFrame(2000, 2));
-  requestHistory(3000, 2);
+  conn.requestHistory(3000, 2);
   sock.fireMessage(scrollFrame(3000, 2));
-  requestHistory(4000, 2);
+  conn.requestHistory(4000, 2);
   sock.fireMessage(scrollFrame(4000, 2));
 }
 
@@ -222,13 +215,14 @@ describe("connection: history request bounds and pacing", () => {
   beforeEach(() => {
     sockets.length = 0;
     retries = 0;
+    windowOpen = false;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    init(baseCallbacks());
+    conn = registerForDispose(createConnection({ ...deps(), callbacks: baseCallbacks() }));
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -237,7 +231,7 @@ describe("connection: history request bounds and pacing", () => {
     it("requests absolute index 0, the oldest line a server can hold", () => {
       const sock = openPagingSocket();
 
-      expect(requestHistory(0, 500)).toBe(true);
+      expect(conn.requestHistory(0, 500)).toBe(true);
       // Index 0 is the top of history, and the frontier walk arrives at it on
       // every session that scrolls far enough. Rejecting it would make the
       // first screen of output the one page paging cannot fetch.
@@ -247,7 +241,7 @@ describe("connection: history request bounds and pacing", () => {
     it("requests a single line", () => {
       const sock = openPagingSocket();
 
-      expect(requestHistory(1000, 1)).toBe(true);
+      expect(conn.requestHistory(1000, 1)).toBe(true);
       // A one-line gap is the last thing a byte-short continuation needs to
       // heal; refusing it leaves that gap permanently marked.
       expect(historyControls(sock)).toEqual([{ fromAbs: 1000, maxLines: 1 }]);
@@ -257,7 +251,7 @@ describe("connection: history request bounds and pacing", () => {
       const sock = openPagingSocket();
       const fromAbs = Number.MAX_SAFE_INTEGER - 500;
 
-      expect(requestHistory(fromAbs, 500)).toBe(true);
+      expect(conn.requestHistory(fromAbs, 500)).toBe(true);
       // fromAbs + maxLines lands ON MAX_SAFE_INTEGER, which has not overflowed:
       // the guard exists to reject a range that would, not the largest that
       // would not.
@@ -275,9 +269,9 @@ describe("connection: history request bounds and pacing", () => {
       // life.
       const sock = openPagingSocket({ version: 3 });
 
-      expect(requestHistory(1000, 500)).toBe(false);
+      expect(conn.requestHistory(1000, 500)).toBe(false);
       expect(historyControls(sock)).toEqual([]);
-      expect(historyRequestInFlight()).toBe(false);
+      expect(windowOpen).toBe(false);
     });
   });
 
@@ -289,7 +283,7 @@ describe("connection: history request bounds and pacing", () => {
 
       // Half a refill interval: half a token, which is not a token.
       vi.advanceTimersByTime(1000);
-      expect(requestHistory(5000, 2)).toBe(false);
+      expect(conn.requestHistory(5000, 2)).toBe(false);
       expect(historyControls(sock)).toHaveLength(4);
 
       // The denial armed ONE coalesced retry for exactly the remaining wait:
@@ -309,9 +303,9 @@ describe("connection: history request bounds and pacing", () => {
       // the trigger repeatedly, so arming a timer per denial would answer one
       // gesture with a burst of requests the moment the bucket refills — into a
       // server bucket that is just as empty.
-      expect(requestHistory(5000, 2)).toBe(false);
-      expect(requestHistory(6000, 2)).toBe(false);
-      expect(requestHistory(7000, 2)).toBe(false);
+      expect(conn.requestHistory(5000, 2)).toBe(false);
+      expect(conn.requestHistory(6000, 2)).toBe(false);
+      expect(conn.requestHistory(7000, 2)).toBe(false);
 
       vi.advanceTimersByTime(1000);
       expect(retries).toBe(1);
@@ -320,7 +314,9 @@ describe("connection: history request bounds and pacing", () => {
 
   describe("the resume's replay bound", () => {
     it("sends a consumer's bound of exactly 1", () => {
-      init({ ...baseCallbacks(), getReplayMax: () => 1 });
+      conn = registerForDispose(
+        createConnection({ ...deps(), callbacks: { ...baseCallbacks(), getReplayMax: () => 1 } }),
+      );
       const sock = openPagingSocket();
 
       // 1 is the smallest legal bound, not a nonsensical one: a client that
@@ -330,7 +326,9 @@ describe("connection: history request bounds and pacing", () => {
     });
 
     it("falls back to the protocol ceiling for a bound of 0", () => {
-      init({ ...baseCallbacks(), getReplayMax: () => 0 });
+      conn = registerForDispose(
+        createConnection({ ...deps(), callbacks: { ...baseCallbacks(), getReplayMax: () => 0 } }),
+      );
       const sock = openPagingSocket();
 
       // 0 would ask the server to replay nothing while the server clamps to its

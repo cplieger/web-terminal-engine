@@ -5,12 +5,13 @@
 # web-terminal-engine is a LIBRARY that ships a `main` package
 # (internal/e2etestserver), so cplieger/ci's app-mode detection ("a main package
 # exists") gates it on punused -- but its exported surface is a PUBLISHED Go
-# proxy API (github.com/cplieger/web-terminal-engine/v5), consumed by vibekit,
-# web-terminal-kiro and web-terminal-server. punused's own README states it "does
-# not detect references from outside of your project", and run.go asks gopls for
-# `textDocument/references` scoped to this module only, so EVERY symbol a
-# consumer repo calls reads as unused here. Triage therefore follows the library
-# rules in tools.md, not the app rules: nothing is deleted on punused's word.
+# proxy API (github.com/cplieger/web-terminal-engine/v6), consumed by
+# web-terminal-kiro and web-terminal-server on this major and by vibekit on the
+# earlier one. punused's own README states it "does not detect references from
+# outside of your project", and run.go asks gopls for `textDocument/references`
+# scoped to this module only, so EVERY symbol a consumer repo calls reads as
+# unused here. Triage therefore follows the library rules in tools.md, not the
+# app rules: nothing is deleted on punused's word.
 #
 # The EU1001 ("used in test only") vs EU1002 ("no reference found") split below
 # reflects only whether THIS repo's own tests happen to exercise the symbol --

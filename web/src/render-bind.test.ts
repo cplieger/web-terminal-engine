@@ -1,15 +1,14 @@
-// render.bind / render.rebuild: the per-tab store swap the tabs feature uses on
-// every switch (design sections 5, 6, 8). Behaviors pinned here:
-// 1. bind() points the one renderer at a different, independently-populated
-//    LineStore and rebuilds the DOM from it; the previous store's content is
-//    gone and the new store's content is shown.
-// 2. The rebuild is viewport-first: the live-window row is present after the
-//    first frame even when scrollback exceeds the per-frame build budget, so a
-//    switch paints the visible screen immediately.
-// 3. A bound store already in the alternate screen rebuilds into the alt grid.
+// renderer.bind / renderer.rebuild, the per-tab store swap a tabs feature runs on
+// every switch: bind() points the renderer at a different, independently
+// populated LineStore and rebuilds the DOM from it, so the previous store's
+// content is gone and the new one's shown; the rebuild is viewport-first, so
+// the live-window row is present after the first frame even when scrollback
+// exceeds the per-frame budget; a store already in the alternate screen
+// rebuilds into the alt grid.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import { LineStore } from "./store.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
@@ -68,12 +67,13 @@ function texts(out: HTMLElement): string[] {
 describe("render.bind / rebuild (per-tab store swap)", () => {
   let outputEl: HTMLDivElement;
   let termWrap: HTMLDivElement;
+  let render: Renderer;
 
   beforeEach(() => {
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 
@@ -173,22 +173,14 @@ describe("render.bind / rebuild (per-tab store swap)", () => {
     expect(shown).toContain("alt1");
   });
 
-  // --- The wipe covers content space, not just the rows ---
-  //
-  // The caret, the predicted cursor, the IME view and the consumer's hidden
-  // textarea all sit INSIDE the scroll container with a `top` in content
-  // coordinates, so each one holds the container's scrollable overflow at the
-  // offset it was last placed at. Measured in Chromium on a 4769-row tab:
-  // leaving them behind left the scroller with ZERO rows of content and an
-  // 81081px scroll range, the viewport parked at 80281px over nothing (which
-  // paints as a black pane), and `stickToBottom` refusing to correct it because
-  // it measured `distanceFromBottom() === 0` against the phantom height.
-  //
-  // These pin the mechanical resets the geometry depends on, rather than the
-  // resulting pixels: each one is synchronous inside `bind` on purpose, because
-  // the browser paints once between the switch and the first flush, and the
-  // clamp has to land before `noteContentShrink` and `pendingRestore.lastWrote`
-  // read the offset.
+  // The wipe covers content space, not just the rows: the caret, the predicted
+  // cursor, the IME view and the consumer's textarea sit INSIDE the scroll
+  // container with a `top` in content coordinates, so each holds the scrollable
+  // overflow at its last offset. Measured in Chromium on a 4769-row tab: left
+  // behind, they kept an 81081px scroll range over ZERO rows, the viewport
+  // parked at 80281px over nothing, and `stickToBottom` declined to correct it
+  // against the phantom height. Each reset is synchronous inside `bind` because
+  // the browser paints once between the switch and the first flush.
 
   it("hides the caret overlay synchronously in bind, before any frame runs", async () => {
     render.handleScreen({
@@ -221,13 +213,12 @@ describe("render.bind / rebuild (per-tab store swap)", () => {
     // same content space; the cursor seam is the only way to reach them, and it
     // has to fire while the DOM is wiped rather than a frame later.
     const moves: number[] = [];
-    render.init({
-      output: outputEl,
-      termWrap,
+    const fx = createEngineFixture({
       onCursorMove: () => {
         moves.push(render.getCursorPx().top);
       },
     });
+    render = fx.engine.renderer;
     render.updateFontMetrics();
     render.handleScroll(scrollMsg(0, ["a", "b", "c"]));
     await tick();
@@ -240,22 +231,14 @@ describe("render.bind / rebuild (per-tab store swap)", () => {
   });
 });
 
-describe("render.init maxLines (the consumer-plumbed retained-line cap)", () => {
-  let outputEl: HTMLDivElement;
-  let termWrap: HTMLDivElement;
-
-  beforeEach(() => {
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-  });
-
+describe("maxLines (the consumer-plumbed retained-line cap)", () => {
   it("caps the implicit store (and therefore the DOM row budget) at the given value", async () => {
     // A consumer with a phone-sized memory budget passes maxLines through
-    // createTerminal -> render.init; the implicit store then evicts at that
-    // cap instead of the 5000 default, which bounds both the retained
+    // createTerminal -> createTerminalEngine; the implicit store then evicts at
+    // that cap instead of the 5000 default, which bounds both the retained
     // WireRun arrays and the DOM rows built from them.
-    render.init({ output: outputEl, termWrap, maxLines: 8 });
+    const { engine, output: outputEl } = createEngineFixture({ maxLines: 8 });
+    const render = engine.renderer;
     render.updateFontMetrics();
     const lines = Array.from({ length: 12 }, (_, i) => `l${String(i)}`);
     render.handleScroll(scrollMsg(0, lines));
@@ -268,32 +251,31 @@ describe("render.init maxLines (the consumer-plumbed retained-line cap)", () => 
     expect(texts(outputEl)).not.toContain("l0");
   });
 
-  it("always installs a fresh implicit store: a custom cap does not leak into the next attachment", async () => {
-    // gpt R1 F2: the store is module-global, so a re-init WITHOUT the option
-    // used to keep (and merely reset) whatever capped store the previous
-    // attachment installed — a destroy/remount silently inherited an 8-line
-    // terminal. init is the attachment boundary: it now always constructs a
-    // fresh store, capped only when THIS call says so.
-    render.init({ output: outputEl, termWrap, maxLines: 8 });
-    render.updateFontMetrics();
+  it("a custom cap belongs to its own instance and does not leak into the next one", async () => {
+    // A destroy/remount must not inherit an 8-line terminal: each renderer
+    // constructs its own store, capped only when ITS options say so.
+    const capped = createEngineFixture({ maxLines: 8 });
+    capped.engine.renderer.updateFontMetrics();
     const lines = Array.from({ length: 12 }, (_, i) => `l${String(i)}`);
-    render.handleScroll(scrollMsg(0, lines));
+    capped.engine.renderer.handleScroll(scrollMsg(0, lines));
     await tick();
-    expect(render.boundStore().oldestIndex()).toBe(4); // capped at 8
+    expect(capped.engine.renderer.boundStore().oldestIndex()).toBe(4); // capped at 8
+    capped.dispose();
 
-    render.init({ output: outputEl, termWrap }); // re-attach, option omitted
-    render.updateFontMetrics();
-    render.handleScroll(scrollMsg(0, lines));
+    const plain = createEngineFixture(); // re-attach, option omitted
+    plain.engine.renderer.updateFontMetrics();
+    plain.engine.renderer.handleScroll(scrollMsg(0, lines));
     await tick();
-    // Default cap restored: nothing evicted at 12 lines.
-    expect(render.boundStore().oldestIndex()).toBe(0);
-    expect(texts(outputEl)).toContain("l0");
+    // Default cap: nothing evicted at 12 lines.
+    expect(plain.engine.renderer.boundStore().oldestIndex()).toBe(0);
+    expect(texts(plain.output)).toContain("l0");
   });
 
   it("warns on and ignores a non-positive or non-integer cap (default applies)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
     try {
-      render.init({ output: outputEl, termWrap, maxLines: 0 });
+      const { engine, output: outputEl } = createEngineFixture({ maxLines: 0 });
+      const render = engine.renderer;
       render.updateFontMetrics();
       const lines = Array.from({ length: 12 }, (_, i) => `l${String(i)}`);
       render.handleScroll(scrollMsg(0, lines));

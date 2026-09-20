@@ -1,27 +1,15 @@
-// The two link paths render.ts runs, at the edges the existing hyperlink tests
-// do not reach.
-//
-// 1. The plain-text AUTOLINKER (linkifySpans): a bare http(s) URL in a run that
-//    carries no OSC 8 URI is split out of its span into an anchor. The text on
-//    either side of the match must survive, in its own span, with the run's
-//    styling intact — a terminal that ate the surrounding text, or dropped the
-//    color from a URL printed inside colored output, would be corrupting the
-//    screen to add a link.
-//
-// 2. The OSC 8 gate. Two rules meet there: the scheme allow-list
-//    (http/https only, asserted adversarially in hyperlink-safety.fuzz.test.ts)
-//    and the link-TEXT rule — an application may keep one hyperlink open across
-//    a whole table cell, so runs made only of whitespace and box-drawing or
-//    block-element glyphs (U+2500..U+259F) are not anchored, and the link
-//    decoration hugs the text instead of bleeding across the row.
-//
-// Spec refs: xterm ctlseqs OSC 8; the OSC 8 hyperlink spec's security section
-// (only a safe scheme subset may be actionable); Unicode blocks Box Drawing
-// (U+2500..U+257F) and Block Elements (U+2580..U+259F).
-// Content was rephrased for compliance with licensing restrictions.
+// The two link paths at their edges. The AUTOLINKER (linkifySpans) splits a bare
+// http(s) URL out of a run with no OSC 8 URI into an anchor, and the text on
+// either side must survive in its own span with the run's styling: eating the
+// surrounding text or dropping its color corrupts the screen to add a link. The
+// OSC 8 gate joins the scheme allow-list (hyperlink-safety.fuzz.test.ts) with
+// the link-TEXT rule: an application may hold one hyperlink open across a table
+// cell, so runs of only whitespace, Box Drawing (U+2500..U+257F) and Block
+// Elements (U+2580..U+259F) are not anchored and the decoration hugs the text.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import { cssColor } from "./test-helpers/spec-colors.js";
 import type { ScreenMessage, WireRun } from "./types.js";
 
@@ -30,6 +18,7 @@ let realRAF: typeof globalThis.requestAnimationFrame;
 let realCAF: typeof globalThis.cancelAnimationFrame;
 
 let output: HTMLDivElement;
+let render: Renderer;
 
 beforeEach(() => {
   realGetContext = HTMLCanvasElement.prototype.getContext;
@@ -47,10 +36,9 @@ beforeEach(() => {
   }) as typeof globalThis.requestAnimationFrame;
   globalThis.cancelAnimationFrame = (() => undefined) as typeof globalThis.cancelAnimationFrame;
 
-  document.body.innerHTML = `<div class="term"><div class="term-output"></div></div>`;
-  const termWrap = document.querySelector<HTMLDivElement>(".term")!;
-  output = document.querySelector<HTMLDivElement>(".term-output")!;
-  render.init({ output, termWrap });
+  const fx = createEngineFixture();
+  output = fx.output;
+  render = fx.engine.renderer;
   render.updateFontMetrics();
 });
 

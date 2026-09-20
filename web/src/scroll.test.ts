@@ -1,21 +1,18 @@
-// Brick-4 scroll controller. scrollHeight / clientHeight are declared rather
-// than measured, because the geometry IS the premise: the follow/hold state
-// machine is what is under test, and a container given real overflow would
-// answer from whatever this file's fixture markup lays out at. Following derives
-// from scroll position plus movement direction, asymmetrically (any upward move
-// with content below holds; only a DOWNWARD move landing at the bottom
-// re-engages, so a shrink clamp can never engage follow under a reader who
-// scrolled up), and stickToBottom only pins when following.
-//
-// Fixture note: the mock starts at scrollTop 0 while reporting 700px of scroll
-// range, which is a state the real container is never in (init's contract is
-// "following", i.e. at the bottom). Tests that care about the follow transition
-// therefore establish the bottom explicitly first, exactly as a real session
-// does through the render pin.
+// The scroll controller's follow/hold state machine. scrollHeight and
+// clientHeight are declared, not measured, because the geometry IS the premise.
+// Following derives from position plus movement direction, asymmetrically: any
+// upward move with content below holds, only a DOWNWARD move landing at the
+// bottom re-engages, so a shrink clamp never engages follow under a reader who
+// scrolled up; stickToBottom pins only when following. The mock starts at
+// scrollTop 0 with 700px of range, a state a real container is never in, so
+// tests of the follow transition establish the bottom first, as the render pin does.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import * as scroll from "./scroll.js";
+import { createScrollController, type ScrollController } from "./scroll.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { makeClampingScrollEl, makeDeferredClampScrollEl } from "./test-helpers/scroll-fixture.js";
+
+let scroll: ScrollController;
 
 function makeScrollEl(scrollHeight: number, clientHeight: number): HTMLElement {
   const el = document.createElement("div");
@@ -44,7 +41,9 @@ describe("scroll controller (brick 4)", () => {
   beforeEach(() => {
     el = makeScrollEl(1000, 300); // 700px of scroll range
     changes = [];
-    scroll.init({ scrollEl: el, onUserScrollChange: (up) => changes.push(up) });
+    scroll = registerForDispose(
+      createScrollController({ scrollEl: el, onUserScrollChange: (up) => changes.push(up) }),
+    );
   });
 
   it("starts in the following state", () => {
@@ -111,7 +110,7 @@ describe("scroll controller (brick 4)", () => {
       },
       configurable: true,
     });
-    scroll.init({ scrollEl: el2 });
+    scroll = registerForDispose(createScrollController({ scrollEl: el2 }));
     scrollTo(el2, 700); // at the bottom, following
     sh = 900; // eviction shrinks the content
     scrollTo(el2, 600); // the browser's clamp to the new bottom (upward move)
@@ -146,15 +145,12 @@ describe("scroll controller (brick 4)", () => {
   });
 
   it("a content shrink that clamps a HOLDING reader to the bottom keeps holding", () => {
-    // The asymmetry's whole reason to exist. A program that erases its
-    // scrollback (ED3) or a cap eviction collapses scrollHeight, and the
-    // browser clamps scrollTop DOWN to the new maximum. By position that clamp
-    // is indistinguishable from the user arriving at the tail; by DIRECTION it
-    // is not, because a user returning to the tail moves down and a clamp moves
-    // up. Deriving from position alone re-engaged auto-follow under a reader who
-    // had deliberately scrolled up, and every line after that pinned them to the
-    // bottom (measured: scrolled up 20000px, an ED3 collapsed the content, the
-    // viewport was pinned to the tail from then on).
+    // The asymmetry's whole reason to exist. An ED3 or a cap eviction collapses
+    // scrollHeight and the browser clamps scrollTop DOWN to the new maximum. By
+    // position that clamp is indistinguishable from the user arriving at the
+    // tail; by DIRECTION it is not, since a returning user moves down and a
+    // clamp moves up. Deriving from position alone re-engages auto-follow under
+    // a reader who scrolled up (measured: 20000px up, an ED3, pinned to the tail).
     let sh = 1000;
     const el2 = document.createElement("div");
     let top = 0;
@@ -167,7 +163,7 @@ describe("scroll controller (brick 4)", () => {
       },
       configurable: true,
     });
-    scroll.init({ scrollEl: el2 });
+    scroll = registerForDispose(createScrollController({ scrollEl: el2 }));
     scrollTo(el2, 700); // at the bottom, following
     scrollTo(el2, 200); // the user scrolls up to read
     expect(scroll.isUserScrolledUp()).toBe(true);
@@ -201,7 +197,7 @@ describe("scroll controller (brick 4)", () => {
       },
       configurable: true,
     });
-    scroll.init({ scrollEl: el2 });
+    scroll = registerForDispose(createScrollController({ scrollEl: el2 }));
     scrollTo(el2, 700); // at the bottom, following
     scrollTo(el2, 200); // the user scrolls up to read
     expect(scroll.isUserScrolledUp()).toBe(true);
@@ -212,28 +208,20 @@ describe("scroll controller (brick 4)", () => {
   });
 });
 
-// noteContentShrink is how the layer that REMOVES rows tells this module that
-// the clamp it is about to see is not a user scrolling up. It exists because the
-// arithmetic signature the epsilon tests is lossy: scrollHeight/clientHeight are
-// integer-rounded while scrollTop is fractional, so a clamp can present as an
-// upward move with a real gap under browser zoom or a fractional DPR, and the
-// reader is then left "holding at the bottom" with auto-follow silently off.
-//
-// These use the CLAMPING fixture, because a clamp is the whole subject: a
-// container that stores whatever offset it is handed cannot produce one.
+// noteContentShrink is how the layer that REMOVES rows says the clamp about to
+// arrive is not a user scrolling up. The epsilon's arithmetic signature is
+// lossy: scrollHeight and clientHeight are integer-rounded while scrollTop is
+// fractional, so under zoom or a fractional DPR a clamp presents as an upward
+// move with a real gap and the reader is left "holding" with follow silently
+// off. These use the CLAMPING fixture, because a clamp is the whole subject.
 describe("noteContentShrink (announced clamps)", () => {
   it("an UNannounced upward move of the same magnitude still disengages", () => {
-    // Deleting the direction rule must fail this one.
-    //
-    // Its former sibling, "an announced shrink of any magnitude preserves
-    // follow", was deleted 2026-08-21: makeClampingScrollEl.setScrollHeight
-    // dispatches the clamp's scroll event from inside itself, so `wasShrink` was
-    // already consumed before noteContentShrink could arm it and the test passed
-    // with `if (wasShrink)` made unreachable. scroll-arming.test.ts covers that
-    // branch on the ordering a browser really produces, with a fixture that does
-    // not dispatch, and it does fail on that mutant.
+    // Deleting the direction rule must fail this one. The announced-shrink
+    // branch is NOT provable with this fixture: makeClampingScrollEl.setScrollHeight
+    // dispatches the clamp's scroll event from inside itself, before a caller can
+    // announce, so scroll-arming.test.ts covers it with a fixture that does not.
     const f = makeClampingScrollEl(10000, 300);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(9700);
     expect(scroll.isUserScrolledUp()).toBe(false);
 
@@ -246,7 +234,7 @@ describe("noteContentShrink (announced clamps)", () => {
     // a wipe whose height is held up by an absolutely-positioned overlay: no
     // clamp, so no event, so an arm would linger and swallow the next gesture.
     const f = makeClampingScrollEl(10000, 300);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(4000); // holding, far from both ends
     expect(scroll.isUserScrolledUp()).toBe(true);
 
@@ -265,7 +253,7 @@ describe("noteContentShrink (announced clamps)", () => {
 
   it("never survives more than one event", () => {
     const f = makeClampingScrollEl(10000, 300);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(9700);
     const before = f.el.scrollTop;
     f.setScrollHeight(5000);
@@ -291,7 +279,7 @@ describe("noteContentShrink (announced clamps)", () => {
       },
       configurable: true,
     });
-    scroll.init({ scrollEl: el });
+    scroll = registerForDispose(createScrollController({ scrollEl: el }));
     el.scrollTop = 700;
     el.dispatchEvent(new Event("scroll"));
     expect(scroll.isUserScrolledUp()).toBe(false);
@@ -301,12 +289,12 @@ describe("noteContentShrink (announced clamps)", () => {
   });
 });
 
-describe("per-view scroll memory seam (currentScrollTop / restoreScrollTop)", () => {
+describe("per-view scroll memory seam (currentScrollTop / a consumer's own write)", () => {
   let el: HTMLElement;
 
   beforeEach(() => {
     el = makeScrollEl(1000, 300);
-    scroll.init({ scrollEl: el });
+    scroll = registerForDispose(createScrollController({ scrollEl: el }));
   });
 
   it("reads the live offset through currentScrollTop", () => {
@@ -314,16 +302,17 @@ describe("per-view scroll memory seam (currentScrollTop / restoreScrollTop)", ()
     expect(scroll.currentScrollTop()).toBe(250);
   });
 
-  it("restoring a mid position holds; restoring the bottom re-engages follow", () => {
-    // A tabbed shell re-entering a tab whose user had scrolled up: the write
-    // fires a scroll event (as any scrollTop assignment does in a browser) and
-    // the follow/hold state re-derives from it like a user scroll.
-    scroll.restoreScrollTop(100);
+  it("a consumer's write to a mid position holds; one to the bottom re-engages follow", () => {
+    // A write from outside the controller (a tabbed shell re-entering a tab
+    // whose user had scrolled up) fires a scroll event, as any scrollTop
+    // assignment does in a browser, and the follow/hold state re-derives from
+    // it by direction like a user scroll.
+    el.scrollTop = 100;
     el.dispatchEvent(new Event("scroll")); // the fixture's setter fires none
     expect(scroll.currentScrollTop()).toBe(100);
     expect(scroll.isUserScrolledUp()).toBe(true);
 
-    scroll.restoreScrollTop(700); // back to the bottom (distance 0)
+    el.scrollTop = 700; // back to the bottom (distance 0)
     el.dispatchEvent(new Event("scroll"));
     expect(scroll.isUserScrolledUp()).toBe(false);
   });
@@ -339,7 +328,9 @@ describe("adjustForContentShift", () => {
   beforeEach(() => {
     el = makeScrollEl(1000, 300);
     changes = [];
-    scroll.init({ scrollEl: el, onUserScrollChange: (up) => changes.push(up) });
+    scroll = registerForDispose(
+      createScrollController({ scrollEl: el, onUserScrollChange: (up) => changes.push(up) }),
+    );
   });
 
   it("moves the viewport by the height that vanished above the reading position", () => {
@@ -407,7 +398,9 @@ describe("restoreView", () => {
   beforeEach(() => {
     el = makeScrollEl(1000, 300);
     changes = [];
-    scroll.init({ scrollEl: el, onUserScrollChange: (up) => changes.push(up) });
+    scroll = registerForDispose(
+      createScrollController({ scrollEl: el, onUserScrollChange: (up) => changes.push(up) }),
+    );
   });
 
   it("restores a mid position with follow off", () => {
@@ -465,19 +458,15 @@ describe("restoreView", () => {
 });
 
 // reconcileScrollRange is the third arithmetic state of distanceFromBottom:
-// positive means content below (pin), zero means the tail (nothing to do), and
-// NEGATIVE means the container is holding an offset past the end of its own
-// content. Only two of the three were ever consumed, so a container that does
-// not reconcile a shrink left the viewport parked over empty space with the
-// content above it, and nothing in the library wrote the offset again.
-//
-// Every test here uses the DEFERRED-CLAMP fixture, because that is the whole
-// subject: on a container that reconciles synchronously the negative state does
-// not exist, which is exactly why the clamping fixtures could not fail for this.
+// positive means content below (pin), zero the tail, NEGATIVE an offset past the
+// end of the container's own content, which a container that does not reconcile
+// a shrink leaves the viewport parked at. Every test uses the DEFERRED-CLAMP
+// fixture, because on a container that reconciles synchronously the negative
+// state does not exist and a clamping fixture cannot fail for this.
 describe("reconcileScrollRange (a container that does not reconcile a shrink)", () => {
   it("moves a FOLLOWING reader back onto the content after a big shrink", () => {
     const f = makeDeferredClampScrollEl(85000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(84400); // at the tail of a long session, following
     expect(scroll.isUserScrolledUp()).toBe(false);
 
@@ -495,7 +484,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
 
   it("keeps a following reader following across the correction", () => {
     const f = makeDeferredClampScrollEl(85000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(84400);
 
     const before = f.el.scrollTop;
@@ -518,7 +507,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
     // the tail with follow still OFF is the ratified degradation for a reading
     // position whose lines no longer exist.
     const f = makeDeferredClampScrollEl(85000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(84400); // following
     f.userScrollTo(20000); // scrolled up to read
     expect(scroll.isUserScrolledUp()).toBe(true);
@@ -538,7 +527,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
     // that would cut the user's own gesture. Nothing announced a shrink, so
     // nothing is armed, so the call is a no-op.
     const f = makeDeferredClampScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(5400); // at the bottom
     // The bounce, forced past the maximum the way the platform does it (a write
     // would be clamped, which is the point of not using one here).
@@ -556,7 +545,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
     // out of range) skips the repair for the rest of the session whenever the
     // two coincide, and a cut animation is the cheaper loss.
     const f = makeDeferredClampScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(5400);
     Object.defineProperty(f.el, "scrollTop", {
       get: () => bounced,
@@ -580,7 +569,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
     // epsilon keeps its original job; correcting this would write on every
     // shrink pass to move the viewport by half a pixel.
     const f = makeDeferredClampScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(5400);
     Object.defineProperty(f.el, "scrollTop", { value: 5400.6, configurable: true });
 
@@ -595,7 +584,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
     // produced is a clamp, not a gesture) AND left it out of range (so a
     // correction is still owed). Answering only the first is what shipped.
     const f = makeDeferredClampScrollEl(85000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(84400);
 
     const before = f.el.scrollTop;
@@ -622,7 +611,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
 
   it("is a no-op when nothing armed it, so an out-of-band call cannot misfire", () => {
     const f = makeDeferredClampScrollEl(6000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(2000); // holding, well inside the range
     scroll.reconcileScrollRange();
     expect(f.el.scrollTop).toBe(2000);
@@ -631,7 +620,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
 
   it("consumes the arm, so a later pass that strands nothing writes nothing", () => {
     const f = makeDeferredClampScrollEl(85000, 600);
-    scroll.init({ scrollEl: f.el });
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(84400);
 
     const before = f.el.scrollTop;

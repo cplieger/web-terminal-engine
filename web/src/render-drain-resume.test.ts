@@ -1,28 +1,18 @@
-// handleScrollPosition: the renderer's scroll-position contract, its bounded
-// drain recovery, and the reschedule rule's canary
-// (docs/tab-switch-repaint.md §3.1, §4.1).
-//
-// The gate is the subject, not the resume. `flushRender` runs three position
-// invariants unconditionally (an armed view restore, the read anchor, the bottom
-// pin) and only the DRAIN is queue-gated, so a flush scheduled from a scroll
-// handler would move the viewport at moments the renderer never flushed at
-// before. Two tests exist to prove that does not happen, and one of them
-// (`would have pinned`) exists to prove the other is not vacuous: it drives a
-// real flush from the same state and shows the pin firing, so a resume that
-// silently scheduled one could not pass.
-//
-// Frame discipline in this file: rAF callbacks are held in a Map under monotonic
-// handles and are CANCELLED, never dropped by reassigning the queue. Dropping
-// them was an earlier version's bug: the module's `pendingFrame` slot stayed
-// occupied, so the renderer believed a frame was scheduled, every later
-// `scheduleFlush` no-oped, and two alt tests asserted over states they had not
-// built. A test that discards a scheduled callback is testing a browser that does
-// not exist.
+// handleScrollPosition: the scroll-position contract, the bounded drain recovery
+// and the reschedule rule's canary (docs/tab-switch-repaint.md §3.1, §4.1). The
+// gate is the subject: `flushRender` runs three position invariants
+// unconditionally and only the DRAIN is queue-gated, so a flush scheduled from a
+// scroll handler would move the viewport; `would have pinned` proves the sibling
+// is not vacuous by driving a real flush from the same state. rAF callbacks are
+// held under monotonic handles and CANCELLED, never dropped: a discarded
+// callback leaves `pendingFrame` occupied and every later `scheduleFlush` a no-op.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import * as render from "./render.js";
-import * as scroll from "./scroll.js";
+import { createModeState } from "./modes.js";
+import { createRenderer, type Renderer } from "./render.js";
+import { createScrollController, type ScrollController } from "./scroll.js";
 import { LineStore } from "./store.js";
+import { createEngineFixture, registerForDispose } from "./test-helpers/engine-fixture.js";
 import { installRowGeometry, type RowGeometry } from "./test-helpers/scroll-fixture.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
@@ -149,6 +139,8 @@ function frameHarness(): Frames {
 describe("handleScrollPosition drain recovery", () => {
   let output: HTMLDivElement;
   let termWrap: HTMLDivElement;
+  let render: Renderer;
+  let scroll: ScrollController;
   let geom: RowGeometry;
   let frames: Frames;
   let warn: ReturnType<typeof vi.spyOn>;
@@ -159,13 +151,13 @@ describe("handleScrollPosition drain recovery", () => {
     // Spied in this describe too, so an accidental canary firing inside a resume
     // scenario cannot pass unnoticed.
     warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    output = document.getElementById("term-output") as HTMLDivElement;
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    output = fx.output;
+    render = fx.engine.renderer;
+    scroll = fx.engine.scroll;
     geom = installRowGeometry({ output, termWrap, rowHeight: ROW_H, clientHeight: VIEWPORT_H });
-    render.init({ output, termWrap });
     render.updateFontMetrics();
-    scroll.init({ scrollEl: termWrap });
   });
 
   afterEach(() => {
@@ -450,6 +442,8 @@ describe("handleScrollPosition drain recovery", () => {
 describe("the reschedule rule's canary", () => {
   let output: HTMLDivElement;
   let termWrap: HTMLDivElement;
+  let render: Renderer;
+  let engineDispose: () => void;
   let geom: RowGeometry;
   let frames: Frames;
   let warn: ReturnType<typeof vi.spyOn>;
@@ -458,13 +452,15 @@ describe("the reschedule rule's canary", () => {
     frames = frameHarness();
     frames.install();
     warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    output = document.getElementById("term-output") as HTMLDivElement;
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    output = fx.output;
+    render = fx.engine.renderer;
+    engineDispose = () => {
+      fx.engine.dispose();
+    };
     geom = installRowGeometry({ output, termWrap, rowHeight: ROW_H, clientHeight: VIEWPORT_H });
-    render.init({ output, termWrap });
     render.updateFontMetrics();
-    scroll.init({ scrollEl: termWrap });
   });
 
   afterEach(() => {
@@ -539,21 +535,28 @@ describe("the reschedule rule's canary", () => {
     frames.pumpUntilIdle();
     expect(render.pendingRowCount()).toBe(0);
 
-    // A NEW stall must be heard. A once-per-process latch would stay silent here,
-    // which is what made the first version of this canary go deaf after one report.
+    // A NEW stall must be heard: a once-per-process latch goes deaf after one.
     render.bind(populated(1500));
     frames.loseNextHandle();
     frames.pump();
     expect(warn).toHaveBeenCalledTimes(2);
   });
 
-  it("re-arms across init, the attachment boundary", () => {
+  it("re-arms across a new renderer over the same surface, the attachment boundary", () => {
     render.bind(populated(1500));
     frames.loseNextHandle();
     frames.pump();
     expect(warn).toHaveBeenCalledTimes(1);
 
-    render.init({ output, termWrap });
+    engineDispose();
+    render = registerForDispose(
+      createRenderer({
+        output,
+        termWrap,
+        scroll: registerForDispose(createScrollController({ scrollEl: termWrap })),
+        modes: createModeState(),
+      }),
+    );
     render.updateFontMetrics();
     render.bind(populated(1500));
     frames.loseNextHandle();

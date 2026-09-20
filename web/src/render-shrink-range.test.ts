@@ -1,23 +1,17 @@
 // The renderer's half of the shrink-range correction: a flush that removes rows
 // on a container that does NOT reconcile the offset must leave the viewport on
-// the content, not parked past the end of it.
-//
-// This is the test that would have caught the shipped defect, and the two things
-// that made it unwritable before are both fixtures rather than logic:
-//
-//   - every scroll fixture in this repo clamped in the scrollTop GETTER, so an
-//     out-of-range offset could not be observed; and
-//   - the assertion has to be made at the RENDER level, because the seam being
-//     guarded is a call in flushRender's tail. A unit test on scroll.ts proves
-//     reconcileScrollRange works; only this proves the renderer calls it.
-//
-// So it is deliberately written to fail if a future refactor drops the call,
-// reorders it after the position invariants, or stops setting removedRowsThisPass
-// on a path that removes rows.
+// the content, not parked past its end. The fixture stores an out-of-range
+// offset rather than clamping in the getter, so the state is observable, and the
+// assertion is made at the RENDER level because the seam is a call in
+// flushRender's tail: scroll.test.ts proves reconcileScrollRange works, only
+// this proves the renderer calls it, in order, with removedRowsThisPass set on
+// every path that removes rows.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import * as render from "./render.js";
-import * as scroll from "./scroll.js";
+import { createModeState } from "./modes.js";
+import { createRenderer, type Renderer } from "./render.js";
+import { createScrollController, type ScrollController } from "./scroll.js";
+import { createEngineFixture, registerForDispose } from "./test-helpers/engine-fixture.js";
 import { installRowGeometry, type RowGeometry } from "./test-helpers/scroll-fixture.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
@@ -65,6 +59,9 @@ function windowRows(): WireRun[][] {
 describe("a shrink on a container that does not reconcile its offset", () => {
   let output: HTMLDivElement;
   let termWrap: HTMLDivElement;
+  let render: Renderer;
+  let scroll: ScrollController;
+  let engineDispose: () => void;
   let geom: RowGeometry;
   let frames: FrameRequestCallback[];
 
@@ -105,9 +102,14 @@ describe("a shrink on a container that does not reconcile its offset", () => {
     vi.stubGlobal("cancelAnimationFrame", (): void => {
       /* the pump drops un-run callbacks with the array */
     });
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    output = document.getElementById("term-output") as HTMLDivElement;
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    output = fx.output;
+    render = fx.engine.renderer;
+    scroll = fx.engine.scroll;
+    engineDispose = () => {
+      fx.engine.dispose();
+    };
     geom = installRowGeometry({
       output,
       termWrap,
@@ -115,16 +117,12 @@ describe("a shrink on a container that does not reconcile its offset", () => {
       clientHeight: VIEWPORT_H,
       reconcile: "deferred",
     });
-    render.init({ output, termWrap });
     render.updateFontMetrics();
-    scroll.init({ scrollEl: termWrap });
   });
 
   afterEach(() => {
     geom.restore();
     vi.unstubAllGlobals();
-    render.resetScrollback();
-    document.body.innerHTML = "";
   });
 
   it("leaves the viewport on the content after the app erases its scrollback", () => {
@@ -197,26 +195,28 @@ describe("a shrink on a container that does not reconcile its offset", () => {
   });
 
   it("collapses the content-space overlays inside the full-reset wipe", () => {
-    // The overlays live in the scroll container carrying a top in CONTENT
-    // coordinates, so one left at the old cursor row holds the container's
-    // scrollable overflow above the built content: the shrink then measures a
-    // phantom height, reads "already at the bottom" over zero rows, and both
-    // seams correctly decline to act on a geometry that is a lie. So the
-    // full-reset branch collapses them with the rows rather than leaving it to
-    // the flush tail, which is exactly what does not run on the paths where this
-    // bites (a throw mid-drain, the bounded give-up, a long frame).
-    //
-    // The consumer's textarea and IME view are reachable only through the cursor
+    // The overlays carry a top in CONTENT coordinates, so one left at the old
+    // cursor row holds scrollable overflow above the built content: the shrink
+    // measures a phantom height, reads "at the bottom" over zero rows, and both
+    // seams decline to act. So the full-reset branch collapses them with the
+    // rows rather than leaving it to the flush tail, which does not run on the
+    // paths where this bites (a throw mid-drain, the bounded give-up). The
+    // consumer's textarea and IME view are reachable only through the cursor
     // seam, so that seam firing with the caret already hidden IS the collapse.
     const seen: boolean[] = [];
-    render.init({
-      output,
-      termWrap,
-      onCursorMove: () => {
-        const c = termWrap.querySelector(".term-cursor-overlay");
-        seen.push(c?.classList.contains("visible") === true);
-      },
-    });
+    engineDispose();
+    render = registerForDispose(
+      createRenderer({
+        output,
+        termWrap,
+        scroll: registerForDispose(createScrollController({ scrollEl: termWrap })),
+        modes: createModeState(),
+        onCursorMove: () => {
+          const c = termWrap.querySelector(".term-cursor-overlay");
+          seen.push(c?.classList.contains("visible") === true);
+        },
+      }),
+    );
     render.updateFontMetrics();
     fill(400);
     seen.length = 0;
@@ -234,8 +234,8 @@ describe("a shrink on a container that does not reconcile its offset", () => {
 
   it("announces and corrects an alt-screen entry that replaces the scrollback", () => {
     // renderAlt's full rebuild swaps every main-buffer row for one screen of
-    // grid, and the alt branch returns before the shared bookkeeping, so this
-    // path used to reach neither seam.
+    // grid, and the alt branch returns before the shared bookkeeping, so the
+    // seams have to fire from inside it.
     fill(400);
     const strandedFrom = termWrap.scrollTop;
     render.handleScreen(

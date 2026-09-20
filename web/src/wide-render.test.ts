@@ -1,26 +1,18 @@
-// Wide-char (East Asian Wide/Fullwidth) and zero-width rendering.
-//
-// Spec: UAX#11 East Asian Width — Wide/Fullwidth chars occupy 2 cells,
-// combining/zero-width chars occupy 0. The engine's width table follows this
-// (vt/width.go). Over the wire a wide char is a base cell followed by a spacer
-// cell (Cell.Ch == 0), which vt/wire.go cellsToRuns serializes as the sentinel
-// U+FFFF appended after the glyph ("漢\uFFFF"). The renderer's job (render.ts):
-//   - never let the U+FFFF sentinel become visible text, and
-//   - stretch the wide glyph across two cells (via letterSpacing).
-//
-// Two model facts these tests rely on (verified against the Go source, not
-// assumed from render.ts):
-//   - Combining marks (width 0) are DROPPED server-side (vt/screen.go put()
-//     returns on width 0), so a bare combining mark never appears in real wire
-//     text — the case below is a raw-render robustness guard, labeled as such.
-//   - Single-codepoint emoji are width-1 by design (vt/width.go "Unsupported by
-//     Design": emoji are NOT treated as Wide), so they carry no U+FFFF spacer.
-//     The astral-wide case below therefore uses a CJK Extension B code point
-//     (U+20000), which the engine's wideRanges genuinely treats as width-2.
+// Wide (UAX#11 East Asian Wide/Fullwidth, 2 cells) and zero-width rendering.
+// Over the wire a wide char is a base cell plus a spacer cell, which
+// vt/wire.go cellsToRuns serializes as U+FFFF after the glyph ("漢\uFFFF"); the
+// renderer must never show the sentinel and must stretch the glyph across two
+// cells through letterSpacing. Two facts from the Go source: combining marks are
+// DROPPED server-side (vt/screen.go put() returns on width 0), so the bare-mark
+// case is a raw-render robustness guard; single-codepoint emoji are width 1 by
+// design (vt/width.go), so the astral-wide case uses CJK Extension B (U+20000).
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, WireRun } from "./types.js";
+
+let render: Renderer;
 
 // Deterministic cell metrics, declared rather than measured: a real Canvas2D and
 // real layout both answer from whatever font the machine has installed, and the
@@ -115,11 +107,10 @@ describe("render: wide-char and zero-width handling", () => {
 
   beforeEach(() => {
     installMetricStubs();
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.resetScreen();
-    render.init({ output: outputEl, termWrap });
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    outputEl = fx.output;
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 
@@ -152,7 +143,7 @@ describe("render: wide-char and zero-width handling", () => {
     expect(kanji, "a span carrying 漢 must exist").toBeDefined();
     // The glyph is stretched by exactly one extra cell (read render's own
     // published cell width, do not recompute it) so it spans two cells total.
-    const cellW = document.documentElement.style.getPropertyValue("--char-w");
+    const cellW = termWrap.style.getPropertyValue("--char-w");
     expect(parseFloat(cellW)).toBeGreaterThan(0); // metrics are non-degenerate
     expect(kanji!.style.letterSpacing).toBe(cellW);
   });
@@ -192,7 +183,7 @@ describe("render: wide-char and zero-width handling", () => {
     const glyph = spanContaining(rowEl, astral);
     expect(glyph, "a span carrying the astral glyph must exist").toBeDefined();
     // Stretched to two cells like any wide glyph (one extra cell of spacing).
-    const cellW = document.documentElement.style.getPropertyValue("--char-w");
+    const cellW = termWrap.style.getPropertyValue("--char-w");
     expect(glyph!.style.letterSpacing).toBe(cellW);
   });
 
@@ -220,8 +211,6 @@ describe("render: wide-char and zero-width handling", () => {
     expect([...text].filter((c) => c === "字").length).toBe(2);
   });
 
-  // --- Cursor placement over wide chars (spec) ---
-  //
   // The engine reports cursor_col in TRUE cell coordinates: a wide glyph moves
   // curX by 2 (base cell + spacer), so vt CursorPos counts the spacer cell. The
   // renderer must therefore count the U+FFFF continuation cell toward its column

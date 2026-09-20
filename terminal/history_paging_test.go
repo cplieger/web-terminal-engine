@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/cplieger/web-terminal-engine/v5/vt"
+	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
 // Tests for demand-paged scrollback (docs/paged-scrollback.md): the bounded

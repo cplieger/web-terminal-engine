@@ -1,24 +1,15 @@
-// The three numbers the renderer derives for the transport and its consumers
-// rather than for the screen, all otherwise unexercised against the real DOM:
-//
-//   - computeSize(): the (cols, rows) a `resize` control message carries. It is
-//     the CONTENT box divided by the cell, so the terminal's padding must come
-//     off the measured box first — a size computed over the padding asks the
-//     server for a screen wider and taller than the one that fits, and every
-//     row then soft-wraps. Clamped to a floor so a collapsed or mid-layout
-//     element can never ask for a zero-column pty.
-//   - replayMaxForResume(): how much history to ask a server to replay on
-//     attach. The client's own retention cap minus the live window it is about
-//     to be sent anyway, so a reconnect does not download rows the cap would
-//     immediately trim.
-//   - cellSize(): the measured cell, which is what a consumer hands to
-//     mouse.init as `cellSize` to turn pointer pixels into grid cells. It has
-//     to answer the CURRENT measurement rather than the module's power-on
-//     fallback, because a consumer that gets a stale or zero divisor here gets
-//     total mouse silence and nothing says why.
+// The three numbers the renderer derives for the transport rather than the
+// screen. computeSize() is the CONTENT box divided by the cell, so the padding
+// comes off first (a size over the padding asks for a screen wider than fits and
+// every row soft-wraps), clamped to a floor so a collapsed element never asks for
+// a zero-column pty. replayMaxForResume() is the retention cap minus the live
+// window a reconnect is sent anyway. cellSize() is the CURRENT measurement, not
+// the power-on fallback: the mouse controller divides pointer pixels by it, and a
+// stale or zero divisor is total mouse silence with nothing saying why.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, WireRun } from "./types.js";
 
 // The stubbed glyph advance, in px. Mutable so a test can restyle the terminal
@@ -32,6 +23,7 @@ let realCAF: typeof globalThis.cancelAnimationFrame;
 
 let termWrap: HTMLDivElement;
 let output: HTMLDivElement;
+let render: Renderer;
 
 function installStubs(): void {
   realGetContext = HTMLCanvasElement.prototype.getContext;
@@ -81,9 +73,10 @@ function attachSized(opts: {
   padding: string;
   maxLines?: number;
 }): void {
-  document.body.innerHTML = `<div class="term"><div class="term-output"></div></div>`;
-  termWrap = document.querySelector<HTMLDivElement>(".term")!;
-  output = document.querySelector<HTMLDivElement>(".term-output")!;
+  const fx = createEngineFixture(opts.maxLines === undefined ? {} : { maxLines: opts.maxLines });
+  termWrap = fx.termWrap;
+  output = fx.output;
+  render = fx.engine.renderer;
   termWrap.style.fontSize = "16px";
   termWrap.style.fontFamily = "monospace";
   termWrap.style.lineHeight = "17px";
@@ -96,11 +89,6 @@ function attachSized(opts: {
     configurable: true,
     get: () => opts.clientHeight,
   });
-  render.init(
-    opts.maxLines === undefined
-      ? { output, termWrap }
-      : { output, termWrap, maxLines: opts.maxLines },
-  );
   render.updateFontMetrics();
 }
 

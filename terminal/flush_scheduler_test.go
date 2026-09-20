@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal-engine/v5/vt"
+	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
 // P4 (event-driven flush + zero-client render suspension) completion-criteria

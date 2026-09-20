@@ -3,11 +3,11 @@
 // render.ts reflects it on screen. Spec-first — expectations come from the
 // ANSI/DEC definition of reverse video (swap the screen's default fg/bg), not
 // from the renderer's internals.
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach } from "vitest";
 import { decodeWireBinary } from "./wire-binary.js";
 import type { ModesMessage } from "./types.js";
-import * as modes from "./modes.js";
-import * as render from "./render.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
+import { createEngineFixture, type EngineFixture } from "./test-helpers/engine-fixture.js";
 
 describe("DECSCNM (reverse video) wire decoding", () => {
   it("decodes reverseVideo=true from modes message with bit 5 set", () => {
@@ -40,10 +40,11 @@ describe("DECSCNM (reverse video) wire decoding", () => {
     expect(msg.bracketedPaste).toBe(true);
   });
 
-  it("modes.setModes stores and exposes reverseVideo", () => {
-    modes.setModes(true, false, false, false, 0, false, true);
+  it("a mode state stores and exposes reverseVideo", () => {
+    const modes = createModeState();
+    modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: true });
     expect(modes.isReverseVideo()).toBe(true);
-    modes.setModes(true, false, false, false, 0, false, false);
+    modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: false });
     expect(modes.isReverseVideo()).toBe(false);
   });
 });
@@ -55,32 +56,23 @@ describe("DECSCNM (reverse video) display effect (spec)", () => {
   // as a `term-reverse-video` class on the terminal wrapper (the CSS bundle
   // does the actual color inversion), so the observable contract is "the class
   // tracks the mode". This is the display half the decode tests leave untested.
-  let termWrap: HTMLDivElement;
+  let fx: EngineFixture;
 
   beforeEach(() => {
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    const outputEl = document.getElementById("term-output") as HTMLDivElement;
-    render.init({ output: outputEl, termWrap });
-  });
-
-  afterEach(() => {
-    // modes is a module-global singleton and vitest runs with isolate:false;
-    // reset reverse-video off so this state never leaks into another test file.
-    modes.setModes(true, false, false, false, 0, false, false);
+    fx = createEngineFixture();
   });
 
   it("marks the terminal reverse-video when DECSCNM is active", () => {
-    modes.setModes(true, false, false, false, 0, false, true);
-    render.updateReverseVideo();
-    expect(termWrap.classList.contains("term-reverse-video")).toBe(true);
+    fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: true });
+    fx.engine.renderer.updateReverseVideo();
+    expect(fx.termWrap.classList.contains("term-reverse-video")).toBe(true);
   });
 
   it("clears the reverse-video mark when DECSCNM is turned off", () => {
-    modes.setModes(true, false, false, false, 0, false, true);
-    render.updateReverseVideo();
-    modes.setModes(true, false, false, false, 0, false, false);
-    render.updateReverseVideo();
-    expect(termWrap.classList.contains("term-reverse-video")).toBe(false);
+    fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: true });
+    fx.engine.renderer.updateReverseVideo();
+    fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: false });
+    fx.engine.renderer.updateReverseVideo();
+    expect(fx.termWrap.classList.contains("term-reverse-video")).toBe(false);
   });
 });

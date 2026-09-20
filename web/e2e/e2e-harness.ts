@@ -1,9 +1,9 @@
 // Shared helpers for the tier-3 real-browser (Playwright/chromium) display
 // tests. Not a test file itself (no `.e2e.test.ts` suffix, so playwright's
-// testMatch ignores it). It bundles the REAL render.ts + decodeWireBinary into
-// one IIFE global, provides the terminal HTML harness, reads the Go-generated
-// golden fixtures, and offers pixel-sampling helpers for the "does it actually
-// paint" assertions.
+// testMatch ignores it). It bundles the REAL engine factories + decodeWireBinary
+// into one IIFE global, provides the terminal HTML harness, reads the
+// Go-generated golden fixtures, and offers pixel-sampling helpers for the "does
+// it actually paint" assertions.
 import * as esbuild from "esbuild";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -29,14 +29,17 @@ const jsToTs = {
   },
 };
 
-/** bundleEngine bundles the real renderer + wire decoder into one IIFE global (WTE). */
+/** bundleEngine bundles the real engine factories + wire decoder into one IIFE global (WTE). */
 export async function bundleEngine(): Promise<string> {
   const result = await esbuild.build({
     stdin: {
-      contents: `export * as render from "./src/render.js";
-export * as modes from "./src/modes.js";
+      contents: `export { createTerminalEngine } from "./src/terminal.js";
+export { createRenderer } from "./src/render.js";
+export { createScrollController } from "./src/scroll.js";
+export { createModeState, POWER_ON_MODES } from "./src/modes.js";
+export { createConnection } from "./src/connection.js";
+export { createMouseController } from "./src/mouse.js";
 export * as keyboard from "./src/keyboard.js";
-export * as connection from "./src/connection.js";
 export { decodeWireBinary } from "./src/wire-binary.js";`,
       resolveDir: webDir,
       loader: "ts",
@@ -180,8 +183,8 @@ function lumAt(png: PNG, i: number): number {
 
 /**
  * pixelDiffFraction returns the fraction of pixels whose luminance differs by
- * more than a threshold between two equal-region rects — used to prove two
- * glyphs render as visually DISTINCT shapes (not the same blob).
+ * more than a threshold between two equal-region rects, which proves two glyphs
+ * render as visually DISTINCT shapes (not the same blob).
  */
 export function pixelDiffFraction(png: PNG, a: Rect, b: Rect): number {
   const w = Math.min(Math.round(a.width), Math.round(b.width));

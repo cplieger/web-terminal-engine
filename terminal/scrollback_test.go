@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/cplieger/web-terminal-engine/v5/vt"
+	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
 func makeLine(text string) []vt.WireRun {

@@ -1,27 +1,11 @@
-// SPEC-FIRST keyboard input-encoding tests for keyboard.ts.
-//
-// Every expected byte sequence in this file is derived from the xterm
-// PC-style keyboard-encoding SPECIFICATION and transcribed from the two
-// authoritative references, NOT from reading keyboard.ts's implementation:
-//
-//   - Control sequences (cursor keys, Home/End, application keypad):
-//     https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-//     ("PC-Style Function Keys" and "VT220-Style Function Keys" tables)
-//   - Per-key / per-modifier sequences (the xterm-new terminfo column):
-//     https://invisible-island.net/xterm/xterm-function-keys.html
-//
-// Modifier parameter = 1 + bitmask, bitmask = 1:Shift 2:Alt 4:Ctrl 8:Meta
-// (ctlseqs.html: shift-F5 => CSI 15;2~, params 2-8, Meta extends to 9-16).
-// So Shift=2, Alt=3, Ctrl=5, Ctrl+Shift=6 — matching the function-keys
-// table columns kXX (=2), kXX3 (=3), kXX5 (=5), kXX6 (=6).
-//
-// A failing assertion here is a real finding: a deviation of our encoder
-// from the xterm spec. Deviations are NOT "fixed" by editing the expected
-// value or the source; they are recorded in the "spec deviations" block
-// via it.skip and enumerated in the accompanying report.
-//
-// Content transcribed/rephrased from invisible-island.net xterm docs for
-// compliance with licensing restrictions.
+// Every expected byte sequence here is transcribed from the xterm PC-style
+// keyboard-encoding specification, never from keyboard.ts: ctlseqs.html
+// ("PC-Style Function Keys", "VT220-Style Function Keys") and
+// xterm-function-keys.html (the xterm-new terminfo column), both at
+// invisible-island.net. Modifier parameter = 1 + bitmask, 1:Shift 2:Alt 4:Ctrl
+// 8:Meta, so Shift=2, Alt=3, Ctrl=5, Ctrl+Shift=6 (the kXX, kXX3, kXX5, kXX6
+// columns). A deviation is recorded as an it.skip asserting the SPEC value, never
+// fixed by editing the expectation. Content rephrased for licensing compliance.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
@@ -32,15 +16,10 @@ import {
   prepareTextForTerminal,
   type KeyboardResult,
 } from "./keyboard.js";
-import * as modes from "./modes.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
 
-// These tests drive the module-singleton modes (set via modes.setModes in
-// beforeEach), so bind it here; mapKeyboardEvent now takes modes explicitly.
+const modes = createModeState();
 const mapKeyboardEvent = (e: KeyboardEvent): KeyboardResult => mapKeyboardEventRaw(e, modes);
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 function ev(init: KeyboardEventInit & { key: string; code?: string }): KeyboardEvent {
   return new KeyboardEvent("keydown", init);
@@ -79,8 +58,6 @@ const ALL_MODS: Mod[] = ["none", "shift", "ctrl", "alt", "ctrlShift"];
 // PageUp/PageDown reserve Shift for local scrollback (see deviations block).
 const NON_SHIFT_MODS: Mod[] = ["none", "ctrl", "alt", "ctrlShift"];
 
-// -- Spec sequence templates (parameterised by the transcribed MOD_PARAM) ----
-
 /** Cursor / Home / End in NORMAL mode: bare `CSI L`, modified `CSI 1;{p}L`. */
 function letterFormNormal(letter: string, mod: Mod): string {
   return mod === "none" ? `\x1b[${letter}` : `\x1b[1;${MOD_PARAM[mod]}${letter}`;
@@ -102,17 +79,13 @@ function tildeForm(num: number, mod: Mod): string {
 }
 
 beforeEach(() => {
-  // modes.ts is module-singleton state shared across test files
-  // (vitest isolate:false). Reset to the VT100 power-on default:
-  // bracketed-paste on, cursor keys NORMAL, application keypad OFF.
-  modes.setModes(true /* bracketed */, false /* app cursor */, false, false, 0, false);
+  // VT100 power-on default: bracketed-paste on, cursor keys NORMAL, application keypad OFF.
+  modes.applySnapshot(POWER_ON_MODES);
 });
 
-// ===========================================================================
 // Cursor keys + Home/End — NORMAL mode (DECCKM reset)
 // Spec (ctlseqs): Up/Down/Right/Left = CSI A/B/C/D; Home = CSI H; End = CSI F.
 // Modified forms from function-keys table: kUP=\E[1;2A, kUP5=\E[1;5A, etc.
-// ===========================================================================
 
 describe("cursor & Home/End keys — normal mode [spec: CSI form]", () => {
   const letterKeys: { key: string; letter: string }[] = [
@@ -135,15 +108,13 @@ describe("cursor & Home/End keys — normal mode [spec: CSI form]", () => {
   }
 });
 
-// ===========================================================================
 // Cursor keys + Home/End — APPLICATION cursor mode (DECCKM set)
 // Spec (ctlseqs): bare form switches to SS3 (ESC O L); modified forms keep
 // the CSI 1;{p}L form (SS3 has no modifier encoding).
-// ===========================================================================
 
 describe("cursor & Home/End keys — application cursor mode / DECCKM [spec: SS3 bare form]", () => {
   beforeEach(() => {
-    modes.setModes(true /* bracketed */, true /* app cursor */, false, false, 0, false);
+    modes.applySnapshot({ ...POWER_ON_MODES, applicationCursor: true });
   });
 
   const letterKeys: { key: string; letter: string }[] = [
@@ -173,12 +144,10 @@ describe("cursor & Home/End keys — application cursor mode / DECCKM [spec: SS3
   }
 });
 
-// ===========================================================================
 // Editing keypad — Insert / Delete / PageUp / PageDown
 // Spec (function-keys table): Insert=CSI 2~, Delete=CSI 3~, PageUp=CSI 5~,
 // PageDown=CSI 6~; modified => CSI n;{p}~ (kIC=\E[2;2~, kDC5=\E[3;5~, ...).
 // PageUp/PageDown reserve Shift for local scrollback — see deviations block.
-// ===========================================================================
 
 describe("editing keypad — Insert/Delete/PageUp/PageDown [spec: CSI n~ tilde form]", () => {
   const tildeKeys: { key: string; num: number; mods: Mod[] }[] = [
@@ -197,12 +166,10 @@ describe("editing keypad — Insert/Delete/PageUp/PageDown [spec: CSI n~ tilde f
   }
 });
 
-// ===========================================================================
 // Function keys F1-F4 — SS3 bare form, CSI 1;{p}L modified
 // Spec (function-keys table, xterm-new): kf1=\EOP..kf4=\EOS;
 // kf13(shift)=\E[1;2P, kf25(ctrl)=\E[1;5P, kf37(ctrl+shift)=\E[1;6P,
 // kf49(alt)=\E[1;3P.
-// ===========================================================================
 
 describe("function keys F1-F4 [spec: SS3 P/Q/R/S bare, CSI 1;{p} modified]", () => {
   const fnKeys: { key: string; letter: string }[] = [
@@ -223,12 +190,10 @@ describe("function keys F1-F4 [spec: SS3 P/Q/R/S bare, CSI 1;{p} modified]", () 
   }
 });
 
-// ===========================================================================
 // Function keys F5-F12 — CSI tilde form
 // Spec (function-keys table, xterm-new): kf5=\E[15~, kf6=\E[17~, kf7=\E[18~,
 // kf8=\E[19~, kf9=\E[20~, kf10=\E[21~, kf11=\E[23~, kf12=\E[24~;
 // modified => CSI n;{p}~ (kf17 shift-F5 = \E[15;2~, kf29 ctrl-F5 = \E[15;5~).
-// ===========================================================================
 
 describe("function keys F5-F12 [spec: CSI {15,17,18,19,20,21,23,24}~]", () => {
   const fnKeys: { key: string; num: number }[] = [
@@ -251,13 +216,11 @@ describe("function keys F5-F12 [spec: CSI {15,17,18,19,20,21,23,24}~]", () => {
   }
 });
 
-// ===========================================================================
 // Function keys F13-F20 — xterm's extended tilde codes (25-34; 27 and 30
 // skipped historically). F21-F24 have NO standard legacy encoding — xterm
 // itself stops at F20 — so they must stay silent on the legacy path (the
 // kitty path covers all twelve with dedicated codepoints; see the kitty
 // suite). xterm.js supports none of F13+ (xtermjs/xterm.js#1426).
-// ===========================================================================
 
 describe("function keys F13-F20 [spec: CSI {25,26,28,29,31,32,33,34}~] and F21-F24 silence", () => {
   const fnKeys: { key: string; num: number }[] = [
@@ -285,10 +248,6 @@ describe("function keys F13-F20 [spec: CSI {25,26,28,29,31,32,33,34}~] and F21-F
     });
   }
 });
-
-// ===========================================================================
-// Tab / Enter / Escape / Backspace / Space
-// ===========================================================================
 
 describe("Tab and Shift+Tab [spec: HT and CSI Z]", () => {
   it("Tab → HT (0x09)", () => {
@@ -345,11 +304,9 @@ describe("Space [spec: Ctrl→NUL; Alt→ESC SP]", () => {
   });
 });
 
-// ===========================================================================
 // Ctrl + printable → C0 control bytes (via mapKeyboardEvent)
 // Spec: Ctrl+A..Z = 0x01..0x1a; Ctrl+@/Space = NUL; Ctrl+[ \ ] ^ _ =
 // 0x1b..0x1f; Ctrl+? = DEL. (US-ASCII control-key convention.)
-// ===========================================================================
 
 describe("Ctrl+printable → C0 controls [spec: ASCII control convention]", () => {
   const letterCases: { key: string; byte: number }[] = [
@@ -384,9 +341,7 @@ describe("Ctrl+printable → C0 controls [spec: ASCII control convention]", () =
   });
 });
 
-// ===========================================================================
 // Alt + printable → ESC prefix + character (metaSendsEscape default)
-// ===========================================================================
 
 describe("Alt+printable → ESC + char [spec: meta prefix]", () => {
   for (const key of ["a", "f", "z", "1", "."]) {
@@ -396,10 +351,6 @@ describe("Alt+printable → ESC + char [spec: meta prefix]", () => {
   }
 });
 
-// ===========================================================================
-// Modifier-only presses are ignored.
-// ===========================================================================
-
 describe("modifier-only presses are ignored", () => {
   for (const key of ["Shift", "Control", "Alt", "Meta"]) {
     it(`${key} alone → ignore`, () => {
@@ -408,11 +359,8 @@ describe("modifier-only presses are ignored", () => {
   }
 });
 
-// ===========================================================================
-// DESIGN-CHOICE behaviours (green — these lock down deliberate deviations
-// from a naive PTY-encoding reading; each also appears in the deviations
-// block below so the report can enumerate them).
-// ===========================================================================
+// Deliberate deviations from a naive PTY-encoding reading, each also listed
+// in the spec-deviations block below.
 
 describe("printable text is deferred to the DOM input event (design choice)", () => {
   it("bare printable keys return kind='ignore' (browser input event emits the char)", () => {
@@ -434,10 +382,7 @@ describe("Shift+PageUp/PageDown route to local scrollback (design choice)", () =
   });
 });
 
-// ===========================================================================
-// SPEC DEVIATIONS — recorded, NOT fixed. Each it.skip states the spec value
-// and the observed encoder behaviour. See the accompanying report.
-// ===========================================================================
+// Spec deviations, recorded as it.skip: each body asserts the SPEC value.
 
 describe("spec deviations (documented — NOT fixed)", () => {
   it.skip("DEVIATION: bare printable key — spec: emits the character; got: kind='ignore' (deferred to DOM input event; DESIGN CHOICE)", () => {
@@ -457,10 +402,8 @@ describe("spec deviations (documented — NOT fixed)", () => {
   });
 });
 
-// ===========================================================================
 // ctrlByteFor — the C0 lookup table (used by mapKeyboardEvent + sticky-Ctrl).
 // Spec: ASCII control-key convention (see the Ctrl+printable block above).
-// ===========================================================================
 
 describe("ctrlByteFor", () => {
   it("a-z (case-folded) → 0x01..0x1a", () => {
@@ -497,19 +440,15 @@ describe("ctrlByteFor", () => {
   });
 });
 
-// ===========================================================================
-// Bracketed paste + CR/LF normalisation (keyboard.ts paste helpers).
-// ===========================================================================
-
 describe("bracketed paste", () => {
   it("wraps with DEC 2004 sentinels and sanitises embedded ESC", () => {
-    expect(bracketTextForPaste("hello")).toBe("\x1b[200~hello\x1b[201~");
-    expect(bracketTextForPaste("a\x1b[201~b")).toBe(`\x1b[200~a\u241B[201~b\x1b[201~`);
+    expect(bracketTextForPaste("hello", modes)).toBe("\x1b[200~hello\x1b[201~");
+    expect(bracketTextForPaste("a\x1b[201~b", modes)).toBe(`\x1b[200~a\u241B[201~b\x1b[201~`);
   });
 
   it("normalises CR/LF to CR", () => {
     expect(prepareTextForTerminal("a\r\nb\nc\r")).toBe("a\rb\rc\r");
-    // Paste NUL hygiene (P2): NUL bytes are stripped wherever they appear —
+    // Paste NUL hygiene: NUL bytes are stripped wherever they appear,
     // never meaningful paste content, and a leading NUL would otherwise
     // interact with the v3 wire framing.
     expect(prepareTextForTerminal("\x00lead\x00mid\x00")).toBe("leadmid");

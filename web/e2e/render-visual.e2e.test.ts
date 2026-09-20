@@ -1,18 +1,13 @@
-// Tier 3 — real DISPLAY OUTPUT (Playwright/chromium). The all-codes sibling
-// test dumps getComputedStyle (proves the CSS is SET); this file goes to the
-// actual rendered output that computed-style can't prove:
-//   1. LAYOUT geometry via getBoundingClientRect — the monospace grid, a wide
-//      char occupying two cells, the cursor's pixel position, contiguous rows.
-//   2. PAINTED pixels via screenshot sampling — that chromium actually paints a
-//      color, that bold is heavier ink than normal, dim is fainter, inverse is a
-//      light block, hidden is blank, underline puts ink in the underline row.
-//   3. VISUAL clear — text paints ink; re-rendering the row blank leaves no ink.
-//
-// Pixel checks sample a FEW known cells and assert SEMANTIC properties (is-red,
-// more-ink, blank) — robust, unlike a full-screen baseline. Frames are built as
-// ScreenMessage objects (the renderer's input contract), so no wire encoding is
-// needed here. Run with `npm run test:e2e`.
+// Real DISPLAY OUTPUT in Playwright Chromium, the part computed style cannot
+// prove: layout geometry through getBoundingClientRect (the monospace grid, a
+// wide char over two cells, the cursor's pixel position), painted pixels through
+// screenshot sampling (a color is painted, bold is heavier ink, dim fainter,
+// inverse a light block, hidden blank, underline ink in the underline row) and
+// a visual clear. Pixel checks sample a FEW cells for SEMANTIC properties rather
+// than a full-screen baseline. Frames are ScreenMessage objects, the renderer's
+// input contract, so no wire encoding is needed. Run with `npm run test:e2e`.
 import { test, expect, type Page } from "@playwright/test";
+import type { ScreenMessage, TerminalEngine, WireRun } from "../src/index.js";
 import {
   bundleEngine,
   HARNESS,
@@ -37,16 +32,14 @@ const RED = 0xff0000;
 const GREEN = 0x00ff00;
 const BLUE = 0x0000ff;
 
-interface WireRun {
-  t: string;
-  f: number;
-  b: number;
-  a: number;
-  uc: number;
-  u?: string; // OSC 8 hyperlink URI
-}
 function run(t: string, opts: Partial<WireRun> = {}): WireRun {
-  const r: WireRun = { t, f: opts.f ?? -1, b: opts.b ?? -1, a: opts.a ?? 0, uc: opts.uc ?? -1 };
+  const r: WireRun = {
+    t,
+    f: opts.f ?? -1,
+    b: opts.b ?? -1,
+    a: opts.a ?? 0,
+    uc: opts.uc ?? -1,
+  };
   if (opts.u !== undefined) {
     r.u = opts.u;
   }
@@ -57,7 +50,7 @@ function screenMsg(
   cursor: [number, number],
   cursorHidden = true,
   cursorStyle = 0,
-): unknown {
+): ScreenMessage {
   return {
     type: "screen",
     base: 0,
@@ -70,7 +63,7 @@ function screenMsg(
   };
 }
 // altMsg builds an alternate-screen frame (ephemeral grid, no history).
-function altMsg(rows: WireRun[][], cursor: [number, number]): unknown {
+function altMsg(rows: WireRun[][], cursor: [number, number]): ScreenMessage {
   return {
     type: "screen",
     base: 0,
@@ -90,19 +83,30 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     bundle = await bundleEngine();
   });
 
-  async function renderMsg(page: Page, msg: unknown): Promise<void> {
+  async function renderMsg(page: Page, msg: ScreenMessage): Promise<void> {
     await page.setContent(HARNESS);
     await page.addScriptTag({ content: bundle });
     await page.evaluate((m) => {
-      const out = document.getElementById("out")!;
-      const wrap = document.getElementById("wrap")!;
-      WTE.render.init({ output: out, termWrap: wrap });
-      WTE.render.updateFontMetrics();
-      WTE.render.handleScreen(m);
+      const output = document.getElementById("out")!;
+      const termWrap = document.getElementById("wrap")!;
+      window.__engine?.dispose();
+      const engine = WTE.createTerminalEngine({
+        output,
+        termWrap,
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+      });
+      window.__engine = engine;
+      engine.renderer.updateFontMetrics();
+      engine.renderer.handleScreen(m);
     }, msg);
     // Deterministic flush wait: every frame here is a fresh full grid, so all
     // its rows materialize as divs (replaces a flaky fixed sleep).
-    await waitForRows(page, (msg as { rows: unknown[] }).rows.length);
+    await waitForRows(page, msg.rows.length);
   }
 
   test("layout geometry: monospace grid, a wide char spans two cells, rows are contiguous", async ({
@@ -119,7 +123,7 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     const g = await page.evaluate(() => {
       const out = document.getElementById("out")!;
       const cellW = parseFloat(
-        getComputedStyle(document.documentElement).getPropertyValue("--char-w"),
+        getComputedStyle(document.getElementById("wrap")!).getPropertyValue("--char-w"),
       );
       const span = (r: number, c: number): Rect & { text: string } => {
         const el = out.children[r]!.children[c] as HTMLElement;
@@ -160,7 +164,7 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     const g = await page.evaluate(() => {
       const out = document.getElementById("out")!;
       const cellW = parseFloat(
-        getComputedStyle(document.documentElement).getPropertyValue("--char-w"),
+        getComputedStyle(document.getElementById("wrap")!).getPropertyValue("--char-w"),
       );
       const rowRect = (out.children[0] as HTMLElement).getBoundingClientRect();
       const cur = document.querySelector<HTMLElement>(".term-cursor-overlay.visible");
@@ -271,7 +275,7 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     // Re-render the same row blank (what a clear/erase produces) and confirm the
     // painted region goes dark — the renderer visually clears it.
     await page.evaluate(() => {
-      WTE.render.handleScreen({
+      window.__engine!.renderer.handleScreen({
         type: "screen",
         base: 0,
         rows: [
@@ -390,7 +394,7 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     });
     expect(g.found, "engine adds .term-blink to the blink cell").toBe(true);
     expect(g.animName, ".term-blink is animated").not.toBe("none");
-    // Opacity differs across the animation cycle => the cell actually blinks.
+    // Opacity differs between the two animation phases, so the cell blinks.
     expect(Math.abs(g.op0 - g.op1), "opacity animates between phases").toBeGreaterThan(0.5);
   });
 
@@ -412,8 +416,9 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     const normal = avgLuminance(decodePng(await page.screenshot()), rect);
     // Turn DEC mode 5 (reverse video) on and let the engine apply its class.
     await page.evaluate(() => {
-      WTE.modes.setModes(true, false, false, false, 0, false, true, false);
-      WTE.render.updateReverseVideo();
+      const engine = window.__engine!;
+      engine.modes.applySnapshot({ ...WTE.POWER_ON_MODES, reverseVideo: true });
+      engine.renderer.updateReverseVideo();
     });
     const reversed = avgLuminance(decodePng(await page.screenshot()), rect);
     // Light-text-on-dark (low mean) must invert to dark-text-on-light (high mean).
@@ -441,7 +446,7 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     // Enter the alternate screen: an ephemeral grid with different content that
     // must NOT disturb the retained main buffer.
     await page.evaluate(
-      (m) => WTE.render.handleScreen(m),
+      (m) => window.__engine!.renderer.handleScreen(m),
       altMsg([[run("ALT-1")], [run("ALT-2")], [run(" ".repeat(8))], [run(" ".repeat(8))]], [0, 0]),
     );
     // Alt-screen swap rewrites rows in place: wait on content, not row count.
@@ -450,7 +455,10 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     expect(alt.slice(0, 2), "alt screen shows the ephemeral alt grid").toEqual(["ALT-1", "ALT-2"]);
 
     // Exit the alternate screen: a normal frame restores the main buffer.
-    await page.evaluate((m) => WTE.render.handleScreen(m), screenMsg(mainRows, [3, 0]));
+    await page.evaluate(
+      (m) => window.__engine!.renderer.handleScreen(m),
+      screenMsg(mainRows, [3, 0]),
+    );
     await waitForRowText(page, 0, "MAIN-A");
     const restored = await page.evaluate(readGrid);
     expect(restored.slice(0, 2), "exiting alt restores the main buffer").toEqual([
@@ -507,24 +515,13 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
   });
 });
 
-// WTE is the esbuild IIFE global injected via addScriptTag.
-declare const WTE: {
-  render: {
-    init: (opts: { output: unknown; termWrap: unknown; onCursorMove?: () => void }) => void;
-    updateFontMetrics: () => void;
-    handleScreen: (msg: unknown) => void;
-    updateReverseVideo: () => void;
-  };
-  modes: {
-    setModes: (
-      bracketed: boolean,
-      appCursor: boolean,
-      mouseSGR: boolean,
-      focus: boolean,
-      mouseMode: number,
-      appKeypad: boolean,
-      reverse: boolean,
-      pixels: boolean,
-    ) => void;
-  };
-};
+/** The esbuild IIFE global `addScriptTag` injects; see `bundleEngine`. */
+declare const WTE: Pick<
+  typeof import("../src/index.js"),
+  "createTerminalEngine" | "POWER_ON_MODES"
+>;
+declare global {
+  interface Window {
+    __engine?: TerminalEngine;
+  }
+}

@@ -1,46 +1,20 @@
-// Per-view scroll memory: captureViewMemory + bind({ view })
-// (docs/scroll-position-fidelity.md §3).
-//
-// The behavior under test is a ROUND TRIP across a rebuild that spans several
-// frames, on a container that CLAMPS scrollTop like a browser. Both halves of
-// that sentence are load-bearing, and their absence is why the bug shipped:
-//
-//   - the rebuild builds at most MAX_ROWS_PER_FRAME (300) rows per frame, so a
-//     restore issued once, at frame 1, is replayed against ~301 of up to 5000
-//     rows; and
-//   - a real container clamps the write to scrollHeight - clientHeight, so that
-//     replay silently lands at the bottom of the PARTIAL content and the saved
-//     position is gone. Nothing retried it.
-//
-// So every assertion here is made by LINE (the data-abs at the viewport top),
-// never by pixel offset, and the drain is pumped frame by frame rather than
-// awaited in one go.
+// Per-view scroll memory, captureViewMemory + bind({ view })
+// (docs/scroll-position-fidelity.md §3): a ROUND TRIP across a rebuild that
+// spans several frames on a container that CLAMPS scrollTop like a browser. The
+// rebuild builds at most MAX_ROWS_PER_FRAME (300) rows per frame, so a restore
+// issued once at frame 1 replays against ~301 of up to 5000 rows, and a clamping
+// container lands it at the bottom of the PARTIAL content. So every assertion
+// is by LINE (the data-abs at the viewport top), never by pixel offset, and the
+// drain is pumped frame by frame.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import * as render from "./render.js";
-import * as scroll from "./scroll.js";
+import { createModeState } from "./modes.js";
+import { createRenderer, type Renderer } from "./render.js";
+import { createScrollController, type ScrollController } from "./scroll.js";
 import { LineStore } from "./store.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { installRowGeometry, type RowGeometry } from "./test-helpers/scroll-fixture.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
-
-// A real browser's ESM module namespace is non-configurable, so `vi.spyOn` on a
-// module export cannot install itself: the property is not redefinable. The
-// emulator ran behind a transform that rewrote exports into configurable
-// getters, which is why these spies used to work without this line.
-//
-// `spy: true` asks vitest for the module with its exports wrapped in spies that
-// CALL THROUGH by default, so nothing is stubbed out wholesale — the same
-// scroll.ts runs, and only the exports a test explicitly overrides behave
-// differently. render.ts imports the same mocked module, which is what makes
-// this the parked-reader seam these tests need.
-//
-// One consequence to know when reading the call-count assertions below: an
-// auto-spy starts recording at module load, and `vi.spyOn` on a property that is
-// already a mock hands back THAT spy rather than a fresh one. So a spy taken
-// mid-test carries whatever the setup above it already did, and a site whose
-// assertion is a COUNT clears it first (`.mockClear()`) to mean what it says —
-// the calls the action under test causes.
-vi.mock("./scroll.js", { spy: true });
 
 interface FakeCtx {
   font: string;
@@ -77,6 +51,8 @@ function scrollMsg(firstIndex: number, texts: string[]): ScrollMessage {
 describe("per-view scroll memory across a multi-frame rebuild", () => {
   let output: HTMLDivElement;
   let termWrap: HTMLDivElement;
+  let render: Renderer;
+  let scroll: ScrollController;
   let geom: RowGeometry;
   let frames: FrameRequestCallback[];
 
@@ -159,9 +135,11 @@ describe("per-view scroll memory across a multi-frame rebuild", () => {
     termWrap = document.getElementById("term") as HTMLDivElement;
     output = document.getElementById("term-output") as HTMLDivElement;
     geom = installRowGeometry({ output, termWrap, rowHeight: ROW_H, clientHeight: VIEWPORT_H });
-    render.init({ output, termWrap });
+    scroll = registerForDispose(createScrollController({ scrollEl: termWrap }));
+    render = registerForDispose(
+      createRenderer({ output, termWrap, scroll, modes: createModeState() }),
+    );
     render.updateFontMetrics();
-    scroll.init({ scrollEl: termWrap });
   });
 
   afterEach(() => {
@@ -440,7 +418,7 @@ describe("per-view scroll memory across a multi-frame rebuild", () => {
     render.bind(s);
     pumpUntilIdle();
 
-    const spy = vi.spyOn(scroll, "noteContentShrink").mockClear();
+    const spy = vi.spyOn(scroll, "noteContentShrink");
 
     // Through the renderer, not the store: a direct store mutation schedules no
     // flush, so both halves below would be vacuously true.
@@ -462,10 +440,8 @@ describe("per-view scroll memory across a multi-frame rebuild", () => {
 
   it("adopts the tail for an explicitly NULL view, instead of inheriting the outgoing tab's flag", () => {
     // A tab never visited, or one left on the alternate screen, has no anchor to
-    // restore — but "no memory" still carries a follow intent, and it is the tail.
-    // Without this the null case adopted NOTHING, so those tabs kept whatever flag
-    // the tab the user just left had: the stale-global-flag bug, narrowed to the
-    // tabs that have nothing saved rather than closed.
+    // restore, but "no memory" still carries a follow intent, and it is the tail:
+    // a null case that adopts NOTHING inherits whatever flag the outgoing tab had.
     const tabA = populated(300);
     render.bind(tabA);
     pumpUntilIdle();

@@ -36,7 +36,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/web-terminal-engine/v5/vt"
+	"github.com/cplieger/web-terminal-engine/v6/vt"
 	"github.com/creack/pty"
 )
 

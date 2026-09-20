@@ -1,27 +1,18 @@
-// The connection layer's RELIABLE-INPUT half: the outbox, the acked-byte window
-// and what a reconnect replays over the new socket.
-//
-// Every assertion here is about bytes the user typed. The outbox is the only
-// copy of input the server has not confirmed, and applyAck is the only thing
-// that removes bytes from it, so an off-by-one there is silent: keystrokes
-// vanish on a reconnect (trimmed too far) or are executed twice (trimmed too
-// little). The observable is deliberately the WIRE — the frames the replacement
-// socket is asked to send after its resumeAck — never the module's counters.
-//
-// Drives the REAL connection module with a fake global WebSocket, the same shape
-// connection.test.ts and connection-paging.test.ts use.
+// The connection's RELIABLE-INPUT half: the outbox, the acked-byte window and
+// what a reconnect replays over the new socket. The outbox is the only copy of
+// input the server has not confirmed and applyAck the only thing that removes
+// bytes from it, so an off-by-one there is silent: keystrokes vanish on a
+// reconnect (trimmed too far) or run twice (trimmed too little). The observable
+// is the WIRE, the frames the replacement socket sends after its resumeAck,
+// never the instance's counters.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  MAX_OUTBOX_BYTES,
-  disconnect,
-  init,
-  reconnectNow,
-  sendBinary,
-  sendResize,
-  setSession,
-} from "./connection.js";
+import { type Connection, createConnection, MAX_OUTBOX_BYTES } from "./connection.js";
+import { connectionDeps } from "./test-helpers/connection-fakes.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
+
+let conn: Connection;
 
 interface MockWS {
   readyState: number;
@@ -119,13 +110,11 @@ function ackOnlyFrame(inputAck: number): ArrayBuffer {
 }
 
 /**
- * The PTY-input frames the socket was asked to send, decoded as text.
- *
- * The encoding is the discriminator, and it is exact rather than incidental:
- * `controlFrame` sends a Uint8Array (the 0x00-sentinel form) and `textControl` a
- * string, while every input path — live send and retransmit alike — sends an
- * ArrayBuffer. So this sees keystrokes and nothing else, including a solitary
- * NUL frame, which a "first byte is 0x00 means control" filter would swallow.
+ * The PTY-input frames the socket was asked to send, decoded as text. The
+ * encoding is the exact discriminator: `controlFrame` sends a Uint8Array and
+ * `textControl` a string, while every input path, live send and retransmit
+ * alike, sends an ArrayBuffer. So this sees keystrokes and nothing else, a
+ * solitary NUL frame included, which a "first byte is 0x00" filter would swallow.
  */
 function inputSent(sock: MockWS): string[] {
   const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
@@ -160,7 +149,7 @@ let session = 0;
 /** Bring up a socket for a FRESH session and take it through its resumeAck. */
 function openSession(opts: { version?: number | undefined } = {}): MockWS {
   session++;
-  setSession(`outbox-${String(session)}`);
+  conn.setSession(`outbox-${String(session)}`);
   const sock = sockets[sockets.length - 1]!;
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame({ received: 0, version: opts.version }));
@@ -169,7 +158,7 @@ function openSession(opts: { version?: number | undefined } = {}): MockWS {
 
 /** Reconnect and answer the new socket's resume with `received`. */
 function reconnectAcking(received: number, opts: { version?: number | undefined } = {}): MockWS {
-  reconnectNow();
+  conn.reconnectNow();
   const sock = sockets[sockets.length - 1]!;
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame({ received, version: opts.version }));
@@ -184,24 +173,23 @@ describe("connection: the outbox and the acked-byte window", () => {
     outboxFull = vi.fn<() => void>();
     serverRestart = vi.fn<() => void>();
     computeSize = vi.fn<() => { cols: number; rows: number }>(() => ({ cols: 80, rows: 24 }));
-    init({
-      onMessage: () => {
-        /* no-op */
-      },
-      onOpen: () => {
-        /* no-op */
-      },
-      onClose: () => {
-        /* no-op */
-      },
-      computeSize,
-      onOutboxFull: outboxFull,
-      onServerRestart: serverRestart,
-    });
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize,
+          onOutboxFull: outboxFull,
+          onServerRestart: serverRestart,
+        },
+      }),
+    );
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -213,16 +201,16 @@ describe("connection: the outbox and the acked-byte window", () => {
       // The boundary is `>`, not `>=`: a send that lands exactly on the cap is
       // the largest legal one, and refusing it would drop input the client can
       // still hold.
-      expect(sendBinary(new Uint8Array(MAX_OUTBOX_BYTES))).toBe(true);
+      expect(conn.sendBinary(new Uint8Array(MAX_OUTBOX_BYTES))).toBe(true);
       expect(outboxFull).not.toHaveBeenCalled();
     });
 
     it("refuses the byte that would exceed the cap, reports it, and sends nothing", () => {
       const sock = openSession();
-      sendBinary(new Uint8Array(MAX_OUTBOX_BYTES));
+      conn.sendBinary(new Uint8Array(MAX_OUTBOX_BYTES));
       const framesBefore = inputFrameSizes(sock).length;
 
-      expect(sendBinary(enc.encode("x"))).toBe(false);
+      expect(conn.sendBinary(enc.encode("x"))).toBe(false);
       expect(outboxFull).toHaveBeenCalledTimes(1);
       // Refused means refused on the wire too: a byte the outbox will not hold
       // must not reach the server, or the server's ledger runs ahead of ours
@@ -234,7 +222,7 @@ describe("connection: the outbox and the acked-byte window", () => {
   describe("what a reconnect replays", () => {
     it("replays exactly the bytes the resume ack left unacked", () => {
       openSession();
-      sendBinary(enc.encode("hello"));
+      conn.sendBinary(enc.encode("hello"));
 
       // The server confirms 2 of the 5 bytes: "he" is applied, "llo" is not.
       const next = reconnectAcking(2);
@@ -244,7 +232,7 @@ describe("connection: the outbox and the acked-byte window", () => {
 
     it("trims a second ack from the already-trimmed head", () => {
       openSession();
-      sendBinary(enc.encode("hello"));
+      conn.sendBinary(enc.encode("hello"));
       const first = sockets[sockets.length - 1]!;
       first.fireMessage(ackOnlyFrame(2));
       first.fireMessage(ackOnlyFrame(4));
@@ -258,8 +246,8 @@ describe("connection: the outbox and the acked-byte window", () => {
 
     it("drops every chunk an ack spans and keeps the partial remainder", () => {
       openSession();
-      sendBinary(enc.encode("ab"));
-      sendBinary(enc.encode("cde"));
+      conn.sendBinary(enc.encode("ab"));
+      conn.sendBinary(enc.encode("cde"));
 
       // 4 of 5 bytes acked: the whole first chunk plus two bytes of the second.
       const next = reconnectAcking(4);
@@ -272,8 +260,8 @@ describe("connection: the outbox and the acked-byte window", () => {
         /* keep the log quiet; the assertion is that it stays empty */
       });
       openSession();
-      sendBinary(enc.encode("ab"));
-      sendBinary(enc.encode("cd"));
+      conn.sendBinary(enc.encode("ab"));
+      conn.sendBinary(enc.encode("cd"));
       const first = sockets[sockets.length - 1]!;
       first.fireMessage(ackOnlyFrame(4));
 
@@ -291,7 +279,7 @@ describe("connection: the outbox and the acked-byte window", () => {
 
     it("does not let a stale ack reopen the window a later ack closed", () => {
       openSession();
-      sendBinary(enc.encode("hello"));
+      conn.sendBinary(enc.encode("hello"));
       const first = sockets[sockets.length - 1]!;
       first.fireMessage(ackOnlyFrame(3));
       // A late duplicate from the flush sweep, below the high-water mark. It
@@ -308,13 +296,13 @@ describe("connection: the outbox and the acked-byte window", () => {
 
     it("clamps an ack that claims more bytes than were sent, so later acks still trim", () => {
       openSession();
-      sendBinary(enc.encode("hello"));
+      conn.sendBinary(enc.encode("hello"));
       const first = sockets[sockets.length - 1]!;
       // A server that counts bytes we never sent (its own control frames, say)
       // would otherwise park bytesAcked above every future ack, and the outbox
       // would never trim again.
       first.fireMessage(ackOnlyFrame(99));
-      sendBinary(enc.encode("more"));
+      conn.sendBinary(enc.encode("more"));
       first.fireMessage(ackOnlyFrame(7));
 
       const next = reconnectAcking(7);
@@ -331,7 +319,7 @@ describe("connection: the outbox and the acked-byte window", () => {
       // split: an empty frame is not a control and not input.
       const sock = openSession({ version: 3 });
 
-      sendBinary(new Uint8Array([0x00, 0x00]));
+      conn.sendBinary(new Uint8Array([0x00, 0x00]));
 
       expect(inputFrameSizes(sock)).toEqual([1, 1]);
     });
@@ -339,7 +327,7 @@ describe("connection: the outbox and the acked-byte window", () => {
     it("sends the remainder after a leading NUL as one frame", () => {
       const sock = openSession({ version: 3 });
 
-      sendBinary(new Uint8Array([0x00, 0x41, 0x42]));
+      conn.sendBinary(new Uint8Array([0x00, 0x41, 0x42]));
 
       expect(inputFrameSizes(sock)).toEqual([1, 2]);
     });
@@ -349,11 +337,11 @@ describe("connection: the outbox and the acked-byte window", () => {
     it("announces a resize that changed only the row count", () => {
       const sock = openSession();
       computeSize.mockReturnValue({ cols: 80, rows: 24 });
-      sendResize();
+      conn.sendResize();
       const before = controlsOfType(sock, "resize").length;
       computeSize.mockReturnValue({ cols: 80, rows: 30 });
 
-      sendResize();
+      conn.sendResize();
 
       // Both dimensions have to match for a resize to be redundant. Suppressing
       // on either one alone loses a real geometry change, and the server keeps
@@ -365,11 +353,11 @@ describe("connection: the outbox and the acked-byte window", () => {
     it("announces a resize that changed only the column count", () => {
       const sock = openSession();
       computeSize.mockReturnValue({ cols: 80, rows: 24 });
-      sendResize();
+      conn.sendResize();
       const before = controlsOfType(sock, "resize").length;
       computeSize.mockReturnValue({ cols: 100, rows: 24 });
 
-      sendResize();
+      conn.sendResize();
 
       // The mirror of the row-only case: each dimension has to be compared on
       // its own, and a column-only change is the common one (a rotated phone).
@@ -383,10 +371,10 @@ describe("connection: the outbox and the acked-byte window", () => {
 
     it("does not ask the consumer to measure while there is no socket", () => {
       openSession();
-      disconnect();
+      conn.disconnect();
       computeSize.mockClear();
 
-      sendResize();
+      conn.sendResize();
 
       // Measuring forces layout in a real consumer, and the answer could not be
       // sent anywhere: the dedup baseline is reset on every open, so a size

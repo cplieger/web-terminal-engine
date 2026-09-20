@@ -1,38 +1,14 @@
-// The transport's RULES, stated one at a time: which timers belong to which
-// socket, what a scheduled reconnect may and may not spawn, what a socket that
-// never opened is allowed to do afterwards, and which frame shapes reach the
-// consumer.
-//
-// The connection module is almost entirely about lifetime. Nearly every field it
-// owns — the liveness interval, the fetch controller's two timers, the backoff
-// timer, the paging capability, the per-session ledger — is a statement about
-// ONE socket, and the failure mode when one of them outlives its socket is
-// silent: a timer fires against a replacement and reconnects a healthy link, or
-// a capability carried across a reconnect makes the client page against a server
-// that never declared it. None of that shows up as an exception; it shows up as
-// a flapping "Reconnecting…" banner or a blank scrollback.
-//
-// So the observables here are deliberately coarse and external: how many sockets
-// exist, what went out on the wire, which callbacks fired and how often. Nothing
-// reads the module's private state, and the fake WebSocket is driven (open,
-// message, error, close) rather than the module's own methods being mocked.
+// The transport's RULES, one at a time: which timers belong to which socket,
+// what a scheduled reconnect may spawn, what a socket that never opened may do
+// afterwards, which frame shapes reach the consumer. Nearly every field the
+// connection owns is a statement about ONE socket, and one outliving its socket
+// fails silently: a timer reconnects a healthy link, a carried capability pages
+// against a server that never declared it. So the observables are coarse and
+// external (socket count, the wire, which callbacks fired) and the fake
+// WebSocket is driven rather than the instance's methods being mocked.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  adoptPersistedEpoch,
-  connect,
-  currentSessionId,
-  disconnect,
-  forgetSession,
-  generateSessionId,
-  historyPagingAvailable,
-  init,
-  reconnectNow,
-  requestHistory,
-  sendBinary,
-  setSession,
-  type Callbacks,
-} from "./connection.js";
+import { type Connection, type ConnectionCallbacks, createConnection } from "./connection.js";
 import {
   MIN_SUPPORTED_SERVER_WIRE_VERSION,
   WIRE_INCOMPATIBLE_CLOSE_CODE,
@@ -40,13 +16,13 @@ import {
   type WireIncompatibility,
 } from "./wire-compatibility.js";
 import type { ServerMessage } from "./types.js";
-import type * as ConnectionModule from "./connection.js";
+import { connectionDeps, type FakeRenderer } from "./test-helpers/connection-fakes.js";
+import { createEngineFixture, registerForDispose } from "./test-helpers/engine-fixture.js";
 
-// --- the fake socket -------------------------------------------------------
-//
-// Same shape the sibling connection suites use: a constructor the module can
-// `new`, a listener registry that HONORS the AbortSignal (the module's whole
-// supersession story is that signal), and fire* helpers for the four events.
+// The fake socket, in the shape the sibling connection suites use: a
+// constructor the module can `new`, a listener registry that HONORS the
+// AbortSignal (the module's whole supersession story is that signal), and
+// fire* helpers for the four events.
 
 interface MockWS {
   url: string;
@@ -146,7 +122,7 @@ function latest(): MockWS {
   return sock;
 }
 
-// --- server frames (mirroring wire_binary.go's encoders) -------------------
+// Server frames, laid out as wire_binary.go's encoders write them.
 
 /**
  * A resumeAck. `bytes` selects the tail the server carries: 9 (bare), 17
@@ -267,8 +243,6 @@ function modesFrame(inputAck: number): ArrayBuffer {
   return buf;
 }
 
-// --- reading what the client sent -----------------------------------------
-
 /**
  * Control messages the socket was asked to send, in order, decoded from EITHER
  * encoding: the v3 0x00-sentinel binary form (a Uint8Array) or the v4 text form
@@ -308,27 +282,17 @@ function inputSent(sock: MockWS): number[][] {
 }
 
 /**
- * Give the Blob→ArrayBuffer chain a bounded window to drain, for the two
- * assertions that a frame produced NOTHING (real timers required).
- *
- * A fixed delay is the wrong instrument for asserting that something DID
- * happen, and it used to be used for that here: `blob.arrayBuffer()` is a real
- * async read served outside the renderer, so its latency is a property of the
- * machine rather than of this module. Three CI failures in 24h came from a 5ms
- * bound; `await vi.waitFor(...)` at every positive assertion is what replaced
- * it, and that has no bound to get wrong.
- *
- * A negative assertion cannot be written that way — `waitFor` on "nothing
- * happened" passes on its first poll — so these two keep a window. Its failure
- * direction is the safe one: too short makes the assertion vacuous, never red.
- * 250ms is ~50x the observed conversion cost and still under a tenth of the
- * 5s test timeout.
+ * A bounded window for the Blob→ArrayBuffer chain to drain, for assertions that
+ * a frame produced NOTHING (real timers required). A positive assertion uses
+ * `vi.waitFor`; a negative one cannot (`waitFor` on "nothing happened" passes on
+ * its first poll), so the window's failure direction is the safe one: too short
+ * is vacuous, never red. 250ms is ~50x the observed conversion cost.
  */
 async function settleBlobChain(): Promise<void> {
   await new Promise((r) => setTimeout(r, 250));
 }
 
-// --- shared consumer -------------------------------------------------------
+let conn: Connection;
 
 let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
 let onOpen: ReturnType<typeof vi.fn<() => void>>;
@@ -336,18 +300,13 @@ let onClose: ReturnType<typeof vi.fn<() => void>>;
 let onServerRestart: ReturnType<typeof vi.fn<() => void>>;
 let onResumeBounds: ReturnType<typeof vi.fn<(committed: number, oldest: number) => void>>;
 let onWireIncompatible: ReturnType<typeof vi.fn<(d: WireIncompatibility) => void>>;
-let onHistoryRetry: ReturnType<typeof vi.fn<() => void>>;
-let onHistoryReply: ReturnType<typeof vi.fn<() => void>>;
+let maybeFetchHistory: ReturnType<typeof vi.fn<() => void>>;
+let handleHistoryReply: ReturnType<typeof vi.fn<FakeRenderer["handleHistoryReply"]>>;
 let noteSolicited: ReturnType<typeof vi.fn<(fromAbs: number, end: number) => void>>;
 let clearSolicited: ReturnType<typeof vi.fn<() => void>>;
 let resumeTransitions: { epochChanged: boolean; paging: boolean; sentHaveThrough: number }[];
 
-/**
- * A consumer wired for observation only. Every engine default this module would
- * otherwise supply from the renderer is replaced by a spy, so a test reads the
- * transport's decisions rather than the renderer's reaction to them.
- */
-function baseCallbacks(): Callbacks {
+function baseCallbacks(): ConnectionCallbacks {
   return {
     onMessage,
     onOpen,
@@ -355,14 +314,23 @@ function baseCallbacks(): Callbacks {
     onServerRestart,
     onResumeBounds,
     onWireIncompatible,
-    onHistoryRetry,
-    onHistoryReply,
+    computeSize: () => ({ cols: 80, rows: 24 }),
+    getReplayMax: () => 500,
+  };
+}
+
+/**
+ * A renderer wired for observation only: every member the connection drives is
+ * a spy, so a test reads the transport's decisions rather than the renderer's
+ * reaction to them.
+ */
+function spyRenderer(): Partial<FakeRenderer> {
+  return {
+    maybeFetchHistory,
+    handleHistoryReply,
     noteSolicited,
     clearSolicited,
-    computeSize: () => ({ cols: 80, rows: 24 }),
-    getHaveThrough: () => -1,
-    getReplayMax: () => 500,
-    onResumeTransition: (ack) => {
+    applyResumeTransition: (ack) => {
       resumeTransitions.push({
         epochChanged: ack.epochChanged,
         paging: ack.paging,
@@ -372,24 +340,29 @@ function baseCallbacks(): Callbacks {
   };
 }
 
-function installConsumer(extra: Partial<Callbacks> = {}): void {
+function installConsumer(extra: Partial<ConnectionCallbacks> = {}): void {
   onMessage = vi.fn<(msg: ServerMessage) => void>();
   onOpen = vi.fn<() => void>();
   onClose = vi.fn<() => void>();
   onServerRestart = vi.fn<() => void>();
   onResumeBounds = vi.fn<(committed: number, oldest: number) => void>();
   onWireIncompatible = vi.fn<(d: WireIncompatibility) => void>();
-  onHistoryRetry = vi.fn<() => void>();
-  onHistoryReply = vi.fn<() => void>();
+  maybeFetchHistory = vi.fn<() => void>();
+  handleHistoryReply = vi.fn<FakeRenderer["handleHistoryReply"]>();
   noteSolicited = vi.fn<(fromAbs: number, end: number) => void>();
   clearSolicited = vi.fn<() => void>();
   resumeTransitions = [];
-  init({ ...baseCallbacks(), ...extra });
+  conn = registerForDispose(
+    createConnection({
+      ...connectionDeps(spyRenderer()),
+      callbacks: { ...baseCallbacks(), ...extra },
+    }),
+  );
 }
 
 let seq = 0;
 
-/** A unique session id per call: module state (the `sessions` map) is shared. */
+/** A session id no other test in this file has used. */
 function freshId(tag: string): string {
   seq++;
   return `mut-${tag}-${String(seq)}`;
@@ -401,14 +374,12 @@ function openSession(
   ack: Parameters<typeof resumeAckFrame>[0] = {},
 ): { id: string; sock: MockWS } {
   const id = freshId(tag);
-  setSession(id);
+  conn.setSession(id);
   const sock = latest();
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame(ack));
   return { id, sock };
 }
-
-// ---------------------------------------------------------------------------
 
 describe("connection: the fetch controller's state belongs to one socket", () => {
   beforeEach(() => {
@@ -419,7 +390,7 @@ describe("connection: the fetch controller's state belongs to one socket", () =>
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
   });
 
@@ -427,23 +398,23 @@ describe("connection: the fetch controller's state belongs to one socket", () =>
   function spendBurst(sock: MockWS): void {
     for (let i = 1; i <= 4; i++) {
       const from = i * 1000;
-      expect(requestHistory(from, 2)).toBe(true);
+      expect(conn.requestHistory(from, 2)).toBe(true);
       sock.fireMessage(scrollFrame(from, 2));
     }
   }
 
   it("a request in flight when the socket goes away never fires its data timeout", () => {
     openSession("dt", { paging: true });
-    expect(requestHistory(500, 10)).toBe(true);
+    expect(conn.requestHistory(500, 10)).toBe(true);
 
-    disconnect();
+    conn.disconnect();
     vi.advanceTimersByTime(9_000); // past HISTORY_DATA_TIMEOUT_MS (8s)
 
     // The timeout's whole job is to release single-flight and retry. Fired
     // against a socket that no longer exists it asks the renderer to re-run a
     // fetch trigger with no transport under it, and it halves the budget a
     // future link will start from.
-    expect(onHistoryRetry).not.toHaveBeenCalled();
+    expect(maybeFetchHistory).not.toHaveBeenCalled();
   });
 
   it("a paced denial's pending retry never fires after the socket goes away", () => {
@@ -451,48 +422,50 @@ describe("connection: the fetch controller's state belongs to one socket", () =>
     spendBurst(sock);
     // Bucket empty: the fifth request is refused and ARMS the coalesced retry
     // for the refill instant instead of being dropped.
-    expect(requestHistory(9_000, 2)).toBe(false);
+    expect(conn.requestHistory(9_000, 2)).toBe(false);
 
-    disconnect();
+    conn.disconnect();
     vi.advanceTimersByTime(9_000); // past HISTORY_REFILL_MS (2s)
 
-    expect(onHistoryRetry).not.toHaveBeenCalled();
+    expect(maybeFetchHistory).not.toHaveBeenCalled();
   });
 
   it("a reply that completes its request disarms the timeout it was waiting on", () => {
     const { sock } = openSession("rt", { paging: true });
-    expect(requestHistory(500, 2)).toBe(true);
+    expect(conn.requestHistory(500, 2)).toBe(true);
 
     sock.fireMessage(scrollFrame(500, 2)); // contained: completes the attempt
     vi.advanceTimersByTime(9_000);
 
     // A live timeout after a served page is a phantom failure: it would retry a
     // window the client already holds and shrink the budget on a healthy link.
-    expect(onHistoryReply).toHaveBeenCalledTimes(1);
-    expect(onHistoryRetry).not.toHaveBeenCalled();
+    expect(handleHistoryReply).toHaveBeenCalledTimes(1);
+    expect(maybeFetchHistory).not.toHaveBeenCalled();
   });
 
   it("the paging capability does not survive the socket that declared it", () => {
     openSession("cap", { paging: true });
-    expect(historyPagingAvailable()).toBe(true);
+    expect(conn.requestHistory(500, 2)).toBe(true);
 
     // A plain connect() supersedes the socket; the replacement has heard
     // nothing from its own server yet.
-    connect();
-    latest().fireOpen();
+    conn.connect();
+    const next = latest();
+    next.fireOpen();
 
     // Carrying the capability over would page against a server that never
     // declared it — the requests are written straight to the PTY there.
-    expect(historyPagingAvailable()).toBe(false);
+    expect(conn.requestHistory(500, 2)).toBe(false);
+    expect(controlsOfType(next, "history")).toEqual([]);
   });
 
   it("a wake reconnect releases the store's solicited window", () => {
     const { sock } = openSession("sol", { paging: true });
-    expect(requestHistory(500, 2)).toBe(true);
+    expect(conn.requestHistory(500, 2)).toBe(true);
     expect(noteSolicited).toHaveBeenCalledWith(500, 502);
     clearSolicited.mockClear();
 
-    reconnectNow();
+    conn.reconnectNow();
 
     // The window is the store's permission to admit lines below its
     // stale-re-send watermark. Left open with no request in flight, a later
@@ -512,7 +485,7 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
   });
 
@@ -520,7 +493,7 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
     const { sock } = openSession("cancel");
     sock.fireClose(1006); // backoff armed
 
-    disconnect();
+    conn.disconnect();
     vi.advanceTimersByTime(20_000); // past the whole backoff ceiling
 
     // A consumer with no tab to show asked for no socket. A surviving timer
@@ -532,7 +505,7 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
     const { sock } = openSession("reentry");
     sock.fireClose(1006); // backoff armed at +500ms
 
-    connect(); // the consumer restores a panel mid-backoff
+    conn.connect(); // the consumer restores a panel mid-backoff
     vi.advanceTimersByTime(5_000);
 
     // The orphaned timer would reset the state to disconnected and connect
@@ -542,21 +515,17 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
   });
 
   it("a connect from the consumer's own onClose leaves no timer to spawn a third socket", () => {
-    // The re-entrant shape of the test above, and the one the guard at
-    // scheduleReconnect misses. The close handler sets "disconnected", calls
-    // onClose, THEN schedules: a consumer that reconnects from its own close
-    // hook (a "retry now" button, a status-driven reconnect) is already back at
-    // "connecting" with a live socket by the time the schedule runs. Arming a
-    // backoff over it also OVERWRITES connState, so connect()'s double-call
-    // guard can no longer see that socket and never aborts it — the timer's
-    // connect() stacks a third socket with the second one's listeners still
-    // bound. That is the duplicate server connection + double delivery the
-    // comment inside connect() describes, reached from the other direction.
+    // The re-entrant shape: the close handler sets "disconnected", calls onClose,
+    // THEN schedules, so a consumer reconnecting from its own close hook is back
+    // at "connecting" with a live socket when the schedule runs. A backoff armed
+    // over it OVERWRITES connState, connect()'s double-call guard loses sight of
+    // that socket and never aborts it, and the timer's connect() stacks a third
+    // socket with the second one's listeners still bound: double delivery.
     let reentered = 0;
     installConsumer({
       onClose: () => {
         reentered++;
-        connect();
+        conn.connect();
       },
     });
     const { sock } = openSession("onclose-reentry");
@@ -581,7 +550,7 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
   });
 
   it("a connect that never opens is retried after the connect timeout", () => {
-    connect();
+    conn.connect();
     expect(sockets).toHaveLength(1);
 
     vi.advanceTimersByTime(10_000); // the connect timeout
@@ -594,7 +563,7 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
   });
 
   it("a socket abandoned by the connect timeout is closed and cannot deliver frames", () => {
-    connect();
+    conn.connect();
     const first = latest();
 
     vi.advanceTimersByTime(10_000);
@@ -642,7 +611,7 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
     expect(onWireIncompatible).toHaveBeenCalledTimes(1);
     const before = sockets.length;
 
-    connect();
+    conn.connect();
     vi.advanceTimersByTime(20_000);
 
     // Refusal is a latch, not a one-shot: this decoder cannot consume that
@@ -652,10 +621,10 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
   });
 
   it("a second connect while the first is still connecting orphans it", () => {
-    connect();
+    conn.connect();
     const first = latest();
 
-    connect(); // e.g. a wake event arriving before the first socket opened
+    conn.connect(); // e.g. a wake event arriving before the first socket opened
     expect(latest()).not.toBe(first);
 
     // The orphan's handlers must be gone. Left bound, it opens, sends its own
@@ -667,10 +636,10 @@ describe("connection: the reconnect schedule and what may cancel it", () => {
   });
 
   it("a socket superseded by a wake reconnect cannot open behind the replacement", () => {
-    connect();
+    conn.connect();
     const first = latest();
 
-    reconnectNow();
+    conn.reconnectNow();
     expect(latest()).not.toBe(first);
 
     first.fireOpen();
@@ -695,16 +664,16 @@ describe("connection: the liveness timer belongs to exactly one socket", () => {
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
   });
 
   it("a fresh socket's idle clock starts at its own open, not the previous socket's", () => {
-    connect();
+    conn.connect();
     latest().fireOpen(); // activity clock = t0
     vi.advanceTimersByTime(8_000);
 
-    reconnectNow();
+    conn.reconnectNow();
     const second = latest();
     second.fireOpen(); // activity clock must restart HERE
 
@@ -719,11 +688,11 @@ describe("connection: the liveness timer belongs to exactly one socket", () => {
   });
 
   it("a supersession leaves one liveness timer, so the staleness deadline is not early", () => {
-    connect();
+    conn.connect();
     latest().fireOpen(); // interval A: ticks at 5s, 10s, 15s, 20s…
     vi.advanceTimersByTime(2_000);
 
-    connect(); // supersedes without stopping A's interval
+    conn.connect(); // supersedes without stopping A's interval
     const second = latest();
     second.fireOpen(); // interval B: ticks at 7s, 12s, 17s, 22s…
 
@@ -741,12 +710,12 @@ describe("connection: the liveness timer belongs to exactly one socket", () => {
   });
 
   it("the probe never replaces a socket while a replacement connect is in flight", () => {
-    connect();
+    conn.connect();
     latest().fireOpen();
     vi.advanceTimersByTime(10_000); // probe goes out on the first socket
 
     vi.advanceTimersByTime(2_000);
-    connect(); // a replacement starts connecting; the probe is still unanswered
+    conn.connect(); // a replacement starts connecting; the probe is still unanswered
     const second = latest();
     expect(second.readyState).toBe(0);
 
@@ -771,7 +740,7 @@ describe("connection: session identity and the resume ledger", () => {
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
   });
 
@@ -780,25 +749,25 @@ describe("connection: session identity and the resume ledger", () => {
     // exactly the lifetime a resume token wants. A consumer keying persisted
     // scrollback by session has nothing else to key it by, so re-minting on the
     // second read would silently orphan everything stored under the first.
-    forgetSession(currentSessionId()); // "unmanaged" = no session set
+    conn.forgetSession(conn.currentSessionId()); // "unmanaged" = no session set
     sessionStorage.clear();
 
-    const first = currentSessionId();
+    const first = conn.currentSessionId();
     expect(sessionStorage.getItem("vterm-session-id")).toBe(first);
 
-    forgetSession(first); // force the module to resolve it again
-    expect(currentSessionId()).toBe(first);
+    conn.forgetSession(first); // force the module to resolve it again
+    expect(conn.currentSessionId()).toBe(first);
   });
 
   it("forgetting a session drops its ledger, so a later switch back resumes from zero", () => {
     const id = freshId("forget");
-    setSession(id);
+    conn.setSession(id);
     latest().fireOpen();
     latest().fireMessage(resumeAckFrame({ received: 0 }));
-    expect(sendBinary(new Uint8Array([65, 66, 67]))).toBe(true);
+    expect(conn.sendBinary(new Uint8Array([65, 66, 67]))).toBe(true);
 
-    forgetSession(id);
-    setSession(id); // the shell re-opens a tab with the same server id
+    conn.forgetSession(id);
+    conn.setSession(id); // the shell re-opens a tab with the same server id
     const revived = latest();
     revived.fireOpen();
 
@@ -814,10 +783,10 @@ describe("connection: session identity and the resume ledger", () => {
 
   it("forgetting a background session leaves the live socket alone", () => {
     const background = freshId("bg");
-    adoptPersistedEpoch(background, 4_242); // registers the session
+    conn.adoptPersistedEpoch(background, 4_242); // registers the session
     const { sock } = openSession("fg");
 
-    forgetSession(background);
+    conn.forgetSession(background);
 
     // Closing a tab is not a reason to drop the terminal the user is looking
     // at, and the shell has no way to notice: it would just stop receiving
@@ -831,9 +800,11 @@ describe("connection: session identity and the resume ledger", () => {
     // so an unavailable CSPRNG must refuse rather than degrade. The refusal has
     // to be the module's own diagnosis: a TypeError from reading a property of
     // `undefined` tells an operator nothing about what to fix.
+    sessionStorage.clear();
     vi.stubGlobal("crypto", undefined);
 
-    expect(() => generateSessionId()).toThrow(/no cryptographically secure RNG available/);
+    expect(() => conn.currentSessionId()).toThrow(/no cryptographically secure RNG available/);
+    expect(sessionStorage.getItem("vterm-session-id")).toBeNull();
   });
 });
 
@@ -846,7 +817,7 @@ describe("connection: what a resume ack tells the store", () => {
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
   });
 
@@ -863,11 +834,11 @@ describe("connection: what a resume ack tells the store", () => {
 
   it("a boot-epoch change is reported to the store's ack transition", () => {
     const id = freshId("epoch-move");
-    setSession(id);
+    conn.setSession(id);
     latest().fireOpen();
     latest().fireMessage(resumeAckFrame({ serverEpoch: 777 }));
 
-    reconnectNow();
+    conn.reconnectNow();
     latest().fireOpen();
     latest().fireMessage(resumeAckFrame({ serverEpoch: 888 }));
 
@@ -880,12 +851,12 @@ describe("connection: what a resume ack tells the store", () => {
 
   it("a restart drops the outbox, so nothing is replayed onto the new process", () => {
     const id = freshId("restart-ledger");
-    setSession(id);
+    conn.setSession(id);
     latest().fireOpen();
     latest().fireMessage(resumeAckFrame({ serverEpoch: 777 }));
-    expect(sendBinary(new Uint8Array([1, 2, 3]))).toBe(true);
+    expect(conn.sendBinary(new Uint8Array([1, 2, 3]))).toBe(true);
 
-    reconnectNow();
+    conn.reconnectNow();
     const second = latest();
     second.fireOpen();
     second.fireMessage(resumeAckFrame({ serverEpoch: 888, received: 0 }));
@@ -894,7 +865,7 @@ describe("connection: what a resume ack tells the store", () => {
     // bytes cannot be "delivered late" — they can only be executed against a
     // shell that never saw the earlier ones.
     expect(inputSent(second)).toEqual([]);
-    reconnectNow();
+    conn.reconnectNow();
     const third = latest();
     third.fireOpen();
     expect(controlsOfType(third, "resume")[0]!["sentBytes"]).toBe(0);
@@ -902,8 +873,8 @@ describe("connection: what a resume ack tells the store", () => {
 
   it("a seeded epoch no server will confirm reads as a restart exactly once", () => {
     const id = freshId("seeded");
-    adoptPersistedEpoch(id, 999); // a claim about content restored from disk
-    setSession(id);
+    conn.adoptPersistedEpoch(id, 999); // a claim about content restored from disk
+    conn.setSession(id);
     latest().fireOpen();
     latest().fireMessage(resumeAckFrame({ serverEpoch: 0 })); // version-silent
 
@@ -913,7 +884,7 @@ describe("connection: what a resume ack tells the store", () => {
     expect(resumeTransitions.at(-1)?.epochChanged).toBe(true);
     expect(onServerRestart).toHaveBeenCalledTimes(1);
 
-    reconnectNow();
+    conn.reconnectNow();
     latest().fireOpen();
     latest().fireMessage(resumeAckFrame({ serverEpoch: 0 }));
 
@@ -941,13 +912,13 @@ describe("connection: acks that ride other frames still trim the outbox", () => 
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
   });
 
   /** Reconnect, answer the resume with received=0, and report what replayed. */
   function replayAfterReconnect(): number[][] {
-    reconnectNow();
+    conn.reconnectNow();
     const sock = latest();
     sock.fireOpen();
     sock.fireMessage(resumeAckFrame({ received: 0 }));
@@ -956,7 +927,7 @@ describe("connection: acks that ride other frames still trim the outbox", () => 
 
   it("a modes frame's piggybacked ack trims the outbox", () => {
     const { sock } = openSession("modes-ack");
-    expect(sendBinary(new Uint8Array([65, 66, 67, 68, 69]))).toBe(true);
+    expect(conn.sendBinary(new Uint8Array([65, 66, 67, 68, 69]))).toBe(true);
 
     sock.fireMessage(modesFrame(5)); // the server applied all five bytes
 
@@ -968,7 +939,7 @@ describe("connection: acks that ride other frames still trim the outbox", () => 
 
   it("an ack riding an ordinary content frame trims the outbox", () => {
     const { sock } = openSession("content-ack");
-    expect(sendBinary(new Uint8Array([65, 66, 67, 68, 69]))).toBe(true);
+    expect(conn.sendBinary(new Uint8Array([65, 66, 67, 68, 69]))).toBe(true);
 
     sock.fireMessage(titleFrame("done", 5));
 
@@ -977,7 +948,7 @@ describe("connection: acks that ride other frames still trim the outbox", () => 
 
   it("a pre-ack scrollback clear is forwarded rows-less and without the bell", () => {
     const id = freshId("preack");
-    setSession(id);
+    conn.setSession(id);
     const sock = latest();
     sock.fireOpen(); // open, but no resume ack yet
 
@@ -1011,7 +982,7 @@ describe("connection: binary frame delivery and its failure modes", () => {
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
   });
 
   it("a Blob frame is decoded and delivered like an ArrayBuffer one", async () => {
@@ -1049,7 +1020,7 @@ describe("connection: binary frame delivery and its failure modes", () => {
       },
     });
     const id = freshId("throw-ab");
-    setSession(id);
+    conn.setSession(id);
     const sock = latest();
     sock.fireOpen();
 
@@ -1076,7 +1047,7 @@ describe("connection: binary frame delivery and its failure modes", () => {
       },
     });
     const id = freshId("throw-blob");
-    setSession(id);
+    conn.setSession(id);
     const sock = latest();
     sock.fireOpen();
 
@@ -1097,7 +1068,7 @@ describe("connection: binary frame delivery and its failure modes", () => {
 
   it("a Blob frame that resolves after its socket was replaced is dropped", async () => {
     const id = freshId("blob-stale");
-    setSession(id);
+    conn.setSession(id);
     const first = latest();
     first.fireOpen();
 
@@ -1105,7 +1076,7 @@ describe("connection: binary frame delivery and its failure modes", () => {
     // path does NOT abort the listeners, so this frame's `.then` is still live.
     first.fireMessage(new Blob([new Uint8Array(titleFrame("stale"))]));
     first.fireClose(1006);
-    connect();
+    conn.connect();
     const second = latest();
     expect(second).not.toBe(first);
     second.fireOpen();
@@ -1137,7 +1108,7 @@ describe("connection: an incompatible server stops the socket", () => {
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
   });
 
@@ -1190,9 +1161,8 @@ describe("connection: an initialSize provider that misbehaves", () => {
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
-    installConsumer(); // leave a sane consumer for later files
   });
 
   it("a throwing provider degrades to announcing nothing, and says so", () => {
@@ -1203,7 +1173,7 @@ describe("connection: an initialSize provider that misbehaves", () => {
       },
     });
     const id = freshId("size-throw");
-    setSession(id);
+    conn.setSession(id);
     const sock = latest();
 
     sock.fireOpen();
@@ -1221,50 +1191,37 @@ describe("connection: an initialSize provider that misbehaves", () => {
   });
 });
 
-describe("connection: the module's own defaults, on a pristine instance", () => {
-  // `managed`, `wsPath` and `cb` are module-scope and one-way: setSession latches
-  // managed forever, init latches wsPath, and no export resets either. The
-  // unmanaged contract therefore cannot be observed on a module some other suite
-  // has already switched sessions on (vitest runs these files with
-  // isolate:false), so these tests import a FRESH module instance instead.
-  //
-  // The query bust, not `vi.resetModules()`: the browser's module registry is
-  // URL-keyed, so resetting and re-importing the same specifier hands back the
-  // CACHED instance with its latches already thrown, and each test would assert
-  // against the state it exists to exclude. The counter gives every test its own
-  // evaluation, and `@vite-ignore` opts out of Vite's variable-dynamic-import
-  // rewrite, which otherwise resolves the specifier against a generated glob map
-  // that no query matches. The extension stays `.ts` (the real file) rather than
-  // the `.js` the static imports use, because this specifier is built at runtime
-  // and so IS the URL the browser requests — written `.js`, every evaluation is
-  // attributed to a file that does not exist and coverage silently reports zero.
-  let mod: typeof ConnectionModule;
-  let pristineBoot = 0;
-
-  beforeEach(async () => {
+describe("connection: an unmanaged connection's defaults", () => {
+  // No setSession: the connection stays unmanaged and mints its own per-tab id.
+  beforeEach(() => {
     sockets.length = 0;
+    sessionStorage.clear();
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    pristineBoot++;
-    mod = (await import(
-      /* @vite-ignore */ `./connection.ts?pristine=${String(pristineBoot)}`
-    )) as typeof ConnectionModule;
   });
 
   afterEach(() => {
-    mod.disconnect();
     vi.useRealTimers();
   });
 
+  function unmanaged(opts: { wsPath?: string } = {}): Connection {
+    return registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+        ...opts,
+      }),
+    );
+  }
+
   it("an unmanaged resume carries the bare per-tab id, not a per-sender composite", () => {
-    sessionStorage.clear();
-    mod.init({
-      onMessage: () => undefined,
-      onOpen: () => undefined,
-      onClose: () => undefined,
-      computeSize: () => ({ cols: 80, rows: 24 }),
-    });
-    mod.connect();
+    const c = unmanaged();
+    c.connect();
     const sock = latest();
     sock.fireOpen();
 
@@ -1274,18 +1231,12 @@ describe("connection: the module's own defaults, on a pristine instance", () => 
     // reload and lose the resume the sessionStorage id exists to provide.
     const resume = controlsOfType(sock, "resume");
     expect(resume).toHaveLength(1);
-    expect(resume[0]!["sessionId"]).toBe(mod.currentSessionId());
+    expect(resume[0]!["sessionId"]).toBe(c.currentSessionId());
     expect(String(resume[0]!["sessionId"])).not.toContain("#");
   });
 
   it("an unmanaged socket connects to the bare path with no session query", () => {
-    mod.init({
-      onMessage: () => undefined,
-      onOpen: () => undefined,
-      onClose: () => undefined,
-      computeSize: () => ({ cols: 80, rows: 24 }),
-    });
-    mod.connect();
+    unmanaged().connect();
 
     // The single-terminal path matches its session purely by the resume frame's
     // id. A ?session= the consumer never chose routes the socket through the
@@ -1295,24 +1246,16 @@ describe("connection: the module's own defaults, on a pristine instance", () => 
   });
 
   it("a consumer's wsPath replaces the default endpoint", () => {
-    mod.init({
-      onMessage: () => undefined,
-      onOpen: () => undefined,
-      onClose: () => undefined,
-      computeSize: () => ({ cols: 80, rows: 24 }),
-      wsPath: "/api/shell/ws",
-    });
-    mod.connect();
+    unmanaged({ wsPath: "/api/shell/ws" }).connect();
 
     // vibekit serves its shell at /api/shell/ws. Ignoring the override sends
     // every consumer to /ws, where nothing is listening.
     expect(new URL(latest().url).pathname).toBe("/api/shell/ws");
   });
 
-  it("a socket opened before any consumer registered asks for a full retained replay", () => {
-    // connect() before init() is reachable (a consumer wiring order bug, or a
-    // wake event during startup) and the resume still has to be a valid one.
-    mod.connect();
+  it("a connection whose renderer holds nothing asks for a full retained replay", () => {
+    const { engine } = createEngineFixture();
+    engine.connection.connect();
     const sock = latest();
     sock.fireOpen();
 

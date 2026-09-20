@@ -1981,7 +1981,7 @@ export class LineStore {
       // `cursor > winBottom` cannot hold there either. That is the ONLY thing
       // holding when the target is 0, which `new LineStore(0)` produces
       // (`evictionBatch(0)` is 1, so `target = 0 - 1 + 1`; the bare
-      // constructor accepts 0, unlike `render.init` and `fromSnapshot`, which
+      // constructor accepts 0, unlike `createRenderer` and `fromSnapshot`, which
       // both require a positive integer) — a reason to leave that conjunct
       // alone.
       // Advance to the lowest remaining key above the victim. Contiguous

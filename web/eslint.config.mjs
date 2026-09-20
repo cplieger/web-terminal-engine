@@ -169,7 +169,19 @@ export default [
     },
   },
 
-  // 5. Generated and config files + tests: drop type-checked rules.
+  // 5. Playwright specs type the bundled `WTE` global as a `Pick` over the package
+  //    module, which only the `typeof import("../src/index.js")` form can name.
+  {
+    files: ["e2e/**/*.ts"],
+    rules: {
+      "@typescript-eslint/consistent-type-imports": [
+        "error",
+        { prefer: "type-imports", fixStyle: "inline-type-imports", disallowTypeAnnotations: false },
+      ],
+    },
+  },
+
+  // 6. Generated and config files + tests: drop type-checked rules.
   {
     files: [
       "**/*.gen.ts",

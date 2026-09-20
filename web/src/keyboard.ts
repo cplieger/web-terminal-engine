@@ -1,20 +1,9 @@
-// Keyboard event → terminal byte sequence mapping.
-//
-// Mirrors xterm.js's evaluateKeyboardEvent (src/common/input/Keyboard.ts):
-// every browser KeyboardEvent maps to either a sequence to send to the
-// PTY or a local action (page-up/down for local scrollback nav). The
-// mapping is exhaustive over xterm.js's coverage so vim/readline/Ink/
-// the host application get the keys they expect.
-//
-// Modifier encoding follows xterm.js / VT520 convention:
-//   1=Shift, 2=Alt, 4=Ctrl, 8=Meta. Sum then +1 for CSI 1;{n}{letter}.
-//
-// Application cursor mode (DECCKM, CSI ?1h/l) is tracked client-side
-// via modes.ts (announced by server in wireMsgModes). Server-side, the
-// vt screen tracks both bracketed paste (?2004) and DECCKM (?1) and
-// emits a modes frame whenever they change.
-
-import { getKeyboardFlags, isBracketedPaste } from "./modes.js";
+// Keyboard event → terminal byte sequence mapping, mirroring xterm.js's
+// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline, Ink
+// and the host application get the keys they expect. Modifier digit per the
+// xterm/VT520 convention: 1=Shift, 2=Alt, 4=Ctrl, 8=Meta, summed then +1 for
+// CSI 1;{n}{letter}. DECCKM and DECKPAM come from the injected mode state,
+// which the server's modes frame keeps current.
 
 /** Result of mapping a keyboard event. */
 export type KeyboardResult =
@@ -26,10 +15,8 @@ export type KeyboardResult =
 /**
  * KeyboardModes is the mode state `mapKeyboardEvent` reads: DECCKM (application
  * cursor keys), DECKPAM (application keypad), and the kitty keyboard
- * progressive-enhancement flags. Passed explicitly so the shared input maps
- * against the active tab's modes and so the mapping is testable without mutating
- * global state. The `modes` module namespace satisfies this structurally; a
- * tabbed shell passes its active session's modes.
+ * progressive-enhancement flags. A `ModeState` satisfies it; a consumer passes
+ * the state of the terminal the key belongs to.
  */
 export interface KeyboardModes {
   isApplicationCursor: () => boolean;
@@ -59,17 +46,10 @@ type CursorKeyLetter = "A" | "B" | "C" | "D" | "H" | "F";
 
 /**
  * plainCursorKeySeq is THE encoding of an unmodified logical cursor-key press
- * (arrows, Home, End) — the one home for the mode decision, shared by the
- * physical-key path (csiLetter's modifier-less branch) and the mobile
- * toolbar's arrow buttons so the two encoders cannot drift:
- *   - kitty disambiguate active: the CSI form regardless of DECCKM (the
- *     protocol supersedes cursor-key mode);
- *   - DECCKM (application cursor mode): the SS3 form (ESC O letter);
- *   - otherwise: the bare CSI form.
- *
- * Both mode bits are PARAMETERS (not read from the module-global mode state):
- * mapKeyboardEvent honors an injected KeyboardModes, and a helper silently
- * consulting the global would diverge from it in a tabbed shell.
+ * (arrows, Home, End), shared by the physical-key path and the mobile toolbar's
+ * arrow buttons so the two encoders cannot drift: the CSI form under kitty
+ * disambiguate (the protocol supersedes cursor-key mode), the SS3 form
+ * (ESC O letter) under DECCKM, the bare CSI form otherwise.
  */
 export function plainCursorKeySeq(
   letter: CursorKeyLetter,
@@ -94,40 +74,22 @@ export function plainEscapeSeq(kittyActive: boolean): string {
   return kittyActive ? `${ESC}[27u` : ESC;
 }
 
-/** kittyActiveIn reads the disambiguate flag from an INJECTED KeyboardModes
- *  (the seam mapKeyboardEvent honors), as opposed to kittyDisambiguateActive,
- *  which reads the module-global active-session facade used by the toolbar.
- *  connection.setSession restores that facade from the target session's
- *  snapshot synchronously before switch-window input can be encoded. */
-function kittyActiveIn(modes: KeyboardModes): boolean {
+/** True when the kitty disambiguate flag is active in `modes`. */
+export function kittyDisambiguateActive(modes: KeyboardModes): boolean {
   return (modes.getKeyboardFlags() & KITTY_DISAMBIGUATE) !== 0;
 }
 
-// Letter is the xterm trailing letter for the keys that honor DECCKM: the four
-// arrows plus Home (H) and End (F). Without modifiers we send the bare CSI form;
-// with modifiers we send CSI 1;{mod}{letter}. xterm.js Keyboard.ts pattern.
-// (F1-F4's SS3/CSI pair is encoded inline at its own call site, not here.)
-//
-// The parameter type is `CursorKeyLetter` rather than `string`, so "every
-// letter reaching here honors DECCKM" is a compiler guarantee instead of a
-// runtime net: all three call sites pass A/B/C/D from ARROW_LETTER, or the H/F
-// literals.
-//
-// Application cursor mode (DECCKM, CSI ?1) is plumbed via modes.ts.
-// When the application has set DECCKM, the modifier-less form switches
-// from CSI to SS3 (ESC O letter) via plainCursorKeySeq; modifier-bearing
-// forms stay on CSI because they have no SS3 equivalent.
+// The keys that honor DECCKM (arrows, Home, End): bare CSI or SS3 unmodified,
+// CSI 1;{mod}{letter} with modifiers, which have no SS3 equivalent. The
+// `CursorKeyLetter` parameter type makes "every letter here honors DECCKM" a
+// compiler guarantee; F1-F4's SS3/CSI pair is encoded at its own call site.
 function csiLetter(letter: CursorKeyLetter, ev: KeyboardEvent, modes: KeyboardModes): string {
   const m = modifiersDigit(ev);
   if (m === 1) {
-    // `kittyActiveIn(modes)` is always FALSE as reached from today's only
-    // caller: mapKeyboardEvent returns through encodeKittyDisambiguate before
-    // any cursor key gets here. It is passed anyway rather than hard-coded,
-    // because plainCursorKeySeq is the one home for the mode decision and a
-    // literal `false` would make this function structurally unable to express
-    // the kitty form — a later change to that early return would then
-    // mis-encode silently instead of failing to compile or reading wrong.
-    return plainCursorKeySeq(letter, kittyActiveIn(modes), modes.isApplicationCursor());
+    // Read from `modes` rather than hard-coded false (mapKeyboardEvent returns
+    // through encodeKittyDisambiguate first) so a change to that early return
+    // cannot mis-encode silently.
+    return plainCursorKeySeq(letter, kittyDisambiguateActive(modes), modes.isApplicationCursor());
   }
   return `${ESC}[1;${m}${letter}`;
 }
@@ -199,18 +161,12 @@ const KEYPAD_SS3: Record<string, string | undefined> = {
 };
 
 // -- Kitty keyboard protocol (progressive enhancement) ----------------------
-// When the server reports an active kitty flag (modes.getKeyboardFlags), keys
-// that do NOT produce text are encoded per the kitty protocol instead of the
-// legacy encodings, so an app that enabled the protocol (e.g. Codex via
-// crossterm) gets unambiguous key events. We honor the disambiguate flag (0x1)
-// — report-event-types (0x2) / report-alternate-keys (0x4) / report-all (0x8) /
-// text (0x10) are masked off server-side, so the CSI ?u query reports only 0x1
-// and the encoder never has to emit them.
-//
-// Under disambiguate, text-producing keys still flow through the hidden
-// textarea as text (this encoder returns "ignore" for them), matching both the
-// spec (text keys stay text under 0x1) and our IME/composition model. Only
-// Escape, ctrl/alt/meta combinations, and functional keys are re-encoded.
+// Under an active kitty flag, keys that do NOT produce text are encoded per the
+// kitty protocol so an app that enabled it (Codex via crossterm) gets
+// unambiguous key events. Only the disambiguate flag (0x1) is honored; the
+// server masks off 0x2/0x4/0x8/0x10, so the CSI ?u query reports only 0x1.
+// Text-producing keys still flow through the hidden textarea as text (this
+// encoder returns "ignore" for them), per the spec and the IME model.
 
 /** Kitty progressive-enhancement flag bits (mirror vt/kitty.go). */
 const KITTY_DISAMBIGUATE = 1;
@@ -339,17 +295,13 @@ export function kittyCtrlCharSeq(ch: string): string | null {
   return `${ESC}[${cp};${shifted ? 6 : 5}u`; // 5 = ctrl, 6 = ctrl+shift
 }
 
-// Keypad NON-TEXT keys under disambiguate, keyed by ev.key (the key's current
-// function — NumLock flips a numpad key between its text digit, which stays text
-// under 0x1, and these navigation functions). ev.code identifies it as a keypad
-// key. Per the spec these get dedicated KP_* codes (57414-57427) so an app can
-// tell them apart from the main navigation keys. NumpadEnter is included as
-// KP_ENTER (57414) — it is a distinct key, NOT the legacy-byte main Enter.
-// KP_BEGIN (Numpad5, NumLock off -> "Clear") is emitted as 57427 in the `u`
-// form: both kitty and crossterm decode `CSI 57427 u`, whereas the spec's
-// alternate `CSI E` letter form is kitty-only (crossterm/ratatui can't parse it).
-// The KP_ DIGIT/operator codes (57399-57416) are deliberately absent — they are
-// a report-all (0x8) feature; under 0x1 a NumLock-on numpad digit is plain text.
+// Keypad NON-TEXT keys under disambiguate, keyed by ev.key (NumLock flips a
+// numpad key between its text digit, which stays text under 0x1, and these
+// functions), with the spec's dedicated KP_* codes (57414-57427). NumpadEnter
+// is KP_ENTER, a distinct key from the legacy-byte main Enter. KP_BEGIN is
+// emitted in the `u` form because the spec's alternate `CSI E` letter form is
+// kitty-only (crossterm/ratatui cannot parse it). The KP_ digit/operator codes
+// (57399-57416) are a report-all (0x8) feature and are deliberately absent.
 const KITTY_KEYPAD: Record<string, number | undefined> = {
   ArrowLeft: 57417, // KP_LEFT
   ArrowRight: 57418, // KP_RIGHT
@@ -490,28 +442,12 @@ function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
   return { kind: "ignore" };
 }
 
-/** True when the kitty disambiguate flag is active in the GLOBAL
- *  active-session mode facade. Exported for the toolbar widget (toolbar.ts);
- *  connection.setSession synchronously restores the target session's cached
- *  snapshot before input resumes. Encoder paths in this module use
- *  kittyActiveIn (the injected-modes read) instead. */
-export function kittyDisambiguateActive(): boolean {
-  return (getKeyboardFlags() & KITTY_DISAMBIGUATE) !== 0;
-}
-
 /**
- * mapKeyboardEvent converts a KeyboardEvent into the terminal action
- * to take. Returns "ignore" when the event is purely a modifier press
- * or when the browser should be allowed to handle it (e.g. browser
- * shortcuts like Cmd+R).
- *
- * Caller is responsible for ev.preventDefault() when the result is
- * "send" or "scroll-*"; we don't call it here so the function stays
- * pure and testable.
- *
- * `modes` supplies the active session's DECCKM/DECKPAM state; pass the `modes`
- * module namespace for the single-terminal case or the active tab's modes in a
- * tabbed shell.
+ * mapKeyboardEvent converts a KeyboardEvent into the terminal action to take,
+ * read against `modes`, the mode state of the terminal the key belongs to.
+ * Returns "ignore" for a bare modifier press or a key the browser should keep
+ * (Cmd+R). The caller calls `ev.preventDefault()` on "send" and "scroll-*";
+ * this function stays pure.
  */
 export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): KeyboardResult {
   // Modifier-only presses (Shift, Ctrl, Alt, Meta) — no-op.
@@ -683,22 +619,10 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
 }
 
 /**
- * ctrlByteFor returns the C0 control byte produced by Ctrl+`ch`, or
- * `null` when the character has no Ctrl mapping. The full table:
- *
- *   a-z (case-folded)  → \x01..\x1a (Ctrl+A=SOH .. Ctrl+Z=SUB)
- *   ' ' (space)        → \x00 (NUL — same as Ctrl+@)
- *   '@'                → \x00 (NUL)
- *   '['                → \x1b (ESC)
- *   '\\'               → \x1c (FS)
- *   ']'                → \x1d (GS)
- *   '^'                → \x1e (RS)
- *   '_'                → \x1f (US)
- *   '?'                → \x7f (DEL — also Ctrl+8 on US layouts via Shift+/)
- *
- * Anything else (multi-char strings, unmapped single chars) returns
- * `null`. Used by `mapKeyboardEvent` for Ctrl+printable handling and
- * by `bindMobileToolbar`'s sticky-Ctrl applier.
+ * ctrlByteFor returns the C0 control byte produced by Ctrl+`ch`, or `null`
+ * when the character has no Ctrl mapping: a-z (case-folded) give \x01..\x1a,
+ * space and '@' give NUL, '[' '\\' ']' '^' '_' give \x1b..\x1f, '?' gives DEL.
+ * A multi-character string or an unmapped character returns `null`.
  */
 export function ctrlByteFor(ch: string): string | null {
   if (ch.length !== 1) {
@@ -774,21 +698,20 @@ function numpadCodeToKey(code: string): string | undefined {
 
 // -- Bracketed paste --------------------------------------------------------
 
+/** The mode bit `bracketTextForPaste` reads; a `ModeState` satisfies it. */
+export interface PasteModes {
+  isBracketedPaste(): boolean;
+}
+
 /**
- * bracketTextForPaste wraps text in DEC 2004 bracketed-paste sentinels
- * after sanitising any embedded ESC bytes to U+241B (visible escape
- * symbol), but only when the application has currently enabled
- * bracketed-paste mode (CSI ?2004h). When disabled, returns the text
- * unchanged. The current mode state is owned by modes.ts, kept in
- * sync by the server's wireMsgModes wire frame.
- *
- * The ESC sanitisation defends against an attacker-controlled paste
- * containing \x1b[201~ that would prematurely close the paste region
- * and let the rest be interpreted as a command — only relevant when
- * we are bracketing.
+ * bracketTextForPaste wraps text in DEC 2004 bracketed-paste sentinels when
+ * `modes` reports bracketed-paste mode (CSI ?2004h) enabled, and returns it
+ * unchanged otherwise. Embedded ESC bytes are replaced with U+241B first: an
+ * attacker-controlled paste containing \x1b[201~ would otherwise close the
+ * paste region early and have the rest interpreted as a command.
  */
-export function bracketTextForPaste(text: string): string {
-  if (!isBracketedPaste()) {
+export function bracketTextForPaste(text: string, modes: PasteModes): string {
+  if (!modes.isBracketedPaste()) {
     return text;
   }
   // eslint-disable-next-line no-control-regex -- intentional: sanitising ESC bytes in pasted text

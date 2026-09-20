@@ -1,17 +1,9 @@
-// Tier 3 — kitty keyboard (disambiguate 0x1) encoding through real key events.
-//
-// The Vitest siblings (src/keyboard-modes-arg.test.ts) construct synthetic
-// KeyboardEvents; this drives REAL chromium key events via page.keyboard, so
-// ev.code / ev.key / the modifier flags are filled by the browser exactly as
-// they are for a user, then runs the real keyboard.ts encoder over them and
-// asserts the emitted bytes. This is what proves the encoder is correct against
-// the browser's own event generation (the input side of the protocol), the
-// counterpart to the Go negotiation/wire tests.
-//
-// The flag is enabled by injecting the client mode state (modes.setModes with
-// keyboardFlags=1) — the same state a server's CSI >1u would sync via the modes
-// wire frame. Run with `npm run test:e2e` (needs `npx playwright install
-// chromium` once).
+// Kitty keyboard (disambiguate 0x1) encoding through REAL Chromium key events:
+// page.keyboard fills ev.code, ev.key and the modifier flags exactly as it does
+// for a user, and the real keyboard.ts encoder runs over them. The Vitest
+// siblings construct synthetic KeyboardEvents and cannot prove that half. The
+// flag comes from a mode state built with keyboardFlags=1, the state a server's
+// CSI >1u would sync through the modes frame.
 import { test, expect, type Page } from "@playwright/test";
 import { bundleEngine, HARNESS } from "./e2e-harness.js";
 
@@ -26,23 +18,11 @@ declare global {
   }
 }
 
-// WTE is the esbuild IIFE global injected via addScriptTag.
-declare const WTE: {
-  keyboard: { mapKeyboardEvent: (ev: KeyboardEvent, modes: unknown) => KbdRec };
-  modes: {
-    setModes: (
-      bracketed: boolean,
-      appCursor: boolean,
-      mSGR?: boolean,
-      focus?: boolean,
-      mMode?: number,
-      appKeypad?: boolean,
-      revVideo?: boolean,
-      mPixels?: boolean,
-      kbdFlags?: number,
-    ) => void;
-  };
-};
+/** The esbuild IIFE global `addScriptTag` injects; see `bundleEngine`. */
+declare const WTE: Pick<
+  typeof import("../src/index.js"),
+  "createModeState" | "POWER_ON_MODES" | "keyboard"
+>;
 
 test.describe("kitty disambiguate encoding in a real browser (real key events -> encoder bytes)", () => {
   let bundle = "";
@@ -58,13 +38,13 @@ test.describe("kitty disambiguate encoding in a real browser (real key events ->
     await page.setContent(HARNESS);
     await page.addScriptTag({ content: bundle });
     await page.evaluate((on: boolean) => {
-      WTE.modes.setModes(true, false, false, false, 0, false, false, false, on ? 1 : 0);
+      const modes = WTE.createModeState({ ...WTE.POWER_ON_MODES, keyboardFlags: on ? 1 : 0 });
       const input = document.createElement("textarea");
       input.id = "kbd-input";
       document.body.appendChild(input);
       window.__kbd = [];
       input.addEventListener("keydown", (ev) => {
-        const r = WTE.keyboard.mapKeyboardEvent(ev, WTE.modes);
+        const r = WTE.keyboard.mapKeyboardEvent(ev, modes);
         window.__kbd?.push(r);
         if (r.kind !== "ignore") {
           ev.preventDefault();

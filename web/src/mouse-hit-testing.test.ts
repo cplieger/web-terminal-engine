@@ -1,42 +1,18 @@
-// Mouse hit-testing and mode-gating tests: the parts of mouse.ts that decide
-// WHETHER to report and WHICH coordinate pair to report, as opposed to the
-// button-byte composition mouse.test.ts already pins.
-//
-// Covered here and nowhere else:
-//   - SGR-pixels (DEC 1016): the whole pixel-coordinate branch, which had no
-//     test at all even though the wire decoder plumbs the flag.
-//   - The terminal element's own viewport offset, which every existing test
-//     hides by leaving getBoundingClientRect all-zero (their fixture element is
-//     detached, so it genuinely has no box), so a sign error in the rect
-//     subtraction is invisible to them.
-//   - The refusals: tracking off, no supported encoding enabled, a degenerate
-//     cell size, a pointer outside the element.
-//   - The grid frame: the OPTIONAL gridElement/gridSize members, which move the
-//     coordinate frame onto the element whose box really is the grid and clamp
-//     every report into it. Both default to today's behaviour, so a consumer
-//     that supplies neither is unaffected.
-//   - The disposer detaching EVERY listener, not just mousedown.
-//
-// Spec source, quoted so the expectations below can be checked against it
-// rather than against mouse.ts (xterm "Control Sequences", section Mouse
-// Tracking, https://invisible-island.net/xterm/ctlseqs/ctlseqs.html):
-//   - the origin: "The upper left character position on the terminal is
-//     denoted as 1,1", and the terminal is the SCREEN, so its last row is
-//     row `rows` whatever partial row the box shows at the top;
-//   - SGR (1006): "CSI <" then the button value, "Px and Py ordinates" and a
-//     final M for press, m for release;
-//   - SGR-Pixels (1016): "the same mouse response format as the 1006
-//     control, but report position in pixels rather than character cells".
-//
-// The CLAMP has no sentence of its own in that document, so it is an engine
-// choice, recorded here as one: the spec numbers the cells of a cols x rows
-// screen from 1,1, so a report outside that range names a cell the
-// application does not have. Under 1016 the same reasoning bounds the report
-// by the grid's pixel box.
+// Mouse hit testing and mode gating: WHETHER to report and WHICH coordinate
+// pair, where mouse.test.ts pins the button byte. Spec (xterm ctlseqs "Mouse
+// Tracking", https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): the
+// origin is cell 1,1 of the SCREEN, so the last row is row `rows` whatever
+// partial row the box shows at the top; SGR 1006 is "CSI <", the button value,
+// the Px and Py ordinates, M for press and m for release; SGR-Pixels 1016 is the
+// same format in pixels. The CLAMP is an engine choice: a report outside the
+// cols x rows screen names a cell the application does not have.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { init as initMouse, type MouseInputHandler } from "./mouse.js";
-import * as modes from "./modes.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
+import { createMouseController, type MouseInputHandler } from "./mouse.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
+
+const modes = createModeState();
 
 const ESC = "\x1b";
 const MOTION = 32;
@@ -46,9 +22,7 @@ const expectedSGR = (b: number, col: number, row: number, release: boolean): str
   `${ESC}[<${b};${col};${row}${release ? "m" : "M"}`;
 
 beforeEach(() => {
-  // modes is a module singleton and the suite runs with isolate:false: reset
-  // every flag so nothing leaks in or out of this file.
-  modes.setModes(true, false, false, false, 0, false, false, false);
+  modes.applySnapshot(POWER_ON_MODES);
 });
 
 interface Fixture {
@@ -79,8 +53,14 @@ function setup(rect: { left: number; top: number } = { left: 0, top: 0 }): Fixtu
     cellSize: () => ({ width: 8, height: 16 }),
     termElement: () => term,
   };
-  const dispose = initMouse(handler);
-  return { term, sent, dispose };
+  const controller = registerForDispose(createMouseController({ ...handler, modes }));
+  return {
+    term,
+    sent,
+    dispose: () => {
+      controller.dispose();
+    },
+  };
 }
 
 /** A terminal element whose reported cell size is degenerate. */
@@ -91,15 +71,24 @@ function setupWithCell(width: number, height: number): Fixture {
     configurable: true,
   });
   const sent: string[] = [];
-  const dispose = initMouse({
-    sendReport: (data) => {
-      sent.push(data);
-      return true;
+  const controller = registerForDispose(
+    createMouseController({
+      modes,
+      sendReport: (data) => {
+        sent.push(data);
+        return true;
+      },
+      cellSize: () => ({ width, height }),
+      termElement: () => term,
+    }),
+  );
+  return {
+    term,
+    sent,
+    dispose: () => {
+      controller.dispose();
     },
-    cellSize: () => ({ width, height }),
-    termElement: () => term,
-  });
-  return { term, sent, dispose };
+  };
 }
 
 /**
@@ -134,17 +123,27 @@ function setupGrid(opts: {
     configurable: true,
   });
   const sent: string[] = [];
-  const dispose = initMouse({
-    sendReport: (data) => {
-      sent.push(data);
-      return true;
+  const controller = registerForDispose(
+    createMouseController({
+      modes,
+      sendReport: (data) => {
+        sent.push(data);
+        return true;
+      },
+      cellSize: () => ({ width: 8, height: 16 }),
+      termElement: () => term,
+      gridElement: () => grid,
+      gridSize: () => ({ cols: opts.cols, rows: opts.rows }),
+    }),
+  );
+  return {
+    term,
+    grid,
+    sent,
+    dispose: () => {
+      controller.dispose();
     },
-    cellSize: () => ({ width: 8, height: 16 }),
-    termElement: () => term,
-    gridElement: () => grid,
-    gridSize: () => ({ cols: opts.cols, rows: opts.rows }),
-  });
-  return { term, grid, sent, dispose };
+  };
 }
 
 function mouseEvent(type: string, opts: Record<string, unknown>): MouseEvent {
@@ -174,12 +173,12 @@ const nextFrame = (): Promise<void> =>
 
 /** SGR 1006 + the given tracking mode; pixels and focus off. */
 function enableSGR(mode: number): void {
-  modes.setModes(true, false, true, false, mode, false, false, false);
+  modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: mode });
 }
 
 /** DEC 1016 (SGR-pixels) + the given tracking mode; SGR 1006 off. */
 function enablePixels(mode: number): void {
-  modes.setModes(true, false, false, false, mode, false, false, true);
+  modes.applySnapshot({ ...POWER_ON_MODES, mouseMode: mode, mousePixels: true });
 }
 
 describe("SGR-pixels (DEC 1016): reports pixel offsets instead of cells", () => {
@@ -516,15 +515,18 @@ describe("the grid frame: gridElement resolves the coordinates, termElement gets
       configurable: true,
     });
     const sent: string[] = [];
-    initMouse({
-      sendReport: (data) => {
-        sent.push(data);
-        return true;
-      },
-      cellSize: () => ({ width: 0, height: 0 }),
-      termElement: () => term,
-      gridSize: () => ({ cols: 10, rows: 5 }),
-    });
+    registerForDispose(
+      createMouseController({
+        modes,
+        sendReport: (data) => {
+          sent.push(data);
+          return true;
+        },
+        cellSize: () => ({ width: 0, height: 0 }),
+        termElement: () => term,
+        gridSize: () => ({ cols: 10, rows: 5 }),
+      }),
+    );
     term.dispatchEvent(
       mouseEvent("mousedown", { clientX: 400, clientY: 400, button: 0, buttons: 0 }),
     );
@@ -599,10 +601,9 @@ describe("a degenerate grid is refused and diagnosed, not clamped into", () => {
 
 describe("the grid frame is opt-in: a consumer supplying neither member is unaffected", () => {
   it("keeps the top-anchored, unclamped hit test", () => {
-    // Today's behaviour, and the reason both members are optional: adding a
-    // required member to an exported interface is a source break for any
-    // external implementor. y=200 with a 16px cell is row 13, past any real
-    // screen, and that is what an unclamped consumer still gets.
+    // Both members are optional because a required member on an exported
+    // interface is a source break for every external implementor. y=200 with a
+    // 16px cell is row 13, past any real screen, which an unclamped consumer gets.
     enableSGR(1002);
     const { term, sent } = setup();
     term.dispatchEvent(
@@ -621,21 +622,21 @@ describe("the grid frame is opt-in: a consumer supplying neither member is unaff
 
 describe("mode gating applies to every event type, not just the press", () => {
   it("reports no release while tracking is off", () => {
-    modes.setModes(true, false, true, false, 0, false, false, false); // SGR on, tracking off
+    modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true }); // SGR on, tracking off
     const { term, sent } = setup();
     term.dispatchEvent(mouseEvent("mouseup", { clientX: 16, clientY: 32, button: 0, buttons: 0 }));
     expect(sent).toEqual([]);
   });
 
   it("reports no motion while tracking is off", () => {
-    modes.setModes(true, false, true, false, 0, false, false, false);
+    modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true });
     const { term, sent } = setup();
     term.dispatchEvent(mouseEvent("mousemove", { clientX: 16, clientY: 32, buttons: 1 }));
     expect(sent).toEqual([]);
   });
 
   it("reports no wheel while tracking is off", () => {
-    modes.setModes(true, false, true, false, 0, false, false, false);
+    modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true });
     const { term, sent } = setup();
     term.dispatchEvent(wheelEvent({ deltaY: -1, clientX: 16, clientY: 32 }));
     expect(sent).toEqual([]);
@@ -647,7 +648,7 @@ describe("no supported encoding enabled: tracking alone reports nothing", () => 
   // encodings are deliberately unimplemented, so the module stays silent rather
   // than sending a report in an encoding the app did not ask for.
   const legacyOnly = (): void => {
-    modes.setModes(true, false, false, false, 1002, false, false, false);
+    modes.applySnapshot({ ...POWER_ON_MODES, mouseMode: 1002 });
   };
 
   it("reports no press", () => {
@@ -713,7 +714,7 @@ describe("reported events suppress the browser's own handling", () => {
   });
 });
 
-describe("the disposer detaches every listener it attached", () => {
+describe("dispose detaches every listener it attached", () => {
   it("stops reporting releases, motion and wheel after dispose", () => {
     enableSGR(1003);
     const { term, sent, dispose } = setup();
@@ -724,12 +725,12 @@ describe("the disposer detaches every listener it attached", () => {
     expect(sent).toEqual([]);
   });
 
-  it("detaches every event type from the element a re-init supersedes", () => {
-    // A re-mount on a new element self-heals by detaching the old one. Any event
-    // type left attached there keeps reporting through the NEW handler — the
-    // stale element is still in the old DOM and still receives events, so a
+  it("detaches every event type from the element a disposed controller leaves", () => {
+    // A re-mount on a new element disposes the old controller. Any event type
+    // left attached there keeps reporting through its handler — the stale
+    // element is still in the old DOM and still receives events, so a
     // half-detach sends input from a terminal the consumer has thrown away.
-    modes.setModes(true, false, true, false, 1003, false, false, false); // tracking on
+    modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: 1003 }); // tracking on
     const sent: string[] = [];
     const elementWithRect = (): HTMLDivElement => {
       const el = document.createElement("div");
@@ -751,8 +752,9 @@ describe("the disposer detaches every listener it attached", () => {
       cellSize: () => ({ width: 8, height: 16 }),
       termElement: () => el,
     });
-    initMouse(handlerFor(first));
-    initMouse(handlerFor(second)); // supersedes: `first` must be fully detached
+    const superseded = createMouseController({ ...handlerFor(first), modes });
+    registerForDispose(createMouseController({ ...handlerFor(second), modes }));
+    superseded.dispose(); // `first` must be fully detached
 
     first.dispatchEvent(
       mouseEvent("mousedown", { clientX: 16, clientY: 32, button: 0, buttons: 0 }),

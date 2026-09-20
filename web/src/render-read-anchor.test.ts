@@ -1,24 +1,16 @@
-// The reading position must survive content vanishing ABOVE it. When the
-// retention cap is reached, every new line evicts one from the top of history —
-// so a user scrolled up to read has the content above them shrink continuously
-// while output streams. Unless the viewport follows it, whatever they are reading
-// slides one line further up per evicted row.
-//
-// Chrome and Firefox fix this natively (scroll anchoring, `overflow-anchor`) and
-// the renderer used to rely on that. WebKit has never implemented it, so on
-// Safari — reported from an iPad — the view crawled upward for as long as the
-// agent kept writing. render.ts anchors the position by hand now; these tests
-// pin that, and they fail if restoreReadAnchor is removed.
-//
-// offsetTop is declared rather than measured, because the geometry IS the
-// premise: rows uniform-height and in document order is exactly what the binary
-// search in captureReadAnchor relies on, and real layout would report whatever
-// height this file's fixture markup happens to produce. The scroll element's
-// geometry is derived from the child count for the same reason.
+// The reading position must survive content vanishing ABOVE it: at the retention
+// cap every new line evicts one from the top of history, so a reader scrolled up
+// slides one line further per evicted row unless the viewport follows. Chrome
+// and Firefox anchor natively (`overflow-anchor`); WebKit never has, so on an
+// iPad the view crawled upward for as long as output streamed, and render.ts
+// anchors by hand. offsetTop is declared rather than measured because the
+// geometry IS the premise: uniform rows in document order is what the binary
+// search in captureReadAnchor relies on.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import * as render from "./render.js";
-import * as scroll from "./scroll.js";
+import type { Renderer } from "./render.js";
+import type { ScrollController } from "./scroll.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import { LineStore } from "./store.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
@@ -68,6 +60,8 @@ const tick = (): Promise<void> =>
 describe("render: the reading position holds when history is evicted above it", () => {
   let outputEl: HTMLDivElement;
   let termWrap: HTMLDivElement;
+  let render: Renderer;
+  let scroll: ScrollController;
   let scrollTop = 0;
   let offsetTopDescriptor: PropertyDescriptor | undefined;
 
@@ -85,9 +79,11 @@ describe("render: the reading position holds when history is evicted above it", 
       },
     });
 
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    outputEl = fx.output;
+    render = fx.engine.renderer;
+    scroll = fx.engine.scroll;
     scrollTop = 0;
     committed = 0;
     Object.defineProperty(termWrap, "scrollHeight", {
@@ -103,9 +99,7 @@ describe("render: the reading position holds when history is evicted above it", 
       },
     });
 
-    render.init({ output: outputEl, termWrap });
     render.updateFontMetrics();
-    scroll.init({ scrollEl: termWrap });
     // A small retention cap, so eviction is reachable without 5000 rows (cap
     // 60 evicts in batches of 3 — evictionBatch(60)); the mid-buffer readers
     // below keep a margin well past one batch so they are not themselves
@@ -272,6 +266,8 @@ describe("render: the reading position holds when history is evicted above it", 
 describe("render: manual anchoring does not fight native scroll anchoring", () => {
   let outputEl: HTMLDivElement;
   let termWrap: HTMLDivElement;
+  let render: Renderer;
+  let scroll: ScrollController;
   let scrollTop = 0;
   let offsetTopDescriptor: PropertyDescriptor | undefined;
   let realRemove: () => void;
@@ -289,9 +285,11 @@ describe("render: manual anchoring does not fight native scroll anchoring", () =
         return Array.prototype.indexOf.call(parent.children, this) * ROW_H;
       },
     });
-    document.body.innerHTML = `<div id="term"><div id="term-output"></div></div>`;
-    termWrap = document.getElementById("term") as HTMLDivElement;
-    outputEl = document.getElementById("term-output") as HTMLDivElement;
+    const fx = createEngineFixture();
+    termWrap = fx.termWrap;
+    outputEl = fx.output;
+    render = fx.engine.renderer;
+    scroll = fx.engine.scroll;
     scrollTop = 0;
     committed = 0;
     Object.defineProperty(termWrap, "scrollHeight", {
@@ -320,9 +318,7 @@ describe("render: manual anchoring does not fight native scroll anchoring", () =
       }
     };
 
-    render.init({ output: outputEl, termWrap });
     render.updateFontMetrics();
-    scroll.init({ scrollEl: termWrap });
     render.bind(new LineStore(60));
   });
 

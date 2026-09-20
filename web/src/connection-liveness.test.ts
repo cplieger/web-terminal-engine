@@ -1,21 +1,19 @@
-// The client's liveness probe and the session switch — the two paths that decide
-// when a socket is REPLACED.
-//
-// Both are timing-driven and both fail silently in opposite directions. A probe
-// that never fires leaves an iOS tab looking connected while the socket is a
-// frozen zombie (nothing arrives, nothing is retried). A probe that fires too
-// eagerly tears down a healthy socket, and every teardown re-runs the resume and
-// replays the outbox. The session switch has the same shape: a switch that
-// declines to no-op reconnects a socket that was already serving the requested
-// session, and one that no-ops too broadly leaves the consumer with no socket at
-// all after a disconnect.
-//
-// The clock here is fake and every assertion lands on an exact instant:
-// HEARTBEAT_INTERVAL_MS 5s, IDLE_BEFORE_PROBE_MS 10s, PONG_TIMEOUT_MS 7s.
+// The liveness probe and the session switch, the two paths that decide when a
+// socket is REPLACED. Both fail silently in opposite directions: a probe that
+// never fires leaves a frozen socket looking connected, one that fires too
+// eagerly tears down a healthy socket and replays the outbox; a switch that
+// declines to no-op reconnects a socket already serving the session, one that
+// no-ops too broadly leaves no socket after a disconnect. The clock is fake and
+// every assertion lands on an exact instant: HEARTBEAT_INTERVAL_MS 5s,
+// IDLE_BEFORE_PROBE_MS 10s, PONG_TIMEOUT_MS 7s.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { disconnect, init, sendBinary, setSession } from "./connection.js";
+import { type Connection, createConnection } from "./connection.js";
+import { connectionDeps } from "./test-helpers/connection-fakes.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
+
+let conn: Connection;
 
 interface MockWS {
   readyState: number;
@@ -139,15 +137,9 @@ let session = 0;
 
 function baseCallbacks() {
   return {
-    onMessage: () => {
-      /* no-op */
-    },
-    onOpen: () => {
-      /* no-op */
-    },
-    onClose: () => {
-      /* no-op */
-    },
+    onMessage: () => undefined,
+    onOpen: () => undefined,
+    onClose: () => undefined,
     computeSize: () => ({ cols: 80, rows: 24 }),
   };
 }
@@ -156,7 +148,7 @@ function baseCallbacks() {
 function openSession(): { id: string; sock: MockWS } {
   session++;
   const id = `liveness-${String(session)}`;
-  setSession(id);
+  conn.setSession(id);
   const sock = sockets[sockets.length - 1]!;
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame());
@@ -168,11 +160,13 @@ describe("connection: the liveness probe", () => {
     sockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    init(baseCallbacks());
+    conn = registerForDispose(
+      createConnection({ ...connectionDeps(), callbacks: baseCallbacks() }),
+    );
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -252,11 +246,13 @@ describe("connection: the reconnect schedule", () => {
     vi.useFakeTimers();
     vi.spyOn(Math, "random").mockReturnValue(0.5);
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    init(baseCallbacks());
+    conn = registerForDispose(
+      createConnection({ ...connectionDeps(), callbacks: baseCallbacks() }),
+    );
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -279,7 +275,7 @@ describe("connection: the reconnect schedule", () => {
 
   it("retries a connect that closed before it ever opened", () => {
     session++;
-    setSession(`liveness-${String(session)}`);
+    conn.setSession(`liveness-${String(session)}`);
     const sock = sockets[sockets.length - 1]!;
 
     // A CONNECTING socket that closes (refused, reset, proxy 502) is the case
@@ -301,11 +297,13 @@ describe("connection: the session switch", () => {
     sockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    init(baseCallbacks());
+    conn = registerForDispose(
+      createConnection({ ...connectionDeps(), callbacks: baseCallbacks() }),
+    );
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -313,7 +311,7 @@ describe("connection: the session switch", () => {
   it("is a no-op for the session already being served", () => {
     const { id } = openSession();
 
-    setSession(id);
+    conn.setSession(id);
 
     // A consumer re-selects the visible tab freely (a focus event, a re-render).
     // Reconnecting for it would replay the outbox and re-run the resume for
@@ -324,19 +322,19 @@ describe("connection: the session switch", () => {
   it("is a no-op for the session whose socket is still connecting", () => {
     session++;
     const id = `liveness-${String(session)}`;
-    setSession(id);
+    conn.setSession(id);
     // No fireOpen: the socket is CONNECTING, which is already serving this
     // session — the resume it will send names it.
-    setSession(id);
+    conn.setSession(id);
 
     expect(sockets).toHaveLength(1);
   });
 
   it("reconnects the same session when there is no socket left", () => {
     const { id } = openSession();
-    disconnect();
+    conn.disconnect();
 
-    setSession(id);
+    conn.setSession(id);
 
     // Same id, but nothing is serving it: the no-op is about a LIVE socket, not
     // about the id alone. Skipping the connect here leaves the consumer with a
@@ -346,10 +344,10 @@ describe("connection: the session switch", () => {
 
   it("carries a switched-to session's own outbox, not the previous session's", () => {
     const first = openSession();
-    sendBinary(new TextEncoder().encode("first"));
+    conn.sendBinary(new TextEncoder().encode("first"));
 
     const second = openSession();
-    sendBinary(new TextEncoder().encode("second"));
+    conn.sendBinary(new TextEncoder().encode("second"));
 
     // Per-session ledgers: the bytes queued for one tab must never leave on
     // another tab's socket.

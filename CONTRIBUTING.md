@@ -134,7 +134,7 @@ CI (`.github/workflows/ci.yaml`) detects both surfaces and runs Go and TypeScrip
 
 ## Publishing model
 
-Releases are automated through `.github/workflows/release.yaml`. Repository releases publish the Go module as `github.com/cplieger/web-terminal-engine/v5` and the TypeScript package to npm and JSR as `@cplieger/web-terminal-engine`. Consumers install and upgrade those artifacts independently, with compatibility determined by wire metadata rather than package-version equality. Do not publish manually.
+Releases are automated through `.github/workflows/release.yaml`. Repository releases publish the Go module as `github.com/cplieger/web-terminal-engine/v6` and the TypeScript package to npm and JSR as `@cplieger/web-terminal-engine`. Consumers install and upgrade those artifacts independently, with compatibility determined by wire metadata rather than package-version equality. Do not publish manually.
 
 ## Commits and PRs
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// Render-pipeline micro-benchmark (C3 perf experiment, 2026-07). Drives the
-// REAL render.ts + store.ts through htop/vim-like workloads in headless
-// Chromium and reports ms/frame + a CPU-profile attribution, so render-path
-// optimizations are measured, never guessed. Not part of any test battery —
-// run by hand: `node e2e/render-bench.mjs [runsPerScenario]`.
+// Render-pipeline micro-benchmark. Drives the REAL renderer + store through
+// htop/vim-like workloads in headless Chromium and reports ms/frame + a
+// CPU-profile attribution, so render-path optimizations are measured, never
+// guessed. Not part of any test battery — run by hand:
+// `node e2e/render-bench.mjs [runsPerScenario]`.
 import * as esbuild from "esbuild";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -28,7 +28,7 @@ const jsToTs = {
 const bundle = (
   await esbuild.build({
     stdin: {
-      contents: `export * as render from "./src/render.js";`,
+      contents: `export { createTerminalEngine } from "./src/terminal.js";`,
       resolveDir: webDir,
       loader: "ts",
     },
@@ -112,7 +112,7 @@ const pageLib = `
   async function drive(frames) {
     flushCpuMs = 0;
     for (const f of frames) {
-      WTE.render.handleScreen(f);
+      window.__engine.renderer.handleScreen(f);
       // Let the microtask chain drain (one macrotask hop per frame).
       await new Promise((r) => setTimeout(r, 0));
     }
@@ -159,11 +159,18 @@ async function boot() {
   await page.addScriptTag({ content: bundle });
   await page.addScriptTag({ content: pageLib });
   await page.evaluate(() => {
-    WTE.render.init({
+    window.__engine?.dispose();
+    window.__engine = WTE.createTerminalEngine({
       output: document.getElementById("out"),
       termWrap: document.getElementById("wrap"),
+      callbacks: {
+        onMessage: () => undefined,
+        onOpen: () => undefined,
+        onClose: () => undefined,
+        computeSize: () => ({ cols: 140, rows: 50 }),
+      },
     });
-    WTE.render.updateFontMetrics();
+    window.__engine.renderer.updateFontMetrics();
   });
 }
 
@@ -171,7 +178,7 @@ const results = {};
 for (const [name, code] of Object.entries(scenarios)) {
   const times = [];
   for (let r = 0; r < runs; r++) {
-    await boot(); // fresh DOM + module state per run
+    await boot(); // a fresh DOM and a fresh engine per run
     times.push(await page.evaluate(code));
   }
   times.sort((a, b) => a - b);

@@ -1,23 +1,18 @@
-// The four decisions in mapKeyboardEvent that no scenario in the keyboard
-// suites reaches from the side that distinguishes them.
-//
-// Three are precedence questions the existing tables cannot ask, because each
+// Four decisions in mapKeyboardEvent the keyboard tables cannot ask, because each
 // table walks ONE key with ONE modifier: which rule wins when Ctrl and Alt are
-// held together over Space, what happens to Alt over a key with no legacy
-// encoding at all, and what the kitty encoder does with a key that is not a
-// character. The fourth is the encoder's floor: the codepoint 0 that the kitty
-// grammar has no room for.
-//
-// Sources: xterm's ctlseqs (Ctrl+Space is NUL, Alt+<char> is the ESC prefix)
-// and the kitty keyboard protocol's key-codes section
-// (https://sw.kovidgoyal.net/kitty/keyboard-protocol/), which defines
-// unicode-key-code as the codepoint of the key's unshifted value — a value that
-// only exists for keys that produce text.
+// held over Space, what Alt does over a key with no legacy encoding, what the
+// kitty encoder does with a key that is not a character, and the encoder's
+// floor, the codepoint 0 the kitty grammar has no room for. Sources: xterm
+// ctlseqs (Ctrl+Space is NUL, Alt+<char> is the ESC prefix) and the kitty key
+// codes section (https://sw.kovidgoyal.net/kitty/keyboard-protocol/), where
+// unicode-key-code is the unshifted codepoint, a value only text keys have.
 
 import { describe, it, expect, beforeEach } from "vitest";
 
 import { mapKeyboardEvent, type KeyboardResult } from "./keyboard.js";
-import * as modes from "./modes.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
+
+const modes = createModeState();
 
 const ESC = "\x1b";
 const KITTY_DISAMBIGUATE = 1;
@@ -28,18 +23,18 @@ function ev(init: KeyboardEventInit & { key: string; code?: string }): KeyboardE
 
 /** Map under the LEGACY encodings (no kitty flag). */
 function legacy(init: KeyboardEventInit & { key: string; code?: string }): KeyboardResult {
-  modes.setModes(true, false, false, false, 0, false, false, false, 0);
+  modes.applySnapshot(POWER_ON_MODES);
   return mapKeyboardEvent(ev(init), modes);
 }
 
 /** Map under the kitty disambiguate flag, via the injected-modes seam. */
 function underKitty(init: KeyboardEventInit & { key: string; code?: string }): KeyboardResult {
-  modes.setModes(true, false, false, false, 0, false, false, false, KITTY_DISAMBIGUATE);
+  modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: KITTY_DISAMBIGUATE });
   return mapKeyboardEvent(ev(init), modes);
 }
 
 beforeEach(() => {
-  modes.setModes(true, false, false, false, 0, false, false, false, 0);
+  modes.applySnapshot(POWER_ON_MODES);
 });
 
 describe("legacy encoding: Ctrl and Alt held together", () => {
@@ -93,17 +88,14 @@ describe("legacy encoding: Alt over a key with no legacy encoding", () => {
 });
 
 describe("the modifier-only preamble runs before the application-keypad rule", () => {
-  // The keypad rule keys off ev.code (the PHYSICAL key) while the modifier-only
-  // rule keys off ev.key (what the key currently does), and the two disagree on
-  // a remapped keyboard: an xkb layout or a QMK firmware that maps the KP0
-  // scancode to Shift_L makes a browser report code "Numpad0" with key "Shift".
-  // The press produced no character, so under DECKPAM it must stay silent —
-  // encoding it as the keypad's SS3 sequence would send ESC O p for a shift.
-  // The ordering of the preamble is what decides that, and it is deliberate
-  // (mapKeyboardEvent's own comment: the shared preamble runs first so both the
-  // legacy and the kitty path behave identically).
+  // The keypad rule keys off ev.code (the PHYSICAL key), the modifier-only rule
+  // off ev.key (what the key does now), and the two disagree on a remapped
+  // keyboard: a layout mapping the KP0 scancode to Shift_L reports code "Numpad0"
+  // with key "Shift". The press produced no character, so under DECKPAM it must
+  // stay silent; the keypad's SS3 form would send ESC O p for a shift. The
+  // preamble's ordering decides that, and both encoder paths share it.
   function underKeypad(init: KeyboardEventInit & { key: string; code?: string }): KeyboardResult {
-    modes.setModes(true, false, false, false, 0, true, false, false, 0);
+    modes.applySnapshot({ ...POWER_ON_MODES, applicationKeypad: true });
     return mapKeyboardEvent(ev(init), modes);
   }
 

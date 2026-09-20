@@ -1,16 +1,16 @@
 // OSC 8 hyperlink rendering: a run carrying an OSC 8 URI is painted as an <a>.
-//
-// Spec: xterm ctlseqs OSC 8 (`OSC 8 ; params ; URI ST`) — the URI in the
-// sequence is authoritative and is what the link points at. Anchors are opened
-// safely (target=_blank, rel=noopener guards reverse-tabnabbing). render.ts
-// only linkifies http/https URIs (a conservative allow-list); the adversarial
-// scheme sweep proving javascript:/data:/etc. never become clickable lives in
-// hyperlink-safety.fuzz.test.ts. Expectations here derive from the OSC 8 spec,
-// not from reading render.ts.
+// Spec: xterm ctlseqs OSC 8 (`OSC 8 ; params ; URI ST`), the URI in the sequence
+// is what the link points at; anchors open safely (target=_blank, rel=noopener
+// against reverse-tabnabbing); only http/https URIs are linkified, and the
+// adversarial scheme sweep lives in hyperlink-safety.fuzz.test.ts. Expectations
+// derive from the OSC 8 spec, not from reading render.ts.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import * as render from "./render.js";
+import type { Renderer } from "./render.js";
+import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, WireRun } from "./types.js";
+
+let render: Renderer;
 
 interface FakeCtx {
   font: string;
@@ -47,11 +47,9 @@ function frame(rowsByIdx: Record<number, WireRun[]>, cursor: [number, number]): 
 
 async function flushFrame(msg: ScreenMessage): Promise<void> {
   render.handleScreen(msg);
-  // Wait for the frame render.ts scheduled, not for a duration. This used to be
-  // a 32ms sleep because the emulator implemented rAF as a ~16ms timer and
-  // racing its queue ordering flaked on CI; against real frames the honest wait
-  // is the frame itself. Two deep because the first callback can run in the
-  // frame the flush was queued in.
+  // Wait for the frame render.ts scheduled, not for a duration: a sleep races
+  // real frames in both directions. Two deep because the first callback can run
+  // in the frame the flush was queued in.
   await new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
@@ -63,18 +61,12 @@ async function flushFrame(msg: ScreenMessage): Promise<void> {
 
 describe("OSC 8 hyperlink rendering", () => {
   let output: HTMLDivElement;
-  let termWrap: HTMLDivElement;
 
   beforeEach(() => {
-    output = document.createElement("div");
-    output.id = "term-output";
+    const fx = createEngineFixture();
+    output = fx.output;
     output.contentEditable = "true";
-    termWrap = document.createElement("div");
-    termWrap.id = "term-wrap";
-    termWrap.appendChild(output);
-    document.body.innerHTML = "";
-    document.body.appendChild(termWrap);
-    render.init({ output, termWrap });
+    render = fx.engine.renderer;
     render.updateFontMetrics();
   });
 
@@ -187,14 +179,10 @@ describe("OSC 8 hyperlink rendering", () => {
   });
 
   it("autolinks a bare http(s) URL in plain text with the same safe-open attributes", async () => {
-    // render.ts builds anchors on TWO paths: the OSC 8 `u`-field path
-    // (asserted above) and linkifySpans, which detects a bare URL in the
-    // visible text of a run that carries no `u`. Both must set the
-    // reverse-tabnabbing guards (target=_blank, rel=noopener noreferrer);
-    // the autolinker path is otherwise unasserted -- the safety fuzz file
-    // uses a fixed non-URL text to isolate the OSC 8 gate, and the only
-    // text-path test here uses URL-free text. A regression dropping
-    // rel/target on the autolinker anchor would pass today.
+    // render.ts builds anchors on TWO paths, the OSC 8 `u` field (asserted above)
+    // and linkifySpans over a bare URL in a run with no `u`, and both must set
+    // the reverse-tabnabbing guards. The autolinker path is asserted nowhere
+    // else: the safety fuzz file isolates the OSC 8 gate with non-URL text.
     const runs: WireRun[] = [{ t: "see https://example.com/x now", f: -1, b: -1, a: 0, uc: -1 }];
     const msg = frame({ 0: runs }, [0, 0]);
     await flushFrame(msg);

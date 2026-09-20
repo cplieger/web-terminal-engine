@@ -1,19 +1,11 @@
-// SPEC-FIRST property tests for keyboard.ts.
-//
-// These assert xterm-encoding INVARIANTS over arbitrary modifier
-// combinations, complementing the example matrix in keyboard.test.ts:
-//
-//   1. Modified cursor keys encode the modifier as param = 1 + bitmask
-//      (Shift=1, Alt=2, Ctrl=4, Meta=8) — ctlseqs.html modifier list.
-//   2. In normal (DECCKM reset) mode every cursor key is CSI-form.
-//   3. A modifier always forces CSI, even under application cursor mode
-//      (SS3 has no modifier encoding).
-//   4. ctrlByteFor folds A-Z/a-z to the C0 range 0x01..0x1a.
-//
-// It also retains the paste-injection-safety property for bracketTextForPaste.
-//
-// Content transcribed/rephrased from invisible-island.net xterm docs for
-// compliance with licensing restrictions.
+// xterm-encoding INVARIANTS over arbitrary modifier combinations, beside the
+// example matrix in keyboard.test.ts: a modified cursor key encodes the modifier
+// as param = 1 + bitmask (Shift=1, Alt=2, Ctrl=4, Meta=8; ctlseqs.html modifier
+// list); in normal (DECCKM reset) mode every cursor key is CSI-form; a modifier
+// always forces CSI, even under application cursor mode (SS3 has no modifier
+// encoding); ctrlByteFor folds A-Z/a-z to the C0 range 0x01..0x1a. Plus the
+// paste-injection-safety property of bracketTextForPaste. Content rephrased
+// from invisible-island.net xterm docs for compliance with licensing restrictions.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import fc from "fast-check";
@@ -23,15 +15,10 @@ import {
   mapKeyboardEvent as mapKeyboardEventRaw,
   type KeyboardResult,
 } from "./keyboard.js";
-import * as modes from "./modes.js";
+import { createModeState, POWER_ON_MODES } from "./modes.js";
 
-// These tests drive the module-singleton modes (set via modes.setModes in
-// beforeEach), so bind it here; mapKeyboardEvent now takes modes explicitly.
+const modes = createModeState();
 const mapKeyboardEvent = (e: KeyboardEvent): KeyboardResult => mapKeyboardEventRaw(e, modes);
-
-// ---------------------------------------------------------------------------
-// Keyboard-encoding invariants
-// ---------------------------------------------------------------------------
 
 function ev(init: KeyboardEventInit & { key: string }): KeyboardEvent {
   return new KeyboardEvent("keydown", init);
@@ -75,7 +62,7 @@ const modifiedArb = modsArb.filter((m) => bitmask(m) > 0);
 describe("mapKeyboardEvent: cursor-key encoding invariants (property)", () => {
   beforeEach(() => {
     // Normal (DECCKM reset), application keypad off.
-    modes.setModes(true, false, false, false, 0, false);
+    modes.applySnapshot(POWER_ON_MODES);
   });
 
   it("modified cursor key → CSI 1;{1+bitmask}{letter}", () => {
@@ -107,7 +94,7 @@ describe("mapKeyboardEvent: cursor-key encoding invariants (property)", () => {
   });
 
   it("a modifier forces CSI even under application cursor mode (DECCKM)", () => {
-    modes.setModes(true, true, false, false, 0, false); // DECCKM on
+    modes.applySnapshot({ ...POWER_ON_MODES, applicationCursor: true }); // DECCKM on
     fc.assert(
       fc.property(arrowArb, modifiedArb, (key, m) => {
         const bytes = sent(mapKeyboardEvent(ev({ key, ...m })));
@@ -130,12 +117,9 @@ describe("ctrlByteFor: C0 folding invariant (property)", () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Paste-injection safety (retained). When bracketed-paste mode is on,
-// bracketTextForPaste must sanitise every ESC byte so an attacker-controlled
-// paste cannot smuggle a premature paste-end (ESC [ 201 ~) and have the
-// trailing bytes interpreted as typed commands.
-// ---------------------------------------------------------------------------
+// Paste-injection safety: under bracketed paste, bracketTextForPaste must
+// sanitise every ESC byte so an attacker-controlled paste cannot smuggle a
+// premature paste-end (ESC [ 201 ~) and have the tail run as typed commands.
 
 const OPEN = "\x1b[200~";
 const CLOSE = "\x1b[201~";
@@ -152,13 +136,13 @@ const pasteText = fc
 
 describe("bracketTextForPaste: paste-injection safety (property)", () => {
   beforeEach(() => {
-    modes.setModes(true, false);
+    modes.applySnapshot(POWER_ON_MODES);
   });
 
   it("wraps in sentinels and the body never contains a raw ESC or a literal paste-end", () => {
     fc.assert(
       fc.property(pasteText, (text) => {
-        const out = bracketTextForPaste(text);
+        const out = bracketTextForPaste(text, modes);
         expect(out.startsWith(OPEN)).toBe(true);
         expect(out.endsWith(CLOSE)).toBe(true);
         const body = out.slice(OPEN.length, out.length - CLOSE.length);
@@ -169,10 +153,10 @@ describe("bracketTextForPaste: paste-injection safety (property)", () => {
   });
 
   it("returns text unchanged when bracketed-paste mode is off", () => {
-    modes.setModes(false, false);
+    modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: false });
     fc.assert(
       fc.property(pasteText, (text) => {
-        expect(bracketTextForPaste(text)).toBe(text);
+        expect(bracketTextForPaste(text, modes)).toBe(text);
       }),
     );
   });

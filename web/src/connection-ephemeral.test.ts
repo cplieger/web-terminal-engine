@@ -1,41 +1,22 @@
-// The connection layer's EPHEMERAL half: best-effort input that never enters the
-// reliable ledger, and the focus state the server derives from.
-//
-// The two input classes have to be pinned APART, which is why one file holds
-// both: the reliable outbox exists so a keystroke survives a blip, and the whole
-// point of the ephemeral channel is that a mouse report must not. An SGR-1006
-// report carries no sequence number and no timestamp, so a receiver cannot tell
-// that it describes a screen which has since been repainted
-// (https://invisible-island.net/xterm/ctlseqs/ctlseqs.html, "Mouse Tracking") —
-// replaying one after a resume delivers a click against different content.
-//
-// The observable is deliberately the WIRE, and for the ledger it is the resume
-// control's own `sentBytes`: that is the only exported view of the byte counter,
-// and asserting the absence of a frame would not pin the invariant — a counted
+// The connection's EPHEMERAL half: best-effort input that never enters the
+// reliable ledger, and the focus state the server derives from. Both input
+// classes are pinned in one file because they must stay APART: a keystroke
+// survives a blip, a mouse report must not (an SGR-1006 report carries no
+// sequence number, so a replay after a resume clicks different content; xterm
+// ctlseqs "Mouse Tracking"). The observable is the WIRE plus the resume
+// control's `sentBytes`, the only exported view of the byte counter: a counted
 // byte that never left still corrupts the ack arithmetic.
-//
-// Refusing to send on a dead socket is what xterm.js's AttachAddon does (returns
-// false rather than sending) and what ttyd does (returns early unless the socket
-// is open). Focus is the other way around: the client writes no DEC 1004 bytes at
-// all, so the wire assertions for it are assertions of ABSENCE, and the ledger
-// counter is what makes an absence observable rather than merely unasserted.
-//
-// Drives the REAL connection module with a fake global WebSocket, the same shape
-// connection-outbox.test.ts uses.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
-  disconnect,
-  init,
-  reconnectNow,
-  sendBinary,
-  sendEphemeral,
-  setClientFocus,
-  setSession,
-} from "./connection.js";
-import * as modes from "./modes.js";
-import * as mouse from "./mouse.js";
+import { type Connection, createConnection } from "./connection.js";
+import { createModeState, type ModeState, POWER_ON_MODES } from "./modes.js";
+import { createMouseController } from "./mouse.js";
+import { connectionDeps } from "./test-helpers/connection-fakes.js";
+import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
+
+let conn: Connection;
+let modes: ModeState;
 
 /** ackFlags bit2 / bit3, as the Go encoder packs them (resumeAckFlags.bits). */
 const ACK_FLAG_SERVER_FOCUS = 4;
@@ -188,7 +169,7 @@ let session = 0;
 /** Bring up a socket for a FRESH session and take it through its resumeAck. */
 function openSession(flags: number): MockWS {
   session++;
-  setSession(`ephemeral-${String(session)}`);
+  conn.setSession(`ephemeral-${String(session)}`);
   const sock = sockets[sockets.length - 1]!;
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame({ flags }));
@@ -197,7 +178,7 @@ function openSession(flags: number): MockWS {
 
 /** Reconnect and answer the new socket's resume with `received`. */
 function reconnectAcking(received: number, flags: number): MockWS {
-  reconnectNow();
+  conn.reconnectNow();
   const sock = sockets[sockets.length - 1]!;
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame({ received, flags }));
@@ -209,36 +190,34 @@ describe("connection: ephemeral input is best-effort and uncounted", () => {
     sockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    // The modes singleton and the page-level focus latch outlive one test in
-    // this file, so both start from their power-on state.
-    modes.setModes(true, false, true, false, 1002, false, false, false);
-    init({
-      onMessage: () => {
-        /* no-op */
-      },
-      onOpen: () => {
-        /* no-op */
-      },
-      onClose: () => {
-        /* no-op */
-      },
-      computeSize: () => ({ cols: 80, rows: 24 }),
-    });
-    setClientFocus(false);
+    modes = createModeState({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: 1002 });
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        modes,
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+      }),
+    );
+    conn.setClientFocus(false);
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
   it("sends nothing, queues nothing and counts nothing while the socket is down", () => {
     openSession(ACK_FLAG_EPHEMERAL_INPUT);
-    sendBinary(enc.encode("abc")); // a real keystroke, so the counter is observable
-    disconnect();
+    conn.sendBinary(enc.encode("abc")); // a real keystroke, so the counter is observable
+    conn.disconnect();
 
-    expect(sendEphemeral(REPORT)).toBe(false);
+    expect(conn.sendEphemeral(REPORT)).toBe(false);
 
     // The COUNTER, not just the absent frame: a counted byte would push the
     // server's received count past bytesSent, whose clamp then pins bytesAcked
@@ -251,8 +230,8 @@ describe("connection: ephemeral input is best-effort and uncounted", () => {
 
   it("does not retransmit a mouse report where it DOES retransmit a keystroke", () => {
     const sock = openSession(ACK_FLAG_EPHEMERAL_INPUT);
-    sendBinary(enc.encode("k"));
-    expect(sendEphemeral(REPORT)).toBe(true);
+    conn.sendBinary(enc.encode("k"));
+    expect(conn.sendEphemeral(REPORT)).toBe(true);
     expect(controlsOfType(sock, "ephemeralInput").length).toBe(1);
 
     const next = reconnectAcking(0, ACK_FLAG_EPHEMERAL_INPUT);
@@ -266,7 +245,7 @@ describe("connection: ephemeral input is best-effort and uncounted", () => {
   it("puts the report in an ephemeralInput control when the server declared it", () => {
     const sock = openSession(ACK_FLAG_EPHEMERAL_INPUT);
 
-    expect(sendEphemeral(REPORT)).toBe(true);
+    expect(conn.sendEphemeral(REPORT)).toBe(true);
 
     expect(controlsOfType(sock, "ephemeralInput")).toEqual([
       { type: "ephemeralInput", data: REPORT },
@@ -281,7 +260,7 @@ describe("connection: ephemeral input is best-effort and uncounted", () => {
     // serve the control keeps a working mouse — and pays the retransmit for it.
     const sock = openSession(0);
 
-    expect(sendEphemeral(REPORT)).toBe(true);
+    expect(conn.sendEphemeral(REPORT)).toBe(true);
 
     expect(controlsOfType(sock, "ephemeralInput")).toEqual([]);
     expect(inputSent(sock)).toEqual([REPORT]);
@@ -295,24 +274,24 @@ describe("connection: who reports focus", () => {
     sockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    modes.setModes(true, false, true, false, 1002, false, false, false);
-    init({
-      onMessage: () => {
-        /* no-op */
-      },
-      onOpen: () => {
-        /* no-op */
-      },
-      onClose: () => {
-        /* no-op */
-      },
-      computeSize: () => ({ cols: 80, rows: 24 }),
-    });
-    setClientFocus(false);
+    modes = createModeState({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: 1002 });
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        modes,
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+      }),
+    );
+    conn.setClientFocus(false);
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -320,7 +299,7 @@ describe("connection: who reports focus", () => {
   it("sends a focus control when the server declared it owns focus", () => {
     const sock = openSession(ACK_FLAG_SERVER_FOCUS);
 
-    setClientFocus(true);
+    conn.setClientFocus(true);
 
     // The resume re-asserts the current state first, then the change.
     expect(controlsOfType(sock, "focus")).toEqual([
@@ -333,17 +312,17 @@ describe("connection: who reports focus", () => {
 
   it("repeats nothing for the state already reported", () => {
     const sock = openSession(ACK_FLAG_SERVER_FOCUS);
-    setClientFocus(true);
+    conn.setClientFocus(true);
     const before = controlsOfType(sock, "focus").length;
 
-    setClientFocus(true);
+    conn.setClientFocus(true);
 
     expect(controlsOfType(sock, "focus").length).toBe(before);
   });
 
   it("re-reports the current focus on the new socket after a resume", () => {
     openSession(ACK_FLAG_SERVER_FOCUS);
-    setClientFocus(true);
+    conn.setClientFocus(true);
 
     const next = reconnectAcking(0, ACK_FLAG_SERVER_FOCUS);
 
@@ -353,13 +332,13 @@ describe("connection: who reports focus", () => {
   });
 
   it("writes no DEC 1004 bytes where the server declared no capability", () => {
-    // The pre-5.1.0 server: no `serverFocus` bit, and the application has 1004
-    // enabled, so the removed fallback would have written the bytes right here.
+    // A server without the `serverFocus` bit while the application has 1004
+    // enabled: a client-side DEC 1004 fallback would write the bytes right here.
     const sock = openSession(0);
     sock.fireMessage(modesFrame({ focusReporting: true }));
 
-    setClientFocus(true);
-    setClientFocus(false);
+    conn.setClientFocus(true);
+    conn.setClientFocus(false);
 
     expect(controlsOfType(sock, "focus")).toEqual([]);
     expect(inputSent(sock)).toEqual([]);
@@ -372,18 +351,18 @@ describe("connection: who reports focus", () => {
   it("writes no DEC 1004 bytes in the window before the resumeAck lands", () => {
     // The window a MATCHED server still has: `resetForNewSocket` clears the
     // declared capabilities, and the socket is `connected` a full round trip
-    // before the resumeAck restores them. The modes singleton is per PAGE rather
+    // before the resumeAck restores them. The mode state is per CONNECTION rather
     // than per socket, so it still reads 1004-enabled from the previous socket
     // — which is exactly why "capability unknown" must not be read as
     // "capability absent" and answered with a byte.
     openSession(ACK_FLAG_SERVER_FOCUS);
     sockets[sockets.length - 1]!.fireMessage(modesFrame({ focusReporting: true }));
     expect(modes.isFocusReporting()).toBe(true);
-    reconnectNow();
+    conn.reconnectNow();
     const pending = sockets[sockets.length - 1]!;
     pending.fireOpen(); // connected, and the ack has NOT arrived
 
-    setClientFocus(true);
+    conn.setClientFocus(true);
 
     expect(inputSent(pending)).toEqual([]);
     expect(controlsOfType(pending, "focus")).toEqual([]);
@@ -401,10 +380,10 @@ describe("connection: who reports focus", () => {
     // control would silently invert: the new server would derive its answer from
     // the state before the user clicked away.
     openSession(ACK_FLAG_SERVER_FOCUS);
-    setClientFocus(true);
-    disconnect();
+    conn.setClientFocus(true);
+    conn.disconnect();
 
-    setClientFocus(false); // the user clicks away with no socket to say it on
+    conn.setClientFocus(false); // the user clicks away with no socket to say it on
 
     const next = reconnectAcking(0, ACK_FLAG_SERVER_FOCUS);
     expect(controlsOfType(next, "focus")).toEqual([{ type: "focus", focused: false }]);
@@ -421,24 +400,24 @@ describe("connection: the transport fires the gesture resync", () => {
     sockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    modes.setModes(true, false, true, false, 1002, false, false, false);
-    init({
-      onMessage: () => {
-        /* no-op */
-      },
-      onOpen: () => {
-        /* no-op */
-      },
-      onClose: () => {
-        /* no-op */
-      },
-      computeSize: () => ({ cols: 80, rows: 24 }),
-    });
-    setClientFocus(false);
+    modes = createModeState({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: 1002 });
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        modes,
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+      }),
+    );
+    conn.setClientFocus(false);
   });
 
   afterEach(() => {
-    disconnect();
+    conn.disconnect();
     vi.useRealTimers();
     vi.unstubAllGlobals();
   });
@@ -456,16 +435,35 @@ describe("connection: the transport fires the gesture resync", () => {
       height: "320px",
     });
     document.body.appendChild(term);
-    const dispose = mouse.init({
-      sendReport: (data) => sendEphemeral(data),
-      cellSize: () => ({ width: 8, height: 16 }),
-      termElement: () => term,
-    });
+    // The controller reports through the connection, and the connection resyncs
+    // the controller: the pair the engine wires, built here by hand.
+    const mouse = registerForDispose(
+      createMouseController({
+        modes,
+        sendReport: (data) => conn.sendEphemeral(data),
+        cellSize: () => ({ width: 8, height: 16 }),
+        termElement: () => term,
+      }),
+    );
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        modes,
+        mouse,
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+      }),
+    );
+    conn.setClientFocus(false);
     try {
       const first = openSession(ACK_FLAG_EPHEMERAL_INPUT);
       // setSession applies the incoming session's mode mirror, so tracking is armed
       // after the attach, as the server's own modes frame would.
-      modes.setModes(true, false, true, false, 1002, false, false, false);
+      modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: 1002 });
       term.dispatchEvent(
         new MouseEvent("mousedown", {
           bubbles: true,
@@ -495,7 +493,6 @@ describe("connection: the transport fires the gesture resync", () => {
       const released = controlsOfType(sock, "ephemeralInput").map((c) => c["data"]);
       expect(released).toEqual(["\x1b[<0;3;3m"]);
     } finally {
-      dispose();
       term.remove();
     }
   });

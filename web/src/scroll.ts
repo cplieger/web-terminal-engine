@@ -1,282 +1,133 @@
-// Scroll controller: the single owner of the scroll container's scrollTop.
-//
-// One piece of state: `following`. The user is "following" when the viewport is
-// at (or within a small tolerance of) the bottom; otherwise they have scrolled
-// up to read and are "holding". The state is derived purely from the scroll
-// events — position plus movement direction — with no debounce window, no
-// suppress timer, and no programmatic-vs-user flag. That heuristic soup (a
-// 100px tolerance, a 150ms debounce, a 60-second touch window) was the source
-// of the view-jumping and scroll-interruption bugs (the legacy heuristic-soup
-// failure mode).
-//
-// The renderer calls stickToBottom() once after each flush: if following, pin
-// to the new bottom; if holding, do nothing. Holding the reading position when
-// content ABOVE it changes height (top-of-history eviction at the retention cap,
-// the trim marker appearing) is adjustForContentShift's job, called by the
-// renderer around its DOM mutations. That used to be left to native scroll
-// anchoring (overflow-anchor), which WebKit has never shipped — so on Safari and
-// iPadOS the read position slid up one line per evicted row while the user was
-// scrolled up reading.
-// Appending content at the bottom does not fire a scroll event, so following
-// stays true across new output and the post-flush pin lands correctly. Pinning
-// to the bottom produces a scroll event whose recomputation yields
-// following=true again (no churn; the pin only ever moves DOWN). Scrolling
-// back to within the tolerance of the bottom re-engages following.
-//
-// Disengaging is direction-based, not tolerance-based: ANY upward movement
-// that leaves a real gap below flips to holding at once. A tolerance-only
-// rule lost a race under heavy streaming — the renderer flushes (and pins)
-// every frame, so each frame's upward scroll increment restarted from the
-// bottom the previous pin reset it to, and unless a single frame's delta
-// exceeded the tolerance the user was yanked back down every few milliseconds
-// (the "scroll up fights me during output" bug). Per the HTML event loop the
-// scroll steps run before that frame's rAF flush, so the first upward tick
-// flips holding before the next pin can fire.
-//
-// ENGAGING is direction-based too, and asymmetrically so: only a move DOWNWARD
-// that lands at the bottom re-engages. An upward move never engages, and a
-// scroll event that did not move the position infers nothing. This asymmetry is
-// what makes a content SHRINK safe. A shrink (top-row eviction at the retention
-// cap, ED3 erasing scrollback, a wipe-and-rebuild) lowers scrollHeight, so the
-// browser clamps scrollTop DOWN to the new maximum and delivers that clamp as an
-// UPWARD move that lands at the bottom. The clamp is indistinguishable by
-// position from a user arriving at the tail, but not by direction: a user
-// returning to the tail always moves down, and a clamp always moves up. Before
-// the asymmetry, deriving the state from position alone meant any shrink
-// silently re-engaged auto-follow under a user who had deliberately scrolled up
-// to read, and every subsequent line then pinned them to the bottom. Measured on
-// an inline TUI that erases scrollback on each redraw: scrolled up 20000px, an
-// ED3 collapsed the content, and the viewport was pinned to the tail from there
-// on. The rule now: follow may be engaged by init, by an explicit
-// scrollToBottom/restoreView, or by a downward user scroll reaching the bottom.
-// Nothing else.
-//
-// The two library writes that happen WHILE HOLDING and must not change the
-// state (adjustForContentShift's anchor correction, restoreView's explicit
-// restore) say so directly, by arming a one-event pass-through for the single
-// scroll event their own write produces. That is deliberately not a general
-// "was this event ours?" mechanism: this module does not own every write to the
-// container (a consumer may page the viewport or animate a smooth jump through
-// the DOM), and per CSSOM View an element enqueues at most one scroll event per
-// frame, so a same-frame library write and user gesture are indistinguishable
-// anyway. The arm is set only when the write actually moved the position, so it
-// can never linger and swallow a later real gesture; every write from outside
-// this module is classified by direction like any user scroll, which is correct
-// for all of them (paging up holds, paging down or a smooth jump to the bottom
-// re-engages on landing).
-
-// A content SHRINK is ANNOUNCED, not inferred. The classification above works
-// off the clamp's arithmetic signature — an upward move that lands within
-// CLAMP_EPSILON_PX of the bottom — and that signature is lossy: scrollHeight
-// and clientHeight are integer-rounded while scrollTop is fractional, so under
-// browser zoom or a fractional device pixel ratio the residual can exceed the
-// epsilon and a clamp reads as a user scrolling up. The reader is then left
-// "holding at the bottom" — visually at the tail with auto-follow silently off,
-// a state only a keystroke or the jump button clears, and one that survives a
-// tab switch (restoreView carries it deliberately). See
-// docs/scroll-position-fidelity.md §1.3.
-//
-// The layer that REMOVES the rows knows a shrink happened, so it says so:
-// noteContentShrink() arms a one-event pass-through for the clamp its own
-// mutation caused. The epsilon keeps its original and only job, absorbing
-// subpixel residual, and stops being the thing that IDENTIFIES a clamp.
-//
-// The arm carries the same discipline as preserveFollowOnce, for the same
-// reason: it is set only when the position ACTUALLY moved (observed after the
-// mutation, never predicted from a row count), so an event is guaranteed to
-// follow and a lingering arm cannot swallow a later real gesture. It is also
-// cleared unconditionally by the first event that arrives, so it cannot outlive
-// one frame even if that guarantee were ever broken.
-
-// A shrink asks TWO independent questions, and for years this module asked only
-// the first.
-//
-//   1. Did the offset MOVE? That identifies the clamp's scroll event, so the
-//      follow state survives it (shrinkArmed, above).
-//   2. Is the offset still OUT OF RANGE? That says the container has not
-//      reconciled it at all, and the viewport is parked past the end of the
-//      content (rangeCorrectionOwed, below).
-//
-// distanceFromBottom() has three arithmetic states and only two were consumed:
-// positive means content below (pin down), zero means the tail (nothing to do),
-// and NEGATIVE means the offset is beyond the content's end. The third was a
-// gap: `stickToBottom`'s `> 0` test is false for it, so the one invariant that
-// could rescue the view declined to act, and nothing else writes the offset.
-// The reader then sees the container's background with the content above the
-// visible region, until either the growing content reaches the parked offset or
-// they scroll and the container reconciles.
-//
-// The negative state is reachable because "the offset is clamped when the
-// content shrinks" is an implementation behaviour, not a specified one. CSSOM
-// View clamps a programmatic scroll at write time; neither it nor CSS Overflow 3
-// says WHEN a UA must reconcile an offset already established when the
-// scrollable overflow rectangle shrinks under it. Blink and Gecko reconcile
-// during layout, so the read that follows a row removal already reports the new
-// maximum. WebKit does not hold the offset inside the range at all: this repo
-// separately records that Safari "updates scrollTop PAST the maximum during an
-// overscroll bounce" (render.ts, the removedRowsThisPass comment), and iOS
-// Safari has been reported leaving an offset outside the valid range until a
-// manual scroll nudges the browser into fixing it
-// (stackoverflow.com/q/79752870, September 2025 — that report is about a
-// programmatic scroll during momentum rather than a shrink, so it corroborates
-// the state rather than proving this path into it).
-//
-// So the arithmetic is treated as authoritative and the browser is not:
-// reconcileScrollRange writes the offset the geometry says is the maximum. The
-// correction is gated on a caller's announced row removal, which is what keeps
-// an overscroll bounce (out of range with no content change) out of it.
+// Scroll controller: the single owner of one scroll container's scrollTop and
+// of one piece of state, `following`, derived from scroll events by position
+// AND direction with no debounce, suppress timer or programmatic-vs-user flag.
+// A library write that must not change the state arms a one-event pass-through
+// for the scroll event its own write produces, only when the write moved the
+// position, so the arm can never linger and swallow a later real gesture; every
+// write from outside this module is classified by direction like a user scroll.
 const BOTTOM_TOLERANCE_PX = 24;
 // An upward move only disengages follow when a real gap is left below it.
-// Bigger than 0 to absorb fractional-layout rounding in the shrink-clamp case
-// (a clamp lands at the bottom, but scrollTop can be subpixel-off); far below
+// Above 0 to absorb fractional-layout rounding on a shrink clamp; far below
 // any real one-frame user scroll increment.
 const CLAMP_EPSILON_PX = 1;
 
-let scrollEl: HTMLElement | null = null;
-let following = true;
-let lastScrollTop = 0;
-// Armed by a library write that must PRESERVE the current follow state across
-// the single scroll event it produces (see the header). Consumed by that one
-// event; never armed when the write did not move the position, because then no
-// event fires and a lingering arm would swallow the next real gesture.
-let preserveFollowOnce = false;
-// Armed by noteContentShrink when a caller's own row removal moved the
-// position: the next event is that clamp, not a gesture. Consumed (and in all
-// cases cleared) by the first event to arrive.
-let shrinkArmed = false;
-// Armed by noteContentShrink when a caller's own row removal left the offset
-// PAST the end of the content, i.e. the container did not reconcile it.
-// Consumed by reconcileScrollRange in the same pass. Independent of shrinkArmed:
-// one says the offset moved, this one says it did not move far enough, and a
-// partial reconciliation sets both.
-let rangeCorrectionOwed = false;
-let onFollowChange: ((scrolledUp: boolean) => void) | null = null;
-let onPosition: (() => void) | null = null;
-let scrollHandler: (() => void) | null = null;
-
-function distanceFromBottom(): number {
-  if (!scrollEl) {
-    return 0;
-  }
-  return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
-}
-
-/**
- * The largest offset the container can hold: the zero point of
- * distanceFromBottom, written out. Every write that means "the bottom" targets
- * this rather than `scrollHeight`.
- *
- * The over-scroll write it replaces (`scrollTop = scrollHeight`, an extra
- * clientHeight past the end) delegated the arithmetic to the container's own
- * clamp. That is the one thing this module can no longer assume: the container
- * this UI runs on is reported to leave an offset outside the valid range, and a
- * write is not obviously exempt from that (the report behind
- * rangeCorrectionOwed is about a programmatic scroll). Writing the maximum
- * needs no clamp to be correct, is identical on a conforming container, and
- * keeps one definition of "the bottom" for the reads and the writes both.
- */
-function bottomOffset(): number {
-  if (!scrollEl) {
-    return 0;
-  }
-  return Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
-}
-
-function atBottom(): boolean {
-  return distanceFromBottom() <= BOTTOM_TOLERANCE_PX;
-}
-
-function setFollowing(next: boolean): void {
-  if (next === following) {
-    return;
-  }
-  following = next;
-  if (onFollowChange) {
-    onFollowChange(!following);
-  }
-}
-
-/**
- * Initialize the scroll controller on the scroll container. The optional
- * callbacks fire whenever the follow state toggles (its argument is true when
- * the user has scrolled up / disengaged auto-follow), and — separately — on
- * every scroll event that reflects a real position change.
- *
- * @param opts.scrollEl            Element whose scroll position is observed and owned.
- * @param opts.onUserScrollChange  Optional callback fired on follow/hold toggle.
- * @param opts.onScrollPosition    Optional callback fired on every real scroll move.
- */
-export function init(opts: {
+/** What `createScrollController` binds to and notifies. */
+export interface ScrollControllerOptions {
+  /** Element whose scroll position is observed and owned. */
   scrollEl: HTMLElement;
+  /** Fired on a follow/hold toggle; the argument is true when the user has scrolled up. */
   onUserScrollChange?: (scrolledUp: boolean) => void;
+  /** Fired on every scroll event that reflects a real position change. */
   onScrollPosition?: () => void;
-}): void {
-  // Detach any prior listener (re-init in tests / re-mount).
-  if (scrollEl && scrollHandler) {
-    scrollEl.removeEventListener("scroll", scrollHandler);
+}
+
+/** The single owner of one scroll container's `scrollTop` and follow state. */
+export interface ScrollController {
+  /** Announce that the caller's own mutation just REMOVED content; pass the offset read before it. */
+  noteContentShrink(scrollTopBefore: number): void;
+  /** Move the offset back inside the range after an announced shrink left it past the end. */
+  reconcileScrollRange(): void;
+  /** Pin the viewport to the bottom iff the user is following. */
+  stickToBottom(): void;
+  /** Force scroll to the bottom and re-engage following. */
+  scrollToBottom(): void;
+  /** Whether the user has scrolled away from the bottom (auto-follow disengaged). */
+  isUserScrolledUp(): boolean;
+  /** The viewport's current scroll offset; 0 once disposed. */
+  currentScrollTop(): number;
+  /** Shift the viewport by a content-height change ABOVE the reading position; a no-op while following. */
+  adjustForContentShift(deltaPx: number): void;
+  /** Restore a saved view: the offset and the follow state, together and explicitly. */
+  restoreView(view: { top: number; following: boolean }): void;
+  /** Removes the scroll listener and drops the element and callbacks; every method is a no-op after. */
+  dispose(): void;
+}
+
+/**
+ * Creates the scroll controller for `opts.scrollEl`, following from
+ * construction. Throws, holding nothing, when the listener cannot be attached.
+ */
+export function createScrollController(opts: ScrollControllerOptions): ScrollController {
+  let scrollEl: HTMLElement | null = opts.scrollEl;
+  let following = true;
+  let lastScrollTop = opts.scrollEl.scrollTop;
+  // Armed by a library write that must PRESERVE the follow state across the
+  // single scroll event it produces; never armed when the write did not move
+  // the position, because then no event fires to consume it.
+  let preserveFollowOnce = false;
+  // Armed by noteContentShrink when the caller's own row removal moved the
+  // position: the next event is that clamp, not a gesture.
+  let shrinkArmed = false;
+  // Armed by noteContentShrink when the removal left the offset PAST the end
+  // of the content; consumed by reconcileScrollRange in the same pass.
+  // Independent of shrinkArmed: a partial reconciliation sets both.
+  let rangeCorrectionOwed = false;
+  let onFollowChange: ((scrolledUp: boolean) => void) | null = opts.onUserScrollChange ?? null;
+  let onPosition: (() => void) | null = opts.onScrollPosition ?? null;
+
+  function distanceFromBottom(): number {
+    if (!scrollEl) {
+      return 0;
+    }
+    return scrollEl.scrollHeight - scrollEl.scrollTop - scrollEl.clientHeight;
   }
-  scrollEl = opts.scrollEl;
-  onFollowChange = opts.onUserScrollChange ?? null;
-  onPosition = opts.onScrollPosition ?? null;
-  following = true;
-  lastScrollTop = scrollEl.scrollTop;
-  preserveFollowOnce = false;
-  shrinkArmed = false;
-  rangeCorrectionOwed = false;
-  scrollHandler = () => {
+
+  // The largest offset the container can hold. Every write that means "the
+  // bottom" targets this rather than `scrollHeight`: writing the maximum needs
+  // no clamp to be correct on a container that leaves offsets out of range.
+  function bottomOffset(): number {
+    if (!scrollEl) {
+      return 0;
+    }
+    return Math.max(0, scrollEl.scrollHeight - scrollEl.clientHeight);
+  }
+
+  function atBottom(): boolean {
+    return distanceFromBottom() <= BOTTOM_TOLERANCE_PX;
+  }
+
+  function setFollowing(next: boolean): void {
+    if (next === following) {
+      return;
+    }
+    following = next;
+    if (onFollowChange) {
+      onFollowChange(!following);
+    }
+  }
+
+  const onScroll = (): void => {
     if (!scrollEl) {
       return;
     }
     const top = scrollEl.scrollTop;
     const prev = lastScrollTop;
     lastScrollTop = top;
-    // Read-and-clear: whatever this event turns out to be, the announcement
-    // does not survive it. An arm that could outlive one event is the bug
-    // preserveFollowOnce's "only when it moved" rule exists to prevent, and a
-    // coalesced event that nets out downward must not leave one behind.
+    // Read-and-clear: the announcement does not survive this event, whatever
+    // it turns out to be, so a coalesced event netting downward leaves no arm.
     const wasShrink = shrinkArmed;
     shrinkArmed = false;
     if (preserveFollowOnce) {
-      // This event is the echo of a library write that carries its own follow
-      // intent; the state is already correct.
       preserveFollowOnce = false;
       return;
     }
-    // The POSITION seam, fired after the early-return above and before the
-    // follow decision below. Both halves of that placement are load-bearing
-    // (docs/paged-scrollback.md §5.4): after, because the swallowed event is
-    // the echo of the library's OWN write — a paged-in prepend goes through
-    // adjustForContentShift, and firing the seam for it would turn every
-    // prepend into a fresh fetch trigger, a self-feeding loop; and separate
-    // from onFollowChange, because that one fires only on a follow/hold TOGGLE,
-    // so an idle session where the reader scrolls within history would never
-    // notify at all — and idle browsing is exactly when paging must work.
-    //
-    // Deliberately a BARE notification: no index, no transport. scroll.ts stays
-    // index-free and transport-free; the renderer owns the mapping from scroll
-    // position to absolute index and decides whether to fetch.
-    //
-    // NOT "the user scrolled". This sits before the direction branch below, so
-    // it also fires for the browser's own clamps — an eviction, an ED3 wipe, a
-    // consumer restyling the surface — i.e. every position change that was not
-    // the library's own arming write. That is harmless because the fetch
-    // trigger re-evaluates its full guard set on each call and asks for nothing
-    // when the geometry says nothing is missing, but a reader who mistakes this
-    // for a gesture signal will wire the wrong thing to it.
+    // Fired AFTER the pass-through above (a paged-in prepend goes through
+    // adjustForContentShift, and notifying for it would make every prepend a
+    // fetch trigger) and separately from onFollowChange (a reader browsing
+    // history never toggles follow, and idle browsing is when paging must
+    // work). It also fires for the browser's own clamps, so it is a position
+    // change, not a gesture (docs/paged-scrollback.md §5.4).
     if (onPosition) {
       onPosition();
     }
     if (top < prev) {
-      // Upward: either the user pulling away from the live tail, or the browser
-      // clamping after a content shrink. Neither may ENGAGE follow (see the
-      // header). Only the former leaves a real gap below, and only that
-      // disengages.
-      //
-      // An ANNOUNCED shrink is the clamp, told to us by the layer that removed
-      // the rows, so the state is preserved without consulting the epsilon at
-      // all. The epsilon still backs the un-announced case (a shrink from
-      // outside this library's mutation paths, e.g. a consumer restyling the
-      // surface).
+      // Upward: a user pulling away or a shrink clamp. ANY upward move leaving
+      // a real gap disengages at once: the renderer pins every frame, and a
+      // tolerance-only rule let each pin reset the baseline under a user
+      // scrolling up. Neither may ENGAGE follow: a shrink clamp lands at the
+      // bottom by an upward move, indistinguishable from a user arriving by
+      // position but not by direction. An announced shrink skips the epsilon,
+      // which still backs an un-announced one (a consumer restyling the surface).
       if (wasShrink) {
         return;
       }
@@ -286,256 +137,154 @@ export function init(opts: {
       return;
     }
     if (top > prev) {
-      // Downward: position decides. Reaching the bottom re-engages follow;
-      // stopping short of it holds.
+      // Downward: only a move that lands at the bottom re-engages.
       setFollowing(atBottom());
     }
-    // Unmoved: a scroll event that changed nothing implies no intent, and the
-    // position it reports may be one a shrink clamp already put us at.
+    // Unmoved: no intent, and the position may be one a shrink clamp set.
   };
-  scrollEl.addEventListener("scroll", scrollHandler, { passive: true });
-}
+  let scrollHandler: (() => void) | null = onScroll;
 
-/**
- * Write the container's scroll offset on the library's own behalf, preserving
- * the current follow state across the resulting scroll event. `lastScrollTop` is
- * synced to the POST-clamp value so the next event's direction is computed from
- * where the container actually landed, and the one-event pass-through is armed
- * only when the position really moved (no move means no event to consume).
- */
-function writePreservingFollow(next: number): void {
-  if (!scrollEl) {
-    return;
+  // Writes the offset on the library's own behalf. `lastScrollTop` is synced to
+  // the POST-clamp value so the next event's direction is computed from where
+  // the container landed; the pass-through is armed only when it really moved.
+  function writePreservingFollow(next: number): void {
+    if (!scrollEl) {
+      return;
+    }
+    const before = scrollEl.scrollTop;
+    scrollEl.scrollTop = next;
+    const after = scrollEl.scrollTop;
+    lastScrollTop = after;
+    if (after !== before) {
+      preserveFollowOnce = true;
+    }
   }
-  const before = scrollEl.scrollTop;
-  scrollEl.scrollTop = next;
-  const after = scrollEl.scrollTop;
-  lastScrollTop = after;
-  if (after !== before) {
-    preserveFollowOnce = true;
-  }
-}
 
-/**
- * Announce that the caller's own mutation just REMOVED content, so the scroll
- * event it produced is the browser's clamp rather than a user gesture, and the
- * follow state must survive it.
- *
- * Call it AFTER the mutation, passing the offset read BEFORE it. The arm is set
- * only when the position actually moved, which is what makes it safe: a clamp
- * that moved the position guarantees an event to consume the arm, and a
- * mutation that did not move the position arms nothing. Predicting the movement
- * from a row count instead would arm on every removal — including the many that
- * cannot clamp (rows removed below the viewport, a removal smaller than the
- * remaining bottom gap, a wipe whose scrollHeight is held up by an
- * absolutely-positioned overlay) — and a lingering arm swallows the next real
- * gesture.
- *
- * That last case used to be live here rather than illustrative, and it is why
- * the caller's ORDER matters: the caret, the predicted cursor, the IME view and
- * the consumer's hidden textarea all sit inside the scroll container carrying a
- * `top` in CONTENT coordinates, so any one of them left at the old offset holds
- * scrollHeight above the built content and the clamp never happens. `rebuild`
- * now collapses all four as part of its wipe, before it calls this
- * (`render.ts` collapseContentSpaceOverlays), so the clamp it announces is real.
- * A caller that removes content without collapsing whatever else is anchored in
- * that space arms nothing and gets no announcement. See
- * `docs/tab-switch-repaint.md` §6.2.
- *
- * A native-scroll-anchoring adjustment (Chrome/Firefox lowering scrollTop as
- * rows are removed above the viewport) also moves the position and also arms
- * this; that is correct rather than incidental, since it is likewise the
- * library's own mutation moving the viewport and not the user.
- *
- * It answers a SECOND question at the same time, and the two are independent
- * (see the header): whether the offset is still out of range after the removal.
- * If it is, the container has not reconciled it and reconcileScrollRange owes a
- * write. A partial reconciliation arms both, which is why neither test returns
- * early on the other.
- *
- * @param scrollTopBefore  The container's offset read before the mutation.
- */
-export function noteContentShrink(scrollTopBefore: number): void {
-  if (!scrollEl) {
-    return;
+  /**
+   * Announce that the caller's own mutation just REMOVED content, so the clamp
+   * it produced is not classified as a gesture. Announced rather than inferred
+   * because scrollHeight and clientHeight are integer-rounded while scrollTop
+   * is fractional, so under zoom a clamp can read as a user scrolling up
+   * (docs/scroll-position-fidelity.md §1.3). Call it AFTER the mutation with the
+   * offset read BEFORE it, having collapsed the overlays anchored in that space.
+   */
+  function noteContentShrink(scrollTopBefore: number): void {
+    if (!scrollEl) {
+      return;
+    }
+    if (scrollEl.scrollTop < scrollTopBefore) {
+      shrinkArmed = true;
+    }
+    // A correctly reconciled offset can read a fraction past the end because
+    // scrollHeight and clientHeight are integer-rounded; do not correct that.
+    if (distanceFromBottom() < -CLAMP_EPSILON_PX) {
+      rangeCorrectionOwed = true;
+    }
   }
-  if (scrollEl.scrollTop < scrollTopBefore) {
-    shrinkArmed = true;
-  }
-  // The epsilon keeps its original job here too: scrollHeight and clientHeight
-  // are integer-rounded while scrollTop is fractional, so a correctly
-  // reconciled offset can read a fraction of a pixel past the end. Correcting
-  // that would write on every shrink pass for no visible gain.
-  if (distanceFromBottom() < -CLAMP_EPSILON_PX) {
-    rangeCorrectionOwed = true;
-  }
-}
 
-/**
- * Move the offset back inside the container's range when a caller's own row
- * removal left it past the end of the content. A no-op unless noteContentShrink
- * armed it in this pass, so it is safe to call after every removal.
- *
- * A RENDERER SEAM. It is public because the whole scroll namespace is
- * re-exported, not because a consumer has a reason to call it; an out-of-band
- * call finds nothing armed and does nothing.
- *
- * Call it in the same pass as noteContentShrink and BEFORE the position
- * invariants (the view restore, the read anchor, the bottom pin), so those
- * measure a geometry the container agrees with. Deliberately NOT folded into
- * either neighbour: `stickToBottom` is follow-gated by contract and a HOLDING
- * reader whose history was discarded is stranded over empty space just the same
- * (the read anchor stands down for a discard, so the pin cannot own this), and
- * `noteContentShrink` is named for a read and the flush tail's own ordering
- * comment depends on it not writing.
- *
- * The destination is the maximum offset, which for a reader who was HOLDING is
- * the tail with follow still off. That is this design's ratified degradation for
- * a reading position whose lines no longer exist (docs/scroll-position-fidelity.md
- * §3.4, §5), not a new decision.
- *
- * The write goes through writePreservingFollow, so the scroll event it produces
- * cannot re-derive the state: a following reader stays following, and a holding
- * reader stays holding at the bottom.
- *
- * One accepted overlap, recorded so it is not read as an oversight. On a
- * container that reports an offset past the maximum during an overscroll bounce,
- * a bounce that coincides with a row-removing pass (cap eviction under heavy
- * streaming) satisfies the gate, and this write then cuts the bounce short at
- * the offset it was settling towards anyway. Refusing the correction whenever
- * the offset was ALREADY out of range before the mutation would avoid that, at
- * the price of skipping the repair for the whole rest of the session whenever
- * the two coincide. A cut animation lasts one frame; a stranded viewport lasts
- * until the user scrolls. The bounce loses.
- */
-export function reconcileScrollRange(): void {
-  if (!scrollEl || !rangeCorrectionOwed) {
-    return;
+  /**
+   * Move the offset back inside the range when an announced row removal left
+   * it past the end: CSSOM View does not say when a UA must reconcile an
+   * established offset after the overflow shrinks, and WebKit can leave it there
+   * until a manual scroll (stackoverflow.com/q/79752870). Call it in the same
+   * pass as noteContentShrink and BEFORE the position invariants. Not folded
+   * into stickToBottom, which is follow-gated while a HOLDING reader is stranded.
+   */
+  function reconcileScrollRange(): void {
+    if (!scrollEl || !rangeCorrectionOwed) {
+      return;
+    }
+    rangeCorrectionOwed = false;
+    writePreservingFollow(bottomOffset());
   }
-  rangeCorrectionOwed = false;
-  writePreservingFollow(bottomOffset());
-}
 
-/**
- * Pin the viewport to the bottom iff the user is following. Called by the
- * renderer after each flush. A no-op when holding (scrolled up) or already at
- * the bottom, so it never fights the user and never scrolls redundantly.
- *
- * Only the positive branch of distanceFromBottom is this function's business: an
- * offset PAST the end of the content is a geometry error rather than a following
- * reader who fell behind, and reconcileScrollRange owns it (see the header).
- * Correcting it here instead would fight an overscroll bounce, which presents
- * the same arithmetic with nothing wrong.
- */
-export function stickToBottom(): void {
-  if (!scrollEl || !following) {
-    return;
+  /**
+   * Pin the viewport to the bottom iff following. Only the positive branch of
+   * distanceFromBottom is this function's business: an offset PAST the end is
+   * a geometry error owned by reconcileScrollRange, and correcting it here
+   * would fight an overscroll bounce, which presents the same arithmetic.
+   */
+  function stickToBottom(): void {
+    if (!scrollEl || !following) {
+      return;
+    }
+    if (distanceFromBottom() > 0) {
+      scrollEl.scrollTop = bottomOffset();
+    }
   }
-  if (distanceFromBottom() > 0) {
+
+  function scrollToBottom(): void {
+    if (!scrollEl) {
+      return;
+    }
     scrollEl.scrollTop = bottomOffset();
+    setFollowing(true);
   }
-}
 
-/**
- * Force scroll to the bottom and re-engage following. Used by the explicit
- * jump-to-bottom control.
- */
-export function scrollToBottom(): void {
-  if (!scrollEl) {
-    return;
+  function isUserScrolledUp(): boolean {
+    return !following;
   }
-  scrollEl.scrollTop = bottomOffset();
-  setFollowing(true);
-}
 
-/** Whether the user has scrolled away from the bottom (auto-follow disengaged). */
-export function isUserScrolledUp(): boolean {
-  return !following;
-}
-
-/**
- * The viewport's current scroll offset, for a consumer keeping per-view
- * scroll memory (a tabbed shell saving the position of the tab it is
- * leaving). Pairs with restoreScrollTop. This module owns the container's
- * scrollTop; consumers read it through this seam rather than the DOM element
- * so an engine-side change to the scroll geometry cannot silently break them.
- */
-export function currentScrollTop(): number {
-  return scrollEl ? scrollEl.scrollTop : 0;
-}
-
-/**
- * Shift the viewport by a content-height change that happened ABOVE the reading
- * position, so the user keeps looking at the same line. A no-op while following
- * (the bottom pin owns the position then) and when the delta is zero.
- *
- * This is scroll anchoring, done by hand. Chrome and Firefox do it natively
- * (`overflow-anchor`), and this module's design leaned on that: "if holding, do
- * nothing and let native scroll anchoring hold the reading position when history
- * is inserted above". WebKit has never shipped scroll anchoring, so on Safari
- * — including iPadOS, where this UI mostly lives — nothing compensated, and
- * every row evicted from the top of history while the user was scrolled up
- * reading slid their reading position one line further up. Over a streaming
- * agent session at the retention cap that reads as "the view scrolls itself
- * while I am trying to read".
- *
- * `following` is deliberately NOT changed: this is a library correction, not a
- * user gesture, so it must leave the reader holding exactly as they were. The
- * write goes through writePreservingFollow, which syncs the direction baseline
- * and lets the resulting scroll event pass through without re-deriving the
- * state. Deriving it instead would let a correction that happens to land the
- * reader at the bottom silently re-engage auto-follow.
- */
-export function adjustForContentShift(deltaPx: number): void {
-  if (!scrollEl || following || deltaPx === 0) {
-    return;
+  function currentScrollTop(): number {
+    return scrollEl ? scrollEl.scrollTop : 0;
   }
-  writePreservingFollow(scrollEl.scrollTop + deltaPx);
-}
 
-/**
- * Restore a saved view: both the scroll offset and the follow state, together
- * and explicitly. For a consumer keeping per-view scroll memory (a tabbed shell
- * re-entering a tab), this is the correct call. `restoreScrollTop` writes only
- * the position and lets the state re-derive, which cannot express a view that
- * was holding AT the bottom — a state that is reachable, because a content
- * shrink under a scrolled-up reader clamps them to the bottom without engaging
- * follow.
- *
- * A non-finite offset is ignored rather than assigned (the DOM would coerce NaN
- * to 0 and silently jump to the top of history); the follow state is still
- * applied, since the caller's intent for it is unambiguous.
- */
-export function restoreView(view: { top: number; following: boolean }): void {
-  if (!scrollEl) {
-    return;
+  /**
+   * Scroll anchoring by hand: WebKit has never shipped `overflow-anchor`, so on
+   * Safari every row evicted above a scrolled-up reader slid their position one
+   * line up. `following` is deliberately NOT changed; deriving it would let a
+   * correction that lands at the bottom silently re-engage auto-follow.
+   */
+  function adjustForContentShift(deltaPx: number): void {
+    if (!scrollEl || following || deltaPx === 0) {
+      return;
+    }
+    writePreservingFollow(scrollEl.scrollTop + deltaPx);
   }
-  if (Number.isFinite(view.top)) {
-    writePreservingFollow(view.top);
-  }
-  setFollowing(view.following);
-}
 
-/**
- * Restore a previously saved scroll offset (per-view scroll memory: a tabbed
- * shell re-entering a tab whose user had scrolled up to read). Position only:
- * the follow/hold state then re-derives from the resulting scroll event exactly
- * as it does for a user scroll, so a restored read position holds and a
- * restored at-bottom position re-engages following ONLY if the restore moved
- * downward to reach it. Prefer restoreView when the saved view carries a follow
- * state, which is the only way to express "holding at the bottom".
- *
- * @deprecated A pixel offset cannot identify a reading position: replayed into
- * a surface whose rows are still being built it is silently clamped, and
- * replayed into one whose content grew it points at a different line. Use
- * `render.captureViewMemory()` + `render.bind(store, { view })`, which restore
- * a LINE (see docs/scroll-position-fidelity.md §3). Kept for one release for
- * any external consumer holding pixel-space view memory; removed in the next
- * major.
- */
-export function restoreScrollTop(top: number): void {
-  if (!scrollEl) {
-    return;
+  /**
+   * Restore both the offset and the follow state explicitly: writing only the
+   * position cannot express a view holding AT the bottom, which a shrink under
+   * a scrolled-up reader produces. A non-finite offset is ignored (the DOM
+   * would coerce NaN to 0 and jump to the top); the follow state still applies.
+   */
+  function restoreView(view: { top: number; following: boolean }): void {
+    if (!scrollEl) {
+      return;
+    }
+    if (Number.isFinite(view.top)) {
+      writePreservingFollow(view.top);
+    }
+    setFollowing(view.following);
   }
-  scrollEl.scrollTop = top;
+
+  function dispose(): void {
+    if (scrollEl && scrollHandler) {
+      scrollEl.removeEventListener("scroll", scrollHandler);
+    }
+    scrollEl = null;
+    scrollHandler = null;
+    onFollowChange = null;
+    onPosition = null;
+    following = true;
+  }
+
+  try {
+    opts.scrollEl.addEventListener("scroll", onScroll, { passive: true });
+  } catch (err) {
+    dispose();
+    throw err;
+  }
+
+  return {
+    noteContentShrink,
+    reconcileScrollRange,
+    stickToBottom,
+    scrollToBottom,
+    isUserScrolledUp,
+    currentScrollTop,
+    adjustForContentShift,
+    restoreView,
+    dispose,
+  };
 }

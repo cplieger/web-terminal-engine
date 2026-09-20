@@ -110,7 +110,7 @@ export default defineConfig({
       concurrent: false,
       hooks: "stack",
     },
-    setupFiles: ["./src/fc-strict-setup.ts"],
+    setupFiles: ["./src/fc-strict-setup.ts", "./src/engine-fixture-setup.ts"],
     printConsoleTrace: true,
     expandSnapshotDiff: true,
     coverage: {

@@ -6,7 +6,7 @@
     ".": "./src/index.ts"
   },
   "publish": {
-    "include": ["LICENSE", "README.md", "src/**/*.ts", "wire-compatibility.json"],
+    "include": ["LICENSE", "NOTICE", "README.md", "src/**/*.ts", "wire-compatibility.json"],
     "exclude": ["src/**/*.test.ts", "src/**/*-setup.ts", "src/**/test-helpers/**"]
   }
 }

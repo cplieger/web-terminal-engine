@@ -73,6 +73,7 @@
     "!src/**/test-helpers/**",
     "jsr.json",
     "LICENSE",
+    "NOTICE",
     "wire-compatibility.json"
   ]
 }

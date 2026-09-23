@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
   "lastUpdate": 1790124008657,
-  "repoUrl": "https://github.com/cplieger/ci",
+  "repoUrl": "https://github.com/cplieger/web-terminal-engine",
   "entries": {
     "Benchmark": [
       {
@@ -335,10 +335,10 @@ window.BENCHMARK_DATA = {
             "username": "web-flow",
             "email": "noreply@github.com"
           },
-          "id": "f9577db6c2f2096d9cc325c89450a48686d66346",
-          "message": "chore(deps): update cplieger/ci digest to aa0a018 (#649)",
-          "timestamp": "2026-09-20T08:02:03Z",
-          "url": "https://github.com/cplieger/ci/commit/f9577db6c2f2096d9cc325c89450a48686d66346"
+          "id": "000e7d96ee2d920cbdb0a288098b739f57af388f",
+          "message": "chore(devdeps): update dependency fast-check to v4.10.2 (#605)",
+          "timestamp": "2026-09-22T20:11:21Z",
+          "url": "https://github.com/cplieger/web-terminal-engine/commit/000e7d96ee2d920cbdb0a288098b739f57af388f"
         },
         "date": 1790124008335,
         "tool": "customSmallerIsBetter",

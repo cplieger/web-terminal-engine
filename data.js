@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
   "lastUpdate": 1790732211413,
-  "repoUrl": "https://github.com/cplieger/ci",
+  "repoUrl": "https://github.com/cplieger/web-terminal-engine",
   "entries": {
     "Benchmark": [
       {
@@ -399,10 +399,10 @@ window.BENCHMARK_DATA = {
             "username": "web-flow",
             "email": "noreply@github.com"
           },
-          "id": "48d1c682390d6a54c634f3df4594be7c938087f9",
-          "message": "chore(deps): update cplieger/ci digest to 1cc06fd (#659)",
-          "timestamp": "2026-09-24T22:02:23Z",
-          "url": "https://github.com/cplieger/ci/commit/48d1c682390d6a54c634f3df4594be7c938087f9"
+          "id": "617bf1a3c8491d863f456cf276f86dac7aa4aece",
+          "message": "chore(devdeps): update vitest monorepo to v5.0.2 (#613)",
+          "timestamp": "2026-09-28T11:13:41Z",
+          "url": "https://github.com/cplieger/web-terminal-engine/commit/617bf1a3c8491d863f456cf276f86dac7aa4aece"
         },
         "date": 1790732210975,
         "tool": "customSmallerIsBetter",

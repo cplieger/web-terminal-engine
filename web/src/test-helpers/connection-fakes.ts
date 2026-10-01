@@ -4,7 +4,7 @@ import { createModeState } from "../modes.js";
 export type FakeRenderer = ConnectionOptions["renderer"];
 
 /** A renderer holding nothing: `getReplayBoundary` -1, `replayMaxForResume` 5000, no-ops otherwise. */
-export function fakeRenderer(overrides: Partial<FakeRenderer> = {}): FakeRenderer {
+function fakeRenderer(overrides: Partial<FakeRenderer> = {}): FakeRenderer {
   return {
     getReplayBoundary: () => -1,
     replayMaxForResume: () => 5000,

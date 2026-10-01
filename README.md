@@ -281,7 +281,7 @@ The web-terminal family builds on this engine:
 
 Apps built on the engine:
 
-- [`vibekit`](https://github.com/cplieger/vibekit)
+- [`marotte`](https://github.com/cplieger/marotte)
 - [`web-terminal-kiro`](https://github.com/cplieger/web-terminal-kiro)
 
 ## Contributing
@@ -298,3 +298,5 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 ## License
 
 MPL-2.0. See [LICENSE](LICENSE).
+
+Third-party attributions are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

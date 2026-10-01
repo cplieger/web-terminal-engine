@@ -105,8 +105,11 @@ export const kitty16: readonly number[] = [
   0xffffff, // 15 bright white
 ];
 
-/** hex formats a 0xRRGGBB value as the CSS "#rrggbb" hex notation. */
-export function hex(value: number): string {
+/** hex formats a 0xRRGGBB value as the CSS "#rrggbb" hex notation. Local to this
+ *  file: cssColor below is the only caller, and it is what the tiers compare
+ *  against — a rendered span reports the CSSOM serialization, never the hex the
+ *  renderer authored. */
+function hex(value: number): string {
   return "#" + (value >>> 0).toString(16).padStart(6, "0");
 }
 

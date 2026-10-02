@@ -14,7 +14,9 @@
 // identically in both modes; some legacy edge cases are pre-existing and out of
 // this feature's scope, so their `legacy` is omitted rather than asserted).
 
-export type Expect = { kind: "send"; bytes: string } | { kind: "ignore" };
+// Local to this file: KittyVector below is the exported surface, and every
+// producer of an Expect (`send`, `ignore`) lives here too.
+type Expect = { kind: "send"; bytes: string } | { kind: "ignore" };
 
 export interface KittyVector {
   /** What this asserts + the spec table/section it is derived from. */

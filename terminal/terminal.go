@@ -263,7 +263,7 @@ const (
 // override the retained-history depth (WithScrollbackCapacity).
 //
 // The engine owns the NAME so the apps that share this knob cannot drift apart
-// — web-terminal-server, web-terminal-kiro and vibekit all embed this handler,
+// — web-terminal-server, web-terminal-kiro and marotte all embed this handler,
 // and a knob spelled three ways is three knobs. The engine deliberately does NOT
 // read the variable itself: no library in this fleet reads os.Getenv, because a
 // library that reads process state takes configuration out of its caller's

@@ -5,13 +5,12 @@
 # web-terminal-engine is a LIBRARY that ships a `main` package
 # (internal/e2etestserver), so cplieger/ci's app-mode detection ("a main package
 # exists") gates it on punused -- but its exported surface is a PUBLISHED Go
-# proxy API (github.com/cplieger/web-terminal-engine/v6), consumed by
-# web-terminal-kiro and web-terminal-server on this major and by vibekit on the
-# earlier one. punused's own README states it "does not detect references from
-# outside of your project", and run.go asks gopls for `textDocument/references`
-# scoped to this module only, so EVERY symbol a consumer repo calls reads as
-# unused here. Triage therefore follows the library rules in tools.md, not the
-# app rules: nothing is deleted on punused's word.
+# proxy API (github.com/cplieger/web-terminal-engine/v6), consumed by marotte,
+# web-terminal-kiro and web-terminal-server. punused's own README states it "does
+# not detect references from outside of your project", and run.go asks gopls for
+# `textDocument/references` scoped to this module only, so EVERY symbol a
+# consumer repo calls reads as unused here. Triage therefore follows the library
+# rules in tools.md, not the app rules: nothing is deleted on punused's word.
 #
 # The EU1001 ("used in test only") vs EU1002 ("no reference found") split below
 # reflects only whether THIS repo's own tests happen to exercise the symbol --
@@ -26,14 +25,14 @@
 # web-terminal-server. The calls live in another MODULE, invisible to punused.
 #
 # NewSessionManager / WithManagerLogger / WithStatusClassifier: built at
-# web-terminal-kiro/routes.go:123-125 and web-terminal-server/main.go:234-239.
-# MountAPI + WithCreateGate: web-terminal-kiro/routes.go:166 mounts the session
-# REST API behind a create gate; web-terminal-server/main.go:335 does the same
+# web-terminal-kiro/routes.go and web-terminal-server/main.go.
+# MountAPI + WithCreateGate: web-terminal-kiro/routes.go mounts the session
+# REST API behind a create gate; web-terminal-server/main.go does the same
 # with webhttp.SessionCreateRateLimit.
-# WithIdleReaper: web-terminal-server/main.go:237 only (kiro runs no reaper).
+# WithIdleReaper: web-terminal-server/main.go only (kiro runs no reaper).
 # (*SessionManager).Shutdown: drains every session on SIGTERM through
-# webhttp.Run's shutdown hook -- web-terminal-kiro/main.go:475 and :489,
-# web-terminal-server/main.go:296 and :304.
+# webhttp.Run's shutdown hook -- web-terminal-kiro/main.go,
+# web-terminal-server/main.go.
 # (*SessionManager).Create: the id-only public form of session creation, kept as
 # published API. From v3.9.0 this repo's own REST handler calls the unexported
 # create() instead, because handleCreate echoes the full SessionInfo it stored
@@ -57,7 +56,7 @@ method (*SessionManager).WithdrawStatusLatch
 
 # --- Status vocabulary: published API, consumer web-terminal-kiro. These are the
 # string constants its injected status classifier RETURNS
-# (web-terminal-kiro/routes.go:660 and :663), so the app's tab-status dots are
+# (web-terminal-kiro/routes.go), so the app's tab-status dots are
 # named by the engine's vocabulary rather than by duplicated literals.
 constant StatusInput
 constant StatusDone
@@ -81,18 +80,18 @@ constant ActivityInput
 # --- Handler functional options: published API, all wired in a consumer's
 # session factory. punused sees only this repo's own option tests.
 #
-# WithWorkDir: vibekit/internal/hub/shell.go:47, web-terminal-kiro/routes.go:277,
-#   web-terminal-server/main.go:482.
+# WithWorkDir: marotte/internal/agent/shell.go, web-terminal-kiro/routes.go,
+#   web-terminal-server/main.go.
 # WithScrollbackCapacity: web-terminal-server/main.go and
 #   web-terminal-kiro/routes.go, both CONDITIONALLY -- neither app holds a depth
 #   of its own any more, so the option is appended only when the operator set
 #   SCROLLBACK and otherwise omitted so the engine's default applies.
-# WithKeepUnfocused: web-terminal-kiro/routes.go:279 -- load-bearing, it is what
+# WithKeepUnfocused: web-terminal-kiro/routes.go -- load-bearing, it is what
 #   keeps kiro-cli emitting the OSC 9 notifications the status dots latch on
-#   (pinned by web-terminal-kiro/session_keep_unfocused_test.go:41).
-# WithCommandLogValue: web-terminal-kiro/routes.go:281 ("[redacted]", CWE-532).
-# WithEnv: web-terminal-kiro/routes.go:289 (kiro-cli version dir first on PATH).
-# WithOnProcessExit: web-terminal-kiro/routes.go:313.
+#   (pinned by web-terminal-kiro/session_keep_unfocused_test.go).
+# WithCommandLogValue: web-terminal-kiro/routes.go ("[redacted]", CWE-532).
+# WithEnv: web-terminal-kiro/routes.go (kiro-cli version dir first on PATH).
+# WithOnProcessExit: web-terminal-kiro/routes.go.
 function WithWorkDir
 function WithScrollbackCapacity
 function WithKeepUnfocused
@@ -125,8 +124,8 @@ function NewContainment
 struct Containment
 
 # --- Wire-compatibility rule: published API, consumed by all three repos'
-# `scripts/wirecheck/main.go` (vibekit:56, web-terminal-kiro:55,
-# web-terminal-server:54) -- non-test code in each. The engine owns the
+# `scripts/wirecheck/main.go` (marotte, web-terminal-kiro, web-terminal-server)
+# -- non-test code in each. The engine owns the
 # compatibility VERDICT so the three clients cannot drift from it; each
 # wirecheck tool asks the engine rather than reimplementing the rule.
 function WirePairIncompatibility
@@ -177,7 +176,7 @@ function Run
 # PUBLISHED API WITH NO FLEET CONSUMER -- awaiting a user decision.
 #
 # Every symbol below is on the published v3 surface with zero references in
-# vibekit, web-terminal-kiro or web-terminal-server (verified by bare-identifier
+# marotte, web-terminal-kiro or web-terminal-server (verified by bare-identifier
 # grep across the fleet, plus `deadcode -test ./...` for the EU1002 four).
 # Removing any of them is a semver-MAJOR break for out-of-fleet importers on the
 # Go proxy, so none is deleted here. They are whitelisted with that reason and
@@ -291,7 +290,7 @@ function StartZombieReaper
 
 
 # --- Wire-compatibility manifest decoder: published API, consumers are the three
-# family release gates (web-terminal-kiro, web-terminal-server, vibekit), which
+# family release gates (web-terminal-kiro, web-terminal-server, marotte), which
 # live in other MODULES and are invisible to punused. The in-repo test that
 # exercises it is the manifest's Go conformance leg, not its only caller.
 #
@@ -337,7 +336,7 @@ function ClampScrollbackCapacity
 # regression rather than a fix.
 #
 # The consumer it is published for holds a bare Handler with no manager in front
-# of it: vibekit/internal/hub/shell.go's ShellManager, which owns one PTY for the
+# of it: marotte/internal/agent/shell.go's ShellManager, which owns one PTY for the
 # built-in shell. web-terminal-kiro and web-terminal-server reach the wait through
 # SessionManager.Shutdown instead.
 #

@@ -1,0 +1,23 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema.json",
+  // Two entry points nothing imports. `entry` EXTENDS knip's defaults rather
+  // than replacing them, so only the non-default ones belong here — and
+  // treatConfigHintsAsErrors below turns a row that stops being needed into a
+  // failure rather than a silent stale suppression.
+  "entry": [
+    // Perf harness run by hand (`node e2e/render-bench.mjs [runs]`), never by a
+    // test battery — see its own header.
+    "e2e/render-bench.mjs",
+    // Mutation-only vitest config, entered by Stryker rather than by an import.
+    "vitest.stryker.config.ts",
+  ],
+  // `go run ./internal/e2etestserver` — the typed-framing e2e test spawns the Go
+  // half of this repo as its server. Go is a toolchain the runner provides, not
+  // an npm dependency this package could declare.
+  "ignoreBinaries": ["go"],
+  "treatConfigHintsAsErrors": true,
+  // Import cycles fail the gate. `cycles` is knip's one warn-level issue type, so
+  // without this it prints and still exits 0 — and under ts-ci's continue-on-error
+  // plus marker-file trailer that reads as a green check with a warning nobody sees.
+  "rules": { "cycles": "error" },
+}

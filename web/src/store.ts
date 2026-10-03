@@ -1666,10 +1666,14 @@ export class LineStore {
     // is validated first, so a corrupt head still rejects the restore rather
     // than being silently sliced off.
     const kept = pairs.length > bound ? pairs.slice(pairs.length - bound) : pairs;
-    const oldest = kept[0]?.[0] ?? -1;
-    if (oldest < 0) {
-      return null;
+    // Non-empty, and its first index is a validated non-negative integer: the
+    // empty-payload return above leaves at least one pair, `bound` is at least
+    // 1, and every entry's index was checked on the way into `pairs`.
+    const first = kept[0];
+    if (first === undefined) {
+      throw new Error("restore: no line pairs left after validation");
     }
+    const oldest = first[0];
     for (const [abs, runs] of kept) {
       store.lines.set(abs, runs);
     }

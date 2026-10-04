@@ -447,7 +447,7 @@ func TestDispatchFrame_StaleFrameDropsStateKeepsDurable(t *testing.T) {
 
 	t.Run("a matching-generation frame carries its own captured ack", func(t *testing.T) {
 		// The complement of the strip: a frame whose generation MATCHES carries
-		// its own captured ack — the socket's fresh bytesReceived at snapshot
+		// its own captured ack — the ledger's fresh received count at snapshot
 		// time — NOT lastAckSent. Stamping lastAckSent here would freeze the
 		// client's ack for as long as frames keep flowing (NoteAcksSent records
 		// what was stamped, so the value never advances) and its outbox would

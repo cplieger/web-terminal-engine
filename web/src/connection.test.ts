@@ -953,6 +953,57 @@ describe("the unmanaged session token is cryptographically random", () => {
   });
 });
 
+describe("connection: an unmanaged connection's resume key", () => {
+  const KEY = "vterm-session-id:resume-key-test";
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    sessionStorage.removeItem(KEY);
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+  });
+
+  afterEach(() => {
+    sessionStorage.removeItem(KEY);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function openUnmanaged(): { conn: Connection; key: string | undefined } {
+    const c = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+        sessionIdKey: KEY,
+      }),
+    );
+    c.connect();
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    const resumes = controlFramesSent(sock).filter((m) => m.type === "resume");
+    expect(resumes).toHaveLength(1);
+    return { conn: c, key: resumes[0]!.sessionId };
+  }
+
+  it("suffixes the sessionStorage id with the page instance", () => {
+    const { conn: c, key } = openUnmanaged();
+    expect(key).toMatch(new RegExp(`^${c.currentSessionId()}#[0-9a-f-]{16,}$`));
+  });
+
+  it("gives two pages sharing one sessionStorage id distinct keys", () => {
+    // A duplicated tab copies sessionStorage, so both pages read the same id.
+    const first = openUnmanaged();
+    const second = openUnmanaged();
+    expect(second.conn.currentSessionId()).toBe(first.conn.currentSessionId());
+    expect(second.key).not.toBe(first.key);
+  });
+});
+
 describe("connection: a process-exited close (4001) is definitive, not transient", () => {
   // The server closes with the application code 4001 (statusProcessExited)
   // when the session's child process has ended. Reconnecting such a session

@@ -473,23 +473,17 @@ export function createConnection(opts: ConnectionOptions): Connection {
   let activeId: string | null = null;
   // managed = a consumer selected sessions through setSession, so the URL
   // carries ?session=<id>. Unmanaged keeps the bare wsPath and a sessionStorage
-  // id, which survives iOS tab-suspend and BFCache so a reload resumes rather
-  // than orphaning its outbox.
+  // id, which survives iOS tab-suspend, BFCache and reload.
   let managed = false;
 
-  // In managed mode the routing id is SHARED by every device attached to the
-  // session, but the server-side input ledger must be PER SENDER: with a shared
-  // key, device B's input advances the ledger and the ack reaches device A,
-  // whose applyAck trims bytes the server never received from A. So the resume
-  // frame carries `<serverSessionId>#<clientInstanceId>` while the URL keeps the
-  // routing id. Page-lifetime and NOT persisted: a reload is a fresh sender with
-  // an empty outbox. Lazy so a cryptoless environment throws on first CONNECT.
+  // Several live pages can share one routing id (every device on a managed
+  // session; a duplicated tab copies sessionStorage), but the server's input
+  // ledger is per sender, so the resume key carries this page-lifetime suffix.
+  // Never persisted: a reloaded page has an empty outbox and nothing to resume.
+  // Lazy so a cryptoless environment throws on first connect, not at init.
   let clientInstanceId: string | null = null;
 
   function resumeKey(st: ResumeState): string {
-    if (!managed) {
-      return st.id;
-    }
     clientInstanceId ??= generateSessionId();
     return `${st.id}#${clientInstanceId}`;
   }

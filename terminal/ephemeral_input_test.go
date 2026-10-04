@@ -46,14 +46,14 @@ func ephemeralFixture(t *testing.T) (h *Handler, state *clientState, drain func(
 	}
 }
 
-// bytesReceived is the session ledger the client's outbox reconciles against.
-func bytesReceived(t *testing.T, state *clientState) uint64 {
+// received is the session ledger the client's outbox reconciles against.
+func received(t *testing.T, state *clientState) uint64 {
 	t.Helper()
 	sess := state.session.Load()
 	if sess == nil {
 		t.Fatalf("client state has no session; the fixture must resolve one")
 	}
-	return sess.bytesReceived
+	return sess.received.Load()
 }
 
 // TestEphemeralInput_writesWithoutCounting is the ledger invariant, and it
@@ -66,14 +66,16 @@ func TestEphemeralInput_writesWithoutCounting(t *testing.T) {
 
 	h.ephemeralInputControl(state, &controlMsg{Type: ctlTypeEphemeralInput, Data: sgrPressReport})
 
-	if got := bytesReceived(t, state); got != 0 {
-		t.Errorf("bytesReceived after an ephemeral write = %d, want 0 (the payload must not enter the resume ledger)", got)
+	if got := received(t, state); got != 0 {
+		t.Errorf("received after an ephemeral write = %d, want 0 (the payload must not enter the resume ledger)", got)
 	}
 	// The counter is genuinely observable through this fixture, so the zero above
 	// is a fact about the write path and not about the assertion.
-	h.registry.IncrementReceived(state, 3)
-	if got := bytesReceived(t, state); got != 3 {
-		t.Errorf("bytesReceived after IncrementReceived(3) = %d, want 3", got)
+	if _, err := h.registry.ApplyInput(state, io.Discard, []byte("abc")); err != nil {
+		t.Fatalf("ApplyInput: %v", err)
+	}
+	if got := received(t, state); got != 3 {
+		t.Errorf("received after a 3-byte ApplyInput = %d, want 3", got)
 	}
 	if got := drain(); got != sgrPressReport {
 		t.Errorf("bytes written to the PTY = %q, want %q", got, sgrPressReport)
@@ -129,6 +131,17 @@ func TestEphemeralInput_refusals(t *testing.T) {
 		h.ephemeralInputControl(state, &controlMsg{Type: ctlTypeEphemeralInput, Data: sgrPressReport})
 		if got := drain(); got != "" {
 			t.Errorf("bytes written with an empty token bucket = %q, want none", got)
+		}
+	})
+
+	t.Run("a fenced socket writes nothing", func(t *testing.T) {
+		// Ephemeral input bypasses the ledger, and with it the owner check, so a
+		// socket a resume superseded must be refused here too.
+		h, state, drain := ephemeralFixture(t)
+		h.registry.ResolveSession(&clientState{}, "ephemeral-session")
+		h.ephemeralInputControl(state, &controlMsg{Type: ctlTypeEphemeralInput, Data: sgrPressReport})
+		if got := drain(); got != "" {
+			t.Errorf("bytes written by a fenced socket = %q, want none", got)
 		}
 	})
 

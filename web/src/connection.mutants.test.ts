@@ -1219,22 +1219,6 @@ describe("connection: an unmanaged connection's defaults", () => {
     );
   }
 
-  it("an unmanaged resume carries the bare per-tab id, not a per-sender composite", () => {
-    const c = unmanaged();
-    c.connect();
-    const sock = latest();
-    sock.fireOpen();
-
-    // The per-sender "<id>#<instance>" key exists because a MANAGED session id
-    // is shared by every device attached to it. An unmanaged id is already per
-    // tab, so composing it would key a second server-side ledger on every
-    // reload and lose the resume the sessionStorage id exists to provide.
-    const resume = controlsOfType(sock, "resume");
-    expect(resume).toHaveLength(1);
-    expect(resume[0]!["sessionId"]).toBe(c.currentSessionId());
-    expect(String(resume[0]!["sessionId"])).not.toContain("#");
-  });
-
   it("an unmanaged socket connects to the bare path with no session query", () => {
     unmanaged().connect();
 

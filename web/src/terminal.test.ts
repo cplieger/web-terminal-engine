@@ -411,8 +411,8 @@ describe("two engines on one page", () => {
     expect(resumeA["type"]).toBe("resume");
     expect(resumeB["type"]).toBe("resume");
     expect(resumeA["sessionId"]).not.toBe(resumeB["sessionId"]);
-    expect(sessionStorage.getItem("k1")).toBe(resumeA["sessionId"]);
-    expect(sessionStorage.getItem("k2")).toBe(resumeB["sessionId"]);
+    expect(String(resumeA["sessionId"]).split("#")[0]).toBe(sessionStorage.getItem("k1"));
+    expect(String(resumeB["sessionId"]).split("#")[0]).toBe(sessionStorage.getItem("k2"));
   });
 });
 

@@ -122,7 +122,7 @@ const HISTORY_MIN_PAGE = 125;
  * value the server will actually honor. The equality is load-bearing: the
  * replay-jump prediction computes `committed - sentReplayMax`, so a server
  * honoring something smaller would place the real replay start above the
- * prediction and leave a genuine jump undetected (docs/paged-scrollback.md §4.5).
+ * prediction and leave a genuine jump undetected.
  */
 export const MAX_REPLAY_LINES = 2000;
 
@@ -519,7 +519,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
   let probeSentAt = 0; // Date.now() the outstanding probe ping was sent; 0 = none
   let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
-  // --- demand-paged scrollback: per-socket fetch state (docs/paged-scrollback.md) ---
+  // --- demand-paged scrollback: per-socket fetch state ---
 
   let history: HistoryState = newHistoryState();
 
@@ -870,7 +870,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
   }
 
   // An anchor computed from the full page size while the length is shrunken
-  // serves a range that ends far from the reader (docs/paged-scrollback.md §4.2).
+  // serves a range that ends far from the reader.
   function historyBudget(): number {
     return isDisposed() ? 0 : history.effMax;
   }
@@ -1102,7 +1102,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
         // The server's reply is a function of the exact haveThrough and
         // replayMax sent, so the replay-jump prediction is computed from the
         // values remembered on the socket, never from store state a frame
-        // between send and ack could have moved (docs/paged-scrollback.md §4.5).
+        // between send and ack could have moved.
         resetForNewSocket();
         const sentHaveThrough = renderer.getReplayBoundary();
         // ALWAYS a number: the server clamps to the same ceiling
@@ -1286,7 +1286,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
         // all run BEFORE the ledger-lost returns below: a ledger loss is not a
         // capability event, and the long-absence attach that loses its ledger
         // is exactly the one that needs its focus asserted and carries a replay
-        // jump (docs/paged-scrollback.md §4.5).
+        // jump.
         caps = {
           ephemeralInput: msg.ephemeralInput === true,
           serverFocus: msg.serverFocus === true,
@@ -1364,8 +1364,8 @@ export function createConnection(opts: ConnectionOptions): Connection {
       if (typeof msg.inputAck === "number") {
         applyAck(st, msg.inputAck);
       }
-      // PRE-ACK CONTENT SUPPRESSION (docs/paged-scrollback.md §4.5): on a busy
-      // session a live frame can arrive before this socket's resumeAck, and its
+      // PRE-ACK CONTENT SUPPRESSION: on a busy session a live frame can arrive
+      // before this socket's resumeAck, and its
       // rows would mutate the store under a stale residency cap. Field-aware:
       // the inputAck was applied above, ED3 is a consumed one-shot the resume
       // batch hard-codes false and is forwarded as a rows-less clear, `bell`

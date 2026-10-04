@@ -199,7 +199,7 @@ function evictionBatch(maxLines: number): number {
 }
 
 /**
- * Demand-paged-scrollback residency constants (docs/paged-scrollback.md §3).
+ * Demand-paged-scrollback residency constants.
  *
  * The store holds a small RESIDENT TAIL plus a disposable BROWSE CACHE of
  * pages fetched on demand. The two budgets are enforced by separate mechanisms
@@ -357,7 +357,7 @@ export class LineStore {
   private altDirty = false;
   private resetPending = false;
 
-  // --- demand-paged scrollback (docs/paged-scrollback.md §5.1, §5.3) ---
+  // --- demand-paged scrollback ---
 
   /**
    * The RESIDENT TAIL cap, and the one deliberately mutable piece of residency
@@ -425,15 +425,10 @@ export class LineStore {
   private browseActivityMs = 0;
 
   /**
-   * Whether the last resumeAck declared paging. Kept because the RENDERER needs
-   * it and cannot derive it: §5.4's top-of-store marker says something different
-   * about the history above what is held depending on whether a fetch can bring
-   * it back.
-   *
-   * A BOOLEAN, false until an ack says otherwise, not a tri-state with a
-   * pre-ack "unknown". The pre-ack instant and a declared `unsupported` want the
-   * same answer — assert only what the client's own bookkeeping proves — so a
-   * third state would be a distinction nothing reads.
+   * Whether the last resumeAck declared paging; the renderer needs it for the
+   * top-of-store marker and cannot derive it. A boolean, false until an ack says
+   * otherwise: before the first ack and under `unsupported` the answer is the
+   * same, so a third state would be read by nothing.
    */
   private paging = false;
 
@@ -503,7 +498,7 @@ export class LineStore {
    *                  consumer-tunable through the renderer/UI plumb.
    */
   constructor(maxLines?: number) {
-    // Constructor-knob semantics (docs/paged-scrollback.md §5.3): an OMITTED
+    // Constructor-knob semantics: an OMITTED
     // cap means "engine's choice", so it holds the legacy value until paging is
     // declared and then flips to the small target. A SUPPLIED cap is an
     // explicit memory decision by the consumer and holds in EVERY capability
@@ -531,31 +526,12 @@ export class LineStore {
   }
 
   /**
-   * The lowest absolute index at or above which this store's content has NOT
-   * been confirmed as committed history by the server, or +Infinity when
-   * everything held is confirmed.
-   *
-   * The distinction this tracks is real and the map cannot express it. A row
-   * arriving in a SCREEN frame lands at `base + y`, which is a screen POSITION
-   * the application repaints in place, so the content held at that absolute
-   * index is what the app most recently drew there — provisional until the row
-   * scrolls off and the server commits it. A row arriving in a SCROLL or history
-   * frame is the opposite: the server has committed it, at that index, for good.
-   *
-   * One number rather than a per-row flag or a second key set. The rows above
-   * this floor are always a contiguous suffix of the store, because a screen
-   * frame's window is contiguous and lowers the floor to its base, while a
-   * durable frame that reaches the floor from below raises it past the range it
-   * delivered. `paged-scrollback.md` §5.3 records why a parallel structure over
-   * the same map is the shape to avoid: the one that was tried, a maintained
-   * companion count, was wrong at four mutation sites and reached -96.
-   *
-   * Movement is deliberately asymmetric. Lowering is unconditional, because a
-   * screen frame is proof its window is provisional. Raising happens only when a
-   * durable frame reaches the floor from at or below it, so a chunk landing
-   * above a still-unconfirmed gap leaves the floor where it is. That direction
-   * is the safe one to be wrong in: too low costs a few replayed rows, too high
-   * is the defect this exists to prevent.
+   * Lowest index the server has not confirmed as committed (+Infinity when all
+   * is). A SCREEN-frame row is a repaintable position, provisional until it
+   * scrolls off; a SCROLL or history row is committed. Those rows form a
+   * contiguous suffix, so one number suffices. It lowers on any screen frame and
+   * rises only when a durable frame reaches it from below: too low replays a few
+   * rows, too high is the defect this prevents.
    */
   private unconfirmedFrom = Number.POSITIVE_INFINITY;
 
@@ -661,27 +637,12 @@ export class LineStore {
    * changed window row at its absolute index (base + y).
    */
   applyScreen(msg: ScreenMessage): void {
-    // ED3 FIRST, BEFORE the screen-mode dispatch. The signal is a property of the
-    // SESSION, not of the buffer the frame happens to describe. The server raises
-    // a pending flag in the PTY path and attaches it to whatever frame it builds
-    // next, with NO alt gate — and it force-appends a row so the flag can never be
-    // dropped, which on an alt tick forces an ALT payload carrying it.
-    //
-    // Handling it inside the main-screen branch made every alt-active ED3 a total
-    // no-op: not one of §5.5's three effects ran. `clear; vim foo` typed as one
-    // line is enough (clear's terminfo emits CSI 3 J, vim's smcup follows in the
-    // same PTY burst, both inside one flush interval), as is `reset` inside any
-    // full-screen app. The erased transcript stayed resident and — because the
-    // server's ring Clear() preserves `committed`, so post-ED3 lines keep
-    // numbering from where the erased ones stopped — it spliced CONTIGUOUSLY into
-    // later output with no index gap, no gap marker and no trim marker. The
-    // in-flight window also stayed open, so a reply already on the wire put the
-    // erased rows back through the one path exempt from guard 2.
-    //
-    // `msg.base` is the correct bound on either buffer: in alt it is
-    // `committedBefore` (alt accrues no history, so the base stays frozen), which
-    // is one past the newest committed line, so "below base" is the whole
-    // scrollback either way.
+    // ED3 FIRST, before the screen-mode dispatch: the server attaches the flag
+    // to whatever frame it builds next, alt included, so handling it only on
+    // the main path made an alt-active ED3 (`clear; vim foo`, `reset` in a
+    // full-screen app) a no-op whose erased transcript spliced contiguously into
+    // later output. `msg.base` bounds either buffer: in alt it is frozen at
+    // `committedBefore`, one past the newest committed line.
     if (msg.scrollbackCleared) {
       this.applyScrollbackCleared(msg.base);
     }
@@ -867,9 +828,9 @@ export class LineStore {
     }
   }
 
-  // --- demand-paged scrollback: public surface (docs/paged-scrollback.md) ---
+  // --- demand-paged scrollback: public surface ---
 
-  /** Whether the last resumeAck declared demand paging (§5.4's `supported`). */
+  /** Whether the last resumeAck declared demand paging. */
   pagingDeclared(): boolean {
     return this.paging;
   }
@@ -879,7 +840,7 @@ export class LineStore {
     return this.serverOldest;
   }
 
-  /** The lowest index still worth requesting (§4.5). */
+  /** The lowest index still worth requesting. */
   pagingFloorIndex(): number {
     return this.pagingFloor;
   }
@@ -957,7 +918,7 @@ export class LineStore {
     }
     // `gapHigh > pagingFloor`, deliberately NOT gapLow: after a ring exhaustion
     // followed by a later tail trim, the frontier's low edge EQUALS the floor,
-    // and that reopened frontier must stay fetchable (§5.4).
+    // and that reopened frontier must stay fetchable.
     const live = candidates.filter((g) => g.hi > this.pagingFloor && g.hi > g.lo);
     const near = live.filter((g) => abs >= g.lo - threshold && abs <= g.hi + threshold);
     near.sort((a, b) => Math.abs(abs - a.hi) - Math.abs(abs - b.hi));
@@ -990,7 +951,7 @@ export class LineStore {
     // A correlated frame wider than the current slot — a timed-out larger reply
     // racing a shrunken retry — has its out-of-window lines routed through the
     // ordinary guards instead, where they are typically refused below the
-    // watermark (§5.1). Without the clip, a stale oversized reply would apply
+    // watermark. Without the clip, a stale oversized reply would apply
     // content the client did not ask for on this attempt.
     const s = this.solicitedPending;
     if (s === null) {
@@ -1030,7 +991,7 @@ export class LineStore {
     }
     if (applied.length === 0) {
       // An empty or fully-refused reply changes no classification. The caller
-      // still owns the floor raise for an empty reply (§4.3).
+      // still owns the floor raise for an empty reply.
       this.enforceCap();
       return;
     }
@@ -1101,19 +1062,12 @@ export class LineStore {
    * safe too.
    */
   private enforceBrowseBudget(target: number, viewportAbs: number): void {
-    // §5.3's viewport exemption, and it is REACHABLE — an earlier comment here
-    // claimed arithmetic made it dead, which was measurably wrong.
-    //
-    // The shape that reaches it: the resume-ack pass uses the small
-    // PREFETCH_THRESHOLD target, and the band is 2 * PREFETCH_THRESHOLD + 1 wide,
-    // so a cache SPANNING the reader but smaller than the band is entirely
-    // exempt while still exceeding the target. Two retained runs either side of
-    // the reader's position do it: 400 rows at [0,400), 400 at [600,1000), the
-    // reader in the hole at 500, and a jump ack classifies all 800 against a
-    // target of 500. Nothing is evictable, the pass stops, and the store keeps
-    // 800 — the bounded overshoot the design prefers to blanking the rows under
-    // the reader. Under BROWSE_CACHE_CAP the same arithmetic never bites, which
-    // is what the dead-code claim was really about.
+    // The viewport exemption is reachable: the resume-ack pass targets
+    // PREFETCH_THRESHOLD while the band is 2 * PREFETCH_THRESHOLD + 1 wide, so
+    // runs either side of a reader in a hole (400 at [0,400), 400 at
+    // [600,1000), reader at 500) are all exempt yet over a 500 target. The pass
+    // then stops and keeps them, the bounded overshoot preferred to blanking
+    // rows under the reader.
     const exemptLo = viewportAbs - PREFETCH_THRESHOLD;
     const exemptHi = viewportAbs + PREFETCH_THRESHOLD + 1;
     const exempt = (abs: number) => abs >= exemptLo && abs < exemptHi;
@@ -1152,18 +1106,11 @@ export class LineStore {
   }
 
   /**
-   * The resume-ack transition: ONE store operation carrying every decision the
-   * ack implies, in a fixed order (docs/paged-scrollback.md §4.5).
-   *
-   * It is one call rather than four because the order is load-bearing and the
-   * inputs live in three different layers — the connection decodes the ack, the
-   * store owns residency, the renderer owns the viewport. Split across
-   * callbacks, an implementer can interleave them; here they cannot.
-   *
-   * `committed`/`serverOldest` are NULLABLE AS A PAIR: a server too old to
-   * carry the ack's length-gated bounds tail sends neither, and inventing zeros
-   * would lower the floor and forge a jump. Such an ack still runs the epoch
-   * reset and the capability read, and skips the two steps that have no inputs.
+   * The resume-ack transition as ONE store operation, because the order of its
+   * steps is load-bearing and its inputs span three layers (connection, store,
+   * renderer). `committed`/`serverOldest` are NULLABLE AS A PAIR: an older
+   * server sends neither, and inventing zeros would lower the floor and forge a
+   * jump, so such an ack runs only the epoch reset and the capability read.
    */
   applyResumeAck(ack: {
     /** The boot epoch changed: everything retained is from another server. */
@@ -1246,24 +1193,12 @@ export class LineStore {
     // as a key set there is nothing to compare — the containment test below
     // reads the set itself and has one answer regardless of which step grew it.
     if (reclassified) {
-      // CONTAINMENT: a FOLLOWING viewport is outside every reclassified band by
-      // definition — it is looking at the live tail, not at cache — so the
-      // disposable band drains to the small target. A reader in HISTORY keeps the
-      // full cache instead, and the TTL cleans up later.
-      //
-      // Following is the WHOLE question, and the store asked a second one twice,
-      // in two different structures. It tested whether the row UNDER the reader
-      // was cache — a proxy that fails in exactly the shape
-      // paging exists for: a reader whose position is an index the store does not
-      // currently hold. Both doors to that shape are ordinary — a hole inside the
-      // cache, and an ARMED RESTORE anchor (§7.2/§7.3 of
-      // scroll-position-fidelity.md — the renderer deliberately passes the position
-      // the reader is REGAINING, whose row may since have been dropped). Either
-      // way the reader is unambiguously reading history and the proxy answered
-      // "no", draining their depth to the small target: measured 801 rows kept
-      // instead of 2420. The range version got that case right by accident (a hull
-      // spans holes) and the key version got it wrong by accident; asking only
-      // what the design means removes both.
+      // CONTAINMENT: a FOLLOWING viewport is looking at the live tail, so the
+      // disposable band drains to the small target; a reader in HISTORY keeps
+      // the full cache and the TTL cleans up. Ask only `following`: whether the
+      // row under the reader is cache fails for a hole in the cache and for an
+      // armed restore anchor whose row was dropped, and drained such a reader
+      // to 801 rows instead of 2420.
       this.enforceBrowseBudget(
         ack.following ? PREFETCH_THRESHOLD : BROWSE_CACHE_CAP,
         ack.viewportAbs,
@@ -1274,13 +1209,10 @@ export class LineStore {
 
   /**
    * The cap flip: set the effective tail cap to the supported target and
-   * reclassify the excess tail as browse cache. Returns whether anything moved.
-   *
+   * reclassify the excess tail as browse cache; returns whether anything moved.
    * The band keeps the newest `max(supportedTarget, windowHeight)` tail lines
-   * and NEVER crosses `win.base` — a LIVE window row is never reclassified,
-   * because the browse budget may evict it and the window must not be
-   * evictable. (§5.2's replay-jump band deliberately DOES include the old
-   * window rows, but only because it retires the descriptor first.)
+   * and never crosses `win.base`, because browse cache is evictable and a live
+   * window row must not be.
    */
   private confirmPaging(): boolean {
     this.effectiveTailCap = this.supportedTarget;
@@ -1303,45 +1235,12 @@ export class LineStore {
   }
 
   /**
-   * Predict where the incoming replay will START, and if it lands above what
-   * this socket told the server it had, reclassify the stranded band as browse
-   * cache before any frame of the batch applies.
-   *
-   * Two causes produce the same shape and both are covered: the new bounded
-   * replay's clamp, and the plain eviction gap EVERY server produces when its
-   * ring has moved past the client's `haveThrough`. Scoping detection to the
-   * clamp alone would miss the shape that already ships.
-   *
-   * The band deliberately includes the OLD window rows and RETIRES the window
-   * descriptor, because the batch's own window frame re-establishes it at the
-   * new base — those rows stop being window rows the moment it lands.
-   *
-   * The band top is `sentHaveThrough` and deliberately does NOT follow the wire
-   * value down now that `replayBoundary()` supplies it. The two questions are
-   * different: the wire value asks "what will I not ask for", the band asks "what
-   * did I claim to hold before the server answered". Rows above the sent value
-   * arrived from the server as committed content, so they are real history and
-   * must not be reclassified as disposable cache; rows this store holds only
-   * provisionally sit at or above the boundary and are covered by the replay,
-   * which now starts at `boundary + 1` precisely because of it.
-   *
-   * One residual, deliberately not addressed here. When the replay start is
-   * CLAMPED above the boundary (`committed - replayMax`, reachable when a
-   * background tab printed more than roughly `tailCap` lines), the provisional
-   * rows are neither replayed nor banded, so they stay tail-classified and lose
-   * the browse budget's TTL sweep. Widening the band to cover them would change a
-   * pinned invariant that two existing cases assert, so it is recorded in
-   * docs/resume-watermark.md rather than changed in passing.
-   *
-   * The retirement leaves the same transition's later steps reading a window of
-   * height 0, so state precisely what that costs rather than forbidding it: the
-   * only window-derived bound they touch is `enforceCap`'s, which loses the live
-   * screen's eviction protection for that one pass. It is harmless HERE and not
-   * by luck — after the jump the tail holds only the keys above
-   * `sentHaveThrough`, so `tailCount` is far below the bound and the pass returns
-   * at its first gate; and were it to run, the walk is oldest-first while the
-   * screen rows are the newest. A future step that evaluates a window bound with
-   * consequences must re-establish the descriptor first.
+   * Predict where the replay will START and, if above the sent `haveThrough`
+   * (a replay clamp or a plain eviction gap), reclassify the stranded band as
+   * browse cache before the batch applies. The band's top is `sentHaveThrough`
+   * (rows above it are committed history). It retires the window descriptor, so
+   * a later step in this transition that relies on a window bound must restore
+   * it first.
    */
   private predictReplayJump(
     committed: number,
@@ -1488,25 +1387,18 @@ export class LineStore {
     this.resetPending = true;
     // CONTENT-derived paging state goes with the content: a new boot epoch shares
     // no absolute indices with the old one, so the cache, the in-flight window and
-    // the floor are all meaningless at once (docs/paged-scrollback.md §5.5).
+    // the floor are all meaningless at once.
     this.browse.clear();
     this.solicitedPending = null;
     this.pagingFloor = 0;
     this.browseActivityMs = 0;
     // CAPABILITY is deliberately NOT reset here. It describes the SERVER on the
     // other end of the socket, not the content, and only a resumeAck can restate
-    // it — so a reset that cleared it left the store waiting for an event that
-    // may never come. That was safe for the documented caller (applyResumeAck's
-    // epoch step, whose very next step re-reads the ack), and wrong for the two
-    // public ones that predate paging: `render.resetScreen()` and
-    // `render.resetScrollback()`, which a consumer is explicitly invited to call
-    // on alt-screen entry, nowhere near a resume. Until the next reconnect that
-    // left `pagingDeclared()` false while the transport was still perfectly able
-    // to page, so §5.4's top marker asserted "earlier output trimmed" about
-    // history the trigger was about to fetch, and the tail cap reverted to the
-    // compatibility value — discarding the residency reduction that is the whole
-    // point of the feature on the device it exists for. `applyResumeAck` now
-    // states the capability explicitly instead of relying on a reset to clear it.
+    // it. `render.resetScreen()` and `render.resetScrollback()` reach this on
+    // alt-screen entry, nowhere near a resume; clearing it there would leave
+    // `pagingDeclared()` false until the next reconnect, so the top marker would
+    // claim "earlier output trimmed" about fetchable history and the tail cap
+    // would revert to the compatibility value.
   }
 
   /**
@@ -1533,17 +1425,11 @@ export class LineStore {
       return null;
     }
     const cap = Number.isInteger(maxLines) && maxLines > 0 ? maxLines : this.effectiveTailCap;
-    // Persist the LIVE TAIL only, excluding browse cache BY CLASSIFICATION
-    // rather than by contiguity (docs/paged-scrollback.md §5.2). Walk down from
-    // `highest` and stop at the first index that is absent OR a browse member:
-    // a fetched page can sit FLUSH against the tail with no numeric gap, so a
-    // contiguity test alone would serialize it. Excluding it is deliberate —
-    // the cache is disposable by construction (recovery is one page fetch), and
-    // persisting it would spend storage writes on data the design defines as
-    // throwaway and hydrate interior holes into a fresh store.
-    //
-    // The result is that a hydrated store is always ONE contiguous tail, which
-    // is what keeps its derived `everEvictedThrough = oldest - 1` honest.
+    // Persist the LIVE TAIL only: walk down from `highest` and stop at the first
+    // absent index OR browse member, since a fetched page can sit flush against
+    // the tail with no numeric gap. Cache is disposable (one page fetch), and a
+    // hydrated store must be ONE contiguous tail to keep its derived
+    // `everEvictedThrough = oldest - 1` honest.
     const tail: number[] = [];
     for (let abs = this.highest; abs >= 0 && tail.length < cap; abs--) {
       if (!this.lines.has(abs) || this.browse.has(abs)) {
@@ -1732,22 +1618,12 @@ export class LineStore {
     if (!Number.isInteger(abs) || abs < 0) {
       return;
     }
-    // Guard 2: not below what we have permanently evicted (stale re-send) —
-    // EXCEPT inside the current live window, and EXCEPT inside the window of a
-    // request we currently have in flight. The window is the terminal's
-    // writable region and is never stale: under the real protocol its base
-    // only advances, so a window index at or below everEvictedThrough is
-    // unreachable — but a malformed or hostile frame whose base RETREATS
-    // must degrade to a drawn screen, not to window rows silently dropped
-    // forever (the property test drives exactly that shape). Same doctrine
-    // as enforceCap's "the live window is never evictable".
-    //
-    // The SOLICITED exception is what makes demand paging possible at all:
-    // a page is by definition a re-fetch of history below the watermark, so
-    // the watermark alone cannot decide staleness any more. What keeps it
-    // safe is that the exception is scoped to one in-flight request window —
-    // an UNSOLICITED line below the watermark is still refused, exactly as
-    // before (docs/paged-scrollback.md §5.1).
+    // Guard 2: refuse an index at or below the permanent-eviction watermark (a
+    // stale re-send), EXCEPT inside the live window (a hostile frame whose base
+    // retreats must still draw, as enforceCap never evicts the window) and
+    // EXCEPT inside the in-flight request window: a page is by definition a
+    // re-fetch below the watermark, and an UNSOLICITED line there is still
+    // refused.
     if (abs <= this.everEvictedThrough && !this.inWindow(abs) && !this.isSolicited(abs)) {
       return;
     }
@@ -1794,28 +1670,12 @@ export class LineStore {
     return s !== null && abs >= s.lo && abs < s.hi;
   }
 
-  // applyScrollbackCleared handles ED3 (erase scrollback) in full: the app told
-  // the terminal to discard its saved lines, and an inline TUI (kiro-cli) does it
-  // on every resize redraw. Window rows (>= base) are kept and refreshed by the
-  // frame carrying the signal. everEvictedThrough is left untouched: the app
-  // discarded the lines deliberately (not a cap trim), so no "earlier output
-  // trimmed" marker fits.
-  //
-  // Dropping the lines is only ONE of the three effects §5.5 requires, and the
-  // other two are what stop the erased history coming back:
-  //
-  //  - The in-flight request window is CANCELLED. It is the store's standing
-  //    permission to admit lines below its stale-re-send watermark, so a reply
-  //    already in flight when the app erased its scrollback would otherwise
-  //    re-apply the very rows the app just discarded — through the one path that
-  //    is exempt from the staleness guard.
-  //  - The paging FLOOR snaps to the cleared bound: nothing at or below it is
-  //    worth requesting any more. Without it the trigger re-fetches the erased
-  //    range from a server that still holds it, and the user watches erased
-  //    output scroll back into view.
-  //
-  // Both run even when this client holds no line below `base`: an in-flight
-  // request and a stale floor are not conditional on local residency.
+  // applyScrollbackCleared handles ED3 (which an inline TUI such as kiro-cli
+  // emits on every resize): drop lines below `base`, leave everEvictedThrough
+  // alone (a deliberate erase is not a trim), CANCEL the in-flight request
+  // (its reply would re-admit the erased rows through the guard-2 exemption),
+  // and snap the paging floor to `base` (or the trigger re-fetches them). The
+  // last two run even when no line below `base` is held.
   private applyScrollbackCleared(base: number): void {
     this.solicitedPending = null;
     this.raisePagingFloor(base);
@@ -1895,7 +1755,7 @@ export class LineStore {
   }
 
   private enforceCap(): void {
-    // AMENDMENT 1 (docs/paged-scrollback.md §5.3): the gate and the victim
+    // The gate and the victim
     // target read `tailCount`, not `lines.size`. Browse cache lives under its
     // OWN budget, enforced at page-apply time, so live output must not be able
     // to evict a page the reader is browsing — at the default batch that would

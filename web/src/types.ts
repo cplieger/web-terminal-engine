@@ -260,11 +260,9 @@ export type ControlMessage =
       haveThrough: number;
       protocolVersion: number;
       /**
-       * Bound the replay to the newest N missing lines. Optional: omitted means
-       * "no bound", which is every pre-paging client's behavior and what an
-       * old server does regardless. Honored only by a server that declares
-       * paging, and clamped by BOTH sides to the same constant so the value
-       * sent equals the value honored (docs/paged-scrollback.md §4.5).
+       * Ask for a replay smaller than the server's own bound. Clamped by BOTH
+       * sides to the same constant (MAX_REPLAY_LINES) so the value sent
+       * equals the value honored.
        */
       replayMax?: number;
     }

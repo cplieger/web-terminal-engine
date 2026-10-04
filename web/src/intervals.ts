@@ -1,27 +1,9 @@
 /**
- * Gap geometry over the store's retained absolute indices.
- *
- * The store's held lines form an INTERVAL SET (docs/paged-scrollback.md §5.2):
- * a live tail plus zero or more browse-cache runs below it, with gaps between
- * them. This module answers only where the GAPS are, and it derives them from
- * the retained KEY SET.
- *
- * It must read the key set, not the cache's membership: a hole can exist inside
- * the live tail — an `unsupported` eviction-gap resume legally leaves two
- * disjoint tail runs — and geometry drawn from cache membership alone would
- * join adjacent rows across such a hole with no marker, silently splicing
- * unrelated regions of output.
- *
- * BROWSE MEMBERSHIP is deliberately not modelled here. The store keeps it as a
- * plain `Set` of keys, because every question it is asked (is the reader on
- * cache, how many rows, which to evict) is a per-key question, and answering
- * those from ranges meant walking numeric spans the store need not even hold —
- * the replay-jump band spans every index a reconnecting client is missing.
- * Classification also cannot be DERIVED from geometry: a fetched page can sit
- * flush against the tail with no numeric gap at all.
- *
- * Every interval is half-open: `[lo, hi)` holds `hi - lo` indices and `hi` is
- * one past the last. Sets are SORTED and DISJOINT with no touching pair.
+ * Gap geometry over the store's retained absolute indices (a live tail plus
+ * browse-cache runs), derived from the retained KEY SET rather than cache
+ * membership: an `unsupported` eviction-gap resume can leave a hole inside the
+ * tail that membership would silently splice across. Intervals are half-open
+ * `[lo, hi)`; sets are sorted and disjoint with no touching pair.
  */
 
 /** A half-open range of absolute line indices: `[lo, hi)`. */

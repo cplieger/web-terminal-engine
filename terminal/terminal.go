@@ -144,10 +144,9 @@ const (
 	// replayChunk. Any value well under 65535 works; 1000 keeps each frame small.
 	maxScrollLinesPerFrame = 1000
 
-	// The demand-paged-scrollback constants (docs/paged-scrollback.md). The
-	// client holds a small resident tail and fetches older history on demand
-	// through the `history` control; these bound what one request costs the
-	// server and what the pairing is allowed to promise.
+	// Demand-paged scrollback: the client holds a small resident tail and
+	// fetches older history on demand through the `history` control; these
+	// bound what one request costs the server and what the pairing may promise.
 	//
 	// historyPageSize is the largest number of lines one page reply may carry.
 	// It matches maxScrollLinesPerFrame so a page is exactly one standard
@@ -178,7 +177,7 @@ const (
 	// write context) even for a consumer that configured a much larger client
 	// cap. The client clamps to the same constant before sending, so the SENT
 	// value equals the HONORED value — an identity the client's replay-jump
-	// prediction depends on (§4.5).
+	// prediction depends on.
 	maxReplayLines = 2000
 	// historyBurst/historyRefill are the per-socket history token bucket: the
 	// server-side floor against accidental bursts and unfair socket churn. The
@@ -220,11 +219,11 @@ const (
 	// mode; the message itself is otherwise a no-op.
 	ctlTypeUpgrade = "upgrade"
 	ctlTypePing    = "ping"
-	// ctlTypeHistory requests a page of retained scrollback by absolute index
-	// (demand-paged scrollback, docs/paged-scrollback.md §4.1). Adding a control
-	// type is back-compatible in both directions: an older server logs it as
-	// unrecognized and returns, which is exactly the "not supported" answer a
-	// newer client infers from the resumeAck's missing capability bit.
+	// ctlTypeHistory requests a page of retained scrollback by absolute index.
+	// Adding a control type is back-compatible in both directions: an older
+	// server logs it as unrecognized and returns, which is exactly the "not
+	// supported" answer a newer client infers from the resumeAck's missing
+	// capability bit.
 	ctlTypeHistory = "history"
 	// ctlTypeFocus reports whether the client's terminal widget is focused. Like
 	// `resize` it is a property of the attached viewer folded into session state;
@@ -610,16 +609,8 @@ func (st *clientState) takeResumeToken() bool {
 // reporting false when it is empty. Same read-loop-owned, lock-free shape as
 // takeResumeToken (controls are serialized per socket) and the same
 // starts-full convention: historyLast's zero value dates the last refill to
-// the epoch, so the first call tops it up to the burst.
-//
-// Scope, stated precisely (docs/paged-scrollback.md §4.4): this is per-socket
-// FAIRNESS and accidental-burst suppression, not an aggregate abuse bound. The
-// registry admits several sockets per session with no admission cap, so N
-// sockets hold N buckets and reconnect churn renews credits — the same shape
-// the shipped resume throttle has, against the same authenticated audience.
-// The client paces itself more slowly than this floor refills (one token per
-// 2s against 1.5s here), so the slack absorbs clock and latency jitter and a
-// healthy client stays under the floor with margin rather than by coincidence.
+// the epoch, so the first call tops it up to the burst. historyBurst owns the
+// bucket's scope and sizing.
 func (st *clientState) takeHistoryToken() bool {
 	now := time.Now()
 	if !st.historyLast.IsZero() {
@@ -1316,34 +1307,14 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	return nil
 }
 
-// childEnv assembles the environment for a session's process.
-//
-// Advertise a capable, well-known terminal identity so apps enable their full
-// feature set. TERM/COLORTERM unlock 256-color + truecolor. TERM_PROGRAM
-// iTerm.app (>= 3.6.6) is the single identity that unlocks OSC 9;4 progress for
-// BOTH kiro-cli (allowlists iTerm.app/WezTerm/Windows Terminal) and Claude Code
-// (iTerm.app >= 3.6.6), plus DEC 2026 synchronized output — all of which this
-// engine implements. Capabilities it does NOT implement (inline images, the kitty
-// IMAGE protocol, and the kitty keyboard flags beyond the implemented
-// disambiguate subset — see vt/kitty.go and the README keyboard section) are
-// consumed silently and never mis-rendered, so over-claiming degrades gracefully
-// rather than corrupting the screen.
-//
-// h.cfg.env is appended last so a consumer's WithEnv can override any of these
-// (last value wins).
-//
-// The reap marker is PREPENDED, ahead of even os.Environ(), so it sits at the
-// front of /proc/<pid>/environ and the reap scan can read a bounded prefix per
-// pid instead of a whole ARG_MAX environment (see reap.go).
-//
-// BOTH env sources are stripped of that key first, not just the consumer's.
-// os/exec keeps the LAST value for a repeated key, so any later assignment
-// displaces the engine's freshly minted marker, and the session's tree then
-// carries a marker the engine never minted: the scan matches nothing and reaping
-// is silently off. The INHERITED environment is the likelier carrier of the two
-// and the one the engine controls least — a server started from inside one of
-// these very sessions inherits that session's live marker, so every session it
-// spawns would inherit it too and the whole process would reap nothing.
+// childEnv assembles a session's environment. TERM/COLORTERM unlock 256-color
+// and truecolor; TERM_PROGRAM=iTerm.app (>= 3.6.6) is the one identity that
+// unlocks OSC 9;4 progress in both kiro-cli and Claude Code plus DEC 2026
+// synchronized output. h.cfg.env is appended last so WithEnv wins. The reap
+// marker goes FIRST so the reap scan reads a bounded environ prefix, and both
+// sources are stripped of it: os/exec keeps the last value of a repeated key,
+// and an inherited marker (a server started inside a session) would silently
+// disable reaping.
 func (h *Handler) childEnv(reap *sessionReap) []string {
 	inherited := stripReapMarker(os.Environ())
 	consumer := stripReapMarker(h.cfg.env)
@@ -1924,20 +1895,16 @@ type controlMsg struct {
 	// An ESC is \u001b, so every escape sequence this channel exists for is
 	// expressible.
 	Data string `json:"data,omitempty"`
-	// ReplayMax bounds the resume replay to the newest N missing lines, so an
-	// attach costs at most the client's own residency however deep the ring is.
-	// Decoded as RawMessage and parsed FIELD-LOCALLY (parseReplayMax) because
-	// this handler drops any control whose unmarshal returns an error: a
-	// malformed value on an ADVISORY field must read as absent, never cost the
-	// client its whole resume. Absent means full replay — today's behavior for
-	// every client older than this field. Honored only when the server declares
-	// paging, so a client that sends it optimistically to a non-paging server
-	// still gets its full backfill. See docs/paged-scrollback.md §4.5.
+	// ReplayMax asks for a resume replay smaller than maxReplayLines. Decoded
+	// as RawMessage and parsed FIELD-LOCALLY (parseReplayMax) because this
+	// handler drops any control whose unmarshal returns an error: a malformed
+	// value on an ADVISORY field must read as absent, never cost the client
+	// its whole resume.
 	ReplayMax json.RawMessage `json:"replayMax,omitempty"`
 	SentBytes uint64          `json:"sentBytes,omitempty"`
 	// FromAbs/MaxLines carry a `history` request: serve at most MaxLines
 	// retained lines starting at absolute index FromAbs. Signed on the wire and
-	// validated BEFORE any conversion to uint64 (§4.1) — the subtraction-form
+	// validated BEFORE any conversion to uint64 — the subtraction-form
 	// overflow guard in historyControl is the reason these are int64 rather
 	// than uint64.
 	FromAbs  int64 `json:"fromAbs,omitempty"`
@@ -2211,19 +2178,14 @@ func (h *Handler) resumeControl(ws *websocket.Conn, state *clientState, c *contr
 // maxSafeInteger is JavaScript's exact-integer ceiling (2^53 − 1). Absolute
 // line indices cross the wire as JSON numbers, so a value above this cannot be
 // represented exactly on the client and is rejected rather than silently
-// rounded (docs/paged-scrollback.md §4.1).
+// rounded.
 const maxSafeInteger int64 = 1<<53 - 1
 
-// shrinkToBudget returns the number of leading lines of `lines` whose encoded
-// size, plus the scroll header, fits pageByteBudget — always at least one line,
-// because the per-row ceiling (capRowRuns) guarantees any single row fits.
-//
-// It keeps a PREFIX (the oldest lines), and that direction is FORCED, not
-// stylistic: shrinking from the low end would move the reply's firstIndex above
-// the request's fromAbs, which §4.3 defines as the CLAMP signal — every styled
-// page would then read as "history permanently trimmed" and paint a false
-// marker. The clamp encoding and this direction are coupled; change neither
-// alone.
+// shrinkToBudget returns how many leading lines, plus the scroll header, fit
+// pageByteBudget, always at least one (capRowRuns guarantees a row fits). It
+// keeps a PREFIX by necessity: shrinking from the low end would move the
+// reply's firstIndex above fromAbs, which the client reads as the CLAMP signal
+// and paints as a false "history permanently trimmed" marker.
 func shrinkToBudget(lines [][]vt.WireRun) int {
 	size := encodedScrollHeaderSize
 	for i, line := range lines {
@@ -2235,19 +2197,12 @@ func shrinkToBudget(lines [][]vt.WireRun) int {
 	return len(lines)
 }
 
-// historyControl serves a `history` request: at most maxLines retained lines
-// starting at absolute index fromAbs. It is the demand-paging read path
-// (docs/paged-scrollback.md §4.2), served INLINE on the socket's read loop like
-// every other control, and written under the socket's writeMu so a reply can
-// never interleave into a resume batch.
-//
-// The serve is the INTERSECTION of the request window and the retained range —
-// never lines the client did not ask for — so every non-empty reply's
-// firstIndex lies inside [fromAbs, end) and the client's correlation always
-// succeeds. An EMPTY reply carries the request's own fromAbs (never
-// LinesRange's empty-case firstAbs, which is `committed` — an index far outside
-// the window) and means "nothing in this range is retained", which the client
-// reads as a permanent trim.
+// historyControl serves a `history` request for at most maxLines retained lines
+// from fromAbs, inline on the read loop and under writeMu so a reply never
+// interleaves into a resume batch. It serves the INTERSECTION of the request
+// and the retained range, so a non-empty reply's firstIndex lies in
+// [fromAbs, end); an empty reply carries the request's own fromAbs and means
+// "nothing here is retained", which the client reads as a permanent trim.
 func (h *Handler) historyControl(ws *websocket.Conn, state *clientState, c *controlMsg) {
 	// A history control before the socket's first successful resume has no
 	// attached session to answer for, and ignoring it keeps pre-resume sockets
@@ -2378,25 +2333,20 @@ func (h *Handler) handlePing(ws *websocket.Conn) {
 var testResumeBatchHold atomic.Pointer[func()]
 
 // historyPagingDeclared reports whether this server advertises demand-paged
-// scrollback to clients (resumeAckFlagHistoryPaging) and therefore honors the
-// `history` control and the resume replay bound. Two conditions, both
-// necessary: the handler serves the control (always true for this build), and
-// the ring is at least paginationMinRing deep. The depth half is what keeps the
-// two bounds consistent: a ring the resume replay can TRUNCATE must declare
-// paging, or the withheld rows are unreachable for the life of the session
-// (docs/paged-scrollback.md §4.5). Below the threshold the replay carries the
-// whole ring, so there is nothing to page for.
+// scrollback (resumeAckFlagHistoryPaging) and so serves the `history` control.
+// It keys on paginationMinRing: a ring the resume replay can TRUNCATE must
+// declare paging, or the withheld rows are unreachable for the life of the
+// session.
 func (h *Handler) historyPagingDeclared() bool {
 	return h.cfg.scrollbackCapacity >= paginationMinRing
 }
 
-// parseReplayMax extracts controlMsg.ReplayMax's advisory value. It returns
-// nil for absent, null, malformed (fractional, string, overflowing), and
-// out-of-domain (< 1) values — every one of which means "no bound, replay in
-// full", today's behavior. A valid value is clamped DOWN to maxReplayLines,
-// mirroring the client's own pre-send clamp so the sent value and the honored
-// value are the same number (the client's replay-jump prediction depends on
-// that identity; §4.5).
+// parseReplayMax extracts controlMsg.ReplayMax's advisory value: nil for an
+// absent, null, malformed (fractional, string, overflowing) or < 1 value, so
+// replayStart applies maxReplayLines alone; otherwise the value clamped DOWN to
+// maxReplayLines. The clamp mirrors the client's own pre-send clamp, so the
+// sent and honored values are the same number, which the client's replay-jump
+// prediction depends on.
 func parseReplayMax(raw json.RawMessage) *int64 {
 	if len(raw) == 0 {
 		return nil
@@ -2412,22 +2362,13 @@ func parseReplayMax(raw json.RawMessage) *int64 {
 	return &bounded
 }
 
-// replayStart returns the absolute index the resume replay should begin at.
-//
-// The base is "everything the client is missing" (haveThrough + 1), clamped so
-// the replay carries at most maxReplayLines however deep the ring. The clamp is
-// UNCONDITIONAL — not gated on the client having asked, and not on this server
-// declaring paging — because the ring's depth is an operator number that can be
-// hundreds of thousands of lines, and a resume that streams all of it is tens of
-// megabytes written under one write lock inside a single 10s context. There is no
-// depth at which replaying the whole ring is the right answer, so no caller gets
-// to opt out of the bound; a client may only ask for LESS.
-//
-// The client applies the same clamp to the value it sends, so the bound the
-// server honors always equals the one the client predicted — the identity its
-// replay-jump detection depends on (docs/paged-scrollback.md §4.5). Clamping the
-// START rather than the end is what makes the jump detectable at all: the client
-// sees a first index above what it holds and reclassifies the stranded band.
+// replayStart returns the absolute index the resume replay begins at: the first
+// line the client is missing (haveThrough + 1), clamped so the replay carries at
+// most maxReplayLines. The clamp is UNCONDITIONAL because the ring can hold
+// hundreds of thousands of lines, and replaying all of them is tens of megabytes
+// under one write lock inside a single 10s context; a client may only ask for
+// LESS. Clamping the START rather than the end is what lets the client detect
+// the jump: it sees a first index above what it holds.
 func replayStart(committed uint64, haveThrough int64, replayMax *int64) uint64 {
 	var from uint64
 	if haveThrough >= 0 {
@@ -2445,47 +2386,14 @@ func replayStart(committed uint64, haveThrough int64, replayMax *int64) uint64 {
 	return from
 }
 
-// handleResume looks up or creates the session for sessionID, attaches
-// it to state, replies with a resumeAck carrying the server's current
-// bytesReceived count plus the absolute-index bounds of retained
-// history, sends a full-repaint frame of the current window (carrying
-// the live alt-screen state) and replays the lines the client is missing
-// (by absolute index), and leaves the next flush to repaint the window
-// idempotently.
-//
-// The order of the window frame and the replay depends on the live alt
-// state, because the window frame is what sets the client's alt flag and
-// the client drops scroll frames while that flag is set (store.ts
-// applyScroll):
-//   - main screen (winAlt == false): the window frame precedes the replay
-//     so a client with a stale alt flag (disconnected in alt, app left alt
-//     while away) leaves alt before the replayed history lands; otherwise
-//     it silently drops those frames.
-//   - alt screen (winAlt == true): the replay precedes the window frame so
-//     a client not yet in alt (fresh load / second tab on an in-alt
-//     session) stores the main-screen history before the window frame
-//     flips it into alt; otherwise that history is lost.
-//
-// haveThrough is the highest absolute line index the client already
-// holds (-1 = none). The server replays lines with index > haveThrough,
-// clamped into the retained range; the resumeAck's oldestIndex lets the
-// client detect an eviction gap when its haveThrough is older than what
-// the ring still holds.
-//
-// sentBytes is the client's claimed total of reliable input bytes sent this
-// session. When the resume key misses the registry (idle GC or cap eviction
-// reclaimed the ledger) while sentBytes > 0, the client believed it had a
-// ledger the server no longer holds — the server cannot vouch for any of
-// that input (it cannot distinguish forgotten-after-applying from
-// lost-having-applied-nothing), so the resumeAck carries an explicit
-// ledger-lost flag and the client drops-and-notifies deterministically
-// instead of guessing from an ambiguous received=0.
-// replayMax lets the client ask for FEWER than the maxReplayLines the replay is
-// bounded to regardless (see replayStart: the bound is unconditional, because no
-// ring depth makes streaming the whole ring the right answer). parseReplayMax has
-// already clamped it to the same ceiling, so the number the client sent and the
-// number honored here are identical — the identity the client's replay-jump
-// prediction depends on (docs/paged-scrollback.md §4.5).
+// handleResume resolves the session for sessionID, attaches it to state,
+// replies with a resumeAck (bytesReceived, retained index bounds, and a
+// ledger-lost flag when the key missed the registry while sentBytes > 0),
+// then sends the window frame and replays lines after haveThrough (-1 = none),
+// bounded by replayStart. On the main screen the window frame goes first so a
+// stale-alt client leaves alt before history lands; in alt the replay goes
+// first so a not-yet-alt client stores history before the frame flips it,
+// because the client drops scroll frames while its alt flag is set.
 func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID SessionID, haveThrough int64, sentBytes uint64, replayMax *int64) {
 	ack, created := h.registry.ResolveSession(state, sessionID)
 	// Capability declaration for the resumeAck's historyPaging bit. It no longer

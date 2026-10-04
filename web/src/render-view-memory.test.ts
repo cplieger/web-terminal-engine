@@ -1,5 +1,4 @@
-// Per-view scroll memory, captureViewMemory + bind({ view })
-// (docs/scroll-position-fidelity.md §3): a ROUND TRIP across a rebuild that
+// Per-view scroll memory, captureViewMemory + bind({ view }): a ROUND TRIP across a rebuild that
 // spans several frames on a container that CLAMPS scrollTop like a browser. The
 // rebuild builds at most MAX_ROWS_PER_FRAME (300) rows per frame, so a restore
 // issued once at frame 1 replays against ~301 of up to 5000 rows, and a clamping

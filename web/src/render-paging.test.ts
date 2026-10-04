@@ -1,4 +1,4 @@
-// The renderer's DEMAND-PAGING half (docs/paged-scrollback.md §5.4-5.5): the
+// The renderer's DEMAND-PAGING half: the
 // fetch controller (when a request fires, where it is anchored, the guards that
 // keep it dormant) and the gap markers, a projection of the store's geometry
 // that heals from either edge. The transport is replaced by spies, since this
@@ -468,8 +468,7 @@ describe("render: paging constants", () => {
 });
 
 describe("render: the top-of-store marker", () => {
-  // Three honest statements about the history above what is held
-  // (docs/paged-scrollback.md §5.4). A bounded resume replay routinely lands a
+  // Three honest statements about the history above what is held. A bounded resume replay routinely lands a
   // client above index 0 with the server still holding the rest, and a single
   // "trimmed" predicate either says NOTHING, presenting a partial transcript as
   // the session's beginning, or says "trimmed" about history about to be fetched.

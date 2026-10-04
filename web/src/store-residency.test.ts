@@ -257,8 +257,8 @@ describe("LineStore: cap eviction with a browse cache resident", () => {
 describe("LineStore: the browse budget's viewport exemption", () => {
   /**
    * Two cached runs either side of a hole, reclassified against the small
-   * containment target by a resume ack — the shape §5.3's exemption is written
-   * for, and the only one where the target is smaller than the band.
+   * containment target by a resume ack — the shape the viewport exemption is
+   * written for, and the only one where the target is smaller than the band.
    */
   function spanningCache(viewportAbs: number, following: boolean): LineStore {
     const s = new LineStore();

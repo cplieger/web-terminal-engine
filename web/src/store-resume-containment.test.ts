@@ -1,24 +1,9 @@
-// The resume-ack budget pass's CONTAINMENT decision, in both directions.
-//
-// docs/paged-scrollback.md §5.3 makes a normative claim about it — "a FOLLOWING
-// viewport is OUTSIDE every reclassified band by definition (it is looking at
-// the live tail, not at cache — the common case, and the one §3's memory picture
-// is keyed on)" — so a disposable band drains to `prefetchThreshold`, while a
-// reader in history keeps the full `browseCacheCap`.
-//
-// The store does NOT decide which of those it is looking at; the renderer passes
-// `following`, because it is the only layer that knows (docs/scroll-position-
-// fidelity.md §7.3). Every version that inferred it here was wrong somewhere:
-// from `viewportAbs >= win.base` it read a descriptor the replay-jump step
-// deliberately RETIRES, so it answered "not following" for every predicted jump
-// and kept 2500 where the design budgets 500 — ~2000 lines over budget on the
-// path §5.3 names as the primary real population. Narrowing it with a
-// cache-membership test then broke the opposite direction, draining a reader
-// whose anchor row simply was not held.
-//
-// So these tests drive `following` as an INPUT and pin that the store honors it
-// both ways, plus the case that made the inference untenable: a reader in
-// history whose anchor row the store does not hold at all.
+// The resume-ack budget pass's CONTAINMENT decision, in both directions: a
+// FOLLOWING viewport drains a disposable band to `prefetchThreshold`, a reader
+// in history keeps `browseCacheCap`. `following` is an INPUT from the renderer,
+// the only layer that knows; inferring it from `win.base` or cache membership
+// was wrong in each direction. The last case is a reader whose anchor row is
+// not held.
 
 import { describe, it, expect } from "vitest";
 import { BROWSE_CACHE_CAP, LineStore, PREFETCH_THRESHOLD } from "./store.js";
@@ -90,7 +75,7 @@ describe("resume-ack budget pass: containment for a following reader", () => {
     // buffer stays hot. The bound is the design's own, not `prefetchThreshold`
     // exactly: the pass exempts every line within `prefetchThreshold` of the
     // viewport and accepts that remainder as stated overshoot, so the ceiling is
-    // `2 * prefetchThreshold + 1` (the statically-asserted invariant in §5.3).
+    // `2 * prefetchThreshold + 1` (the invariant store.ts asserts statically).
     expect(s.browseCacheSize()).toBeLessThanOrEqual(2 * PREFETCH_THRESHOLD + 1);
     // The regression, as the number it actually produced: 2500 retained where the
     // design budgets ~500 is ~2000 lines of phone memory nothing accounts for.
@@ -146,14 +131,11 @@ describe("resume-ack budget pass: containment for a following reader", () => {
       following: false,
     });
 
-    // Asserted as the CAP exactly, which is §5.3's contract for a reader inside
-    // the band ("or the full browseCacheCap when it does"). A range assertion is
-    // not enough here, and this is measured rather than assumed: taking the small
-    // target instead leaves 2304, because the viewport exemption protects most of
-    // the band and the pass accepts the rest as stated overshoot. So `> 500` and
-    // even `> 2 * PREFETCH_THRESHOLD + 1` both hold for the WRONG behavior — the
-    // first two versions of this assertion were vacuous, and a hard-coded
-    // `inside = false` (the exact failure this test names) passed them both.
+    // Asserted as the CAP exactly, the contract for a reader inside the band.
+    // A range assertion is not enough here: taking the small target instead
+    // leaves 2304, because the viewport exemption protects most of the band and
+    // the pass accepts the rest as stated overshoot, so `> 500` and even
+    // `> 2 * PREFETCH_THRESHOLD + 1` both hold for the WRONG behavior.
     expect(s.browseCacheSize()).toBe(BROWSE_CACHE_CAP);
   });
 });

@@ -1008,20 +1008,12 @@ func TestResume_SpamThrottleDropsExcessResumes(t *testing.T) {
 	}
 }
 
-// TestHistoryControl_NotInterleavedIntoResumeBatch extends this file's ordering
-// contract to the demand-paging read path (docs/paged-scrollback.md §7).
-//
-// A page reply is a scroll frame written outside the flush loop, on the socket's
-// own goroutine, which makes it the one payload that could land BETWEEN the
-// resumeAck and the batch's window frame — the client would then apply history
-// as live scrollback mid-resume, above indices the batch is about to replay. The
-// serialization is the same `clientState.writeMu` the dispatcher takes, so this
-// asserts the same delay-not-drop shape: while the batch holds the lock nothing
-// is written and the call is still in progress, and the reply lands afterwards.
-//
-// The goroutine model already serializes these (a socket's control reads and its
-// resume run on one goroutine), so this is a regression guard on the lock rather
-// than a fix for an observed interleave.
+// TestHistoryControl_NotInterleavedIntoResumeBatch pins that a page reply, a
+// scroll frame written on the socket's own goroutine, waits on
+// clientState.writeMu while a resume batch holds it: landing between the
+// resumeAck and the window frame would apply history as live scrollback
+// mid-resume. Delay, not drop: nothing is written while the batch holds the
+// lock, and the reply lands after.
 func TestHistoryControl_NotInterleavedIntoResumeBatch(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(paginationMinRing), WithLogger(nil))
 	h.screen = vt.New(3, 20)

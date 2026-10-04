@@ -103,7 +103,7 @@ A terminal socket is an interactive shell, and the engine allows same-origin pag
 
 To embed a terminal in another origin, build one policy with `NewOriginPolicy` and pass it to both `WithOriginPolicy` and `WithManagerOriginPolicy`. Entries are exact origins. The policy has no wildcards and refuses `Origin: null`.
 
-Anyone who has a session id can attach to that session, so treat it as a secret. Log it only through `LogID`, which keeps the first 8 bytes and drops the rest. The engine sets `Cache-Control: no-store` on every session REST response and on the status stream. [Security for embedders](docs/security.md) covers the details.
+Anyone who has a session id can attach to that session, so treat it as a secret. Log it only through `LogID`, which keeps the first 8 bytes and drops the rest. The engine sets `Cache-Control: no-store` on every session REST response and on the status stream. [Security for embedders](docs/security-model.md) covers the details.
 
 ## Unsupported by design
 
@@ -128,7 +128,7 @@ The engine reads these sequences and does nothing with them:
 ## Documentation
 
 - [Sessions and processes](docs/sessions.md) covers the session manager, its routes, statuses and process cleanup.
-- [Security for embedders](docs/security.md) covers origins, session ids, caching and logs.
+- [Security for embedders](docs/security-model.md) covers origins, session ids, caching and logs.
 - [Scrollback and reconnect](docs/scrollback.md) covers history depth, paging and restoring after a reload.
 - [Colors, links and input](docs/rendering.md) covers the palette, contrast, character width, links, keyboard and mouse.
 - [Wire protocol and compatibility](docs/wire-protocol.md) covers frames, revisions and the manifest.

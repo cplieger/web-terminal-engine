@@ -1,13 +1,8 @@
-// The scroll controller's follow/hold state machine. scrollHeight and
-// clientHeight are declared, not measured, because the geometry IS the premise.
-// Following derives from position plus movement direction, asymmetrically: any
-// upward move with content below holds, only a DOWNWARD move landing at the
-// bottom re-engages, so a shrink clamp never engages follow under a reader who
-// scrolled up; stickToBottom pins only when following. The mock starts at
-// scrollTop 0 with 700px of range, a state a real container is never in, so
-// tests of the follow transition establish the bottom first, as the render pin does.
+// scrollHeight and clientHeight are declared, not measured: the geometry IS the
+// premise. The mock starts at scrollTop 0 with 700px of range, which a real
+// container never is, so follow-transition tests reach the bottom first.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createScrollController, type ScrollController } from "./scroll.js";
 import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { makeClampingScrollEl, makeDeferredClampScrollEl } from "./test-helpers/scroll-fixture.js";
@@ -130,6 +125,7 @@ describe("scroll controller (brick 4)", () => {
   });
 
   it("stickToBottom does nothing while holding (does not yank the reader)", () => {
+    scrollTo(el, 700);
     scrollTo(el, 100); // holding
     scroll.stickToBottom();
     expect(el.scrollTop).toBe(100); // unchanged
@@ -235,6 +231,7 @@ describe("noteContentShrink (announced clamps)", () => {
     // clamp, so no event, so an arm would linger and swallow the next gesture.
     const f = makeClampingScrollEl(10000, 300);
     scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
+    f.userScrollTo(9700);
     f.userScrollTo(4000); // holding, far from both ends
     expect(scroll.isUserScrolledUp()).toBe(true);
 
@@ -307,6 +304,7 @@ describe("per-view scroll memory seam (currentScrollTop / a consumer's own write
     // whose user had scrolled up) fires a scroll event, as any scrollTop
     // assignment does in a browser, and the follow/hold state re-derives from
     // it by direction like a user scroll.
+    scrollTo(el, 700);
     el.scrollTop = 100;
     el.dispatchEvent(new Event("scroll")); // the fixture's setter fires none
     expect(scroll.currentScrollTop()).toBe(100);
@@ -318,9 +316,6 @@ describe("per-view scroll memory seam (currentScrollTop / a consumer's own write
   });
 });
 
-// adjustForContentShift is manual scroll anchoring: it exists because WebKit has
-// never implemented the native kind, so on Safari/iPadOS nothing held the reading
-// position when rows were evicted from the top of history during streaming.
 describe("adjustForContentShift", () => {
   let el: HTMLElement;
   let changes: boolean[];
@@ -334,6 +329,7 @@ describe("adjustForContentShift", () => {
   });
 
   it("moves the viewport by the height that vanished above the reading position", () => {
+    scrollTo(el, 700);
     scrollTo(el, 400); // scroll up to read
     expect(scroll.isUserScrolledUp()).toBe(true);
 
@@ -344,12 +340,14 @@ describe("adjustForContentShift", () => {
   });
 
   it("moves the other way when content is inserted above (the trim marker)", () => {
+    scrollTo(el, 700);
     scrollTo(el, 400);
     scroll.adjustForContentShift(20);
     expect(el.scrollTop).toBe(420);
   });
 
   it("does not disengage or re-engage following", () => {
+    scrollTo(el, 700);
     scrollTo(el, 400);
     changes.length = 0;
     scroll.adjustForContentShift(-34);
@@ -438,10 +436,7 @@ describe("restoreView", () => {
     expect(el.scrollTop).toBe(700); // the bottom: scrollHeight - clientHeight
   });
 
-  it("does not arm the one-event pass-through when the position did not move", () => {
-    // No move means no scroll event, so an arm would linger and swallow the
-    // user's NEXT gesture. Restore the offset it already holds, then make a
-    // genuine upward move and require it to register.
+  it("lets the gesture after a restore that did not move the offset register", () => {
     scrollTo(el, 700); // at the bottom, following
     scroll.restoreView({ top: 700, following: true });
     expect(scroll.isUserScrolledUp()).toBe(false);
@@ -493,8 +488,8 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
     scroll.reconcileScrollRange();
     expect(f.el.scrollTop).toBe(5400);
     // The correction produced a large UPWARD move, which the direction rule
-    // would read as the user pulling away from the tail. It goes through
-    // writePreservingFollow, so the event it causes passes through instead.
+    // would read as the user pulling away from the tail. It is the library's
+    // own write, so its echo is measured from where the write landed.
     f.el.dispatchEvent(new Event("scroll"));
     expect(scroll.isUserScrolledUp()).toBe(false);
   });
@@ -612,6 +607,7 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
   it("is a no-op when nothing armed it, so an out-of-band call cannot misfire", () => {
     const f = makeDeferredClampScrollEl(6000, 600);
     scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
+    f.userScrollTo(5400);
     f.userScrollTo(2000); // holding, well inside the range
     scroll.reconcileScrollRange();
     expect(f.el.scrollTop).toBe(2000);
@@ -635,5 +631,926 @@ describe("reconcileScrollRange (a container that does not reconcile a shrink)", 
     f.userScrollTo(1000);
     scroll.reconcileScrollRange();
     expect(f.el.scrollTop).toBe(1000);
+  });
+});
+
+// A scroll event is queued at most once per target per frame
+// (https://drafts.csswg.org/cssom-view/#scrolling-events), so a user move and a
+// library write can share one. Attached: the intent listeners sit on the window.
+interface LiveScroller {
+  el: HTMLElement;
+  child: HTMLElement;
+  writes: number[];
+  userScrollTo(top: number): void;
+  fire(): void;
+  grow(px: number): void;
+  setClientHeight(px: number): void;
+  maxTop(): number;
+}
+
+function makeLiveScroller(scrollHeight: number, clientHeight: number): LiveScroller {
+  const el = document.createElement("div");
+  const child = document.createElement("div");
+  el.appendChild(child);
+  document.body.appendChild(el);
+  let height = scrollHeight;
+  let viewport = clientHeight;
+  let top = 0;
+  const writes: number[] = [];
+  const maxTop = (): number => Math.max(0, height - viewport);
+  const clamp = (v: number): number => Math.max(0, Math.min(v, maxTop()));
+  Object.defineProperty(el, "scrollHeight", { get: () => height, configurable: true });
+  Object.defineProperty(el, "clientHeight", { get: () => viewport, configurable: true });
+  Object.defineProperty(el, "scrollTop", {
+    get: () => top,
+    set: (v: number) => {
+      writes.push(v);
+      top = clamp(v);
+    },
+    configurable: true,
+  });
+  return {
+    el,
+    child,
+    writes,
+    userScrollTo(next: number): void {
+      top = clamp(next);
+    },
+    fire(): void {
+      el.dispatchEvent(new Event("scroll"));
+    },
+    grow(px: number): void {
+      height += px;
+    },
+    setClientHeight(px: number): void {
+      viewport = px;
+      top = clamp(top);
+    },
+    maxTop,
+  };
+}
+
+function touch(
+  type: "touchstart" | "touchmove" | "touchend",
+  target: HTMLElement,
+  clientY: number,
+): void {
+  const t = new Touch({ identifier: 1, target, clientX: 10, clientY });
+  const down = type === "touchend" ? [] : [t];
+  target.dispatchEvent(
+    new TouchEvent(type, {
+      bubbles: true,
+      cancelable: true,
+      touches: down,
+      targetTouches: down,
+      changedTouches: [t],
+    }),
+  );
+}
+
+function wheel(target: HTMLElement, init: WheelEventInit): void {
+  target.dispatchEvent(new WheelEvent("wheel", { bubbles: true, cancelable: true, ...init }));
+}
+
+function keydown(target: HTMLElement, key: string): void {
+  target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+}
+
+function scrollend(el: HTMLElement): void {
+  // An element's scrollend does not bubble: https://drafts.csswg.org/cssom-view/#scrolling-events
+  el.dispatchEvent(new Event("scrollend"));
+}
+
+// HTML fires it at the document with bubbles=true:
+// https://html.spec.whatwg.org/multipage/interaction.html#update-the-visibility-state
+function visibilitychange(): void {
+  document.dispatchEvent(new Event("visibilitychange", { bubbles: true }));
+}
+
+describe("follow classification against the library's own writes", () => {
+  let s: LiveScroller | undefined;
+
+  function followAtBottom(): LiveScroller {
+    const live = makeLiveScroller(6000, 600);
+    s = live;
+    scroll = registerForDispose(createScrollController({ scrollEl: live.el }));
+    live.userScrollTo(5400);
+    live.fire();
+    return live;
+  }
+
+  afterEach(() => {
+    s?.el.remove();
+    s = undefined;
+    vi.useRealTimers();
+  });
+
+  it.each([5, 10, 16])(
+    "holds when a %ipx upward move lands in one event with a 17px pin",
+    (delta) => {
+      const f = followAtBottom();
+      f.grow(17);
+      scroll.stickToBottom();
+      f.userScrollTo(5417 - delta);
+      f.fire();
+
+      expect(scroll.isUserScrolledUp()).toBe(true);
+      f.grow(17);
+      scroll.stickToBottom();
+      expect(f.el.scrollTop).toBe(5417 - delta);
+    },
+  );
+
+  it("keeps following through the echo of its own pin", () => {
+    const f = followAtBottom();
+    f.grow(17);
+    scroll.stickToBottom();
+    f.fire();
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    f.grow(17);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5434);
+  });
+
+  it("classifies a return to the tail that shares one event with an anchor correction", () => {
+    const f = followAtBottom();
+    f.userScrollTo(5300);
+    f.fire();
+    scroll.adjustForContentShift(-34);
+    f.userScrollTo(5400);
+    f.fire();
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("classifies an upward move that shares one event with a restore", () => {
+    const f = followAtBottom();
+    scroll.restoreView({ top: 3000, following: true });
+    f.userScrollTo(2980);
+    f.fire();
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("adds up sub-pixel upward steps until they leave a real gap", () => {
+    // A precise trackpad on a fractional device-pixel ratio scrolls in steps
+    // smaller than the echo tolerance; each one alone is noise, together a move.
+    const f = followAtBottom();
+    for (const top of [5399.4, 5398.8, 5398.2]) {
+      f.userScrollTo(top);
+      f.fire();
+    }
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("disengages on an upward move the page can see before its event arrives", () => {
+    const f = followAtBottom();
+    f.userScrollTo(5390);
+    f.grow(17);
+    const before = f.writes.length;
+    scroll.stickToBottom();
+
+    expect(f.writes.length).toBe(before);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("notifies the position for a user move coalesced with an anchor correction", () => {
+    const f = makeLiveScroller(6000, 600);
+    s = f;
+    let positions = 0;
+    scroll = registerForDispose(
+      createScrollController({ scrollEl: f.el, onScrollPosition: () => (positions += 1) }),
+    );
+    f.userScrollTo(5300);
+    f.fire();
+    positions = 0;
+    scroll.adjustForContentShift(-34);
+    f.userScrollTo(5000);
+    f.fire();
+
+    expect(positions).toBe(1);
+  });
+
+  it("owes the next event a notification when a write settled a user move first", () => {
+    const f = makeLiveScroller(6000, 600);
+    s = f;
+    let positions = 0;
+    scroll = registerForDispose(
+      createScrollController({ scrollEl: f.el, onScrollPosition: () => (positions += 1) }),
+    );
+    f.userScrollTo(5300);
+    f.fire();
+    positions = 0;
+    f.userScrollTo(5200);
+    scroll.adjustForContentShift(-34);
+    expect(positions).toBe(0); // never synchronously from inside a write
+    f.fire();
+
+    expect(positions).toBe(1);
+  });
+
+  it("disengages on an upward wheel before any scroll event", () => {
+    const f = followAtBottom();
+    wheel(f.child, { deltaY: -10 });
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    f.grow(17);
+    const before = f.writes.length;
+    scroll.stickToBottom();
+    expect(f.writes.length).toBe(before);
+  });
+
+  it("ignores an upward wheel the page cancelled", () => {
+    // Mouse tracking cancels the wheel and reports it to the application instead.
+    const f = followAtBottom();
+    f.child.addEventListener("wheel", (e) => e.preventDefault(), { passive: false });
+    wheel(f.child, { deltaY: -10 });
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("ignores a pinch-zoom wheel", () => {
+    const f = followAtBottom();
+    wheel(f.child, { deltaY: -10, ctrlKey: true });
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("ignores a downward wheel and a wheel outside the container", () => {
+    const f = followAtBottom();
+    wheel(f.child, { deltaY: 10 });
+    wheel(document.body, { deltaY: -10 });
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("ignores an upward wheel when there is nothing above to scroll to", () => {
+    const f = makeLiveScroller(600, 600);
+    s = f;
+    scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
+    wheel(f.child, { deltaY: -10 });
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("restores follow when an upward wheel moved nothing within the quiet window", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    wheel(f.child, { deltaY: -10 });
+    f.grow(17);
+
+    vi.advanceTimersByTime(199);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it.each(["PageUp", "Home"])("disengages on %s aimed at the page", (key) => {
+    followAtBottom();
+    keydown(document.body, key);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("ignores a PageUp the terminal handled", () => {
+    // A mapped key is sent to the application, which cancels the event.
+    const f = followAtBottom();
+    f.child.addEventListener("keydown", (e) => e.preventDefault());
+    keydown(f.child, "PageUp");
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("ignores a PageUp aimed at an element outside the container", () => {
+    followAtBottom();
+    const field = document.createElement("input");
+    document.body.appendChild(field);
+    keydown(field, "PageUp");
+    field.remove();
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("restores follow when a PageUp on the page scrolled some other element", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    keydown(document.body, "PageUp");
+    f.grow(17);
+
+    vi.advanceTimersByTime(199);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    vi.advanceTimersByTime(1);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("keeps holding when the PageUp scrolled the container", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    keydown(document.body, "PageUp");
+    f.userScrollTo(4900);
+    f.fire();
+    f.grow(17);
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    expect(f.el.scrollTop).toBe(4900);
+  });
+
+  it("does not count an announced shrink as the movement that confirms intent", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    f.grow(17);
+    keydown(document.body, "PageUp");
+    f.grow(-100);
+    f.userScrollTo(5300);
+    scroll.noteContentShrink(5400);
+    f.fire();
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(f.el.scrollTop).toBe(5317);
+  });
+
+  it("does not count a browser clamp to the bottom as the movement that confirms intent", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    keydown(document.body, "PageUp");
+    f.setClientHeight(700);
+    f.fire();
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    f.grow(17);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5317);
+  });
+
+  it("confirms intent by a downward move that stops short of the bottom", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    f.grow(500);
+    keydown(document.body, "PageUp");
+    f.userScrollTo(5600);
+    f.fire();
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    expect(f.el.scrollTop).toBe(5600);
+  });
+
+  it("keeps an explicit restore made while intent was unconfirmed", () => {
+    vi.useFakeTimers();
+    followAtBottom();
+    keydown(document.body, "PageUp");
+    scroll.restoreView({ top: 5400, following: false });
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("never re-engages a reader who was already holding when the intent came", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    f.userScrollTo(5000);
+    f.fire();
+    wheel(f.child, { deltaY: -10 });
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("holds as soon as a finger pulls the content down 8px, before any scroll event", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    touch("touchmove", f.child, 108);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("does not hold for a finger movement under 8px", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    touch("touchmove", f.child, 107);
+    touch("touchend", f.child, 107);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("restores follow when a finger pull lifted without scrolling the content", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    touch("touchmove", f.child, 110);
+    touch("touchend", f.child, 110);
+    f.grow(17);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    vi.advanceTimersByTime(200);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("keeps holding when a finger pull's scroll arrives after the finger lifted", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    touch("touchmove", f.child, 140);
+    touch("touchend", f.child, 140);
+    vi.advanceTimersByTime(100);
+    f.userScrollTo(5360);
+    f.fire();
+    f.grow(17);
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    expect(f.el.scrollTop).toBe(5360);
+  });
+
+  it("stays held through a finger drag up and its momentum", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    touch("touchmove", f.child, 140);
+    f.userScrollTo(5360);
+    f.fire();
+    touch("touchend", f.child, 140);
+    for (const top of [5300, 5250, 5220]) {
+      f.userScrollTo(top);
+      f.fire();
+    }
+    scrollend(f.el);
+    f.grow(17);
+    const before = f.writes.length;
+    scroll.stickToBottom();
+
+    expect(f.writes.length).toBe(before);
+    expect(f.el.scrollTop).toBe(5220);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("re-engages follow when a finger drags back to the bottom, and pins after release", () => {
+    const f = followAtBottom();
+    f.userScrollTo(4000);
+    f.fire();
+    touch("touchstart", f.child, 300);
+    touch("touchmove", f.child, 200);
+    f.userScrollTo(5000);
+    f.fire();
+    f.userScrollTo(5400);
+    f.fire();
+    touch("touchend", f.child, 200);
+    scrollend(f.el);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    f.grow(17);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("releases the hold at touchend after a tap and performs the pin it skipped", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.grow(17);
+    const before = f.writes.length;
+    scroll.stickToBottom();
+
+    expect(f.writes.length).toBe(before);
+    touch("touchend", f.child, 100);
+    expect(f.el.scrollTop).toBe(5417);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("leaves follow engaged after a touch that moves and ends at the bottom", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    touch("touchmove", f.child, 104);
+    f.userScrollTo(5396);
+    f.fire();
+    touch("touchmove", f.child, 100);
+    f.userScrollTo(5400);
+    f.fire();
+    touch("touchend", f.child, 100);
+    scrollend(f.el);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    f.grow(17);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("holds the pin while a touch scrolls and performs it at scrollend", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 300);
+    f.grow(17);
+    scroll.stickToBottom();
+    f.userScrollTo(5410);
+    f.fire();
+    touch("touchend", f.child, 290);
+    scroll.stickToBottom();
+
+    expect(f.el.scrollTop).toBe(5410);
+    scrollend(f.el);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("counts a move a write settled during the press as scrolling, not a tap", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 300);
+    f.grow(17);
+    scroll.stickToBottom();
+    // The next pin settles the move before its event, which then reads as an echo.
+    f.userScrollTo(5410);
+    scroll.stickToBottom();
+    f.fire();
+    touch("touchend", f.child, 290);
+
+    expect(f.el.scrollTop).toBe(5410);
+    scrollend(f.el);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("releases on a 200ms quiet timer where scrollend never fires", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    touch("touchstart", f.child, 300);
+    f.grow(17);
+    scroll.stickToBottom();
+    f.userScrollTo(5410);
+    f.fire();
+    touch("touchend", f.child, 290);
+
+    vi.advanceTimersByTime(199);
+    expect(f.el.scrollTop).toBe(5410);
+    vi.advanceTimersByTime(1);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("restarts the quiet timer on every momentum scroll event", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    touch("touchstart", f.child, 300);
+    f.grow(17);
+    scroll.stickToBottom();
+    f.userScrollTo(5405);
+    f.fire();
+    touch("touchend", f.child, 290);
+    vi.advanceTimersByTime(150);
+    f.userScrollTo(5410);
+    f.fire();
+
+    vi.advanceTimersByTime(199);
+    expect(f.el.scrollTop).toBe(5410);
+    vi.advanceTimersByTime(1);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("ends the press when the touched node was removed mid-gesture", () => {
+    // The renderer rebuilds live rows in place, and a removed node's events no
+    // longer propagate to the window.
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.child.remove();
+    f.grow(17);
+    scroll.stickToBottom();
+    touch("touchend", f.child, 100);
+
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("holds for a finger pull on a node the renderer removed after the touch began", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.child.remove();
+    touch("touchmove", f.child, 140);
+    f.grow(17);
+    scroll.stickToBottom();
+    const before = f.writes.length;
+    touch("touchend", f.child, 140);
+    expect(f.writes.length).toBe(before);
+
+    vi.advanceTimersByTime(100);
+    f.userScrollTo(5360);
+    f.fire();
+    vi.advanceTimersByTime(200);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    expect(f.el.scrollTop).toBe(5360);
+  });
+
+  it("ignores a finger pull the page cancelled", () => {
+    const f = followAtBottom();
+    const cancel = (e: Event): void => {
+      e.preventDefault();
+    };
+    document.addEventListener("touchmove", cancel, { passive: false });
+    touch("touchstart", f.child, 100);
+    touch("touchmove", f.child, 140);
+    document.removeEventListener("touchmove", cancel);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("ignores a finger pull whose touch the page cancelled at its start", () => {
+    const f = followAtBottom();
+    const cancel = (e: Event): void => {
+      e.preventDefault();
+    };
+    document.addEventListener("touchstart", cancel, { passive: false });
+    touch("touchstart", f.child, 100);
+    document.removeEventListener("touchstart", cancel);
+    touch("touchmove", f.child, 140);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("ignores a pull on a removed node whose own listener cancelled it", () => {
+    const f = followAtBottom();
+    f.child.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+    touch("touchstart", f.child, 100);
+    f.child.remove();
+    touch("touchmove", f.child, 140);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("ignores a pull on a removed row's span that the row's listener cancelled", () => {
+    const f = followAtBottom();
+    const span = document.createElement("span");
+    f.child.appendChild(span);
+    f.child.addEventListener("touchmove", (e) => e.preventDefault(), { passive: false });
+    touch("touchstart", span, 100);
+    f.child.remove();
+    touch("touchmove", span, 140);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("holds for a pull on a span whose row the renderer removed", () => {
+    const f = followAtBottom();
+    const span = document.createElement("span");
+    f.child.appendChild(span);
+    touch("touchstart", span, 100);
+    f.child.remove();
+    touch("touchmove", span, 140);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+  });
+
+  it("adds no listener to the container for a touch that lands on it directly", () => {
+    const f = followAtBottom();
+    const add = vi.spyOn(f.el, "addEventListener");
+    touch("touchstart", f.el, 100);
+    touch("touchmove", f.el, 104);
+    touch("touchend", f.el, 104);
+
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it("performs the owed pin when a tap directly on the container ends", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.el, 100);
+    f.grow(17);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5400);
+
+    touch("touchend", f.el, 100);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("ends the press when the last finger to lift began outside the container", () => {
+    const f = followAtBottom();
+    const outside = document.createElement("div");
+    document.body.appendChild(outside);
+    const inner = new Touch({ identifier: 1, target: f.child, clientX: 10, clientY: 100 });
+    const outer = new Touch({ identifier: 2, target: outside, clientX: 10, clientY: 100 });
+    const send = (type: string, target: HTMLElement, down: Touch[], changed: Touch): void => {
+      target.dispatchEvent(
+        new TouchEvent(type, { bubbles: true, touches: down, changedTouches: [changed] }),
+      );
+    };
+    send("touchstart", f.child, [inner], inner);
+    send("touchstart", outside, [inner, outer], outer);
+    f.grow(17);
+    scroll.stickToBottom();
+    send("touchend", f.child, [outer], inner);
+    expect(f.el.scrollTop).toBe(5400);
+
+    send("touchend", outside, [], outer);
+    outside.remove();
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("ends the press when a page listener stops the touchend", () => {
+    const stop = (e: Event): void => {
+      e.stopPropagation();
+    };
+    document.addEventListener("touchend", stop);
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.grow(17);
+    scroll.stickToBottom();
+    touch("touchend", f.child, 100);
+    document.removeEventListener("touchend", stop);
+
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("keeps following when a drag toward the tail stops short of output that grew during the press", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 300);
+    f.grow(102);
+    scroll.stickToBottom();
+    touch("touchmove", f.child, 280);
+    f.userScrollTo(5430);
+    f.fire();
+    touch("touchend", f.child, 280);
+    scrollend(f.el);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(f.el.scrollTop).toBe(5502);
+  });
+
+  it("keeps following when a flick toward the tail ends short of output that grew during it", () => {
+    vi.useFakeTimers();
+    const f = followAtBottom();
+    touch("touchstart", f.child, 300);
+    touch("touchmove", f.child, 250);
+    for (const top of [5408, 5416]) {
+      f.grow(17);
+      scroll.stickToBottom();
+      f.userScrollTo(top);
+      f.fire();
+    }
+    touch("touchend", f.child, 250);
+    for (const top of [5424, 5432, 5440, 5448]) {
+      f.grow(17);
+      scroll.stickToBottom();
+      f.userScrollTo(top);
+      f.fire();
+    }
+    vi.advanceTimersByTime(200);
+
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(f.el.scrollTop).toBe(5502);
+  });
+
+  it("releases a press the page was hidden in the middle of", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.grow(17);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5400);
+
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    visibilitychange();
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("releases a hidden page's press even when a page listener stops the event", () => {
+    const stop = (e: Event): void => {
+      e.stopPropagation();
+    };
+    document.addEventListener("visibilitychange", stop);
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.grow(17);
+    scroll.stickToBottom();
+
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    visibilitychange();
+    document.removeEventListener("visibilitychange", stop);
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("keeps the press when the page becomes visible", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.grow(17);
+    scroll.stickToBottom();
+    visibilitychange();
+
+    expect(f.el.scrollTop).toBe(5400);
+  });
+
+  it("keeps the tail across a soft keyboard opening and closing", () => {
+    const f = followAtBottom();
+    f.setClientHeight(300);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5700);
+    f.fire();
+
+    f.setClientHeight(600);
+    f.fire();
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5400);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("lands on the tail when the keyboard a tap raised resizes during the hold", () => {
+    const f = followAtBottom();
+    touch("touchstart", f.child, 100);
+    f.setClientHeight(300);
+    scroll.stickToBottom();
+
+    expect(f.el.scrollTop).toBe(5400);
+    touch("touchend", f.child, 100);
+    expect(f.el.scrollTop).toBe(5700);
+  });
+
+  it("holds the pin while the scrollbar is pressed and performs it at release", () => {
+    const f = followAtBottom();
+    f.el.style.width = "100px";
+    f.el.style.height = "50px";
+    Object.defineProperty(f.el, "clientWidth", { get: () => 80, configurable: true });
+    const box = f.el.getBoundingClientRect();
+    f.el.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerType: "mouse",
+        bubbles: true,
+        clientX: box.left + 90,
+        clientY: box.top + 10,
+      }),
+    );
+    f.grow(17);
+    scroll.stickToBottom();
+
+    expect(f.el.scrollTop).toBe(5400);
+    window.dispatchEvent(new PointerEvent("pointerup", { pointerType: "mouse" }));
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("does not hold for a mouse press on the content beside the scrollbar", () => {
+    const f = followAtBottom();
+    f.el.style.width = "100px";
+    f.el.style.height = "50px";
+    Object.defineProperty(f.el, "clientWidth", { get: () => 80, configurable: true });
+    const box = f.el.getBoundingClientRect();
+    f.el.dispatchEvent(
+      new PointerEvent("pointerdown", {
+        pointerType: "mouse",
+        bubbles: true,
+        clientX: box.left + 70,
+        clientY: box.top + 10,
+      }),
+    );
+    f.grow(17);
+    scroll.stickToBottom();
+
+    expect(f.el.scrollTop).toBe(5417);
+  });
+
+  it("dispose removes every window listener it added, with the same capture flag", () => {
+    const capture = (o: unknown): boolean =>
+      typeof o === "boolean" ? o : ((o as { capture?: boolean } | undefined)?.capture ?? false);
+    const add = vi.spyOn(window, "addEventListener");
+    const remove = vi.spyOn(window, "removeEventListener");
+    const f = makeLiveScroller(6000, 600);
+    s = f;
+    const controller = createScrollController({ scrollEl: f.el });
+    const added = add.mock.calls.map((c) => [c[0], c[1], capture(c[2])]);
+    controller.dispose();
+    const removed = remove.mock.calls.map((c) => [c[0], c[1], capture(c[2])]);
+
+    expect(added.length).toBeGreaterThan(0);
+    expect(removed).toHaveLength(added.length);
+    expect(removed).toEqual(expect.arrayContaining(added));
+  });
+
+  it("dispose releases the node a touch in progress landed on", () => {
+    const f = followAtBottom();
+    const add = vi.spyOn(f.child, "addEventListener");
+    const remove = vi.spyOn(f.child, "removeEventListener");
+    touch("touchstart", f.child, 100);
+    scroll.dispose();
+
+    expect(add).toHaveBeenCalled();
+    expect(remove.mock.calls.map((c) => [c[0], c[1]])).toEqual(
+      add.mock.calls.map((c) => [c[0], c[1]]),
+    );
+  });
+
+  it("still classifies scroll events for a container with no window", () => {
+    const doc = document.implementation.createHTMLDocument("");
+    const el = doc.createElement("div");
+    let top = 0;
+    Object.defineProperty(el, "scrollHeight", { get: () => 1000, configurable: true });
+    Object.defineProperty(el, "clientHeight", { get: () => 300, configurable: true });
+    Object.defineProperty(el, "scrollTop", {
+      get: () => top,
+      set: (v: number) => {
+        top = v;
+      },
+      configurable: true,
+    });
+    scroll = registerForDispose(createScrollController({ scrollEl: el }));
+    top = 700;
+    el.dispatchEvent(new Event("scroll"));
+    top = 600;
+    el.dispatchEvent(new Event("scroll"));
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
   });
 });

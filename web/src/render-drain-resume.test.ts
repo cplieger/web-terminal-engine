@@ -1,11 +1,11 @@
 // handleScrollPosition: the scroll-position contract, the bounded drain recovery
-// and the reschedule rule's canary (docs/tab-switch-repaint.md §3.1, §4.1). The
-// gate is the subject: `flushRender` runs three position invariants
-// unconditionally and only the DRAIN is queue-gated, so a flush scheduled from a
-// scroll handler would move the viewport; `would have pinned` proves the sibling
-// is not vacuous by driving a real flush from the same state. rAF callbacks are
-// held under monotonic handles and CANCELLED, never dropped: a discarded
-// callback leaves `pendingFrame` occupied and every later `scheduleFlush` a no-op.
+// and the reschedule rule's canary. The gate is the subject: `flushRender` runs
+// three position invariants unconditionally and only the DRAIN is queue-gated,
+// so a flush scheduled from a scroll handler would move the viewport; `would
+// have pinned` proves the sibling is not vacuous by driving a real flush from
+// the same state. rAF callbacks are held under monotonic handles and CANCELLED,
+// never dropped: a discarded callback leaves `pendingFrame` occupied and every
+// later `scheduleFlush` a no-op.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createModeState } from "./modes.js";
@@ -341,14 +341,17 @@ describe("handleScrollPosition drain recovery", () => {
   });
 
   it("does not pin a reader parked inside the bottom tolerance", () => {
-    // scroll.ts engages follow anywhere within BOTTOM_TOLERANCE_PX (24) of the
-    // tail, while stickToBottom pins on ANY non-zero gap. So a reader who stops
-    // a few pixels short is following AND not at the bottom, which is exactly
-    // the state an ungated flush-on-scroll would snap to the bottom.
+    // scroll.ts engages follow on a downward move landing within
+    // BOTTOM_TOLERANCE_PX (24) of the tail, while stickToBottom pins on ANY
+    // non-zero gap. So a reader who scrolls back down and stops a few pixels
+    // short is following AND not at the bottom, which is exactly the state an
+    // ungated flush-on-scroll would snap to the bottom.
     render.bind(populated(900));
     frames.pumpUntilIdle();
 
     const tail = termWrap.scrollHeight - termWrap.clientHeight;
+    termWrap.scrollTop = tail - 200;
+    termWrap.dispatchEvent(new Event("scroll"));
     termWrap.scrollTop = tail - 8;
     termWrap.dispatchEvent(new Event("scroll"));
     expect(scroll.isUserScrolledUp()).toBe(false);
@@ -370,6 +373,8 @@ describe("handleScrollPosition drain recovery", () => {
     frames.pumpUntilIdle();
 
     const tail = termWrap.scrollHeight - termWrap.clientHeight;
+    termWrap.scrollTop = tail - 200;
+    termWrap.dispatchEvent(new Event("scroll"));
     termWrap.scrollTop = tail - 8;
     termWrap.dispatchEvent(new Event("scroll"));
     const parked = termWrap.scrollTop;

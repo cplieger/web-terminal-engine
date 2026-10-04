@@ -1,33 +1,11 @@
-// Scroll-container fixtures that behave like a REAL scroller.
-//
-// A real browser gives a container real layout, and these fixtures still fake
-// it, deliberately: what they model is the CLAMP, and the clamp is not something
-// a test can arrange by giving an element overflow. The fixtures that predate
-// this file define scrollTop as a plain setter, which stores whatever it is
-// handed — and a real container CLAMPS to [0, scrollHeight - clientHeight]. That
-// difference is not cosmetic: the clamp IS the mechanism behind the tab-switch
-// position bug (docs/scroll-position-fidelity.md §1.1), and it is the mechanism
-// the pin's deliberate over-scroll write (`scrollTop = scrollHeight`) relies on.
-// A non-clamping double cannot express either, so a test written on one cannot
-// fail for the reason it exists — which is why the bug shipped, and why
-// docs/paged-scrollback.md §7's multi-frame-prepend anchor test needs this too.
-//
-// Every fixture here fakes scrollHeight, clientHeight and scrollTop TOGETHER,
-// from one derivation. That matters more in a browser than it did under an
-// emulator: a faked scrollTop beside a real scrollHeight is a container whose
-// two halves disagree, and the arithmetic under test is exactly the difference
-// between them.
-//
-// Both helpers clamp. Use makeClampingScrollEl for a standalone container with
-// a settable height, and installRowGeometry when rows in a real DOM tree must
-// report offsets and the container must derive its height from them.
-//
-// makeDeferredClampScrollEl is the third, and the odd one: a container that
-// clamps a WRITE but does not reconcile an offset the content shrank out from
-// under. That is the WebKit shape — so no browser this suite runs in can supply
-// it, whatever layout it is given — it is the state reconcileScrollRange exists
-// for, and neither clamping fixture can express it. A position invariant is
-// worth testing against both shapes.
+// Scroll-container fixtures that CLAMP scrollTop to [0, scrollHeight -
+// clientHeight] like a real scroller, faking all three values from one
+// derivation so they cannot disagree. The clamp is what loses a held view's
+// position on shrink, so a non-clamping double cannot fail for the reason a
+// test exists.
+// makeClampingScrollEl is a standalone container, installRowGeometry derives
+// height from real DOM rows, and makeDeferredClampScrollEl clamps writes but
+// leaves the offset past the end after a shrink until something writes it.
 
 /** A standalone clamping scroll container whose content height is settable. */
 export interface ClampingScrollEl {

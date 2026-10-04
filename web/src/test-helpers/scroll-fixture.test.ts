@@ -1,21 +1,8 @@
-// Contract test for the scroll-container fixtures.
-//
-// A test double normally needs no test of its own, and this one is the
-// exception the file's own header argues for: its clamp IS the mechanism behind
-// the tab-switch position bug (docs/scroll-position-fidelity.md §1.1), and a
-// double that stores whatever it is handed makes a scroll test "cannot fail for
-// the reason it exists". The clamp is therefore load-bearing evidence, not
-// convenience — but nothing pinned it: the fixture could stop clamping
-// altogether, or start remembering the offset a shrink destroyed, and 91 tests
-// across four suites would still pass while proving nothing.
-//
-// So the three properties every one of those suites silently depends on are
-// asserted here directly: the offset is clamped to [0, scrollHeight -
-// clientHeight]; the clamp is DESTRUCTIVE (a browser does not restore the old
-// offset when the content grows back); and a shrink that moves the offset
-// announces it with exactly one scroll event, which is the event the library
-// must not mistake for a user scrolling up. Precedent for testing a helper
-// here: wire-manifest.node.test.ts, beside this file.
+// Contract test for the scroll-container fixtures, because a double that
+// stores whatever it is handed lets a scroll test pass for the wrong reason.
+// It pins the offset clamp to [0, scrollHeight - clientHeight], that the clamp
+// is DESTRUCTIVE (growth does not restore the offset), and that a shrink which
+// moves the offset fires exactly one scroll event.
 
 import { describe, it, expect, afterEach } from "vitest";
 import { makeClampingScrollEl, installRowGeometry } from "./scroll-fixture.js";

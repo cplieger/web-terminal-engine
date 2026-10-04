@@ -1542,7 +1542,7 @@ func TestHandleResume_ledgerLostFlag(t *testing.T) {
 			defer cleanup()
 
 			if tc.preSeedSession {
-				h.registry.sessions["sid"] = &sessionState{lastSeen: time.Now(), bytesReceived: 120}
+				h.registry.sessions["sid"] = ledger(time.Now(), 120)
 			}
 			h.handleResume(server, &clientState{}, "sid", -1, tc.sentBytes, nil)
 
@@ -1581,7 +1581,7 @@ func TestSweepAcks_acksQuietInputOnce(t *testing.T) {
 
 	state := h.registry.Add(server)
 	h.registry.ResolveSession(state, "sid")
-	h.registry.IncrementReceived(state, 42)
+	applyN(t, h.registry, state, 42)
 
 	h.sweepAcks()
 	frames := framePump(t, client)
@@ -1622,7 +1622,7 @@ func TestDispatchFrame_suppressesRedundantAckSweep(t *testing.T) {
 
 	state := h.registry.Add(server)
 	h.registry.ResolveSession(state, "sid")
-	h.registry.IncrementReceived(state, 7)
+	applyN(t, h.registry, state, 7)
 
 	frame := &flushFrame{
 		clients:      map[*websocket.Conn]uint64{server: 7},
@@ -1743,7 +1743,7 @@ func TestTypedFraming_latchSequence(t *testing.T) {
 	}
 
 	// Ledger proof: exactly len(payload) input bytes were counted for the
-	// session (IncrementReceived runs only on the input path, with the whole
+	// session (ApplyInput runs only on the input path, with the whole
 	// frame). The resize/upgrade controls contribute nothing.
 	want := uint64(len(payload))
 	deadline := time.Now().Add(waitPatience)
@@ -1752,14 +1752,14 @@ func TestTypedFraming_latchSequence(t *testing.T) {
 		sess := h.registry.sessions["sid-latch"]
 		var got uint64
 		if sess != nil {
-			got = sess.bytesReceived
+			got = sess.received.Load()
 		}
 		h.registry.mu.Unlock()
 		if got == want {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("session bytesReceived = %d, want %d (all payload bytes incl. the leading NUL must count as input)", got, want)
+			t.Fatalf("session received = %d, want %d (all payload bytes incl. the leading NUL must count as input)", got, want)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -1907,14 +1907,14 @@ func TestParseFallback_countsBytes(t *testing.T) {
 		sess := h.registry.sessions["sid-count"]
 		var got uint64
 		if sess != nil {
-			got = sess.bytesReceived
+			got = sess.received.Load()
 		}
 		h.registry.mu.Unlock()
 		if got == 3 {
 			break // 1 (solitary NUL) + 2 (NUL + 'A')
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("session bytesReceived = %d, want 3 (fallback frames must count their full length)", got)
+			t.Fatalf("session received = %d, want 3 (fallback frames must count their full length)", got)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

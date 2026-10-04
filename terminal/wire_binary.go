@@ -1,80 +1,11 @@
-// Binary wire format for server → client messages.
-//
-// Replaces the JSON encoding for screen/scroll/resumeAck so frames stay
-// small over slow links (notably iPad on a Korea↔France relay where JSON
-// payloads of >100KB caused the browser to choke). The format is little-
-// endian fixed-width fields; no length-prefixed dictionary keys, no
-// repeated string identifiers.
-//
-//	[1B] msg_type:    0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard, 7=ackOnly
-//	[8B] inputAck:    uint64  (server-confirmed bytesReceived for this session)
-//
-//	If msg_type == screen:
-//	  [8B] base          uint64  (absolute index of top screen row; changed[y] -> base+y)
-//	  [2B] cursor_row    uint16
-//	  [2B] cursor_col    uint16
-//	  [2B] screen_height uint16  (full terminal height; rows below is sparse)
-//	  [2B] num_changed   uint16
-//	  [1B] cursor_style  uint8   (DECSCUSR style 0-6)
-//	  [1B] cursor_flags  uint8   (bit0=hidden, bit1=bell, bit2=blink, bit3=altActive, bit4=scrollbackCleared)
-//	  For each changed row:
-//	    [2B] row_idx     uint16
-//	    [row payload]
-//
-//	If msg_type == scroll:
-//	  [8B] first_index  uint64  (absolute index of lines[0]; line i applies at first_index+i)
-//	  [2B] num_lines    uint16
-//	  For each line:
-//	    [row payload]
-//
-//	If msg_type == resumeAck:
-//	  inputAck above carries the value;
-//	  [8B] serverEpoch  uint64 (process-start nanoseconds since epoch).
-//	                    Client compares against last seen epoch to detect
-//	                    server restart; on mismatch the resume protocol's
-//	                    silent-data-loss case (server has no record of
-//	                    bytes the client thinks are acked) is surfaced
-//	                    instead of being papered over.
-//	  [8B] committed    uint64 (absolute index of the next line to commit)
-//	  [8B] oldestIndex  uint64 (absolute index of the oldest retained line)
-//	  [1B] serverWireVersion uint8 (the server's wireProtocolVersion, so the
-//	                    client can surface a stale-bundle skew; length-gated
-//	                    optional tail, absent on pre-tier servers)
-//	  [1B] ackFlags     uint8 capability/condition bits, same length-gated tail
-//	                    as serverWireVersion:
-//	                      bit0 ledgerLost:     the resume key missed the registry
-//	                                           while the client claimed
-//	                                           sentBytes > 0, so the client must
-//	                                           drop-and-notify instead of replaying
-//	                      bit1 historyPaging:  demand-paged scrollback is served
-//	                      bit2 serverFocus:    the server derives the DEC 1004
-//	                                           answer from the `focus` control
-//	                      bit3 ephemeralInput: the `ephemeralInput` control is
-//	                                           served
-//
-//	If msg_type == ackOnly:
-//	  inputAck above carries the value; no body. Sent from the flush tick
-//	  when input was applied but no content frame carried the advanced ack
-//	  (input into a no-echo read), so acks never depend on output. Older
-//	  clients ignore the unknown opcode (back-compatible, no version bump).
-//
-//	row payload:
-//	  [2B] num_runs    uint16
-//	  For each run:
-//	    [2B] text_byte_len uint16
-//	    [N B] text         utf-8 bytes
-//	    [4B] fg            int32   (-1 = default fg)
-//	    [4B] bg            int32   (-1 = default bg)
-//	    [2B] attrs         uint16  (bit flags, see WireRun.A)
-//	    [4B] uc            int32   (-1 = default underline color)
-//	    [2B] url_len       uint16  (UTF-8 byte length of OSC 8 URL; 0 = no link)
-//	    [N B] url          utf-8 bytes (OSC 8 hyperlink URI)
-//
-// Per-client ack patching: encodeScreenMsg / encodeScrollMsg accept a
-// placeholder ack (typically 0) and return a template that flushLoop
-// then clones and patches with the real per-client ack via
-// withClientAck. This keeps the encode work O(frame_size) instead of
-// O(clients × frame_size).
+// Binary wire format for server → client messages. Fields are little-endian
+// and fixed-width, with no length-prefixed dictionary keys and no repeated
+// string identifiers, so frames stay small over slow links (notably an iPad on
+// a Korea↔France relay, where JSON payloads over 100KB made the browser choke).
+// Every frame opens with a 1-byte msg_type and the 8-byte inputAck, the
+// server-confirmed received count on the socket's input ledger. The per-message
+// layout is in docs/wire-protocol.md "Byte layout"; the encoders below are
+// authoritative.
 
 package terminal
 
@@ -420,22 +351,13 @@ func encodeScrollMsg(ack, firstIndex uint64, lines [][]vt.WireRun) []byte {
 	return buf
 }
 
-// encodeResumeAck builds a resumeAck frame carrying the server's current
-// per-session bytesReceived count, the server boot epoch, and the
-// absolute-index bounds of retained history. committed is the absolute
-// index of the next line to commit (one past the newest); oldestIndex
-// is the absolute index of the oldest retained line. The client uses
-// epoch to detect a server restart and (oldestIndex, committed) to
-// detect a history-eviction gap on resume.
-//
-// The trailing [serverWireVersion, ackFlags] pair is the frame's third
-// length-gated tail (>= 35 bytes): serverWireVersion lets the client surface
-// a stale-bundle protocol skew ("reload required") instead of leaving the
-// mismatch server-log-only, and ackFlags carries the four bits documented on
-// resumeAckFlags (ledgerLost, historyPaging, serverFocus, ephemeralInput).
-// Older clients ignore the extra bytes, and one that reads the tail masks only
-// the bits it knows; newer clients treat a shorter frame as "tail absent",
-// which reads as every bit clear.
+// encodeResumeAck builds a resumeAck frame: the per-ledger received count, the
+// server boot epoch (the client detects a restart), and the retained-history
+// bounds, committed (one past the newest line) and oldestIndex (the client
+// detects an eviction gap). The trailing [serverWireVersion, ackFlags] pair is
+// the third length-gated tail (>= 35 bytes): the version lets the client report
+// a stale-bundle skew, and ackFlags carries the resumeAckFlags bits. An older
+// client ignores the tail; a newer one reads a shorter frame as every bit clear.
 func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64, flags resumeAckFlags) []byte {
 	buf := make([]byte, 0, 35)
 	buf = append(buf, wireMsgResumeAck)

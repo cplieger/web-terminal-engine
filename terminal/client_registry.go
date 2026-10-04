@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -27,7 +28,7 @@ type clientRegistry struct {
 	mu       sync.Mutex
 	// anyFocused mirrors "some registered client reports its widget focused" so
 	// the DEC 1004 derivation reads it with one load. handlePTYData reads it once
-	// per PTY chunk, and r.mu is the lock the flush dispatcher, IncrementReceived
+	// per PTY chunk, and r.mu is the lock the flush dispatcher, the input path
 	// and every attach already contend for.
 	anyFocused atomic.Bool
 }
@@ -45,7 +46,7 @@ func newClientRegistry(logger *slog.Logger) *clientRegistry {
 
 // Add registers a new WebSocket connection and returns its state.
 func (r *clientRegistry) Add(ws *websocket.Conn) *clientState {
-	state := &clientState{}
+	state := &clientState{ws: ws}
 	r.mu.Lock()
 	r.clients[ws] = state
 	r.refreshAnyFocusedLocked()
@@ -53,33 +54,40 @@ func (r *clientRegistry) Add(ws *websocket.Conn) *clientState {
 	return state
 }
 
-// Remove unregisters a WebSocket connection and returns the terminal size that
-// client had last reported (0, 0 if it never sent a resize). The caller uses it
-// to decide whether the departure should heal the shared screen size (see
-// Handler.maybeHealSize).
-//
-// It also stamps lastSeen on the departing client's resume ledger, which is
-// what makes the idle-GC window mean "60 minutes since a client last HELD this
-// ledger". Without the stamp, lastSeen only advanced on attach and on
-// client->server input, so a tab open for hours reading agent output without
-// typing carried an hours-old lastSeen while still connected — protected only
-// by the GC's attached-session skip — and went GC-eligible the instant its
-// socket dropped. A phone that slept for 30 minutes then came back to a
-// reclaimed ledger and a false "server restarted" banner, because the window
-// the iOS-suspension rationale sized had already elapsed before the sleep
-// began. Stamping here restarts the clock at the disconnect.
+// Remove unregisters a WebSocket connection and returns the size that client
+// last reported (0, 0 if none), which Handler.maybeHealSize uses to decide
+// whether the departure heals the shared screen size. It stamps lastSeen on the
+// departing client's ledger so the idle-GC window runs from the detach: a tab
+// that only read output never advances lastSeen, and without the stamp its
+// ledger went GC-eligible the instant the socket dropped. A departing owner
+// gives up its ledger, so a later resume there supersedes nobody.
 func (r *clientRegistry) Remove(ws *websocket.Conn) (cols, rows int) {
+	var st *clientState
+	var sess *sessionState
 	r.mu.Lock()
-	if st := r.clients[ws]; st != nil {
+	if st = r.clients[ws]; st != nil {
 		cols, rows = st.cols, st.rows
-		if sess := st.session.Load(); sess != nil {
+		if sess = st.session.Load(); sess != nil {
 			sess.lastSeen = time.Now()
 		}
 	}
 	delete(r.clients, ws)
 	r.refreshAnyFocusedLocked()
 	r.mu.Unlock()
+	if sess != nil {
+		sess.release(st)
+	}
 	return cols, rows
+}
+
+// release gives up st's ownership of the ledger; a no-op when another socket
+// already owns it.
+func (s *sessionState) release(st *clientState) {
+	s.mu.Lock()
+	if s.owner == st {
+		s.owner = nil
+	}
+	s.mu.Unlock()
 }
 
 // RecordSize stores a client's most recently requested terminal size on its
@@ -171,7 +179,7 @@ func (r *clientRegistry) Snapshot() (
 	for ws, state := range r.clients {
 		var ack uint64
 		if sess := state.session.Load(); sess != nil {
-			ack = sess.bytesReceived
+			ack = sess.received.Load()
 		}
 		acks[ws] = ack
 		writers[ws] = state
@@ -180,27 +188,20 @@ func (r *clientRegistry) Snapshot() (
 	return acks, writers, gens
 }
 
-// ResolveSession looks up or creates a session for the given ID,
-// attaches it to the client state, and returns the session's current
-// bytesReceived plus whether the session had to be created (a key miss —
-// the caller uses it with the client's claimed sentBytes to signal ledger
-// loss on the resumeAck rather than leaving the client to guess from an
-// ambiguous received=0).
-// A key hit refreshes lastSeen so an attached, input-idle client (a pure
-// viewer that reconnects but never types) is not GC-eligible merely because
-// IncrementReceived never ran for it. Remove stamps it again on detach, so
-// between the two the retention window below always measures time since a
-// client last held the ledger.
-// Opportunistically GCs sessions unattached for >60 min. The 60-minute window
-// is long enough to survive iOS Safari aggressively unloading a backgrounded
-// tab (which can keep the same sessionId via sessionStorage but suspends
-// the WebSocket for an unbounded period). A shorter window (the previous
-// 10-minute one) caused a duplicate-resend bug: tab suspended >10 min →
-// session GC'd → reconnect creates new session with bytesReceived=0 →
-// client's resumeAck handler trims nothing → retransmitOutbox replays
-// every queued chunk → the child re-receives the same input as fresh
-// keystrokes and queues duplicate messages.
-func (r *clientRegistry) ResolveSession(state *clientState, sessionID SessionID) (ack uint64, created bool) {
+// testLedgerMoveHold, when non-nil, runs inside ResolveSession after the state
+// is attached to its new ledger and before it leaves the old one, so a test can
+// take the old ledger over at that instant. Never set in production.
+var testLedgerMoveHold atomic.Pointer[func()]
+
+// ResolveSession looks up or creates the ledger for sessionID, attaches it to
+// state, and returns its received count and whether it was created (a key miss,
+// which the caller pairs with the client's sentBytes to signal ledger loss). A
+// key hit refreshes lastSeen, so a viewer that never types stays retained.
+// state becomes the owner; displaced is the previous owner, already fenced, for
+// the caller to close. The ack is read in the same critical section as the
+// transfer, so it counts every byte the previous owner applied and none after.
+// A fenced state takes nothing: it was superseded and the caller ends it.
+func (r *clientRegistry) ResolveSession(state *clientState, sessionID SessionID) (ack uint64, created bool, displaced *clientState) {
 	r.mu.Lock()
 	sess, ok := r.sessions[sessionID]
 	if !ok {
@@ -212,10 +213,60 @@ func (r *clientRegistry) ResolveSession(state *clientState, sessionID SessionID)
 	} else {
 		sess.lastSeen = time.Now()
 	}
-	state.session.Store(sess)
-	ack = sess.bytesReceived
+	prev := state.session.Swap(sess)
 	r.mu.Unlock()
-	return ack, created
+
+	if hold := testLedgerMoveHold.Load(); hold != nil {
+		(*hold)()
+	}
+	// Leave the old ledger before reading the fence: from then on nothing can
+	// fence state through it, so the check below sees every supersession.
+	if prev != nil && prev != sess {
+		prev.release(state)
+	}
+	sess.mu.Lock()
+	if state.fenced.Load() {
+		sess.mu.Unlock()
+		return 0, created, nil
+	}
+	if sess.owner != nil && sess.owner != state {
+		displaced = sess.owner
+		displaced.fenced.Store(true)
+	}
+	sess.owner = state
+	ack = sess.received.Load()
+	sess.mu.Unlock()
+	return ack, created, displaced
+}
+
+// ApplyInput writes one input frame to pty and counts it on state's ledger as
+// one step, so a resume's ack can never fall between the write and the count.
+// applied is false, with nothing written, when another socket has taken the
+// ledger over; the caller then ends this socket. A socket that has not
+// resumed yet has no ledger: its input is written but counted nowhere.
+func (r *clientRegistry) ApplyInput(state *clientState, pty io.Writer, msg []byte) (applied bool, err error) {
+	sess := state.session.Load()
+	if sess == nil {
+		_, err = pty.Write(msg)
+		return err == nil, err
+	}
+	sess.mu.Lock()
+	if sess.owner != state {
+		sess.mu.Unlock()
+		return false, nil
+	}
+	_, err = pty.Write(msg)
+	if err == nil {
+		sess.received.Add(uint64(len(msg)))
+	}
+	sess.mu.Unlock()
+	if err != nil {
+		return false, err
+	}
+	r.mu.Lock()
+	sess.lastSeen = time.Now()
+	r.mu.Unlock()
+	return true, nil
 }
 
 // attachedSessions returns the set of sessions currently attached to a live
@@ -247,10 +298,10 @@ func (r *clientRegistry) gcIdleSessions() {
 			continue
 		}
 		if time.Since(s.lastSeen) > 60*time.Minute {
-			if s.bytesReceived > 0 {
+			if received := s.received.Load(); received > 0 {
 				r.logger.Info("terminal: gc'd idle session with received bytes",
 					"session_id", LogID(id),
-					"bytes_received", s.bytesReceived,
+					"bytes_received", received,
 					"idle", time.Since(s.lastSeen).Round(time.Second))
 			}
 			delete(r.sessions, id)
@@ -294,7 +345,7 @@ func (r *clientRegistry) evictOldestSession() {
 	}
 }
 
-// AckSweepTargets returns the clients whose session's bytesReceived has
+// AckSweepTargets returns the clients whose session's received count has
 // advanced past the last ack actually written to them, and optimistically
 // records the new value as sent. flushLoop calls it on ticks that produced
 // no content frame, then writes a bare ackOnly frame to each target — so
@@ -311,7 +362,7 @@ func (r *clientRegistry) AckSweepTargets() map[*websocket.Conn]uint64 {
 		if sess == nil {
 			continue
 		}
-		if ack := sess.bytesReceived; ack != state.lastAckSent.Load() {
+		if ack := sess.received.Load(); ack != state.lastAckSent.Load() {
 			if m == nil {
 				m = make(map[*websocket.Conn]uint64)
 			}
@@ -345,18 +396,5 @@ func (r *clientRegistry) NoteAcksSent(acks map[*websocket.Conn]uint64) {
 				break
 			}
 		}
-	}
-}
-
-// IncrementReceived adds n to the session's bytesReceived counter.
-func (r *clientRegistry) IncrementReceived(state *clientState, n int) {
-	if n <= 0 {
-		return
-	}
-	if sess := state.session.Load(); sess != nil {
-		r.mu.Lock()
-		sess.bytesReceived += uint64(n)
-		sess.lastSeen = time.Now()
-		r.mu.Unlock()
 	}
 }

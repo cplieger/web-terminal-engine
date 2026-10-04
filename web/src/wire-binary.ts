@@ -1,7 +1,7 @@
 // Binary wire decoder. Mirrors wire_binary.go on the server.
 //
-// All multi-byte integers are little-endian. See the Go terminal package's
-// wire_binary.go for the exact frame layout.
+// All multi-byte integers are little-endian. The frame layouts are in
+// docs/wire-protocol.md "Byte layout" at the repository root.
 
 import type {
   WireRun,

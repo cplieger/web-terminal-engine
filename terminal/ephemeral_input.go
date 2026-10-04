@@ -39,14 +39,17 @@ func (st *clientState) takeEphemeralToken() bool {
 }
 
 // ephemeralInputControl writes an `ephemeralInput` payload to the PTY as
-// BEST-EFFORT input: uncounted, never retransmitted, not recoverable — a mouse
-// report describes a screen a resume has since repainted.
+// BEST-EFFORT input: uncounted, never retransmitted, not recoverable, since a
+// mouse report describes a screen a resume has since repainted.
 //
-// It MUST NOT call IncrementReceived. The resume ledger is byte-exact both ways:
-// a counted byte here pushes the server's received count past the client's
-// bytesSent, whose clamp pins bytesAcked and empties the outbox, silently acking
-// keystrokes the server never received.
+// It MUST NOT go through ApplyInput: a counted byte here pushes the received
+// count past the client's bytesSent, whose clamp empties the outbox and acks
+// keystrokes the server never received. That also skips the ledger's owner
+// check, so the fence is asserted here too.
 func (h *Handler) ephemeralInputControl(state *clientState, c *controlMsg) {
+	if state.fenced.Load() {
+		return
+	}
 	if c.Data == "" || len(c.Data) > maxEphemeralInputBytes {
 		h.cfg.logger.Debug("terminal: ephemeral input payload out of range", "bytes", len(c.Data))
 		return

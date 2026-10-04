@@ -483,22 +483,35 @@ func WithMinimumContrast(ratio float64) Option {
 	return func(c *handlerConfig) { c.minContrast = ratio }
 }
 
-// sessionState persists across WS reconnects for the same logical
-// client. The client identifies its session via the resume control
-// message; the server uses sessionState.bytesReceived as the ack value
-// to send back, which the client compares to its sent count to
-// determine which bytes (if any) need retransmission after a blip.
+// sessionState is one sender's input ledger, kept across WS reconnects and
+// named by the resume control message. received is the ack the client compares
+// to its sent count to decide what to retransmit. A sender has one live
+// transport, so a ledger has at most one owner socket: a resume transfers
+// ownership and fences the previous owner, and a non-owner's input is dropped.
 type sessionState struct {
-	lastSeen      time.Time
-	bytesReceived uint64
+	// lastSeen is guarded by clientRegistry.mu.
+	lastSeen time.Time
+	// owner is guarded by mu.
+	owner *clientState
+	// received is written only under mu, so the PTY write and the count are
+	// one step against a resume's ack read; readers that need no such
+	// ordering (Snapshot, the ack sweep, the GC) load it without mu.
+	received atomic.Uint64
+	// mu is held across the owner's PTY write on purpose: it exists to
+	// serialize that write with the count. Lock order: never take mu while
+	// holding clientRegistry.mu.
+	mu sync.Mutex
 }
 
 // clientState tracks per-WS-connection state. session is resolved
 // from the sessionId in the resume control message. session is stored
-// as an atomic.Pointer so IncrementReceived can test whether a session
-// is attached without taking registry.mu; the pointed-to sessionState's
-// fields are guarded by the clientRegistry's mutex (registry.mu), not h.mu.
+// as an atomic.Pointer so the input path can test whether a session
+// is attached without taking registry.mu; the pointed-to sessionState
+// documents which lock guards each of its fields.
 type clientState struct {
+	// ws is the socket this state belongs to, set once by clientRegistry.Add
+	// so a resume that supersedes this socket can close it.
+	ws      *websocket.Conn
 	session atomic.Pointer[sessionState]
 	// resumeLast/resumeTokens are the per-socket resume throttle's token
 	// bucket (see resumeControl). Owned by the socket's read loop — one
@@ -517,7 +530,7 @@ type clientState struct {
 	// lastAckSent is the most recent inputAck value actually written to this
 	// socket (stamped on a content frame by dispatchFrame, sent bare by a
 	// no-frame scheduler pass's ackOnly sweep, or carried by handleResume's
-	// resumeAck). The sweep compares it to the session's bytesReceived so input
+	// resumeAck). The sweep compares it to the ledger's received count so input
 	// into a silent app is acknowledged on the next dirty pass. Atomic because
 	// handleResume (per-connection goroutine) and flushLoop both write it.
 	lastAckSent atomic.Uint64
@@ -540,6 +553,11 @@ type clientState struct {
 	// `focus` control). Guarded by clientRegistry.mu like cols/rows; the
 	// aggregate the DEC 1004 derivation reads is AnyClientFocused.
 	focused bool
+	// fenced is set, under the ledger's mu, when a resume on this socket's
+	// ledger moved ownership to another socket. It is never cleared: nothing
+	// this socket sends reaches the PTY or shared state again, and it never
+	// owns a ledger again.
+	fenced atomic.Bool
 	// writeMu serializes the two CONTENT-frame writers to this socket: the
 	// flush dispatcher's per-client payload loop (dispatchFrame) and
 	// handleResume's snapshot+batch. coder/websocket serializes individual
@@ -1986,21 +2004,19 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	h.clientReadLoop(ctx, ws, state, markResumeServed)
 }
 
-// clientReadLoop pumps one client's messages until the socket dies or a
-// protocol violation closes it.
+// clientReadLoop pumps one client's messages until the socket dies, a
+// protocol violation closes it, or a resume on another socket fences it.
 //
-// v4 typed-framing state (the negotiation contract is WireProtocolVersion's
-// doc comment in wire_binary.go): a binary bootstrap resume declaring
-// protocolVersion >= 4 ARMS the connection; the
-// first valid recognized TEXT control on an armed connection LATCHES typed
-// mode (text = control, binary = full-alphabet PTY input). Until the latch,
-// binary frames keep exact v3 semantics — the 0x00 sentinel plus the
-// parse-fallback — so v3 and version-silent clients ride that path forever.
+// v4 typed framing (contract: WireProtocolVersion in wire_binary.go): a binary
+// resume declaring protocolVersion >= 4 ARMS the connection; the first valid
+// recognized TEXT control then LATCHES typed mode (text is control, binary is
+// PTY input). Until the latch, binary frames keep exact v3 semantics (the 0x00
+// sentinel plus the parse-fallback), so v3 and version-silent clients stay there.
 func (h *Handler) clientReadLoop(ctx context.Context, ws *websocket.Conn, state *clientState, markResumeServed func()) {
 	var armed, latched bool
 	for {
 		typ, msg, err := ws.Read(ctx)
-		if err != nil {
+		if err != nil || state.fenced.Load() {
 			return
 		}
 		if typ == websocket.MessageText {
@@ -2028,7 +2044,7 @@ func (h *Handler) clientReadLoop(ctx context.Context, ws *websocket.Conn, state 
 // ever silently swallowed and acks stay on frame boundaries); post-latch, and
 // for all non-sentinel frames, the bytes are PTY input. Returns the updated
 // armed state and ok=false when the connection must end (PTY start/write
-// failure).
+// failure, or the socket's ledger has moved to another socket).
 func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg []byte, armed, latched bool, onResumeServed func()) (newArmed, ok bool) {
 	if !latched && msg[0] == 0x00 {
 		if d := h.handleControl(ws, state, msg[1:], onResumeServed); d.parsed {
@@ -2045,15 +2061,14 @@ func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg 
 			return armed, false
 		}
 	}
-	if _, err := h.ptmx.Write(msg); err != nil {
+	applied, err := h.registry.ApplyInput(state, h.ptmx, msg)
+	if err != nil {
 		h.cfg.logger.Debug("terminal: pty write", "error", err)
 		return armed, false
 	}
-	// Increment session bytesReceived for the resume protocol.
-	// state.session is set when the client sends its first resume
-	// control message; without it we silently skip — the client is
-	// either not using the protocol or hasn't initialized yet.
-	h.registry.IncrementReceived(state, len(msg))
+	if !applied {
+		return armed, false
+	}
 	// Wake the scheduler even though no PTY output may follow (a silent
 	// reader, e.g. `read -s`): the pass's ack sweep is what trims the
 	// client's outbox for input that produces no echo.
@@ -2115,7 +2130,7 @@ type controlDisposition struct {
 	parsed bool // payload was valid control JSON
 	known  bool // c.Type was a recognized control type
 	armsV4 bool // a resume declaring protocolVersion >= typedFramingMinVersion
-	closed bool // compatibility enforcement closed the connection
+	closed bool // the connection was closed, or superseded and closing
 }
 
 // resumeControl is handleControl's resume case: the wire-version gate, the
@@ -2168,7 +2183,10 @@ func (h *Handler) resumeControl(ws *websocket.Conn, state *clientState, c *contr
 		ht = *c.HaveThrough
 	}
 	replayMax := parseReplayMax(c.ReplayMax)
-	h.handleResume(ws, state, c.SessionID, ht, c.SentBytes, replayMax)
+	if h.handleResume(ws, state, c.SessionID, ht, c.SentBytes, replayMax) {
+		d.closed = true
+		return d
+	}
 	if onResumeServed != nil {
 		onResumeServed()
 	}
@@ -2386,16 +2404,26 @@ func replayStart(committed uint64, haveThrough int64, replayMax *int64) uint64 {
 	return from
 }
 
-// handleResume resolves the session for sessionID, attaches it to state,
-// replies with a resumeAck (bytesReceived, retained index bounds, and a
-// ledger-lost flag when the key missed the registry while sentBytes > 0),
-// then sends the window frame and replays lines after haveThrough (-1 = none),
-// bounded by replayStart. On the main screen the window frame goes first so a
-// stale-alt client leaves alt before history lands; in alt the replay goes
-// first so a not-yet-alt client stores history before the frame flips it,
-// because the client drops scroll frames while its alt flag is set.
-func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID SessionID, haveThrough int64, sentBytes uint64, replayMax *int64) {
-	ack, created := h.registry.ResolveSession(state, sessionID)
+// handleResume attaches state to sessionID's input ledger and replies with a
+// resumeAck (the ledger's received count, the retained index bounds, and a
+// ledger-lost flag when the key missed the registry while sentBytes > 0), then
+// sends the window frame and replays lines after haveThrough (-1 = none),
+// bounded by replayMax. On the main screen the frame goes first so a stale-alt
+// client leaves alt before history lands; in alt the replay goes first, because
+// the client drops scroll frames while its alt flag is set. It reports
+// superseded, sending nothing, when another socket already took the ledger.
+func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID SessionID, haveThrough int64, sentBytes uint64, replayMax *int64) (superseded bool) {
+	ack, created, displaced := h.registry.ResolveSession(state, sessionID)
+	if displaced != nil {
+		h.cfg.logger.Info("terminal: resume superseded the ledger's previous socket",
+			"session_id", LogID(sessionID))
+		// Close waits on the displaced socket's close handshake, which must not
+		// block this resume.
+		go func(prev *websocket.Conn) { _ = prev.Close(websocket.StatusNormalClosure, "superseded") }(displaced.ws)
+	}
+	if state.fenced.Load() {
+		return true
+	}
 	// Capability declaration for the resumeAck's historyPaging bit. It no longer
 	// gates the replay clamp: that bound is unconditional, so a shallow-ring
 	// server bounds its replay too.
@@ -2549,6 +2577,7 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	// The deferred writeMu.Unlock runs right after this poke; the pass it
 	// wakes blocks on the lock for at most that gap.
 	h.markDirty()
+	return false
 }
 
 // clampResize floors the requested dimensions to a sane minimum and caps them

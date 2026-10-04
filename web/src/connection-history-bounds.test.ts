@@ -4,7 +4,7 @@
 // overflowed); the token bucket's refill rate and wait, a contract with the
 // server's bucket (refilling faster gets requests dropped, under-waiting re-asks
 // into an empty bucket forever); and the resume's replayMax at 1 and 0, which the
-// store predicts the replay jump from (docs/paged-scrollback.md §4.5).
+// store predicts the replay jump from.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { type Connection, createConnection, MAX_REPLAY_LINES } from "./connection.js";

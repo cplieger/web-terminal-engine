@@ -1,24 +1,11 @@
 #!/usr/bin/env bash
-# Fetch the esctest2 VT conformance suite and run it against the engine's VT.
-#
-# esctest2 (github.com/ThomasDickey/esctest2) is GPL-2.0; the engine is MPL-2.0.
-# Those cannot be COMBINED into one work in this direction: MPL-2.0 §3.3 lets MPL
-# files enter a GPL work, not GPL code enter an MPL one. So esctest2 is NOT
-# vendored: this script fetches it into a gitignored checkout and the suite runs
-# as a subprocess over a PTY (never linked into the engine), which is mere
-# aggregation. See internal/esctest/harness.go and .kiro steering testing.md.
-#
-# Usage:
-#   bash scripts/esctest.sh                 # run the conformance gate
-#   bash scripts/esctest.sh -v              # verbose (list every FAIL)
-#   ESCTEST_INCLUDE='CUPTests' bash scripts/esctest.sh -v   # one test class
-#   ESCTEST_OPTIONS='none' bash scripts/esctest.sh          # drop the strictness opts
-#
-# The gate runs at maximum strictness by default (--options xtermWinopsEnabled;
-# see internal/esctest/harness_test.go). It passes when the failing set matches
-# internal/esctest/known_failures.txt (the allowlist of intentional
-# deviations). To reseed that allowlist after a deliberate change, run with
-# ESCTEST_LOGCOPY set and regenerate from the FAIL lines.
+# Fetch the esctest2 VT conformance suite (GPL-2.0) into a gitignored checkout
+# and run it against the engine's VT as a PTY subprocess. It is never vendored
+# or linked: MPL-2.0 §3.3 lets MPL code enter a GPL work, not the reverse.
+# Usage: bash scripts/esctest.sh [-v]; ESCTEST_INCLUDE=<class> narrows the run,
+# ESCTEST_OPTIONS=none drops the default --options xtermWinopsEnabled. The gate
+# passes when the FAIL set matches internal/esctest/known_failures.txt; reseed it
+# from the FAIL lines of an ESCTEST_LOGCOPY run.
 set -eu
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"

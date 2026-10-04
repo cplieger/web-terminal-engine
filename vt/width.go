@@ -2,33 +2,12 @@ package vt
 
 import "unicode"
 
-// Unicode cell width determination for terminal emulation.
-//
-// Implements UAX#11 East Asian Width:
-//   - Wide (W) and Fullwidth (F) characters → width 2
-//   - Combining / zero-width characters → width 0
-//   - Ambiguous (A) → width 1 (Western convention)
-//   - Everything else → width 1
-//
-// The zero-width set comes from the Go standard library's Unicode tables
-// (unicode.Mn / Me / Cf), which track the toolchain's Unicode version, so it
-// stays current without a hand-maintained table. The East Asian Wide/Fullwidth
-// and emoji-presentation sets are local tables because the stdlib does not
-// expose them; they are GENERATED from a pinned UCD version by
-// scripts/gen-width-tables.py (bump UNICODE_VERSION there and re-run to
-// update). Runtime stays stdlib-only.
-//
-// Single-codepoint emoji with default emoji presentation (Unicode
-// Emoji_Presentation=Yes, e.g. 🟢 U+1F7E2) are Wide (width 2). This matches the
-// modern terminal-emulator consensus (iTerm2, kitty, WezTerm, VTE, Windows
-// Terminal) and, decisively, the wcwidth model the programs driving the PTY use
-// (go-runewidth): a width-1 mismatch is exactly what clips such glyphs into the
-// next cell. The set is emojiRanges below.
-//
-// OUT OF SCOPE: multi-codepoint grapheme clusters — ZWJ sequences (family
-// emoji), skin-tone modifiers, variation selectors that change width, and
-// regional-indicator flags. Combining marks are consumed (width 0) but no
-// grapheme joining is performed; see the README "Unsupported by Design" table.
+// Cell width follows UAX#11: Wide and Fullwidth → 2, combining/zero-width → 0,
+// Ambiguous and everything else → 1. The zero-width set is the stdlib's
+// unicode.Mn/Me/Cf; the Wide and emoji-presentation tables are generated from a
+// pinned UCD by scripts/gen-width-tables.py. Emoji_Presentation=Yes emoji are
+// width 2, matching go-runewidth on the PTY side. Multi-codepoint grapheme
+// clusters are out of scope (docs/non-goals.md).
 
 // runeWidth returns the terminal cell width of a rune:
 //
@@ -220,16 +199,11 @@ var wideRanges = []interval{
 	{0x30000, 0x3FFFD},
 }
 
-// emojiRanges lists single-codepoint emoji with default emoji
-// presentation (Unicode Emoji_Presentation=Yes), which render two cells
-// wide in modern terminals and in the wcwidth model the PTY-side
-// programs use (go-runewidth), so the engine reserves two cells to stay
-// in sync (a width-1 mismatch is what clips e.g. 🟢 U+1F7E2).
-// Regional-indicator flags (U+1F1E6-1F1FF) and ZWJ / skin-tone /
-// variation-selector sequences are intentionally excluded: they are
-// multi-codepoint grapheme clusters, out of scope (see the width scope
-// note above and the README). Ascending + non-overlapping for inTable's
-// binary search (guarded by TestEmojiRangesSortedNonOverlapping).
+// emojiRanges lists single-codepoint Emoji_Presentation=Yes emoji, two cells
+// wide to match go-runewidth on the PTY side. Flags and ZWJ/skin-tone/
+// variation-selector sequences are excluded (grapheme clusters). Ascending and
+// non-overlapping for inTable's binary search
+// (TestEmojiRangesSortedNonOverlapping).
 var emojiRanges = []interval{
 	{0x231A, 0x231B},
 	{0x23E9, 0x23EC},

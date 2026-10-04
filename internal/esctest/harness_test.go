@@ -102,7 +102,7 @@ func TestConformance(t *testing.T) {
 		t.Errorf("unexpected esctest failure (regression): %s", n)
 	}
 	// The "a listed test now passes" check is only valid for a FULL run. A
-	// scoped ESCTEST_INCLUDE (documented in scripts/esctest.sh and steering as
+	// scoped ESCTEST_INCLUDE (documented in scripts/esctest.sh as
 	// `ESCTEST_INCLUDE='CUPTests' bash scripts/esctest.sh -v`) runs a subset,
 	// so an allowlisted test merely not appearing means "not run", not "now
 	// passes" -- asserting it emits a false stale-entry error for every

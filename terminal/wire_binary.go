@@ -169,15 +169,11 @@ const (
 	// guessing from an ambiguous received=0.
 	resumeAckFlagLedgerLost byte = 1 << 0
 
-	// resumeAckFlagHistoryPaging is bit1 of the resumeAck ackFlags byte: the
-	// server DECLARES that it serves the `history` control and that its ring is
-	// deep enough to back demand paging (see historyPagingDeclared). Capability
-	// is declared rather than probed because the ack is the first frame of every
-	// resume batch, so the client knows one RTT after attach with zero requests
-	// spent and no way to mis-read a slow link as an old server. An unset bit
-	// (or a server too old to carry the length-gated tail at all) reads as
-	// unsupported: the client keeps its legacy resident-tail cap and never sends
-	// a history control. See docs/paged-scrollback.md §4.5.
+	// resumeAckFlagHistoryPaging is bit1 of ackFlags: the server serves the
+	// `history` control and its ring is deep enough to page
+	// (historyPagingDeclared). It is declared in the ack, not probed, so the
+	// client knows one RTT after attach. Unset (or an older server without the
+	// tail) means unsupported: the client keeps its resident-tail cap.
 	resumeAckFlagHistoryPaging byte = 1 << 1
 
 	// resumeAckFlagServerFocus is bit2 of the resumeAck ackFlags byte: the
@@ -547,9 +543,8 @@ func encodePongMsg() []byte {
 }
 
 // Per-row wire overhead, split out so the ceiling arithmetic below and the
-// tests that pin it read the same numbers as the encoder (see
-// docs/paged-scrollback.md §4.2 — one helper drives stripping, page packing,
-// and the tests so the three cannot drift).
+// tests that pin it read the same numbers as the encoder: one helper drives
+// stripping, page packing and the tests, so the three cannot drift.
 const (
 	// encodedRowCountSize is the row payload's leading num_runs field.
 	encodedRowCountSize = 2
@@ -585,16 +580,11 @@ func encodedRowSize(runs []vt.WireRun) int {
 	return size
 }
 
-// stripRowURIs returns a copy of runs with every hyperlink URI emptied and
-// the autolink bit cleared, so a stripped run is indistinguishable from a
-// never-linked one (rather than carrying AttrAutolink with an empty U, a state
-// the wire format has never carried). Text and styling are untouched.
-//
-// The client re-linkifies stripped rows from VISIBLE text, so a server-stamped
-// autolink whose URL was split by a style change or a soft wrap re-derives a
-// PREFIX href, and an OSC 8 link whose text is not a URL loses its link
-// entirely. That is the accepted degradation, reachable only above
-// rowByteCeiling (see docs/paged-scrollback.md §4.2).
+// stripRowURIs returns a copy of runs with every hyperlink URI emptied and the
+// autolink bit cleared, so a stripped run reads as never linked; text and
+// styling are untouched. Above rowByteCeiling the client re-linkifies from
+// visible text, so a split autolink re-derives a prefix href and an OSC 8 link
+// whose text is not a URL loses its link: the accepted degradation.
 func stripRowURIs(runs []vt.WireRun) []vt.WireRun {
 	out := make([]vt.WireRun, len(runs))
 	copy(out, runs)
@@ -623,9 +613,8 @@ func capRowRuns(runs []vt.WireRun) []vt.WireRun {
 // frames, resume replay chunks, and screen frames — deliberately including
 // screen so a pathological row displays and pages identically (link-less in
 // both) instead of showing links on screen and losing them the moment it
-// scrolls off. The ceiling bounds every ROW; it does not bound the aggregate
-// multi-row messages, which remain the pre-existing exposure named in
-// docs/paged-scrollback.md §4.2.
+// scrolls off. The ceiling bounds every ROW, not the aggregate multi-row
+// messages.
 func appendRowRuns(buf []byte, runs []vt.WireRun) []byte {
 	runs = capRowRuns(runs)
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(runs)))

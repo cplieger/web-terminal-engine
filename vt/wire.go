@@ -34,17 +34,10 @@ const wireDefaultColor = int32(-1)
 const AttrAutolink = 1024
 
 // maxAutolinkRows caps how many soft-wrapped rows are joined when scanning for
-// URLs, bounding the per-row work. Four rows cover any real URL even at phone
-// widths (~40 cols); a chain longer than the cap keeps the rows NEAREST the row
-// being rendered (see boundChain).
-//
-// A URL that outgrows the cap links imperfectly rather than not at all, and the
-// difference is visible: rows near the URL's start get an href truncated at the
-// window edge, while a row far enough past the start gets no anchor, because the
-// scheme has left the window. Measured at 20 columns on a 100-character URL: the
-// first three rows link to the URL's first 80 characters and the last two are
-// not clickable. Reaching it takes about five wrapped rows, which is why the cap
-// stands; the bound is documented for consumers in the README.
+// URLs, keeping the rows NEAREST the rendered one (boundChain). Four covers any
+// real URL at ~40 columns; past the cap a URL links imperfectly (rows near its
+// start get a truncated href, later rows none), which docs/rendering.md
+// documents for consumers.
 const maxAutolinkRows = 4
 
 // urlRE follows the client's autolink pattern (render.ts URL_RE, the xterm.js

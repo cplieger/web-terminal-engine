@@ -11,11 +11,6 @@ import (
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
-// Tests for demand-paged scrollback (docs/paged-scrollback.md): the bounded
-// ring accessor, the per-row URI-strip ceiling, the `history` control's
-// validation and intersection serve, the per-socket history bucket, the
-// resumeAck capability bit, and the bounded resume replay.
-
 // row builds a single-run row of plain text (local helper; the golden test's
 // own `row` lives in wire_golden_test.go and is not shared to keep each file
 // readable on its own).

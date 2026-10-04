@@ -1,12 +1,8 @@
-// Unit tests for the store's DEMAND-PAGING half (docs/paged-scrollback.md §5):
-// the residency split between a live tail and a disposable browse cache, the
-// solicited-range doctrine, the single resume-ack transition (bounds, cap flip,
-// replay-jump prediction), the paging floor, and the two exclusions that keep
-// disposable cache out of persistence and out of the eviction watermark.
-//
-// Pure data structure, no DOM. The renderer supplies `viewportAbs` in
-// production; here the tests supply it directly, which is the point of the
-// store not guessing it.
+// Unit tests for the store's demand-paging half: the live-tail/browse-cache
+// residency split, the solicited-range doctrine, the resume-ack transition
+// (bounds, cap flip, replay-jump prediction), the paging floor, and the
+// exclusion of disposable cache from persistence and the eviction watermark.
+// Tests supply `viewportAbs` directly; the renderer does in production.
 
 import { describe, it, expect } from "vitest";
 import {
@@ -346,7 +342,7 @@ describe("LineStore paging: the replay jump", () => {
     // under the post-flip target moves nothing at the flip, so the jump is the
     // only source of cache. The budget pass is gated on EITHER having moved
     // something — gating it on the flip alone leaves the jump's band unbudgeted,
-    // which is the whole population §5.3 names as primary.
+    // which is the primary population.
     const s = new LineStore();
     // A tail well under RESIDENT_TAIL_CAP: confirmPaging has nothing to move.
     s.applyScroll(pageMsg(0, 900));

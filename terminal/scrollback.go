@@ -119,13 +119,11 @@ func (r *scrollbackRing) LinesFrom(abs uint64) (firstAbs uint64, lines [][]vt.Wi
 
 // LinesRange returns at most maxLines retained lines starting at absolute
 // index abs, in order, along with the absolute index of the first returned
-// line. It is LinesFrom with a count bound: LinesFrom returns everything
-// from the clamp up to the tail, which is an O(ring) copy per call and far
-// more than a paged history request asks for (see docs/paged-scrollback.md
-// §4.2). Clamping behavior is identical — abs older than the retained range
-// clamps up to OldestIndex, so the caller compares the returned firstAbs
+// line. It is LinesFrom with a count bound, so a page request copies a page
+// rather than the ring. Clamping is identical — abs older than the retained
+// range clamps up to OldestIndex, so the caller compares the returned firstAbs
 // against the requested abs to detect an eviction gap — and abs at or beyond
-// Committed returns no lines. maxLines <= 0 returns no lines.
+// Committed, or maxLines <= 0, returns no lines.
 func (r *scrollbackRing) LinesRange(abs uint64, maxLines int) (firstAbs uint64, lines [][]vt.WireRun) {
 	if r.count == 0 || abs >= r.committed || maxLines <= 0 {
 		return r.committed, nil

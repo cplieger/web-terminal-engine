@@ -1,4 +1,4 @@
-// The connection's DEMAND-PAGING half (docs/paged-scrollback.md §4 and §5.1):
+// The connection's DEMAND-PAGING half:
 // the capability read off the resumeAck, the values this socket SENT so the
 // store can predict the replay start, the single-flight history request with
 // its token bucket and data timeout, the containment rule that decides whether

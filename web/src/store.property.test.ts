@@ -160,19 +160,12 @@ describe("LineStore invariants (property)", () => {
   });
 });
 
-// The paging half (docs/paged-scrollback.md §7): the same generated-interleaving
-// treatment, extended with a SOLICITED flag per batch so the guard-2 split is
-// generated rather than pinned by example. Under the solicited-range doctrine an
-// unsolicited line below the eviction watermark is refused and a solicited one at
-// the same index is stored, so the two paths now diverge inside the same store
-// and every residency invariant has to survive their interleaving.
-//
-// Page ranges are derived at run time as ranges strictly BELOW the retained
-// frontier, which is the only shape the fetch controller produces (it fills gaps
-// under the reader). That is deliberate modelling, not convenience: it is what
-// makes "the top of the store is always live tail" a real invariant rather than
-// an accident, and that invariant is what keeps a resume's `haveThrough` from
-// naming a disposable cache line.
+// The paging half: generated interleavings with a SOLICITED flag per batch, so
+// a solicited and an unsolicited line at one index (stored vs refused below
+// the eviction watermark) diverge in one store. Page ranges sit strictly BELOW
+// the retained frontier, the only shape the fetch controller produces, which
+// is what makes "the top of the store is live tail" a real invariant: it keeps
+// a resume's `haveThrough` from naming a disposable cache line.
 describe("LineStore paging invariants (property)", () => {
   const screenOf = (base: number, height: number): ScreenMessage => ({
     type: "screen",
@@ -237,19 +230,11 @@ describe("LineStore paging invariants (property)", () => {
         return `${label}: window row ${win.base + y} (base ${win.base}, height ${win.height}) was evicted`;
       }
     }
-    // 5. The TOP of the store is live tail, never cache. snapshot() walks down
-    //    from `highest` and stops at the first browse member, so a non-null
-    //    snapshot for a non-empty store is exactly that statement — and it is
-    //    what keeps a resume's `haveThrough` from naming a refetchable line.
-    //
-    //    Scoped out of the post-jump transient, which the design names: a
-    //    replay jump reclassifies the client's ENTIRE island as cache and
-    //    retires the window, so between that ack and the batch's first frame
-    //    there is legitimately no live tail at all (§5.2 — while the descriptor
-    //    is retired no window-derived bound may be evaluated). The property
-    //    found this state; scoping it is the honest reading, and the invariant
-    //    is still asserted on every other operation, including the frames that
-    //    land after the transition.
+    // 5. The TOP of the store is live tail, never cache: a non-null snapshot
+    //    for a non-empty store says exactly that, which keeps `haveThrough`
+    //    off a refetchable line. Exempt mid-jump only: a replay jump
+    //    reclassifies the whole island as cache and retires the window, so
+    //    until the batch's first frame there is legitimately no live tail.
     if (!midJump && total > 0 && s.snapshot(1) === null) {
       return `${label}: the highest retained line is browse cache, so nothing is persistable`;
     }

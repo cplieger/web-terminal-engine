@@ -175,6 +175,7 @@ describe("scroll: the zero-delta content shift", () => {
     // left holding instead of following.
     const f = makeClampingScrollEl(6000, 600);
     scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
+    f.userScrollTo(5400);
     f.userScrollTo(3000); // scrolled up to read
     expect(scroll.isUserScrolledUp()).toBe(true);
 

@@ -491,6 +491,8 @@ describe("what the engine wires between its parts", () => {
     });
     makeScrollable(fx);
 
+    fx.termWrap.scrollTop = 900;
+    fx.termWrap.dispatchEvent(new Event("scroll"));
     fx.termWrap.scrollTop = 500;
     fx.termWrap.dispatchEvent(new Event("scroll"));
     fx.termWrap.scrollTop = 900;

@@ -1,11 +1,11 @@
 // The scroll controller's ARMING discipline: the announced-shrink pass-through
 // on the ordering a browser produces (the announcement comes BEFORE the clamp's
 // scroll event, which CSSOM delivers at the next frame, and matters only when
-// the residual exceeds CLAMP_EPSILON_PX); the one-event lifetime of both arms
-// (an arm that fails to clear swallows the next real gesture); the position seam
-// and its placement after the pass-through return; the dispose detach; and the
-// exact edges, 24px bottom tolerance and 1px epsilon. The fixtures are local
-// because the shared one dispatches the clamp's event before a caller can announce.
+// the residual exceeds CLAMP_EPSILON_PX); its one-event lifetime (an arm that
+// fails to clear swallows the next real gesture); the position seam and the
+// silence of a library write's echo; the dispose detach; and the exact edges,
+// 24px bottom tolerance and 1px epsilon. The fixtures are local because the
+// shared one dispatches the clamp's event before a caller can announce.
 
 import { describe, it, expect } from "vitest";
 import { createScrollController, type ScrollController } from "./scroll.js";
@@ -134,11 +134,10 @@ describe("construction leaves no arm standing", () => {
   });
 });
 
-describe("the library-write pass-through lasts exactly one event", () => {
+describe("the echo of a library write", () => {
   it("lets the gesture after the echo re-engage follow", () => {
-    // adjustForContentShift writes the container on the library's behalf and
-    // arms a one-event pass-through for the echo. An arm that survived the echo
-    // would swallow the user's next scroll — here, their return to the tail.
+    // A write that left anything armed past its echo would swallow the user's
+    // next scroll: here, their return to the tail.
     const f = makeManualScroller(1000, 300);
     scroll = registerForDispose(createScrollController({ scrollEl: f.el }));
     f.userScrollTo(700); // the tail, following
@@ -147,7 +146,7 @@ describe("the library-write pass-through lasts exactly one event", () => {
 
     scroll.adjustForContentShift(-34); // two evicted rows above the reading position
     expect(f.top).toBe(366);
-    f.fireScroll(); // the write's own echo, consumed by the arm
+    f.fireScroll(); // the write's own echo
 
     f.userScrollTo(700); // back down to the tail
     expect(scroll.isUserScrolledUp()).toBe(false);

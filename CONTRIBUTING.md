@@ -1,145 +1,25 @@
 # Contributing to web-terminal-engine
 
-web-terminal-engine is a cross-language terminal library: a Go VT100/VT500 emulator plus WebSocket session handler, and a browser-side TypeScript renderer. The two halves never share code. They communicate over a versioned wire protocol, so protocol compatibility is the first thing to understand before changing either side.
+The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md) for commits, releases, synced files and checks apply here.
 
-## Architecture
+## Rules
 
-Three packages, two languages, one wire contract:
+- A new fixture in `wire-golden/` needs its own decode test in `web/src/wire-golden.node.test.ts` in the same change. That test reads fixtures by name, so without one a layout change fails in Go and passes in the browser.
+- After a socket upgrades, send every control through `sendControl` in `web/src/connection.ts`, which sends it as a text frame. The Go server reads a binary frame as terminal input, so a control built with `controlFrame` reaches the user's program.
+- Change the wire compatibly by adding a server-to-client opcode or a length-gated frame tail. Older clients skip both, but they misread a field or opcode whose meaning changed.
+- A wire revision bump changes `WireProtocolVersion` in `terminal/wire_binary.go` and `WIRE_PROTOCOL_VERSION` in `web/src/wire-compatibility.ts` in one change. The same change updates both codecs, the golden fixtures and the revision stated in [README.md](README.md#wire-protocol) and [docs/wire-protocol.md](docs/wire-protocol.md).
+- `wire-golden/v3-published.json` holds the fixtures released at tag `v2.8.0`, and the `@cplieger/web-terminal-engine-v3` devDependency is that release's decoder. The Go and TypeScript tests hold its revision equal to both floors.
+- Raise both floors in one change with their tests, the frozen fixtures, the pinned decoder and the floor stated in `README.md` and `docs/wire-protocol.md`. The review then shows which peers stop working.
+- An importable file outside `src/`, such as `wire-compatibility.json`, goes in `files` and `exports` in `web/package.json` and in `publish.include` in `web/jsr.json`. JSR `exports` lists modules only.
 
-- **`vt/` (Go)**: The VT100/VT500 screen buffer. It parses terminal byte streams (CSI/OSC/DCS, SGR, DEC modes, charsets, mouse) into a cell grid and renders rows to the wire format. No I/O or networking.
-- **`terminal/` (Go)**: The WebSocket session handler. It bridges a PTY (`github.com/creack/pty`) to a browser through `github.com/coder/websocket`, drives a `vt` screen, and adds reconnect, scrollback replay, adaptive ping, and the resume/inputAck reliability layer. `terminal/` also provides `SessionManager` (`session_manager.go`, `events.go`) for the multi-session `/ws?session=`, `/api/sessions`, and status-SSE surface.
-- **`web/` (TypeScript)**: The browser renderer (`render`), keyboard mapper (`keyboard`), on-screen mobile toolbar (`toolbar`), mouse/focus encoder (`mouse`), DEC-mode state (`modes`), scroll tracker (`scroll`), socket lifecycle (`connection`), and binary frame decoder (`decodeWireBinary`). It is published as `@cplieger/web-terminal-engine` with zero runtime dependencies.
+## Checks
 
-### The wire contract is load-bearing
+- Run `bash scripts/esctest.sh` after a change to `vt/`. It clones the esctest2 VT conformance suite at a pinned commit into the gitignored `.esctest2/` folder and needs `git`, `python3` and network access. CI skips this gate.
+- Run `npm run test:e2e` in `web/` after a change to rendering, scrolling, keyboard encoding or client-to-server framing, and after you regenerate a `render-golden/` fixture. CI does not run this Playwright suite.
+- The suite needs Chromium, installed once with `npx playwright install chromium`, and a Go toolchain, because the framing test starts `go run ./internal/e2etestserver` from the repository root.
 
-The Go server and TS client agree on a byte-level WebSocket protocol without importing shared types. The code is authoritative, backed by round-trip fuzz tests and `wire-golden/*.bin` fixtures. The README's "Wire Protocol" section documents the consumer contract and design rationale. The canonical implementations are:
+## Releases
 
-- Encoder (Go): `terminal/wire_binary.go`
-- Wire row types (Go): `vt/wire.go`
-- Decoder (TS): `web/src/wire-binary.ts`
-- Client control/input path (TS): `web/src/connection.ts`, `web/src/wire.ts`, `web/src/wsurl.ts`
-- Compatibility metadata (TS): `web/src/wire-compatibility.ts`
-- Generated language-neutral manifest: `web/wire-compatibility.json` (generator `web/src/test-helpers/wire-manifest.ts`)
-
-Two rules keep the two halves honest, and both have been broken:
-
-- **Every `wire-golden/*.bin` fixture needs a decode test on the TS side.** A fixture
-  the Go generator writes and nothing in `web/src/wire-golden.node.test.ts` reads pins one
-  half of a two-language contract: a layout change then fails loudly in Go and
-  silently in the browser. Add the fixture and its consumer assertions in the same
-  change.
-- **A client → server control is a TEXT frame on an upgraded socket.** The v3
-  `0x00`-sentinel binary form is only for the pre-upgrade bootstrap. Past the
-  upgrade the server reads a binary frame as terminal INPUT, so a control sent that
-  way is typed into the user's program and counted in the received-byte ledger.
-  Send through `sendControl`, which owns that decision, rather than reaching for
-  `controlFrame` directly.
-
-The Go and TypeScript artifacts can be installed and upgraded independently. Package-version equality is not the compatibility contract. Each release exports a current wire revision and a directional receiver floor:
-
-- Go: `terminal.WireProtocolVersion` and `terminal.MinSupportedClientWireVersion`
-- TypeScript: `WIRE_PROTOCOL_VERSION`, `MIN_SUPPORTED_SERVER_WIRE_VERSION`, `WIRE_INCOMPATIBLE_CLOSE_CODE`, and `WIRE_COMPATIBILITY`
-- Language-neutral: `web/wire-compatibility.json`, generated from `WIRE_COMPATIBILITY` (see below)
-
-Within one half, the minimum-supported-peer floor may never exceed that half's own revision; such a build could not talk to a peer of its own revision. `terminal.WirePairIncompatibility` enforces this per half and reports it BEFORE any cross-side verdict, so incoherent input (a scrape that read the wrong line, a hand-typed matrix entry) is diagnosed as corrupt input rather than as a version skew to fix by bumping a pin.
-
-This check was added after v3.2.1 and is a behaviour change for existing callers: a pair that is individually incoherent but passes both cross-side floors used to be reported compatible and is now reported incompatible. No pairing of real released artifacts changes verdict (both halves have always shipped revision 4 with floor 3). The repo keeps no checked-in changelog (release notes are generated by git-cliff from the conventional commits), so a change to this comparator's verdicts must state that in the commit body, in the form: `Behaviour change: WirePairIncompatibility now reports a half whose minimum-peer floor exceeds its own revision as incompatible.`
-
-### The generated wire-compatibility manifest
-
-`web/wire-compatibility.json` publishes the compatibility constants to consumers that cannot import TypeScript. It is GENERATED from `WIRE_COMPATIBILITY` by `web/src/test-helpers/wire-manifest.ts` and checked in, because the release pipeline publishes the working tree with no build step (`npm pkg set version` is the only mutation it makes, so a manifest produced at publish time would never reach the tarball). Never hand-edit it, and never restate the numbers there: one source of truth is the whole point of the file.
-
-Regenerate after any change to `web/src/wire-compatibility.ts`:
-
-```sh
-cd web && UPDATE_GOLDEN=1 npx vitest --run src/test-helpers/wire-manifest.node.test.ts
-```
-
-Three guards keep the surfaces from diverging, all on the normal CI path:
-
-- Drift: `web/src/test-helpers/wire-manifest.node.test.ts` regenerates the manifest and fails on any byte of difference (same code path that writes it under `UPDATE_GOLDEN=1`).
-- TypeScript conformance: the same test pins every manifest value to its `wire-compatibility.ts` constant.
-- Go conformance: `terminal/wire_manifest_test.go` pins the manifest against `WireProtocolVersion` / `WireIncompatibleCloseCode`, checks the client floor cannot exceed the server's revision, and feeds the manifest through `WirePairIncompatibility` to assert the published pair accepts itself.
-
-The manifest's `schemaVersion` describes the FILE's layout, not the protocol. Bumping it, or removing/renaming/retyping a field, is a breaking change to a published artifact: release-note it, and update the consumer contract in [web/README.md](web/README.md#wire-compatibility-manifest). Adding a field is a minor change (consumers parse permissively). Adding a new publish surface also means updating both publish paths: npm `files` + `exports`, and `jsr.json`'s `publish.include` (JSR `exports` accepts modules only, so the JSON ships as an included file).
-
-Keep the two current revisions equal. Their floors may diverge when one receiver retires an older decode path. A version-silent peer remains supported; a declared peer below the receiver's floor is refused with close code 4002; a higher revision warns and continues because it may preserve the compatible baseline.
-
-When changing the protocol:
-
-- Bump the revision for a breaking frame-layout or control-message change. Update both implementations, metadata exports, tests, and README contract in the same PR.
-- Keep compatible evolution append-only when possible. Add server-to-client opcodes, use length-gated frame tails, and never change an existing field or opcode meaning in place.
-- Raise only the affected receiver's floor when it can no longer decode a previously supported revision. Update that floor's export, enforcement tests, compatibility snapshot, and release notes together.
-- State metadata changes in release notes: `Wire: revision 4; Go accepts declared clients from revision 3; TypeScript accepts declared servers from revision 3; version-silent peers remain supported.`
-
-### Cross-version compatibility tests
-
-The normal Go and Vitest jobs carry the compatibility gate:
-
-- `wire-golden/v3-published.json` is the frozen wire-v3 fixture snapshot published at tag `v2.8.0`.
-- The current TypeScript decoder must decode every frozen v3 fixture.
-- The published `@cplieger/web-terminal-engine@2.8.0` decoder, installed under the test-only alias `@cplieger/web-terminal-engine-v3`, must tolerate every current fixture.
-- Go and TypeScript tests require the frozen fixture revision to equal their declared floor.
-- The current resumeAck golden carries the Go revision and is decoded against the TypeScript revision, keeping the current-revision mirrors equal.
-
-Advance the frozen snapshot and pinned previous decoder only when intentionally raising a floor. Keep the outgoing-floor fixtures in the same change so the compatibility loss is explicit in review.
-
-### Intentional non-features
-
-The README's [Unsupported by Design](README.md#unsupported-by-design) table lists deliberate VT/DEC scope decisions. Input for those sequences is consumed but produces no effect. Do not file them as bugs or implement them without first proposing a scope change.
-
-## Local development
-
-The Go packages live at the repo root; the TypeScript package lives in `web/`. The two toolchains are independent.
-
-### Go (`vt/`, `terminal/`)
-
-```sh
-go build ./...
-go test ./...
-go test -race ./...
-golangci-lint run
-golangci-lint fmt
-```
-
-`go.mod` targets Go 1.27+. Linting uses golangci-lint v2 (`.golangci.yaml`). `golangci-lint run` reports unformatted files, so run `golangci-lint fmt` before pushing. The config enables a strict linter set, including gosec, gocritic, revive, gocyclo and gocognit at complexity 15, sloglint in key/value mode, and gofumpt/gci formatting.
-
-### TypeScript (`web/`)
-
-```sh
-cd web
-npm install
-npm run typecheck
-npm run typecheck:tests
-npm test
-npm run test:e2e
-npx eslint .
-npx prettier --check .
-```
-
-The Playwright `e2e/` suite runs the real modules against a served harness page in headless Chromium. It checks display conformance against Go-generated `render-golden` fixtures, keyboard encoding against real browser events, and typed-framing negotiation against a real Go server. Install Chromium once with `npx playwright install chromium`.
-
-The Vitest unit suites live under `src/` and run in **two projects**. The default is `browser`: Vitest Browser Mode drives them in headless Chromium (`@vitest/browser-playwright`), because this package renders DOM, measures text through Canvas2D and reads layout, so the browser is the environment it ships into. A file opts out with the `.node.test.ts` suffix and lands in the `node` project — reserved for genuine Node capabilities, which here means the three suites that read `wire-golden/` fixtures off disk by name and, in `wire-manifest`, write a regenerated manifest back under `UPDATE_GOLDEN=1`. A write has no import equivalent, so that one is irreducible. Placement is readable off the filename because a misplaced file that needs _browser_ globals fails silently rather than loudly. `*.fuzz.test.ts` keeps its own suffix untouched: that is how CI selects fuzz targets.
-
-ESLint uses the `strictTypeChecked` and `stylisticTypeChecked` presets. `tsconfig.json` enables `exactOptionalPropertyTypes`, `noUncheckedIndexedAccess`, `noPropertyAccessFromIndexSignature`, and related strict checks. Vitest runs with `requireAssertions`; `fc-strict-setup.ts` configures fast-check property tests.
-
-CI (`.github/workflows/ci.yaml`) detects both surfaces and runs Go and TypeScript jobs in parallel. Run checks for the half you changed, or both for protocol changes.
-
-## Conventions and gotchas
-
-- **Tests live beside the code** (`*_test.go`, `*.test.ts`). The suites rely on fuzz and adversarial tests. Extend the fuzz corpus for parser or codec changes instead of adding only a happy path.
-- **Public API is a contract.** Exported Go symbols and TypeScript package exports are documented in the READMEs. Keep them synchronized when adding or renaming public symbols.
-- **Keep dependencies small.** The Go side uses the standard library, `coder/websocket`, `creack/pty`, `golang.org/x/sys`, and `cplieger/runesafe/v2`; the TypeScript package has zero runtime dependencies.
-- **The session surface refuses caching, and the policy is stated upstream of the mux.** A session id is the `/ws` attach + resume capability, and it travels as a path segment on every REST route past the collection, so a cache that stores such a response retains an entry keyed by a live credential. `withNoStore` (`terminal/mount.go`) sets `Cache-Control: no-store` before the handler runs, wrapping `RESTHandler`'s mux and, again, the mount's REST handler outside any create gate. Adding a REST route or a gate therefore inherits the policy with no change here. Two rules to preserve when touching it: set the header BEFORE calling through, since a header written after the response is committed is dropped on the wire, and leave an already-present value alone, which is the consumer's deliberate override (`writeJSON` is the one exception and always overwrites, because its bodies contain the id). Do not wrap the WebSocket handshake, and do not wrap the SSE stream; it states its own stricter `no-cache, no-store`.
-
-## Publishing model
-
-Releases are automated through `.github/workflows/release.yaml`. Repository releases publish the Go module as `github.com/cplieger/web-terminal-engine/v6` and the TypeScript package to npm and JSR as `@cplieger/web-terminal-engine`. Consumers install and upgrade those artifacts independently, with compatibility determined by wire metadata rather than package-version equality. Do not publish manually.
-
-## Commits and PRs
-
-Branch from `main`, keep changes focused, and open a PR. Commits follow [Conventional Commits](https://www.conventionalcommits.org/) (parsed by git-cliff for release notes): `feat:`, `fix:`, `sec:`, and the non-releasing `chore:`/`ci:`/`docs:`/`refactor:`/`test:` types. Wire-format changes that break compatibility use `feat!:` or a `BREAKING CHANGE:` footer.
-
-## Conduct and security
-
-By participating you agree to the [Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md). Report security vulnerabilities through the [security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md), never in a public issue.
+- One tag releases the Go module and the npm and JSR package. A breaking change in either half, TypeScript included, needs the next `/vN` module path in `go.mod` and every internal import, or the release stops before it tags.
+- Raising a floor, or any wire change a released peer cannot read, is a breaking change even when no API changes.
+- When the wire protocol changes, web-terminal-engine and [web-terminal-ui](https://github.com/cplieger/web-terminal-ui) release together.

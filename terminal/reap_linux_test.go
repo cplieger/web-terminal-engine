@@ -593,3 +593,113 @@ func TestReapTeardownWarnSplitsTermFromKill(t *testing.T) {
 		}
 	})
 }
+
+func statLine(comm string, state byte, flags, envEnd string) []byte {
+	f := make([]string, 50)
+	for i := range f {
+		f[i] = "1"
+	}
+	f[0] = string(state)
+	f[6] = flags
+	f[48] = envEnd
+	return []byte("4242 (" + comm + ") " + strings.Join(f, " ") + "\n")
+}
+
+// An empty environ read is only an exec in flight for a live, non-exiting user
+// task whose env_end is still zero; every other empty read is not a member.
+func TestStatExecPhase(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		stat []byte
+		want execPhase
+	}{
+		{"live task with environ bounds", statLine("sh", 'S', "4194560", "140724796252137"), phaseSettled},
+		{"live task mid-execve", statLine("sh", 'R', "4194560", "0"), phaseExecing},
+		{"zombie", statLine("sh", 'Z', "4194560", "0"), phaseGone},
+		{"dead", statLine("sh", 'X', "4194560", "0"), phaseGone},
+		{"exiting task", statLine("sh", 'R', strconv.Itoa(0x400100|pfExiting), "0"), phaseGone},
+		{"kernel thread", statLine("kworker/0:1", 'I', strconv.Itoa(pfKthread), "0"), phaseGone},
+		{"comm with a fake state after a paren", statLine("a) Z (b", 'R', "0", "0"), phaseExecing},
+		{"line ending one field before env_end", []byte("4242 (sh) R" + strings.Repeat(" 0", 47)), phaseGone},
+		{"no closing paren", []byte("4242 (sh R 1"), phaseGone},
+		{"unparseable flags", statLine("sh", 'R', "x", "0"), phaseGone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := statExecPhase(tc.stat); got != tc.want {
+				t.Errorf("statExecPhase(%q) = %d, want %d", tc.stat, got, tc.want)
+			}
+		})
+	}
+}
+
+// Field 51 is read off the real kernel's layout: this process has an
+// environment, so its own stat must classify as settled, not as an exec.
+func TestStatExecPhaseOnThisProcess(t *testing.T) {
+	t.Parallel()
+	b, err := os.ReadFile("/proc/self/stat")
+	if err != nil {
+		t.Fatalf("read own stat: %v", err)
+	}
+	if got := statExecPhase(b); got != phaseSettled {
+		t.Fatalf("statExecPhase(own stat) = %d, want phaseSettled (%d): field 51 is not env_end here", got, phaseSettled)
+	}
+}
+
+// A pid caught mid-execve is re-polled until it settles, and is a member only
+// if its settled image carries the marker; one that never settles is left out
+// once the budget is spent, and a settled verdict is never re-polled.
+func TestCollectMembersRepollsOnlyPidsMidExec(t *testing.T) {
+	t.Parallel()
+	script := map[int][]reapState{
+		1: {reapMember},
+		2: {reapOutside},
+		3: {reapExecing, reapExecing, reapMember},
+		4: {reapExecing, reapOutside},
+		5: {reapExecing},
+	}
+	calls := map[int]int{}
+	classify := func(pid int) reapState {
+		seq := script[pid]
+		st := seq[min(calls[pid], len(seq)-1)]
+		calls[pid]++
+		return st
+	}
+
+	got := collectMembers([]int{1, 2, 3, 4, 5}, classify, 5*reapPoll)
+
+	slices.Sort(got)
+	if !slices.Equal(got, []int{1, 3}) {
+		t.Errorf("collectMembers = %v, want [1 3]: the settled member and the pid that settled as one on its third read", got)
+	}
+	for _, pid := range []int{1, 2} {
+		if calls[pid] != 1 {
+			t.Errorf("pid %d classified %d times, want 1: a settled verdict is final", pid, calls[pid])
+		}
+	}
+	if calls[3] != 3 || calls[4] != 2 {
+		t.Errorf("calls = %v, want pid 3 read 3 times and pid 4 twice: re-polling stops once a pid settles", calls)
+	}
+	if calls[5] < 3 {
+		t.Errorf("a pid that never settles was read %d times, want it re-polled until the budget ran out", calls[5])
+	}
+}
+
+func TestCollectMembersDoesNotWaitWhenNothingIsMidExec(t *testing.T) {
+	t.Parallel()
+	start := time.Now()
+	got := collectMembers([]int{1, 2}, func(pid int) reapState {
+		if pid == 1 {
+			return reapMember
+		}
+		return reapOutside
+	}, waitPatience)
+	if !slices.Equal(got, []int{1}) {
+		t.Errorf("collectMembers = %v, want [1]", got)
+	}
+	if elapsed := time.Since(start); elapsed >= waitPatience/2 {
+		t.Errorf("collectMembers took %v with nothing to re-poll, want it to return without spending its %v budget", elapsed, waitPatience)
+	}
+}

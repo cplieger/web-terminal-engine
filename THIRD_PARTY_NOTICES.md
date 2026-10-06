@@ -2,7 +2,7 @@
 
 The Go `vt` package includes code from two other projects. Both are MIT-licensed and their license texts are reproduced below.
 
-- `vt/screen.go` derives from [tonistiigi/vt100](https://github.com/tonistiigi/vt100), a fork of [jaguilar/vt100](https://github.com/jaguilar/vt100), which is why the license text below carries that author's copyright line. The derivation is recorded in the package comment at `vt/screen.go:16`.
+- `vt/screen.go` derives from [tonistiigi/vt100](https://github.com/tonistiigi/vt100), a fork of [jaguilar/vt100](https://github.com/jaguilar/vt100), which is why the license text below carries that author's copyright line. The derivation is recorded in the package comment in `vt/screen.go`.
 - The `decSpecialGraphics` table at `vt/charset.go:46`, which maps bytes 0x60 to 0x7E onto the DEC Special Graphics code points, is adapted from [xterm.js](https://github.com/xtermjs/xterm.js) `Charsets.ts` `CHARSETS['0']`.
 
 ## tonistiigi/vt100

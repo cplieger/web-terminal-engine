@@ -322,7 +322,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
   // read-anchor binary searches keep their monotonic-`data-abs` invariant; an
   // INTERIOR marker cannot be data-abs-less the way the top trim marker is. A
   // marker is a PROJECTION of the store's gap geometry, re-derived whenever
-  // either edge moves and removed when the gap closes (docs/paged-scrollback.md §5.4).
+  // either edge moves and removed when the gap closes.
   const gapMarkerEls = new Map<number, HTMLDivElement>();
 
   let requestHistoryFn: ((fromAbs: number, maxLines: number) => boolean) | null =
@@ -396,7 +396,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
   let fullResetThisPass = false;
   // The ED3 base observed since the last flush, or -1; consumed by the pass that
   // applies it. Renderer-local because the renderer calls every path that
-  // discards a REGION rather than trimming the cap (docs/scroll-position-fidelity.md §5).
+  // discards a REGION rather than trimming the cap.
   let discardedBelowPending = -1;
   let discardedBelowThisPass = -1;
   // Whether THIS pass removed rows. Announcing a shrink for a pass that did not
@@ -558,7 +558,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
     scheduleFlush();
   }
 
-  // --- demand-paged scrollback: the consumer's seams (docs/paged-scrollback.md) ---
+  // --- demand-paged scrollback: the consumer's seams ---
 
   // The viewport index is supplied here rather than by the caller because the
   // renderer is the only layer that knows it, and the store's eviction needs it
@@ -590,7 +590,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
     // uses the viewport to decide which rows survive, and the live transient
     // would evict the rows an armed restore is about to bring back; the restore
     // names the position the user is REGAINING, so it wins, and it also
-    // overrides the live follow flag (docs/scroll-position-fidelity.md §7.2).
+    // overrides the live follow flag.
     const pending = pendingRestoreAbs();
     const pendingRestoreArmed = pending !== null;
     store.applyResumeAck({
@@ -892,7 +892,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
     if (msg.scrollbackCleared) {
       // ED3. Recorded at the one place that sees the frame before the store
       // consumes it, so restoreReadAnchor can tell a region DISCARD from a cap
-      // trim; the two need opposite recoveries (docs/scroll-position-fidelity.md §5).
+      // trim; the two need opposite recoveries.
       // Max, because several frames can land between flushes.
       discardedBelowPending = Math.max(discardedBelowPending, msg.base);
     }
@@ -983,7 +983,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
   // The ONE row-selection primitive every "where is the reader" question
   // resolves through (the read anchor, the paging trigger, the per-view memory):
   // two definitions would drift exactly during a rebuild, when the answer
-  // matters most (docs/scroll-position-fidelity.md §7.2). Binary search, since
+  // matters most. Binary search, since
   // the children are in document order with monotonic offsetTop.
   function rowAtViewportTop(): HTMLElement | null {
     if (!output) {
@@ -1022,7 +1022,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
     const el = rowAtViewportTop();
     if (el === null) {
       // Stand down rather than fall back to the tail: a tail proxy is what
-      // turned a large content shrink into a tail-drag (docs/scroll-position-fidelity.md §1.2).
+      // turned a large content shrink into a tail-drag.
       return null;
     }
     return { el, abs: rowAbs(el), screenTop: el.offsetTop - scroll.currentScrollTop() };
@@ -1076,10 +1076,10 @@ export function createRenderer(opts: RendererOptions): Renderer {
       // A region DISCARD (ED3), not a cap trim: nothing surviving is guaranteed
       // ADJACENT to what the reader saw. An inline TUI that reprints on resize
       // brings the same text back at new indices, and holding the survivor at
-      // the old screen position is the "random jump on resize" symptom
-      // (docs/scroll-position-fidelity.md §1.2, §5). The test is the ANCHOR's
-      // index only: requiring the SURVIVOR above the base too never held, since
-      // the reprint re-delivers lines below the base in the same frame.
+      // the old screen position is the "random jump on resize" symptom. The test
+      // is the ANCHOR's index only: requiring the SURVIVOR above the base too
+      // never held, since the reprint re-delivers lines below the base in the
+      // same frame.
       if (discardedBelowThisPass >= 0 && anchor.abs < discardedBelowThisPass) {
         return;
       }
@@ -1149,8 +1149,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
     // The post-flush trigger. The reader's position relative to the store's gaps
     // can change without any scroll event — a tail trim moves the frontier up
     // under a stationary reader, and a byte-short page leaves a fresh sub-gap
-    // beside them — so the flush is the other place the trigger must run
-    // (docs/paged-scrollback.md §5.4).
+    // beside them — so the flush is the other place the trigger must run.
     maybeFetchHistory();
     reportUnnamedDrainStall();
   }
@@ -1317,7 +1316,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
     }
   }
 
-  // --- Per-view scroll memory (docs/scroll-position-fidelity.md §3) ---
+  // --- Per-view scroll memory ---
   // A reading position is a LINE, not a pixel offset: a replayed `scrollTop` is
   // silently CLAMPED while a rebuild has built only the live window plus one
   // frame's budget, and it stops meaning the same line once the content grows in
@@ -1410,7 +1409,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
 
   // The viewport's absolute index for the paging layer's questions about NOW;
   // `pendingRestoreAbs` answers the resume transition, which asks which rows
-  // must SURVIVE a switch (docs/scroll-position-fidelity.md §7.2).
+  // must SURVIVE a switch.
   function viewportAbs(): number {
     if (!store) {
       return 0;
@@ -1443,7 +1442,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
   function maybeFetchHistory(): void {
     // The pending-demand timer fires from a CLOCK, so this alt guard is the
     // load-bearing one: without it a vim session would fetch pages nobody can
-    // see, and each denial would re-arm the timer (docs/paged-scrollback.md §5.5).
+    // see, and each denial would re-arm the timer.
     if (!store || store.isAlt()) {
       return;
     }
@@ -1526,7 +1525,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
   // places a row before it. Its frontier is deliberately NOT sourced from gap
   // geometry: the lower edge is a policy question (what is still worth
   // requesting), so an exhausted frontier still renders a marker rather than
-  // vanishing when the gap closes (docs/paged-scrollback.md §5.4).
+  // vanishing when the gap closes.
   function updateTrimMarker(): void {
     if (!output) {
       return;
@@ -1557,7 +1556,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
   // Three honest statements about the history above what is held: nothing when
   // index 0 is held; "trimmed" when the client evicted the rows itself with no
   // paging, or when paging proved nothing below survives; "not loaded" when
-  // paging is declared and neither proof is in hand (docs/paged-scrollback.md §5.4).
+  // paging is declared and neither proof is in hand.
   function topMarkerLabel(): string | null {
     if (!store) {
       return null;

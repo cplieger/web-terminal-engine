@@ -166,13 +166,9 @@ func (f resumeAckFlags) bits() byte {
 // judges it: the revision that half speaks, and the minimum peer revision it
 // accepts. For the Go half the two values are normally this package's
 // WireProtocolVersion and MinSupportedClientWireVersion; for the TS half they
-// come from WIRE_PROTOCOL_VERSION and MIN_SUPPORTED_SERVER_WIRE_VERSION.
-//
-// A struct rather than four positional ints because that signature was the
-// worst swap hazard in the fleet: every permutation of four same-typed
-// arguments type-checks, and several permutations still return plausible
-// verdicts. Construct it with field names (WireEnd{Rev: ..., MinPeer: ...}) so
-// each number is labeled at the call site.
+// come from WIRE_PROTOCOL_VERSION and MIN_SUPPORTED_SERVER_WIRE_VERSION. A struct
+// because every permutation of four same-typed ints type-checks and several
+// return plausible verdicts: construct it with field names (WireEnd{Rev: ...}).
 type WireEnd struct {
 	// Rev is the wire-protocol revision this half speaks.
 	Rev int

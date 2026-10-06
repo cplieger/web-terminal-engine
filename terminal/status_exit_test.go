@@ -1,23 +1,13 @@
 package terminal
 
-// Status-layer tests for how a session's END is reported: exited for an ordinary
-// one, crashed for a failure.
-//
-// The boundary these tests pin (crashedExit owns the rule):
-//
-//   - exit status 0 -> exited;
-//   - a non-zero exit status -> crashed;
-//   - a terminating signal the program was not asked for -> crashed;
-//   - anything the SERVER caused (Shutdown, and therefore SessionManager.Close
-//     and the idle reaper) -> exited, whatever wait status the kill produced,
-//     because reporting a routine shutdown as a crash paints a whole fleet red;
-//   - SIGHUP -> exited, because a hangup means the terminal went away, and the
-//     only thing that closes a session's PTY master is this engine.
-//
-// Real children throughout (sh -c 'exit 3', sh -c 'kill -9 $$'), so the tests
-// exercise the actual cmd.Wait() error shape rather than a hand-built one: the
-// classification reads *exec.ExitError and its wait status, and a mock would let
-// a wrong assumption about either survive.
+// Status-layer tests for how a session's END is reported (crashedExit owns the
+// rule): exit 0 -> exited; a non-zero exit or an unrequested terminating signal
+// -> crashed; anything the SERVER caused (Shutdown, SessionManager.Close, the
+// idle reaper) -> exited whatever the wait status, because a routine shutdown
+// reported as a crash paints every session red; SIGHUP -> exited, since only this
+// engine closes a session's PTY master. Real children throughout (sh -c 'exit 3',
+// sh -c 'kill -9 $$'), so the tests exercise the actual *exec.ExitError shape,
+// which a mock would let a wrong assumption about survive.
 
 import (
 	"fmt"

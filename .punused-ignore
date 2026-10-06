@@ -1,25 +1,11 @@
 # punused findings adjudicated for this repo. One literal substring per line,
-# matched against punused's output line; full-line `#` comments carry the
-# reason.
-#
-# web-terminal-engine is a LIBRARY that ships a `main` package
-# (internal/e2etestserver), so cplieger/ci's app-mode detection ("a main package
-# exists") gates it on punused -- but its exported surface is a PUBLISHED Go
-# proxy API (github.com/cplieger/web-terminal-engine/v6), consumed by marotte,
-# web-terminal-kiro and web-terminal-server. punused's own README states it "does
-# not detect references from outside of your project", and run.go asks gopls for
-# `textDocument/references` scoped to this module only, so EVERY symbol a
-# consumer repo calls reads as unused here. Triage therefore follows the library
-# rules in tools.md, not the app rules: nothing is deleted on punused's word.
-#
-# The EU1001 ("used in test only") vs EU1002 ("no reference found") split below
-# reflects only whether THIS repo's own tests happen to exercise the symbol --
-# run.go skips `_test.go` files when collecting declarations but still counts
-# references from them. It carries no information about consumer use.
-#
-# Patterns are symbol-only (no file:line), matching the nine sibling repos'
-# files, so they survive line shifts in an actively edited file. Each entry was
-# verified to match exactly one of the 29 findings.
+# matched against punused's output line; full-line `#` comments carry the reason.
+# This LIBRARY ships a `main` package (internal/e2etestserver), so CI's app-mode
+# detection runs punused on it, but its exported surface is a PUBLISHED Go API
+# consumed by marotte, web-terminal-kiro and web-terminal-server. punused sees no
+# references from outside the module, so nothing is deleted on its word. EU1001 vs
+# EU1002 says only whether THIS repo's tests exercise a symbol. Patterns are
+# symbol-only (no file:line) so they survive line shifts.
 
 # --- Session-manager surface: published API, consumers web-terminal-kiro and
 # web-terminal-server. The calls live in another MODULE, invisible to punused.
@@ -143,19 +129,13 @@ function WirePairIncompatibility
 field ParserState
 field CursorState
 
-# --- Exported methods on an UNEXPORTED type. scrollbackRing (terminal/
-# scrollback.go:22) is reachable only through Handler.scrollback, an unexported
-# field (terminal/terminal.go:312), so no consumer can name the type or reach
-# these methods -- exportedness is a red herring here (tools.md). Both are live
-# in-repo observation points for real behavior, not accessors under test:
-# Len is how TestED3ClearsScrollbackRing (terminal/scrollback_clear_test.go:16)
-# proves CSI 3 J empties the ring while committed stays monotonic -- the
-# regression guard for the resize-duplication bug -- and how the fuzz invariant
-# at terminal/scrollback_fuzz_test.go:44 checks retention against capacity.
-# Lines is the ring-order oracle for terminal/scrollback_test.go:24,41,66 and
-# the commit checks at terminal/terminal_test.go:329 and
-# terminal/flush_scheduler_test.go:233. Reading r.count/r.buf directly instead
-# would reimplement the ring's index arithmetic inside its own tests.
+# --- Exported methods on an UNEXPORTED type. scrollbackRing is reachable only
+# through Handler.scrollback, an unexported field, so no consumer can reach these
+# methods and exportedness is a red herring. Both are live in-repo observation
+# points: Len is how TestED3ClearsScrollbackRing proves CSI 3 J empties the ring
+# and how the scrollback fuzz invariant checks retention against capacity; Lines
+# is the ring-order oracle for the scrollback, terminal and flush-scheduler tests.
+# Reading r.count/r.buf directly would reimplement the ring's index arithmetic.
 method (*scrollbackRing).Len
 method (*scrollbackRing).Lines
 
@@ -173,27 +153,19 @@ method (*scrollbackRing).Lines
 function Run
 
 # ============================================================================
-# PUBLISHED API WITH NO FLEET CONSUMER -- awaiting a user decision.
+# PUBLISHED API WITH NO CONSUMER IN THE CPLIEGER REPOS -- awaiting a maintainer decision.
 #
-# Every symbol below is on the published v3 surface with zero references in
-# marotte, web-terminal-kiro or web-terminal-server (verified by bare-identifier
-# grep across the fleet, plus `deadcode -test ./...` for the EU1002 four).
-# Removing any of them is a semver-MAJOR break for out-of-fleet importers on the
-# Go proxy, so none is deleted here. They are whitelisted with that reason and
-# reported for a decision.
+# Every symbol below has zero references in marotte, web-terminal-kiro or
+# web-terminal-server. Removing any is a semver-MAJOR break for outside importers
+# on the Go proxy, so none is deleted here.
 # ============================================================================
 
 # NewOriginPolicy, WithOriginPolicy and WithManagerOriginPolicy -- the
-# cross-origin widening surface, successor to the removed WithAcceptOptions
-# (which sat here for the same reason). Still no fleet caller, and that is the
-# CORRECT posture rather than an oversight: every consumer serves its terminal
-# same-origin, so all three deliberately rely on the same-origin default and
-# web-terminal-kiro/routes_test.go asserts in prose that the app does not widen
-# it. The API exists because the default cannot be widened any other way and
-# net/http.CrossOriginProtection cannot do it (a WS handshake is a GET, which it
-# treats as safe). Covered in-repo by TestNewHandler_WithOriginPolicy
-# (terminal/terminal_options_test.go) and terminal/origin_test.go.
-#
+# cross-origin widening surface. No caller in the cplieger repos, which is the
+# CORRECT posture: every consumer serves its terminal same-origin. The API exists
+# because the default cannot be widened any other way, and
+# net/http.CrossOriginProtection treats a WS handshake GET as safe. Covered
+# in-repo by TestNewHandler_WithOriginPolicy and terminal/origin_test.go.
 # WithOriginPolicy is NOT a substring of WithManagerOriginPolicy, so the two
 # entries claim one finding each regardless of order.
 function NewOriginPolicy
@@ -266,15 +238,12 @@ method (*Screen).RowString
 
 
 # (*Handler).ScrollbackBounds -- public read accessor for a session's retained
-# scrollback bounds (committed / oldest absolute index), added so a consumer can
+# scrollback bounds (committed / oldest absolute index), so a consumer can
 # observe them without decoding the private resumeAck frame layout.
-# web-terminal-kiro's session_scrollback_test.go currently reads those two values
-# by hard-coding the frame's msg type, byte offsets 17/25 and min length 33; this
-# accessor is the supported replacement, so the reference lives in another MODULE
-# and is invisible to punused (library rules in tools.md). Covered in-repo by
-# TestScrollbackBounds and TestScrollbackBounds_concurrent
-# (terminal/scrollback_bounds_test.go), the latter under -race for the locking
-# half of the contract.
+# web-terminal-kiro's session_scrollback_test.go is its intended consumer, a
+# reference in another MODULE and invisible to punused. Covered in-repo by
+# TestScrollbackBounds and TestScrollbackBounds_concurrent (terminal/
+# scrollback_bounds_test.go), the latter under -race for the locking half.
 method (*Handler).ScrollbackBounds
 
 # (*Handler).Text -- plain-text read of a session's history and main screen,
@@ -285,13 +254,8 @@ method (*Handler).Text
 
 
 # --- Session reaping and zombie reaping: published API, consumer
-# web-terminal-kiro, wired in the same effort that added them here (its
-# composition root calls StartZombieReaper). The calls live in another MODULE,
-# invisible to punused.
-#
-# WithoutSessionReap is gone rather than adjudicated: reaping became
-# unconditional at v5 (terminal/reap.go states why), and the option had no
-# caller anywhere in the fleet.
+# web-terminal-kiro (its composition root calls StartZombieReaper). The calls
+# live in another MODULE, invisible to punused.
 function StartZombieReaper
 
 

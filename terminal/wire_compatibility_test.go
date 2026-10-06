@@ -357,7 +357,7 @@ func TestWirePairNamesTheBehindHalf(t *testing.T) {
 // TestResumeControl_warnsOnlyAboveTheServerVersion pins which declared client
 // revision draws the "newer than server" warning. The hint on that line tells
 // the operator to upgrade the SERVER, so it has to fire only when the client
-// really is ahead: on a fleet where every client matches the server it would
+// really is ahead: when every client matches the server it would
 // otherwise appear on every single attach and permanently point at the wrong
 // component.
 func TestResumeControl_warnsOnlyAboveTheServerVersion(t *testing.T) {

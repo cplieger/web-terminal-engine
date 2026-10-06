@@ -3,23 +3,13 @@
 package terminal
 
 // Linux discovery for the automatic session title (see proctitle.go for the
-// ladder and why it exists). Two kernel interfaces:
-//
-//   - TIOCGPGRP on the pty master gives the foreground process group. This is
-//     the exact operation tmux uses (tcgetpgrp in osdep-linux.c). An earlier
-//     draft parsed field 8 (tpgid) out of /proc/<pid>/stat to avoid a new
-//     dependency; golang.org/x/sys/unix is the cheaper answer — it is the Go
-//     project's maintained syscall layer, four sibling repos in this fleet
-//     already depend on it directly, and it deletes a hand-written parser of a
-//     kernel text format whose second field can itself contain spaces and
-//     parentheses.
-//   - procfs for the name and the cwd. cmdline (not comm) is read for the name,
-//     also matching tmux, because the kernel truncates comm at TASK_COMM_LEN
-//     (16 bytes including the NUL); comm is the fallback for a process with an
-//     empty cmdline.
-//
-// Everything here is best-effort: any failure returns a zero value and the
-// caller falls down the ladder.
+// ladder). TIOCGPGRP on the pty master gives the foreground process group, the
+// exact operation tmux uses (tcgetpgrp in osdep-linux.c), through
+// golang.org/x/sys/unix rather than parsing /proc/<pid>/stat, whose second field
+// can itself contain spaces and parentheses. procfs gives the name and the cwd:
+// cmdline (not comm) for the name, also matching tmux, because the kernel
+// truncates comm at TASK_COMM_LEN (16 bytes); comm is the fallback for an empty
+// cmdline. Everything is best-effort: a failure returns a zero value.
 
 import (
 	"bytes"

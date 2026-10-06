@@ -9,41 +9,14 @@ import (
 	"time"
 )
 
-// Session reaping is the engine's capability-free answer to the same problem
-// containment solves with a cgroup: a PTY child can escape every signal-scoped
-// boundary the engine otherwise has. A process that calls setsid() leaves both
-// its process group and its session, so neither kill(-pgid) nor the PTY-close
-// SIGHUP (delivered to the controlling terminal's FOREGROUND process group) can
-// reach it, and a process re-parented to init has no ancestry left to walk.
-//
-// The boundary used here is an inherited environment marker. Every session's
-// child is spawned with one unguessable variable, execve copies the environment
-// into every descendant for free, and the marker survives exactly the two events
-// that defeat the alternatives: setsid() does not clear the environment, and
-// neither does re-parenting. So "every process belonging to this session" is a
-// /proc scan, with no capability, no cgroup, no mount and no PID namespace.
-//
-// Measured on the container this was written for: a full scan of 17,547 pids
-// costs ~81ms, the marker was inherited by every member of a tree whose KAS
-// runtime had setsid()'d away, and a process-group kill reached 1 of the 2
-// process groups the same tree spanned.
-//
-// Two honest limits, neither of which the alternatives improve on for free:
-//
-//   - A descendant that execve()s with a deliberately scrubbed environment
-//     (env -i) escapes the domain. Nothing short of a cgroup or a PID namespace
-//     catches that, which is why Containment still exists as the stronger,
-//     opt-in boundary for hosts willing to grant it.
-//   - The scan enumerates, so a tree that forks DURING teardown can outrun one
-//     pass. The ladder below rescans before each escalation rather than reusing
-//     the first pass's pid set, which bounds it to a fork racing the final
-//     SIGKILL round.
-//
-// Reaping is unconditional: leaving a closed session's tree alive is the defect
-// rather than a feature. (An opt-out shipped through v4 as WithoutSessionReap;
-// it had no caller anywhere in the fleet and was removed at v5 — work meant to
-// outlive a tab belongs outside the session's process tree, e.g. a detached
-// service, not behind an engine knob.)
+// Session reaping is the capability-free answer to a PTY child that escapes the
+// engine's signal-scoped boundaries: a setsid() process leaves its process group
+// and session, so neither kill(-pgid) nor the PTY-close SIGHUP reaches it. Each
+// session's child gets an unguessable environment marker, which execve copies to
+// every descendant and which survives setsid() and re-parenting, so the session's
+// processes are a /proc scan. env -i escapes it (Containment is the stronger
+// opt-in boundary), and each escalation rescans so only a fork racing the final
+// SIGKILL round can outrun it. Reaping is unconditional.
 
 const (
 	// reapMarkerEnv names the variable every session's process tree inherits;

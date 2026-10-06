@@ -313,10 +313,7 @@ func TestScrollbackRing_ClearReleasesAndRegrows(t *testing.T) {
 // TestScrollbackRing_AccessorsCopyLines pins the mutation isolation of every
 // read door: LinesFrom, LinesRange and Lines each return lines a caller may
 // transform in place without rewriting ring history, so a LATER replay of the
-// same absolute index still sees the original text. The accessors used to hand
-// back the inner []vt.WireRun the ring itself holds, and the paging and replay
-// callers that serialize or rewrite runs would then have edited every future
-// reader's copy (go-rulebook C21).
+// same absolute index still sees the original text.
 //
 // Each subtest mutates through one door and re-reads through ALL of them,
 // because one uncopied door is enough to leak the ring.

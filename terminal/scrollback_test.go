@@ -18,7 +18,7 @@ func TestScrollbackRing_Basic(t *testing.T) {
 		t.Fatalf("expected empty ring, got %d", r.Len())
 	}
 
-	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")})
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")}, nil)
 	if r.Len() != 3 {
 		t.Fatalf("expected 3, got %d", r.Len())
 	}
@@ -34,8 +34,8 @@ func TestScrollbackRing_Basic(t *testing.T) {
 
 func TestScrollbackRing_Eviction(t *testing.T) {
 	r := newScrollbackRing(3)
-	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")})
-	r.Append([][]vt.WireRun{makeLine("d"), makeLine("e")})
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")}, nil)
+	r.Append([][]vt.WireRun{makeLine("d"), makeLine("e")}, nil)
 
 	if r.Len() != 3 {
 		t.Fatalf("expected 3 (capped), got %d", r.Len())
@@ -48,7 +48,7 @@ func TestScrollbackRing_Eviction(t *testing.T) {
 
 func TestScrollbackRing_Clear(t *testing.T) {
 	r := newScrollbackRing(5)
-	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b")})
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b")}, nil)
 	r.Clear()
 	if r.Len() != 0 {
 		t.Fatalf("expected 0 after clear, got %d", r.Len())
@@ -61,9 +61,9 @@ func TestScrollbackRing_Clear(t *testing.T) {
 func TestScrollbackRing_WrapAround(t *testing.T) {
 	r := newScrollbackRing(4)
 	// Fill completely
-	r.Append([][]vt.WireRun{makeLine("1"), makeLine("2"), makeLine("3"), makeLine("4")})
+	r.Append([][]vt.WireRun{makeLine("1"), makeLine("2"), makeLine("3"), makeLine("4")}, nil)
 	// Overwrite oldest two
-	r.Append([][]vt.WireRun{makeLine("5"), makeLine("6")})
+	r.Append([][]vt.WireRun{makeLine("5"), makeLine("6")}, nil)
 
 	lines := r.Lines()
 	if len(lines) != 4 {
@@ -96,7 +96,7 @@ func TestScrollbackRing_AbsoluteIndices(t *testing.T) {
 			for _, name := range names[i:min(i+3, n)] {
 				batch = append(batch, makeLine(name))
 			}
-			r.Append(batch)
+			r.Append(batch, nil)
 		}
 		return r
 	}
@@ -132,7 +132,7 @@ func TestScrollbackRing_AbsoluteIndices(t *testing.T) {
 // index so the caller can detect an eviction gap.
 func TestScrollbackRing_LinesFrom(t *testing.T) {
 	r := newScrollbackRing(5)
-	r.Append([][]vt.WireRun{makeLine("0"), makeLine("1"), makeLine("2"), makeLine("3"), makeLine("4")})
+	r.Append([][]vt.WireRun{makeLine("0"), makeLine("1"), makeLine("2"), makeLine("3"), makeLine("4")}, nil)
 
 	t.Run("exact alignment", func(t *testing.T) {
 		// Ask from index 2, get [2,3,4] starting at 2.
@@ -148,7 +148,7 @@ func TestScrollbackRing_LinesFrom(t *testing.T) {
 	})
 	t.Run("an evicted index clamps up and signals the gap", func(t *testing.T) {
 		// Force eviction: indices 0..1 drop out (cap 5, now 8 committed).
-		r.Append([][]vt.WireRun{makeLine("5"), makeLine("6"), makeLine("7")})
+		r.Append([][]vt.WireRun{makeLine("5"), makeLine("6"), makeLine("7")}, nil)
 		if r.OldestIndex() != 3 {
 			t.Fatalf("oldest=%d, want 3", r.OldestIndex())
 		}
@@ -169,12 +169,12 @@ func TestScrollbackRing_LinesFrom(t *testing.T) {
 // within a session even after a clear.
 func TestScrollbackRing_ClearPreservesCommitted(t *testing.T) {
 	r := newScrollbackRing(5)
-	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b")})
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b")}, nil)
 	r.Clear()
 	if r.Committed() != 2 {
 		t.Fatalf("after clear: committed=%d, want 2 (preserved)", r.Committed())
 	}
-	r.Append([][]vt.WireRun{makeLine("c")})
+	r.Append([][]vt.WireRun{makeLine("c")}, nil)
 	if r.Committed() != 3 {
 		t.Fatalf("append after clear: committed=%d, want 3 (index 2 not reused)", r.Committed())
 	}
@@ -185,7 +185,7 @@ func TestScrollbackRing_ClearPreservesCommitted(t *testing.T) {
 // correct; nothing is retained for replay.
 func TestScrollbackRing_ZeroCapacityAdvancesCommitted(t *testing.T) {
 	r := newScrollbackRing(0)
-	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")})
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")}, nil)
 	if r.Committed() != 3 {
 		t.Fatalf("zero-cap committed=%d, want 3", r.Committed())
 	}
@@ -223,7 +223,7 @@ func TestScrollbackRing_GrowsOnDemand(t *testing.T) {
 		t.Errorf("fresh ring allocated %d slots; want 0", got)
 	}
 
-	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")})
+	r.Append([][]vt.WireRun{makeLine("a"), makeLine("b"), makeLine("c")}, nil)
 	if got := r.Len(); got != 3 {
 		t.Fatalf("retained %d lines, want 3", got)
 	}
@@ -252,7 +252,7 @@ func TestScrollbackRing_GrowsThenWraps(t *testing.T) {
 	const capacity = 4
 	r := newScrollbackRing(capacity)
 	for i := range 10 {
-		r.Append([][]vt.WireRun{makeLine(fmt.Sprintf("L%d", i))})
+		r.Append([][]vt.WireRun{makeLine(fmt.Sprintf("L%d", i))}, nil)
 
 		wantLen := min(i+1, capacity)
 		if got := r.Len(); got != wantLen {
@@ -290,7 +290,7 @@ func TestScrollbackRing_GrowsThenWraps(t *testing.T) {
 // of pointers holding every row alive.
 func TestScrollbackRing_ClearReleasesAndRegrows(t *testing.T) {
 	r := newScrollbackRing(10)
-	r.Append([][]vt.WireRun{makeLine("old1"), makeLine("old2"), makeLine("old3")})
+	r.Append([][]vt.WireRun{makeLine("old1"), makeLine("old2"), makeLine("old3")}, nil)
 	r.Clear()
 	if got := len(r.buf); got != 0 {
 		t.Errorf("buffer length %d after Clear; want 0, or the next append reads back a stale row", got)
@@ -299,7 +299,7 @@ func TestScrollbackRing_ClearReleasesAndRegrows(t *testing.T) {
 		t.Errorf("buffer still holds a %d-slot array after Clear; want it released so the rows can be freed", got)
 	}
 
-	r.Append([][]vt.WireRun{makeLine("new1")})
+	r.Append([][]vt.WireRun{makeLine("new1")}, nil)
 	if got := lineTexts(r.Lines()); !slices.Equal(got, []string{"new1"}) {
 		t.Errorf("Lines() = %v after clear+append, want [new1] (a stale row means the buffer outlived its contents)", got)
 	}
@@ -346,7 +346,7 @@ func TestScrollbackRing_AccessorsCopyLines(t *testing.T) {
 
 	newRing := func() *scrollbackRing {
 		r := newScrollbackRing(5)
-		r.Append([][]vt.WireRun{makeLine(original), makeLine("b"), makeLine("c")})
+		r.Append([][]vt.WireRun{makeLine(original), makeLine("b"), makeLine("c")}, nil)
 		return r
 	}
 
@@ -384,7 +384,7 @@ func TestScrollbackRing_AccessorsCopyLines(t *testing.T) {
 		// arrive as a nil slice; copying must not turn that into a non-nil
 		// empty slice, which encodes as [] rather than null on the wire.
 		r := newScrollbackRing(2)
-		r.Append([][]vt.WireRun{nil})
+		r.Append([][]vt.WireRun{nil}, nil)
 		if lines := r.Lines(); len(lines) != 1 || lines[0] != nil {
 			t.Errorf("Lines() = %#v, want exactly one nil line", lines)
 		}

@@ -582,14 +582,14 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 			m = eraseSpareBoth
 		}
 		s.eraseRegionMode(0, 0, s.Height-1, s.Width-1, m)
-		s.Drained = nil
+		s.dropDrained()
 		s.clearWrapState()
 	case 3:
 		// ED3 ("Erase Saved Lines"): clears scrollback only, screen untouched.
 		// The VT has no handle on the terminal-layer ring, so it raises a flag
 		// the handler observes to clear it and tell the client to drop history.
 		s.scrollbackCleared = true
-		s.Drained = nil
+		s.dropDrained()
 		s.drainTail = nil // describes history that no longer exists
 	}
 }
@@ -1053,7 +1053,7 @@ func (s *Screen) resetMode(mode int) {
 		s.noClearOnColumn = false
 	case 47, 1047, 1049:
 		s.exitAltScreen(mode)
-		s.Drained = nil
+		s.dropDrained()
 	case 1048:
 		s.restoreCursor()
 	case 1000:
@@ -1153,7 +1153,7 @@ func (s *Screen) setColumnMode() {
 		return
 	}
 	s.eraseRegion(0, 0, s.Height-1, s.Width-1)
-	s.Drained = nil
+	s.dropDrained()
 }
 
 // --- DECRQM handler (uses new param structure) ---

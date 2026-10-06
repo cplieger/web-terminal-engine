@@ -45,7 +45,10 @@ type Screen struct {
 	Notification string
 	tabStops     []bool
 	Drained      [][]WireRun
-	Cells        [][]Cell
+	// drainedWrapped[i] is the wrapped flag Drained[i] carried as it left the
+	// screen: whether it soft-wraps from the line drained before it.
+	drainedWrapped []bool
+	Cells          [][]Cell
 	// wrapped[y] marks row y as a soft-wrap CONTINUATION of row y-1 (autowrap,
 	// not a hard newline) — the row-chain signal the URL autolinker joins rows
 	// with (wire.go stampAutolinks). It travels with row IDENTITY: every site
@@ -327,8 +330,52 @@ func (s *Screen) Write(dt []byte) (int, error) {
 // DrainScrollback returns and clears accumulated scrolled-off lines.
 func (s *Screen) DrainScrollback() [][]WireRun {
 	d := s.Drained
-	s.Drained = nil
+	s.dropDrained()
 	return d
+}
+
+// DrainedWrapped reports, for each line in Drained, whether it soft-wraps from
+// the line before it. The result is a copy aligned to Drained; read it before
+// DrainScrollback, which clears both.
+func (s *Screen) DrainedWrapped() []bool {
+	out := make([]bool, len(s.Drained))
+	copy(out, s.drainedWrapped)
+	return out
+}
+
+func (s *Screen) dropDrained() {
+	s.Drained = nil
+	s.drainedWrapped = nil
+}
+
+// MainScreenText returns the main screen as plain text, one string per row,
+// with wrapped[y] reporting whether row y soft-wraps from row y-1. While the
+// alternate screen is active it reads the saved main screen beneath it.
+// Wide-character spacer cells are dropped, and trailing blanks are trimmed
+// except on a row the next row wraps from, where they are part of the line.
+func (s *Screen) MainScreenText() (rows []string, wrapped []bool) {
+	cells, flags := s.Cells, s.wrapped
+	if s.InAltScreen && s.savedMainCells != nil {
+		cells, flags = s.savedMainCells, s.savedMainWrapped
+	}
+	rows = make([]string, len(cells))
+	wrapped = make([]bool, len(cells))
+	copy(wrapped, flags)
+	var buf strings.Builder
+	for y, row := range cells {
+		buf.Reset()
+		for _, cell := range row {
+			if cell.Ch != 0 {
+				buf.WriteRune(cell.Ch)
+			}
+		}
+		text := buf.String()
+		if y+1 >= len(wrapped) || !wrapped[y+1] {
+			text = strings.TrimRight(text, " ")
+		}
+		rows[y] = text
+	}
+	return rows, wrapped
 }
 
 // HoldFlush requests that the flush loop skip flushing the screen until
@@ -711,6 +758,7 @@ func (s *Screen) drainTopRow() {
 	continuesBelow := len(s.wrapped) > 1 && s.wrapped[1]
 	runs := s.stampAutolinks(0, s.cellsToRuns(s.Cells[0], continuesBelow))
 	s.Drained = append(s.Drained, runs)
+	s.drainedWrapped = append(s.drainedWrapped, len(s.wrapped) > 0 && s.wrapped[0])
 	if s.InAltScreen {
 		return
 	}

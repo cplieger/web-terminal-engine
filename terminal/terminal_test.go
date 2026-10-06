@@ -1156,7 +1156,7 @@ func TestHandleResume_replayStartsAfterHaveThrough(t *testing.T) {
 	server, client, cleanup := dualConn(t)
 	defer cleanup()
 
-	h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")})
+	h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")}, nil)
 
 	h.handleResume(server, &clientState{}, "sid", 0, 0, nil) // client already holds index 0
 
@@ -1193,7 +1193,7 @@ func TestHandleResume_replayChunkBoundaryEmitsSingleFrame(t *testing.T) {
 	for i := range lines {
 		lines[i] = makeLine("x")
 	}
-	h.scrollback.Append(lines)
+	h.scrollback.Append(lines, nil)
 
 	h.handleResume(server, &clientState{}, "sid", -1, 0, nil) // -1 ⇒ replay everything from index 0
 
@@ -1217,7 +1217,7 @@ func TestHandleResume_replayChunksCarryAscendingAbsoluteIndices(t *testing.T) {
 	for i := range lines {
 		lines[i] = makeLine("x")
 	}
-	h.scrollback.Append(lines)
+	h.scrollback.Append(lines, nil)
 
 	h.handleResume(server, &clientState{}, "sid", -1, 0, nil) // replay all from index 0
 
@@ -1366,7 +1366,7 @@ func TestHandleResume_frameOrderByAltState(t *testing.T) {
 
 			// Commit history the resuming client does not yet hold, so a scroll
 			// replay is generated alongside the window frame.
-			h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")})
+			h.scrollback.Append([][]vt.WireRun{makeLine("L0"), makeLine("L1"), makeLine("L2")}, nil)
 			// The window frame must carry this live alt state in both arms.
 			h.screen.InAltScreen = tc.inAlt
 

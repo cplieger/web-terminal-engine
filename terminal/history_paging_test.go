@@ -24,7 +24,7 @@ func fillRing(h *Handler, n int) {
 	for i := range lines {
 		lines[i] = plainRow(fmt.Sprintf("line-%d", i))
 	}
-	h.scrollback.Append(lines)
+	h.scrollback.Append(lines, nil)
 }
 
 // decodeScroll pulls firstIndex and numLines out of a scroll frame.

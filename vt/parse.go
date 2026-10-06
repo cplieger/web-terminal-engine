@@ -384,7 +384,7 @@ func (s *Screen) dispatchEsc(b byte) {
 		s.eraseRegion(0, 0, s.Height-1, s.Width-1)
 		s.curY, s.curX = 0, 0
 		s.pendingWrap = false
-		s.Drained = nil
+		s.dropDrained()
 		s.clearWrapState()
 		s.scrollbackCleared = true
 		s.InAltScreen = false

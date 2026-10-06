@@ -1,31 +1,3 @@
-// Package vt handles OSC (Operating System Command) dispatch.
-//
-// Supported:
-//   - OSC 0 ; Pt BEL/ST — Set icon name and window title to Pt
-//   - OSC 1 ; Pt BEL/ST — Set icon name only (tracked separately from title)
-//   - OSC 2 ; Pt BEL/ST — Set window title to Pt
-//   - OSC 4 / 104 — set/query and reset palette colors (index 0-255)
-//   - OSC 5 / 105 — set/query and reset the special colors (bold/underline/…)
-//   - OSC 8 ; params ; URI BEL/ST — Set/clear hyperlink (URI empty = clear)
-//   - OSC 9 ; Pt BEL/ST — desktop notification: Pt is captured into
-//     Notification for the status layer. The ConEmu subcommand form
-//     (OSC 9 ; Ps [; ...]) is not a notification; subcommand 4 (progress) is
-//     captured into Progress + ProgressValue, any other numeric subcommand is
-//     ignored
-//   - OSC 10-19 ; spec|? BEL/ST — set/query the dynamic colors (default
-//     fg/bg/cursor/…), answered from the configured Theme; see WithTheme
-//   - OSC 52 ; Pc ; Pd — clipboard: SET pushes to the browser clipboard and
-//     retains the session selection; QUERY reports it back (only when
-//     AllowScreenReport is enabled — see handleOsc52)
-//   - OSC 110-119 — reset a dynamic color to its Theme default
-//
-// Out-of-scope (buffered then ignored):
-//   - OSC 7  (Current directory)
-//   - OSC 133 (shell integration), OSC 777 (notifications)
-//   - X11 Xcms color-space specs in OSC 4/5/10-19 (CIE*/rgbi/TekHVC)
-//
-// The OSC payload format is: <numeric-id> ; <string-data>
-// The numeric prefix is parsed as decimal digits up to the first ';'.
 package vt
 
 import (

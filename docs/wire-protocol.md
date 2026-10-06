@@ -16,7 +16,7 @@ The TypeScript keyboard and mouse code encodes input for DEC modes, such as SGR 
 
 ## Byte layout
 
-Every server-to-client frame starts with the same header. Integers are fixed-width, and frames carry no length-prefixed dictionary keys and no repeated string identifiers, so they stay small over slow links. This section describes what the encoder and decoder do; where it disagrees with them, this section is wrong.
+Every server-to-client frame starts with the same header. Integers are fixed-width, and frames carry no length-prefixed dictionary keys and no repeated string identifiers, so they stay small over slow links. This section describes what the encoder and decoder do. Where it disagrees with them, this section is wrong.
 
 ### Common header
 
@@ -72,7 +72,7 @@ The client compares `serverEpoch` against the last epoch it saw. A mismatch mean
 | 2 | `serverFocus` | The server derives the DEC 1004 answer from the `focus` control. |
 | 3 | `ephemeralInput` | The `ephemeralInput` control is served. |
 
-An older client ignores the tail; a client that reads it masks only the bits it knows.
+An older client ignores the tail. A client that reads it masks only the bits it knows.
 
 ### ackOnly (7)
 

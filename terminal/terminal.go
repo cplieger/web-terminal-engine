@@ -1,23 +1,24 @@
 // Package terminal bridges a PTY to a browser WebSocket.
 //
-// Each WS connection spawns the configured command in its own PTY and
-// pipes bytes both ways. Server-side state is kept in the VT screen;
-// on reconnect the current cell snapshot is replayed to the new client.
-// No external multiplexer is involved — the VT emulator IS the
+// Each WebSocket connection spawns the configured command in its own PTY and
+// pipes bytes both ways. Server-side state is kept in the VT screen, and on
+// reconnect the current cell snapshot is replayed to the new client. No
+// external multiplexer is involved, because the VT emulator is the
 // persistence layer.
 //
 // Wire protocol (binary WebSocket frames):
 //
-//	client → server: raw terminal input bytes
-//	server → client: binary frames encoding screen/scroll/modes/title/
-//	                 resumeAck/pong messages (see wire_binary.go) — PTY
-//	                 output is rendered into the VT screen and sent as
-//	                 absolute-indexed cell runs, not as raw bytes
-//	client → server: JSON control messages prefixed with 0x00:
+//	client to server: raw terminal input bytes
+//	server to client: binary frames encoding screen, scroll, modes, title,
+//	                  resumeAck and pong messages (see wire_binary.go). PTY
+//	                  output is rendered into the VT screen and sent as
+//	                  absolute-indexed cell runs, not as raw bytes
+//	client to server: JSON control messages prefixed with 0x00:
 //	  {"type":"resize",...}, {"type":"resume",...}, {"type":"ping"}
 //
-// The 0x00 prefix byte distinguishes control messages from raw
-// input; no valid terminal input starts with NUL.
+// The 0x00 prefix byte tells control messages from raw input, because no
+// valid terminal input starts with NUL. docs/wire-protocol.md has the full
+// format.
 package terminal
 
 import (

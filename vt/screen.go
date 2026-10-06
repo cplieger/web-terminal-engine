@@ -1,19 +1,21 @@
-// Package vt implements a minimal VT100 screen buffer for intercepting
-// Ink's cursor-up + overwrite rendering pattern. It maintains a rows×cols
-// grid, processes escape sequences to update it, and captures lines that
-// scroll off the top (the "scrollback drain").
+// Package vt is the VT screen emulator behind the terminal package. A [Screen]
+// is a rows by cols cell grid that the program's output updates one byte at a
+// time, and lines that scroll off the top are captured as scrollback.
 //
-// File layout:
+// [New] builds a Screen and [Screen.Write] feeds it PTY output. Its accessors
+// read the grid, the cursor, the modes, the title and the per-row style runs
+// ([WireRun]) that the browser renderer draws.
 //
-//	types.go   — public types (Color, Style, Cell, parser state enum)
-//	screen.go  — the Screen struct, ctor, write entry, basic state ops
-//	parse.go   — VT500-style byte-at-a-time state machine
-//	csi.go     — CSI sequence dispatch + cell-level operations
-//	sgr.go     — SGR (color/attribute) parsing + ANSI emission helpers
-//	wire.go    — wire format: per-row style runs (WireRun) for the canvas renderer
-//	contrast.go — minimum-contrast floor over a run's resolved fg/bg pair
+// Supported OSC sequences: the window and icon titles (OSC 0, 1 and 2), the
+// palette and special colors (OSC 4, 5, 104 and 105), hyperlinks (OSC 8),
+// desktop notifications and ConEmu progress (OSC 9), the dynamic colors
+// answered from the configured theme (OSC 10 to 19 and 110 to 119) and the
+// clipboard (OSC 52). Other OSC numbers, such as 7, 133 and 777, are read and
+// ignored. The OSC 52 read-back and the DECRQCRA checksum answer only when
+// [Screen.AllowScreenReport] is on, because both write into the program's
+// input. The features left out on purpose are listed in docs/non-goals.md.
 //
-// Derived from github.com/tonistiigi/vt100 (MIT license, Docker BuildKit).
+// The screen buffer derives from github.com/tonistiigi/vt100 (MIT license).
 package vt
 
 import (

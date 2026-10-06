@@ -28,7 +28,7 @@ func FuzzScrollbackRing_replayMatchesModel(f *testing.F) {
 
 		r := newScrollbackRing(capacity)
 		for i := range numLines {
-			r.Append([][]vt.WireRun{makeLine(fmt.Sprintf("L%d", i))})
+			r.Append([][]vt.WireRun{makeLine(fmt.Sprintf("L%d", i))}, nil)
 		}
 
 		if got := r.Committed(); got != uint64(numLines) {

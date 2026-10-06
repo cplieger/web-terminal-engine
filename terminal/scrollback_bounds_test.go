@@ -18,7 +18,7 @@ func appendLines(t *testing.T, h *Handler, n int) {
 		lines[i] = []vt.WireRun{{T: "line"}}
 	}
 	h.mu.Lock()
-	h.scrollback.Append(lines)
+	h.scrollback.Append(lines, nil)
 	h.mu.Unlock()
 }
 
@@ -112,7 +112,7 @@ func TestScrollbackBounds_concurrent(t *testing.T) {
 		defer close(done)
 		for range rounds {
 			h.mu.Lock()
-			h.scrollback.Append([][]vt.WireRun{{{T: "x"}}})
+			h.scrollback.Append([][]vt.WireRun{{{T: "x"}}}, nil)
 			h.mu.Unlock()
 		}
 	})

@@ -15,6 +15,8 @@ A handler stops in one of two ways:
 
 `(*Handler).ScrollbackBounds()` returns the session's retained-history bounds as one atomic pair. The first value is the committed index, one past the newest committed line. The second is the oldest index a resume can still ask for. Both follow the child's output and the configured capacity, so the call is read-only.
 
+`(*Handler).Text(maxLines)` returns the newest `maxLines` lines of the session as plain text, read from the parsed screen rather than the byte stream. It covers retained history and the main screen. A line the terminal wrapped comes back as one line, trailing blanks are dropped, and no escape sequences remain. While a full-screen program such as vim holds the alternate screen, it returns the main screen beneath it and sets `AltScreen`. A value of `0` or less returns all retained history. The second result is `false` until the process has started.
+
 `(*Handler).ExitError()` returns the `cmd.Wait()` error the session kept, which is what decides between the `exited` and `crashed` statuses below.
 
 ## Many sessions

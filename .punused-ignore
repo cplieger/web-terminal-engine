@@ -277,6 +277,12 @@ method (*Screen).RowString
 # half of the contract.
 method (*Handler).ScrollbackBounds
 
+# (*Handler).Text -- plain-text read of a session's history and main screen,
+# published for marotte/internal/agent/shell.go's ShellManager, which feeds it to
+# the agent as `#` terminal context. The call lives in another MODULE. Covered
+# in-repo by terminal/text_test.go, including a -race read against PTY output.
+method (*Handler).Text
+
 
 # --- Session reaping and zombie reaping: published API, consumer
 # web-terminal-kiro, wired in the same effort that added them here (its

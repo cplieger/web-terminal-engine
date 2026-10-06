@@ -27,7 +27,9 @@ import "github.com/cplieger/web-terminal-engine/v6/vt"
 // replacing the old count-based scheme whose two independently-capped
 // buffers drifted into overlaps and gaps.
 type scrollbackRing struct {
-	buf       [][]vt.WireRun
+	buf [][]vt.WireRun
+	// wrap[i] mirrors buf[i]: the line soft-wraps from the line before it.
+	wrap      []bool
 	capacity  int    // retained-line ceiling; buf grows up to this
 	start     int    // ring index of the oldest retained line
 	count     int    // number of retained lines (<= len(buf))
@@ -41,8 +43,9 @@ func newScrollbackRing(capacity int) *scrollbackRing {
 // Append adds lines to the ring in order, assigning each the next
 // absolute index and evicting the oldest retained line when at capacity.
 // committed advances by len(lines) regardless of capacity, so absolute
-// indices stay monotonic even after eviction.
-func (r *scrollbackRing) Append(lines [][]vt.WireRun) {
+// indices stay monotonic even after eviction. wrapped[i] marks lines[i] as a
+// soft-wrap continuation of the line before it; a missing entry is false.
+func (r *scrollbackRing) Append(lines [][]vt.WireRun, wrapped []bool) {
 	if r.capacity == 0 {
 		// Scrollback disabled: still advance committed so the screen
 		// window's absolute base stays correct. Lines are unrecoverable
@@ -50,21 +53,31 @@ func (r *scrollbackRing) Append(lines [][]vt.WireRun) {
 		r.committed += uint64(len(lines))
 		return
 	}
-	for _, line := range lines {
+	for i, line := range lines {
+		w := i < len(wrapped) && wrapped[i]
 		if len(r.buf) < r.capacity {
 			// Growing. start is 0 and count == len(buf) in this phase, so the
 			// append position IS the ring index and no modulo is needed.
 			r.buf = append(r.buf, line)
+			r.wrap = append(r.wrap, w)
 			r.count++
 		} else {
 			// At capacity: the slot holding the oldest line is also the next
 			// slot to write, so one store plus one start advance is the whole
 			// eviction. count stays at capacity.
 			r.buf[r.start] = line
+			r.wrap[r.start] = w
 			r.start = (r.start + 1) % r.capacity
 		}
 		r.committed++
 	}
+}
+
+// at returns the retained line at position i (0 = oldest) and its wrap flag,
+// without copying: the caller reads it under the lock that guards the ring.
+func (r *scrollbackRing) at(i int) (line []vt.WireRun, wrapped bool) {
+	j := (r.start + i) % len(r.buf)
+	return r.buf[j], r.wrap[j]
 }
 
 // Committed returns the total number of lines ever committed to history,
@@ -168,6 +181,7 @@ func (r *scrollbackRing) Lines() [][]vt.WireRun {
 // pointers keeping every retained row alive.
 func (r *scrollbackRing) Clear() {
 	r.buf = nil
+	r.wrap = nil
 	r.start = 0
 	r.count = 0
 }

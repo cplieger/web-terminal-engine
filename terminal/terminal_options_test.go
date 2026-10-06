@@ -97,7 +97,7 @@ func TestNewHandler_WithScrollbackCapacity(t *testing.T) {
 	for i := range lines {
 		lines[i] = []vt.WireRun{{T: fmt.Sprintf("L%d", i)}}
 	}
-	h.scrollback.Append(lines)
+	h.scrollback.Append(lines, nil)
 	if got := h.scrollback.Len(); got != 500 {
 		t.Errorf("retained %d lines, want 500", got)
 	}
@@ -329,7 +329,7 @@ func TestNewHandler_WithScrollbackCapacity_Zero(t *testing.T) {
 		t.Fatalf("scrollbackCapacity = %d, want 0", h.cfg.scrollbackCapacity)
 	}
 	// Append must not panic on a zero-capacity ring.
-	h.scrollback.Append([][]vt.WireRun{{{T: "hello"}}})
+	h.scrollback.Append([][]vt.WireRun{{{T: "hello"}}}, nil)
 }
 
 // TestNewHandler_WithScrollbackCapacity_Negative verifies a negative capacity
@@ -339,7 +339,7 @@ func TestNewHandler_WithScrollbackCapacity_Negative(t *testing.T) {
 	if h.cfg.scrollbackCapacity != 0 {
 		t.Fatalf("scrollbackCapacity = %d, want 0 (clamped from -1)", h.cfg.scrollbackCapacity)
 	}
-	h.scrollback.Append([][]vt.WireRun{{{T: "hello"}}})
+	h.scrollback.Append([][]vt.WireRun{{{T: "hello"}}}, nil)
 }
 
 // TestNewHandler_LastOptionWins verifies duplicate options use last-wins

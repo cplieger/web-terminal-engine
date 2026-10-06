@@ -1444,6 +1444,7 @@ type flushFrame struct {
 	gens             map[*websocket.Conn]uint64
 	rows             [][]vt.WireRun
 	scrollLines      [][]vt.WireRun
+	scrollWrapped    []bool // per scrollLines entry, see scrollbackRing.Append
 	changed          []int
 	modesPayload     []byte
 	titlePayload     []byte
@@ -1470,11 +1471,17 @@ func (h *Handler) retainSuspendedScrollback() {
 	if !h.sizeEstablished {
 		return
 	}
-	drained := h.screen.DrainScrollback()
+	drained, wrapped := drainScrollback(h.screen)
 	if h.screen.InAltScreen || h.builder.altTransitionPending(h.screen) || len(drained) == 0 {
 		return
 	}
-	h.scrollback.Append(drained)
+	h.scrollback.Append(drained, wrapped)
+}
+
+// drainScrollback drains the screen's scrolled-off lines with their wrap flags.
+func drainScrollback(screen *vt.Screen) (lines [][]vt.WireRun, wrapped []bool) {
+	wrapped = screen.DrainedWrapped()
+	return screen.DrainScrollback(), wrapped
 }
 
 // buildFrame computes the next outbound frame under h.mu. Returns a nil frame
@@ -1529,7 +1536,7 @@ func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 		frame = h.builder.Build(h.screen, h.sizeEstablished, clients, committedBefore)
 	}
 	if frame != nil && len(frame.scrollLines) > 0 {
-		h.scrollback.Append(frame.scrollLines)
+		h.scrollback.Append(frame.scrollLines, frame.scrollWrapped)
 	}
 	if frame != nil && h.scrollbackClearedPending {
 		frame.scrollbackCleared = true
@@ -2468,11 +2475,11 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	// Commit any pending drain to history at its absolute index before
 	// computing the replay, so lines that scrolled while the client was
 	// away are retained (the old code discarded them here).
-	drained := h.screen.DrainScrollback()
+	drained, wrapped := drainScrollback(h.screen)
 	// Match Build's guard: drain that straddles an alt-screen transition belongs to the
 	// buffer just left and must not enter main history.
 	if !h.screen.InAltScreen && !h.builder.altTransitionPending(h.screen) && len(drained) > 0 {
-		h.scrollback.Append(drained)
+		h.scrollback.Append(drained, wrapped)
 	}
 	committed := h.scrollback.Committed()
 	oldest := h.scrollback.OldestIndex()

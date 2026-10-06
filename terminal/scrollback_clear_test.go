@@ -17,7 +17,7 @@ func TestED3ClearsScrollbackRing(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"})
 
 	// Populate the ring as if lines had scrolled into history.
-	h.scrollback.Append([][]vt.WireRun{{{T: "old1"}}, {{T: "old2"}}})
+	h.scrollback.Append([][]vt.WireRun{{{T: "old1"}}, {{T: "old2"}}}, nil)
 	if h.scrollback.Len() == 0 {
 		t.Fatal("setup: ring should be non-empty")
 	}

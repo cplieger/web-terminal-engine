@@ -208,7 +208,7 @@ func TestBuild_AbsoluteIndexIntegrity(t *testing.T) {
 			}
 		}
 		if len(frame.scrollLines) > 0 {
-			ring.Append(frame.scrollLines)
+			ring.Append(frame.scrollLines, nil)
 		}
 	}
 

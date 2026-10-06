@@ -80,15 +80,16 @@ func (b *flushFrameBuilder) Build(screen *vt.Screen, sizeEstablished bool, clien
 		b.prevAltValid = true
 	}
 
-	drained := screen.DrainScrollback()
+	drained, drainedWrapped := drainScrollback(screen)
 	var scrollOut [][]vt.WireRun
+	var scrollWrapped []bool
 	// Drain that straddles an alt-screen transition belongs to the buffer just
 	// left. vt's scrollUpOnce (csi.go:501) appends scrolled lines to Drained on any
 	// full-screen scroll region without checking InAltScreen, so on alt->main exit
 	// the leftover alt lines would be committed as main scrollback. Only emit drain
 	// that accrued purely on the main screen with no transition this tick.
 	if !screen.InAltScreen && !altChanged && len(drained) > 0 {
-		scrollOut = drained
+		scrollOut, scrollWrapped = drained, drainedWrapped
 	}
 	// In the alt screen the window is ephemeral and accrues no history,
 	// so the absolute base stays frozen at committedBefore. On the main
@@ -127,6 +128,7 @@ func (b *flushFrameBuilder) Build(screen *vt.Screen, sizeEstablished bool, clien
 		clients:        clients,
 		rows:           rows,
 		scrollLines:    scrollOut,
+		scrollWrapped:  scrollWrapped,
 		scrollFirstIdx: committedBefore,
 		base:           base,
 		changed:        changed,

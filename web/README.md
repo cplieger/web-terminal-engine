@@ -123,22 +123,22 @@ Two engines share nothing: each holds its own DOM handles, timers, listeners, so
 
 `engine.dispose()` disposes the five parts in reverse build order: the connection closes its socket with code 1000 (no `onClose` fires), stops its heartbeat, history and reconnect timers, drops every session's queued bytes and detaches your callbacks; the mouse controller detaches its four listeners and cancels its pending motion frame; the renderer cancels its pending frame and blink interval, removes its `visibilitychange` listener, empties `output`, removes its overlays and the `--char-w`, `cursor-blink-off` and `term-reverse-video` marks from `termWrap`, and drops every element reference; the scroll controller removes its `scroll` listener; the mode state resets to `POWER_ON_MODES`. A callback may call `dispose()` on the engine that invoked it; the connection stops after the callback returns. Every method stays callable afterwards and answers an empty value rather than throwing:
 
-| Part         | Method                                                             | After `dispose()`                                       |
-| ------------ | ------------------------------------------------------------------ | ------------------------------------------------------- |
-| `renderer`   | `boundStore()`                                                     | a new, empty `LineStore` on every call                  |
-| `renderer`   | `getHighestIndex()`, `getReplayBoundary()`                         | `-1`                                                    |
-| `renderer`   | `lastBrowseActivityMs()`, `browseCacheSize()`, `pendingRowCount()` | `0`                                                     |
-| `renderer`   | `replayMaxForResume()`                                             | `5000`                                                  |
-| `renderer`   | `captureViewMemory()`, `pendingRestoreAbs()`                       | `null`                                                  |
-| `renderer`   | `computeSize()`, `gridSize()`                                      | `{ cols: 0, rows: 0 }`                                  |
-| `renderer`   | `cellSize()`                                                       | `{ width: 0, height: 0 }`                               |
-| `renderer`   | `getCursorPx()`                                                    | `{ left: 0, top: 0, cellH: 0 }`                         |
-| `scroll`     | `isUserScrolledUp()`                                               | `false`                                                 |
-| `scroll`     | `currentScrollTop()`                                               | `0`                                                     |
-| `connection` | `sendBinary()`, `sendEphemeral()`, `requestHistory()`              | `false`                                                 |
-| `connection` | `historyBudget()`, `serverEpochOf()`                               | `0`                                                     |
-| `connection` | `currentSessionId()`                                               | `""`                                                    |
-| `modes`      | the nine readers, `snapshot()`                                     | the `POWER_ON_MODES` values; `applySnapshot` is a no-op |
+| Part | Method | After `dispose()` |
+| --- | --- | --- |
+| `renderer` | `boundStore()` | a new, empty `LineStore` on every call |
+| `renderer` | `getHighestIndex()`, `getReplayBoundary()` | `-1` |
+| `renderer` | `lastBrowseActivityMs()`, `browseCacheSize()`, `pendingRowCount()` | `0` |
+| `renderer` | `replayMaxForResume()` | `5000` |
+| `renderer` | `captureViewMemory()`, `pendingRestoreAbs()` | `null` |
+| `renderer` | `computeSize()`, `gridSize()` | `{ cols: 0, rows: 0 }` |
+| `renderer` | `cellSize()` | `{ width: 0, height: 0 }` |
+| `renderer` | `getCursorPx()` | `{ left: 0, top: 0, cellH: 0 }` |
+| `scroll` | `isUserScrolledUp()` | `false` |
+| `scroll` | `currentScrollTop()` | `0` |
+| `connection` | `sendBinary()`, `sendEphemeral()`, `requestHistory()` | `false` |
+| `connection` | `historyBudget()`, `serverEpochOf()` | `0` |
+| `connection` | `currentSessionId()` | `""` |
+| `modes` | the nine readers, `snapshot()` | the `POWER_ON_MODES` values; `applySnapshot` is a no-op |
 
 `createTerminalEngine` and each factory throw when a listener or timer cannot be acquired, and a throw leaves nothing behind: the parts built before it are disposed in reverse order, so there is no partially built engine to dispose.
 

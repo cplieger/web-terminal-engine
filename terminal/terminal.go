@@ -260,25 +260,13 @@ const (
 )
 
 // ScrollbackEnvVar is the environment variable consumers read to let an operator
-// override the retained-history depth (WithScrollbackCapacity).
-//
-// The engine owns the NAME so the apps that share this knob cannot drift apart
-// — web-terminal-server, web-terminal-kiro and marotte all embed this handler,
-// and a knob spelled three ways is three knobs. The engine deliberately does NOT
-// read the variable itself: no library in this fleet reads os.Getenv, because a
-// library that reads process state takes configuration out of its caller's
-// hands. Consumers read it (envx.IntStrict) and pass WithScrollbackCapacity.
-//
-// The name carries no component prefix on purpose. It is set by an operator who
-// knows the app they run, not the library serving its HTTP, so a WT_ prefix
-// leaked an internal name at them and bought no disambiguation. The keys the
-// engine INJECTS into a session's child environment are the opposite case and do
-// keep the prefix — see reapMarkerEnv.
-//
-// Values: 0 disables scrollback; 1..MinPagingCapacity-1 is honoured but too
-// shallow to declare demand paging, so a consumer should clamp up and say so
-// (see MinPagingCapacity); anything larger is retained as asked, and there is no
-// upper bound to trip over — the ring allocates only what it fills.
+// override the retained-history depth (WithScrollbackCapacity). The engine owns
+// the NAME so the apps embedding this handler cannot drift apart, but does NOT
+// read it: a library that reads process state takes configuration out of its
+// caller's hands, so consumers read it (envx.IntStrict) and pass the option. It
+// carries no WT_ prefix because an operator sets it per app. Values: 0 disables
+// scrollback; 1..MinPagingCapacity-1 is honoured but too shallow for demand
+// paging, so clamp up and say so; anything larger is retained, with no upper bound.
 const ScrollbackEnvVar = "SCROLLBACK"
 
 // DefaultScrollbackCapacity is the retained-history depth a handler uses when a
@@ -966,34 +954,14 @@ func (h *Handler) exitOutcome() (exited, crashed bool) {
 	return true, crashedExit(h.ExitError(), h.shutdownRequested.Load())
 }
 
-// crashedExit classifies a reaped child's exit: true means the program died in a
-// way an operator should see as a failure (StatusCrashed), false means it ended
-// normally (StatusExited).
-//
-// The rule, and why each case falls where it does:
-//
-//   - werr == nil — exit status 0. Clean, never a crash.
-//   - serverInitiated — the SERVER ended this session (Close, and therefore
-//     Shutdown, SessionManager.Close and the idle reaper too). The child is killed by the
-//     cancelled context (SIGKILL) or hung up by the PTY closing, so its wait
-//     status is signalled through no fault of its own. Not a crash: classifying
-//     it as one would turn every routine server shutdown, every closed tab and
-//     every reap into a fleet of red dots — the single worst failure mode this
-//     boundary has, so the server's own intent outranks the wait status.
-//   - SIGHUP — the controlling terminal went away. The only thing that closes
-//     this session's PTY master is the engine itself (Close, or the monitor
-//     after the child is already reaped), so a hangup means "the session ended",
-//     not "the program failed". Excluded independently of serverInitiated
-//     because the PTY close and the flag are set by the same teardown but
-//     observed through different mechanisms, and a hangup is not evidence of
-//     failure whichever way it arrived.
-//   - any other *exec.ExitError — a non-zero exit status or a terminating signal
-//     the program was not asked for (SIGSEGV, SIGKILL from an OOM killer,
-//     SIGTERM from outside). This is the crash case, and the only one.
-//   - any other error — Wait itself failed (a lost child, ErrWaitDelay without
-//     an exit status). We have no evidence about the program's own outcome, so
-//     the safe answer is the quiet one: not a crash. A crash claim needs
-//     positive evidence, because a false crash is the expensive direction.
+// crashedExit classifies a reaped child's exit: true means a failure an operator
+// should see (StatusCrashed), false a normal end (StatusExited). Exit 0 is clean.
+// serverInitiated wins over the wait status: a killed or hung-up child of Close,
+// Shutdown or the idle reaper is not a crash, or every closed tab would show red.
+// SIGHUP is excluded independently, because only the engine closes the PTY
+// master. Any other *exec.ExitError (non-zero status, unrequested signal) is the
+// crash case. Any other Wait error carries no evidence about the program, so it
+// is not a crash: a false crash is the expensive direction.
 func crashedExit(werr error, serverInitiated bool) bool {
 	if werr == nil || serverInitiated {
 		return false

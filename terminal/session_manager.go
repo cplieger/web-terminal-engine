@@ -441,23 +441,14 @@ func (m *SessionManager) create() (SessionInfo, error) {
 // short of the 128-bit token an attacker would need to attach.
 const logIDPrefixBytes = 8
 
-// LogID returns a short, correlation-safe prefix of a session id for logs:
-// the first 8 bytes plus an ellipsis, or the id unchanged when it is already
-// that short. Minted ids are crypto-random hex, but a CLIENT-supplied resume id
-// is arbitrary bytes (see SessionID), so the cut lands on a rune boundary: a
-// byte prefix of multi-byte input would put invalid UTF-8 into the log stream,
-// which a JSON handler then escapes to U+FFFD and a text handler emits raw.
-//
-// The full id is a WS routing + resume capability token: logging it whole
-// places a session-access credential into aggregated logs (CWE-532), where
-// anyone with log-read reach and network access can attach to the session.
-// Every consumer that logs a session id — its own lifecycle lines, a
-// per-session logger's bound attribute — must pass it through here rather
-// than re-deriving the truncation, so the fleet keeps ONE definition of how
-// much of a session token may be logged. Exported for exactly that reason:
-// re-implemented copies drift, and the drift is silent (a wrong length leaks
-// more entropy; a missing call leaks the whole token) unless a test asserts
-// the logged value, which is why consumers should pin it.
+// LogID returns a short, correlation-safe prefix of a session id for logs: the
+// first 8 bytes plus an ellipsis, or the id unchanged when already that short.
+// A client-supplied resume id is arbitrary bytes (see SessionID), so the cut lands
+// on a rune boundary and never puts invalid UTF-8 into the log. The full id is a
+// session-access capability token (CWE-532 if logged whole), so every consumer
+// that logs a session id must pass it through here rather than re-deriving the
+// truncation, keeping ONE definition of how much of the token may be logged;
+// consumers should pin the logged value in a test.
 func LogID(id SessionID) string {
 	if len(id) <= logIDPrefixBytes {
 		return string(id)

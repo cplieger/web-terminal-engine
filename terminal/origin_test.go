@@ -516,7 +516,7 @@ func TestLogSafeHeader(t *testing.T) {
 		t.Parallel()
 		got := logSafeHeader(strings.Repeat("A", 4096))
 		// The preset places its "..." marker OUTSIDE the cap, so the bound is
-		// maxLoggedOriginBytes plus the marker (runesafe.md, API).
+		// maxLoggedOriginBytes plus the marker.
 		if len(got) > maxLoggedOriginBytes+3 {
 			t.Errorf("len = %d, want <= %d", len(got), maxLoggedOriginBytes+3)
 		}

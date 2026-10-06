@@ -99,7 +99,7 @@ func (r *scrollbackRing) OldestIndex() uint64 {
 // replay and paging paths whose callers serialize or transform them; without
 // the copy the returned inner []vt.WireRun still aliases ring history, so one
 // mutating caller would rewrite what every LATER replay sees. The outer slices
-// were always fresh; this closes the inner layer (go-rulebook C21).
+// are fresh already; this copies the inner layer too.
 func copyLine(line []vt.WireRun) []vt.WireRun {
 	if line == nil {
 		return nil

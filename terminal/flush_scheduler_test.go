@@ -63,14 +63,13 @@ func startWSReader(t *testing.T, ws *websocket.Conn) <-chan wsReadResult {
 	return results
 }
 
-// readUntilQuiet drains frames until none arrives for the grace window,
-// returning the number read. Used to consume the attach-time burst so a test
-// measures only what its own stimulus produces.
-func readUntilQuiet(t *testing.T, results <-chan wsReadResult, grace time.Duration) int {
+// readUntilQuiet drains frames until none arrives for the grace window. Used
+// to consume the attach-time burst so a test measures only what its own
+// stimulus produces.
+func readUntilQuiet(t *testing.T, results <-chan wsReadResult, grace time.Duration) {
 	t.Helper()
 	timer := time.NewTimer(grace)
 	defer timer.Stop()
-	n := 0
 	for {
 		select {
 		case result, ok := <-results:
@@ -80,18 +79,17 @@ func readUntilQuiet(t *testing.T, results <-chan wsReadResult, grace time.Durati
 			if result.err != nil {
 				t.Fatalf("WebSocket read while draining attach frames: %v", result.err)
 			}
-			n++
 			if !timer.Stop() {
 				<-timer.C
 			}
 			timer.Reset(grace)
 		case <-timer.C:
-			return n
+			return
 		}
 	}
 }
 
-func readFrameWithin(t *testing.T, results <-chan wsReadResult, timeout time.Duration) wsReadResult {
+func readFrameWithin(t *testing.T, results <-chan wsReadResult, timeout time.Duration) {
 	t.Helper()
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -103,10 +101,8 @@ func readFrameWithin(t *testing.T, results <-chan wsReadResult, timeout time.Dur
 		if result.err != nil {
 			t.Fatalf("WebSocket read: %v", result.err)
 		}
-		return result
 	case <-timer.C:
 		t.Fatalf("no WebSocket frame within %v", timeout)
-		return wsReadResult{}
 	}
 }
 

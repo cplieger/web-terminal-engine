@@ -1,7 +1,7 @@
 // Imports no production module: `engine-fixture-setup.ts` loads this before every
 // test file, and a production module evaluated that early is the one a later
 // `vi.mock` in the test file can no longer replace.
-export interface Disposable {
+interface Disposable {
   dispose(): void;
 }
 

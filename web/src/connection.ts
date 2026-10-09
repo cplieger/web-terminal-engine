@@ -40,7 +40,7 @@ type ConnState =
   // false: controls are 0x00-sentinel binary frames and input is leading-NUL-
   // split. true: controls are text frames and input is raw binary.
   | { status: "connected"; sock: WebSocket; abort: AbortController; upgraded: boolean }
-  | { status: "reconnecting"; timer: ReturnType<typeof setTimeout>; delayMs: number }
+  | { status: "reconnecting"; timer: ReturnType<typeof setTimeout> }
   | { status: "incompatible" };
 
 // The server's close code for "the child process has exited"
@@ -727,7 +727,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
       connState = { status: "disconnected" };
       connect();
     }, step.scheduledMs);
-    connState = { status: "reconnecting", timer, delayMs: step.scheduledMs };
+    connState = { status: "reconnecting", timer };
   }
 
   function cancelScheduledReconnect(): void {

@@ -144,15 +144,14 @@ func makeSavedMain(rows, cols int) [][]Cell {
 	return g
 }
 
-// resizeSavedCursor enters alt-screen, overrides the saved main cursor, resizes,
-// and returns the post-resize saved main cursor.
-func resizeSavedCursor(savedX, savedY, newRows, newCols int) (gotX, gotY int) {
+// resizeSavedCursorX enters alt-screen, overrides the saved main cursor column,
+// resizes, and returns the post-resize saved main cursor column.
+func resizeSavedCursorX(savedX, newRows, newCols int) int {
 	s := New(8, 12)
 	s.enterAltScreen(1049)
 	s.savedMainCurX = savedX
-	s.savedMainCurY = savedY
 	s.Resize(newRows, newCols)
-	return s.savedMainCurX, s.savedMainCurY
+	return s.savedMainCurX
 }
 
 // TestResizeTabStopsGrow verifies that widening a non-nil tabStops slice fills
@@ -257,7 +256,7 @@ func TestResizeSavedCursorXClamp(t *testing.T) {
 		{"under unchanged", 2, 5, 2},
 	}
 	for _, c := range cases {
-		gotX, _ := resizeSavedCursor(c.savedX, 0, 8, c.newCols)
+		gotX := resizeSavedCursorX(c.savedX, 8, c.newCols)
 		if gotX != c.wantX {
 			t.Errorf("%s: Resize savedMainCurX (savedX=%d, cols=%d) = %d, want %d",
 				c.name, c.savedX, c.newCols, gotX, c.wantX)

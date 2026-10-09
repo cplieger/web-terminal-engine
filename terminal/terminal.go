@@ -426,6 +426,8 @@ func WithOriginPolicy(p *OriginPolicy) Option {
 }
 
 // WithOnProcessExit registers a callback invoked when the child process exits.
+// The child's final output is on the screen by then, unless a process still
+// holding the terminal keeps it open past a one-second drain bound.
 func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
@@ -1207,7 +1209,11 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		"pid", pid, "command", loggedCommand, "cols", cols, "rows", rows)
 
 	// PTY reader goroutine — feeds VT screen and notifies clients.
-	h.wg.Go(func() { h.readLoop(ctx) })
+	readDone := make(chan struct{})
+	h.wg.Go(func() {
+		defer close(readDone)
+		h.readLoop(ctx)
+	})
 	// Flush scheduler — sends screen updates to all clients.
 	h.wg.Go(func() { h.flushLoop(ctx) })
 	// Periodic per-session cost line, when the consumer asked for one. Stopped
@@ -1222,6 +1228,7 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		// os/exec is done with this pid, so the zombie sweep may stop excluding
 		// it. One mutex, no allocation, and ahead of anything that can block.
 		spawnForget(pid)
+		awaitReadDrain(readDone)
 		// Retain the outcome BEFORE procExitCh closes, so any reader that sees
 		// Exited() == true also sees the final exit error (the status sweep reads
 		// the pair through exitOutcome). Nothing here can panic — a mutex and one
@@ -1336,6 +1343,37 @@ func startSessionPTY(cmd *exec.Cmd, cols, rows int) (*os.File, error) {
 	return ptmx, err
 }
 
+// exitDrainBound caps how long the process monitor waits, after the child is
+// reaped, for readLoop to drain the PTY to EOF/EIO. It must be finite: a
+// backgrounded process still holding the slave keeps the master open, so the
+// read may never end on its own.
+const exitDrainBound = time.Second
+
+// awaitReadDrain blocks until readDone closes or exitDrainBound elapses, so the
+// exit callback, procExitCh and the ptmx close all follow the child's final
+// output instead of racing it.
+func awaitReadDrain(readDone <-chan struct{}) {
+	if hold := testExitDrainHold.Load(); hold != nil {
+		(*hold)()
+	}
+	t := time.NewTimer(exitDrainBound)
+	defer t.Stop()
+	select {
+	case <-readDone:
+	case <-t.C:
+	}
+}
+
+// testExitDrainHold, when non-nil, is invoked by awaitReadDrain before it waits,
+// and testPTYReadHold by readLoop after a read returns data and before the data
+// reaches the screen. Test-only: together they hold the reader at the instant the
+// monitor starts draining, which no real timing reaches deterministically. Atomic
+// for the same reason as testResumeBatchHold. Never set in production.
+var (
+	testExitDrainHold atomic.Pointer[func()]
+	testPTYReadHold   atomic.Pointer[func()]
+)
+
 func (h *Handler) readLoop(ctx context.Context) {
 	buf := make([]byte, ptyReadBuf)
 	for {
@@ -1346,6 +1384,9 @@ func (h *Handler) readLoop(ctx context.Context) {
 		}
 		n, err := h.ptmx.Read(buf)
 		if n > 0 {
+			if hold := testPTYReadHold.Load(); hold != nil {
+				(*hold)()
+			}
 			h.handlePTYData(buf[:n])
 		}
 		if err != nil {

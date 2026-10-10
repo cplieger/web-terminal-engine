@@ -37,6 +37,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
+	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 	"github.com/creack/pty"
 )
@@ -204,11 +205,10 @@ const (
 	minResizeCols = 20
 	minResizeRows = 5
 
-	// maxResizeCols/maxResizeRows bound the eagerly-allocated grid. The VT
-	// screen allocates cols*rows Cells, so the winsize field width (0xFFFF)
-	// is not a memory bound: a 65535x65535 resize allocates ~4.3e9 Cells
-	// (>250 GB) and OOMs the host. Cap far above any real display but well
-	// below OOM territory; raise for a genuine ultra-wide layout.
+	// maxResizeCols/maxResizeRows bound a client's resize. vt.Screen caps its
+	// grid at 1000 for memory (vt's maxDimension owns why), so a larger value
+	// here would size the PTY past the screen; TestResizeCeilingFitsScreen
+	// pins the two together.
 	maxResizeCols = 1000
 	maxResizeRows = 1000
 
@@ -238,6 +238,9 @@ const (
 	// against the resume ledger (see ephemeralInputControl). Declared with
 	// resumeAckFlagEphemeralInput.
 	ctlTypeEphemeralInput = "ephemeralInput"
+	// maxLoggedControlTypeBytes bounds the client-chosen type an unrecognized
+	// control logs; every real control type is under 16 bytes.
+	maxLoggedControlTypeBytes = 32
 
 	// defaultScrollbackCapacity is the number of scrollback lines the server
 	// retains for replay and for demand-paged history requests. It is the
@@ -2301,7 +2304,8 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 		// framing in the read loop; nothing else to do.
 		d.known = true
 	default:
-		h.cfg.logger.Debug("terminal: unrecognized control type", "type", c.Type)
+		h.cfg.logger.Debug("terminal: unrecognized control type",
+			"type", runesafe.SanitizeSingleLineBounded(c.Type, maxLoggedControlTypeBytes))
 	}
 	return d
 }

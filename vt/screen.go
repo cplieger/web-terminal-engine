@@ -301,9 +301,28 @@ func WithMinimumContrast(ratio float64) Option {
 	}
 }
 
-// New creates a screen buffer of the given dimensions. Optional behavior (e.g.
-// the reported color theme) is configured via functional Option values.
+// maxDimension caps the rows and the cols of every Screen. The grid is
+// allocated eagerly (rows*cols Cells, again for the saved main buffer while the
+// alt screen is up), so a caller-supplied size is a memory bound: 65535x65535
+// is ~4.3e9 Cells. 1000 sits far above any real display.
+const maxDimension = 1000
+
+// capDimension bounds n to maxDimension. It is a comparison rather than min()
+// because CodeQL's go/uncontrolled-allocation-size only accepts a relational
+// guard as a bound (AllocationSizeCheckBarrier in
+// https://github.com/github/codeql/blob/main/go/ql/lib/semmle/go/security/AllocationSizeOverflowCustomizations.qll).
+func capDimension(n int) int {
+	if n <= maxDimension {
+		return n
+	}
+	return maxDimension
+}
+
+// New creates a screen buffer of the given dimensions, each capped at 1000.
+// Optional behavior (e.g. the reported color theme) is configured via
+// functional Option values.
 func New(rows, cols int, opts ...Option) *Screen {
+	rows, cols = capDimension(rows), capDimension(cols)
 	s := &Screen{Height: rows, Width: cols, Cells: make([][]Cell, rows), wrapped: make([]bool, rows), scrollTop: 0, scrollBottom: rows - 1, rightMargin: cols - 1, conformanceLevel: 65, AutoWrap: true, CursorBlink: true, theme: DefaultTheme(), minContrast: MinimumContrastOff}
 	s.singleShft = -1
 	s.Progress = progressAbsent      // no OSC 9;4 progress seen yet
@@ -409,10 +428,11 @@ func (s *Screen) CursorPos() (row, col int) {
 // Resize adjusts the screen dimensions, preserving existing content where
 // possible. When dimensions actually change, cells are cleared so the host application's
 // SIGWINCH redraw starts from a clean slate; on a no-op resize (e.g. client
-// reconnect at the same size), content is preserved.
+// reconnect at the same size), content is preserved. Each dimension is floored
+// at 1 and capped at 1000.
 func (s *Screen) Resize(rows, cols int) {
-	cols = max(cols, 1)
-	rows = max(rows, 1)
+	cols = capDimension(max(cols, 1))
+	rows = capDimension(max(rows, 1))
 	s.resizeHeight(rows)
 	s.resizeWidth(cols)
 	if s.curY >= s.Height {

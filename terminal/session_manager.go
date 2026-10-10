@@ -18,6 +18,7 @@ import (
 	"cmp"
 	"context"
 	"crypto/rand"
+	"encoding/base32"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -76,6 +77,12 @@ type SessionInfo struct {
 	CreatedAt time.Time `json:"createdAt"`
 	ID        SessionID `json:"id"`    // marshals as a plain string; the wire shape is unchanged
 	Title     string    `json:"title"` // resolved display title (effectiveTitle)
+	// Alias is the session's short public name, safe to show in a URL: 1 to 64
+	// characters of [A-Za-z0-9_-], unique among live sessions, and NOT a
+	// capability (nothing attaches with it; only ID does). The manager mints a
+	// random 8-character one at create; a host may replace it with
+	// SetSessionAlias.
+	Alias string `json:"alias"`
 	// ClientTitle is the raw stored client-derived title, exposed alongside
 	// Title so a consumer can read the pushed label directly (bypassing the
 	// precedence baked into Title) — used by an input-title UI that treats a
@@ -230,6 +237,7 @@ type session struct {
 	createdAt   time.Time
 	handler     *Handler
 	id          SessionID
+	alias       string // public URL name; see SessionInfo.Alias
 	clientTitle string // client-derived automatic title, below the OSC title
 	pinnedTitle string // the user's explicit name; outranks every automatic source
 	// autoTitle is the server-derived fallback (foreground process, then cwd,
@@ -414,7 +422,10 @@ func (m *SessionManager) create() (SessionInfo, error) {
 	// autoTitle starts at the command basename (the ladder's last rung): the
 	// sweep refines it to a foreground-process or cwd name, but a List served
 	// before the first sweep must still name the session.
-	m.sessions[id] = &session{id: id, handler: h, createdAt: now, autoTitle: h.commandBase()}
+	alias := m.mintAliasLocked()
+	m.sessions[id] = &session{
+		id: id, alias: alias, handler: h, createdAt: now, autoTitle: h.commandBase(),
+	}
 	// Newest session last, which is where a new tab belongs. A client that has
 	// arranged its tabs keeps that arrangement; only the new id moves.
 	m.order = append(m.order, id)
@@ -429,7 +440,7 @@ func (m *SessionManager) create() (SessionInfo, error) {
 	m.logger.Info("session: created", "session", LogID(id), "sessions", n)
 	// A freshly eager-started session is idle until it produces output; the
 	// status stream corrects that within a tick if the process died instantly.
-	return SessionInfo{ID: id, Status: StatusIdle, CreatedAt: now, Order: order}, nil
+	return SessionInfo{ID: id, Alias: alias, Status: StatusIdle, CreatedAt: now, Order: order}, nil
 }
 
 // logIDPrefixBytes is how much of a session token may reach a log: 8 bytes of
@@ -763,7 +774,7 @@ func (m *SessionManager) List() []SessionInfo {
 	for _, s := range m.sessions {
 		it := listItem{
 			info: SessionInfo{
-				ID: s.id, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
+				ID: s.id, Alias: s.alias, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
 				CreatedAt: s.createdAt,
 			},
 			// Held beside the info rather than in info.Order: the published field is
@@ -850,6 +861,75 @@ func (m *SessionManager) SetSessionTitle(id SessionID, title string) bool {
 	}
 	s.clientTitle = sanitizeTitle(title, maxClientTitleRunes)
 	return true
+}
+
+// SetSessionAlias replaces a session's public name (see SessionInfo.Alias). It
+// returns false, changing nothing, for an unknown id, an alias outside
+// [A-Za-z0-9_-]{1,64}, or one another live session holds; setting a session's
+// current alias again succeeds. Pushed to subscribers by the next sweep.
+func (m *SessionManager) SetSessionAlias(id SessionID, alias string) bool {
+	if !validSessionAlias(alias) {
+		return false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	s, ok := m.sessions[id]
+	if !ok {
+		return false
+	}
+	if s.alias != alias && m.aliasHeldLocked(alias) {
+		return false
+	}
+	s.alias = alias
+	return true
+}
+
+// maxSessionAliasLen bounds an alias; a kiro-cli session id ("sess_" plus a
+// UUID, 41 characters) is the longest host value in use.
+const maxSessionAliasLen = 64
+
+func validSessionAlias(s string) bool {
+	if s == "" || len(s) > maxSessionAliasLen {
+		return false
+	}
+	for i := range len(s) {
+		if !isAliasByte(s[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAliasByte(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '_' || c == '-'
+}
+
+func (m *SessionManager) aliasHeldLocked(alias string) bool {
+	for _, s := range m.sessions {
+		if s.alias == alias {
+			return true
+		}
+	}
+	return false
+}
+
+// aliasEncoding is unpadded lowercase base32 (a-z, 2-7): 5 random bytes are
+// exactly 8 characters, and the alphabet has no look-alike pair.
+var aliasEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
+
+// mintAliasLocked returns a random alias no live session holds. Random rather
+// than a counter because sessions do not survive a restart: a counter would
+// hand an old URL's name to a different tab.
+func (m *SessionManager) mintAliasLocked() string {
+	for {
+		var b [5]byte
+		// crypto/rand.Read never returns an error since Go 1.24
+		// (https://pkg.go.dev/crypto/rand#Read).
+		_, _ = rand.Read(b[:])
+		if alias := aliasEncoding.EncodeToString(b[:]); !m.aliasHeldLocked(alias) {
+			return alias
+		}
+	}
 }
 
 // SetSessionPinnedTitle sets the user's explicit name for a session, which

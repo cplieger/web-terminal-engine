@@ -29,6 +29,7 @@
 //    background state carried beside the turn status. It survives the parse, an
 //    absent pair reads as undefined rather than as a state, and an unknown value
 //    from a newer server is forwarded rather than dropped.
+// 11. The session alias (the URL name) survives the parse.
 
 import { describe, it, expect, vi } from "vitest";
 
@@ -337,6 +338,15 @@ describe("connectStatusStream", () => {
       expect(got.activity).toBe("queued");
       expect(got.activityCount).toBe(1);
     });
+  });
+
+  it("carries the session alias through the parse", () => {
+    const onStatus = vi.fn();
+    const { fake } = mountFake({ onStatus });
+    fake.emit("message", JSON.stringify({ ...sample, alias: "sess_thread" }));
+
+    const got = onStatus.mock.calls[0]![0] as SessionStatus;
+    expect(got.alias).toBe("sess_thread");
   });
 
   // The session-end split. The server reports "exited" for an ordinary end —

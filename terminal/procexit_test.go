@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -27,12 +28,7 @@ func TestExitedAttachServesReplayBefore4001(t *testing.T) {
 	if err := h.StartEager(); err != nil {
 		t.Fatalf("StartEager: %v", err)
 	}
-	// Wait for the child's output to be PARSED INTO THE SCREEN, not merely for
-	// the child to exit. Exited() flips when the process is reaped, which can
-	// happen before readLoop has drained the remaining PTY bytes and the VT
-	// parser has applied them — so waiting on Exited() alone raced the replay
-	// assertion below and failed it intermittently with an empty screen.
-	// Waiting on the screen makes the precondition the thing the test needs.
+	// Poll the screen itself: it is the precondition the replay assertion needs.
 	deadline := time.Now().Add(waitPatience)
 	for !screenContains(h, marker) {
 		if time.Now().After(deadline) {
@@ -124,11 +120,97 @@ func TestProcessExitClosesWith4001(t *testing.T) {
 	}
 }
 
-// screenContains reports whether the parsed screen currently holds want. Reads
-// the cells under h.mu, the same lock the parser writes them under, so a test
-// can wait on "the child's output has been parsed" rather than on the weaker
-// "the child has exited" — the two are not the same instant, and assuming they
-// were is what made the replay assertion above flaky.
+// TestProcessExit_finalOutputReachesTheScreenBeforeTheCallback holds the PTY
+// reader on the child's only output until the monitor starts draining, or until
+// the exit callback fires if it never drains. A monitor that does not wait for
+// the reader fires the callback over an empty screen.
+func TestProcessExit_finalOutputReachesTheScreenBeforeTheCallback(t *testing.T) {
+	const marker = "goodbye"
+	draining := make(chan struct{})
+	fired := make(chan struct{})
+	var drainOnce, firedOnce sync.Once
+	t.Cleanup(func() {
+		drainOnce.Do(func() { close(draining) })
+		firedOnce.Do(func() { close(fired) })
+	})
+	drainHold := func() { drainOnce.Do(func() { close(draining) }) }
+	readHold := func() {
+		select {
+		case <-draining:
+		case <-fired:
+		}
+	}
+	testExitDrainHold.Store(&drainHold)
+	testPTYReadHold.Store(&readHold)
+	t.Cleanup(func() {
+		testExitDrainHold.Store(nil)
+		testPTYReadHold.Store(nil)
+	})
+
+	var h *Handler
+	var atCallback string
+	h = NewHandler([]string{"/bin/sh", "-c", "printf " + marker},
+		WithWorkDir("/"),
+		WithLogger(nil),
+		WithOnProcessExit(func(error) {
+			atCallback = screenText(h)
+			firedOnce.Do(func() { close(fired) })
+		}),
+	)
+	defer h.Close()
+	if err := h.StartEager(); err != nil {
+		t.Fatalf("StartEager: %v", err)
+	}
+
+	select {
+	case <-fired:
+	case <-time.After(waitPatience):
+		t.Fatalf("onProcessExit not called within %v; screen holds %q", waitPatience, screenText(h))
+	}
+	if !strings.Contains(atCallback, marker) {
+		t.Errorf("screen at onProcessExit = %q, want it to contain the child's final output %q", atCallback, marker)
+	}
+}
+
+// TestProcessExit_drainIsBoundedWhenABackgroundChildHoldsTheTerminal: a
+// backgrounded process that ignores SIGHUP keeps the PTY slave open after the
+// head exits, so the reader never sees EOF. The exit must still be reported.
+func TestProcessExit_drainIsBoundedWhenABackgroundChildHoldsTheTerminal(t *testing.T) {
+	const marker = "ready"
+	fired := make(chan struct{})
+	h := NewHandler([]string{"/bin/sh", "-c", `trap "" HUP; sleep 30 & printf ` + marker},
+		WithWorkDir("/"),
+		WithLogger(nil),
+		WithOnProcessExit(func(error) { close(fired) }),
+	)
+	defer h.Close()
+	start := time.Now()
+	if err := h.StartEager(); err != nil {
+		t.Fatalf("StartEager: %v", err)
+	}
+
+	select {
+	case <-fired:
+	case <-time.After(waitPatience):
+		t.Fatalf("onProcessExit not called within %v while a background child held the terminal; the drain wait must be bounded", waitPatience)
+	}
+	if elapsed := time.Since(start); elapsed < exitDrainBound {
+		t.Fatalf("onProcessExit fired %v after start, under the %v bound: either the monitor did not wait for the reader, or the background child did not hold the terminal and this fixture tests nothing", elapsed, exitDrainBound)
+	}
+	deadline := time.Now().Add(waitPatience)
+	for !h.Exited() {
+		if time.Now().After(deadline) {
+			t.Fatalf("Exited() still false %v after onProcessExit fired on the bounded path", waitPatience)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !screenContains(h, marker) {
+		t.Errorf("screen = %q, want the head's output %q", screenText(h), marker)
+	}
+}
+
+// screenContains reports whether the parsed screen currently holds want, read
+// under h.mu, the lock the parser writes the cells under.
 func screenContains(h *Handler, want string) bool {
 	return strings.Contains(screenText(h), want)
 }

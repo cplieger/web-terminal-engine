@@ -8,15 +8,12 @@
 import { nextBackoffDelay } from "./reconnect.js";
 
 /** SessionInfo is one session's wire shape: the JSON object the session REST
- *  API (GET/POST /api/sessions) returns per session. Mirrors the Go
- *  terminal.SessionInfo — the two are kept in lockstep by hand (single 8-field
- *  type; flip to wiregen if this surface grows).
+ *  API (GET/POST /api/sessions) returns per session, kept in lockstep with the Go
+ *  terminal.SessionInfo by hand.
  *
- *  Three of the fields are title-shaped and they are not interchangeable:
- *  `title` is the RESOLVED display title, `pinnedTitle` is the USER's name (set
- *  and cleared only by a human action, outranking everything else), and
- *  `clientTitle` is a CLIENT-DERIVED automatic title a client asked the server to
- *  remember. */
+ *  `title` is the RESOLVED display title, `pinnedTitle` the USER's name (set and
+ *  cleared only by a human action, outranking everything else), and `clientTitle`
+ *  a CLIENT-DERIVED automatic title a client asked the server to remember. */
 export interface SessionInfo {
   readonly id: string;
   /** the session's current status. "working"/"idle"/"exited"/"crashed" are
@@ -35,6 +32,13 @@ export interface SessionInfo {
   readonly status:
     "working" | "idle" | "input" | "done" | "exited" | "crashed" | "failed" | "warning";
   readonly title: string;
+  /** the session's short public name, safe to put in a URL: 1 to 64 characters
+   *  of `[A-Za-z0-9_-]`, unique among live sessions, and NOT a capability
+   *  (nothing attaches with it; only `id` does). The server mints a random one
+   *  and a host may replace it (web-terminal-kiro sets the kiro-cli thread id).
+   *  Absent from a server before 6.2 and from a status event carrying
+   *  `removed`. Untrusted wire text: validate it before use. */
+  readonly alias?: string;
   /** the raw client-derived automatic title (before the precedence baked into
    *  `title`); a consumer that treats the program's OSC window title as
    *  unreliable reads this instead of `title`. */

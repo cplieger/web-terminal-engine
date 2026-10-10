@@ -28,7 +28,7 @@ type recordingHandler struct {
 	records []slog.Record
 }
 
-func (h *recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (*recordingHandler) Enabled(context.Context, slog.Level) bool { return true }
 
 func (h *recordingHandler) Handle(_ context.Context, r slog.Record) error {
 	h.mu.Lock()

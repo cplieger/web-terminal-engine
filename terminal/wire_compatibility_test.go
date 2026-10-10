@@ -320,6 +320,31 @@ func TestLogID_neverEmitsInvalidUTF8(t *testing.T) {
 	}
 }
 
+// TestLogID_neutralizesClientChosenBytes pins the log-forging half of LogID's
+// contract. A resume id is client-chosen, and slog's JSONHandler emits C1 and
+// bidi runes raw while a non-quoting handler emits CR/LF raw, so the prefix
+// must reach every handler as one plain line.
+func TestLogID_neutralizesClientChosenBytes(t *testing.T) {
+	cases := map[string]struct {
+		in   SessionID
+		want string
+	}{
+		"a short id keeps no line break":      {"a\nb", "a b"},
+		"a short id keeps no bidi override":   {"\u202eabc", " abc"},
+		"a short id keeps no C1 introducer":   {"\u009b31m", " 31m"},
+		"a short id keeps no invalid UTF-8":   {"\xff\xfe", "\ufffd\ufffd"},
+		"a cut prefix keeps no CRLF":          {"ab\r\ncdefgh", "ab  cdef\u2026"},
+		"a cut prefix keeps no invalid UTF-8": {"\xff\xff\xff\xff\xff\xff\xff\xff\xff", strings.Repeat("\ufffd", 8) + "\u2026"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			if got := LogID(tc.in); got != tc.want {
+				t.Errorf("LogID(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestWirePairNamesTheBehindHalf pins what the keyed pair buys. Every check in
 // the comparator is symmetric in shape, so the compatible-or-not VERDICT
 // survives a transposition; the REASON does not. With the two halves passed

@@ -86,6 +86,9 @@ type statusEvent struct {
 	// second client learns of a rename (or its removal) made elsewhere. Not
 	// carried on a Removed event.
 	PinnedTitle string `json:"pinnedTitle"`
+	// Alias is the session's public name (see SessionInfo.Alias). Omitted only
+	// on a Removed event.
+	Alias string `json:"alias,omitempty"`
 	// Activity is the session's SECONDARY activity state (see SessionActivity).
 	// Never omitempty: "" is not a legal state, so the empty string IS the absence
 	// and a sentinel would encode the same fact twice. It is ORTHOGONAL to Status
@@ -133,6 +136,7 @@ type statusTracker struct {
 	lastTitle       string
 	lastClientTitle string // last emitted raw client title (to detect a title-only PUT)
 	lastPinnedTitle string // last emitted raw pinned name (to detect a rename / clear)
+	lastAlias       string // last emitted alias (a SetSessionAlias moves nothing else)
 	latched         string // "", StatusInput, or StatusDone
 	// lastActivity is the last emitted secondary activity state. Without it the
 	// field changes silently and only surfaces when something else moves.
@@ -190,7 +194,7 @@ const autoTitleConfirm = 500 * time.Millisecond
 // correct one. While a candidate is inside its confirmation window the previous
 // title is HELD rather than reset to the cwd, so `vim` giving way to `less` does
 // not detour through the directory name.
-func (m *SessionManager) confirmAutoTitle(s *session, in *statusRaw, tr *statusTracker) {
+func (*SessionManager) confirmAutoTitle(s *session, in *statusRaw, tr *statusTracker) {
 	p := in.autoProbe
 	if !p.ok {
 		return // no information this sweep (OSC-titled, exited, unsupported platform)
@@ -298,23 +302,14 @@ func (it *statusRaw) read() {
 	}
 }
 
-// diffStatuses recomputes every session's status and returns the events for
-// sessions whose status, effective title, raw client title, raw pinned name, or
-// reported activity changed since the last sweep, plus removed events for
-// sessions that vanished. Broadcasting happens outside the lock (see sweepLoop).
-// It is also the sole writer of each session's server-derived automatic title
-// (see confirmAutoTitle).
+// diffStatuses returns one event per session whose emitted state changed since
+// the last sweep (sweepSession owns which fields count), plus a removed event per
+// vanished session. It is also the sole writer of the automatic title.
 //
-// It runs in three phases so the manager lock is never held across handler
-// getters: each getter takes that handler's h.mu, and one wedged handler under
-// m.mu would stall every manager path (List, create/close, snapshot) for as
-// long as the handler stays stuck — 4×/s, forever. Phase 1 snapshots the
-// session set under m.mu; phase 2 reads each handler's inputs with no manager
-// lock (a stuck handler now stalls only the sweep goroutine); phase 3 re-takes
-// m.mu to run the tracker state machine and change detection (snapshot() reads
-// tracker fields under m.mu, so mutating them outside would race). A session
-// closed between phases is skipped in phase 3 and emits its removed event in
-// the same sweep; one added between phases is picked up next sweep (250ms).
+// Three phases keep m.mu off the handler getters, each of which takes h.mu: one
+// wedged handler under m.mu would stall every manager path. Phase 1 snapshots
+// under m.mu, phase 2 reads handlers lock-free, and phase 3 re-takes m.mu for the
+// tracker state machine, whose fields snapshot() also reads under m.mu.
 func (m *SessionManager) diffStatuses() []statusEvent {
 	// Phase 1: snapshot sessions + tracker refs under m.mu. No handler calls.
 	m.mu.Lock()
@@ -399,6 +394,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	// be masked by the phase-1 capture.
 	clientTitle := s.clientTitle
 	pinnedTitle := s.pinnedTitle
+	alias := s.alias
 	// The sweep is the ONLY writer of the server-derived automatic title, so
 	// List and snapshot read one confirmed value instead of each probing
 	// procfs and disagreeing with this stream.
@@ -430,7 +426,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	// nothing else, so without a clause of its own the client's mark never updates.
 	// A fresh notification always emits, since delivering the event IS the point.
 	if status == tr.lastStatus && title == tr.lastTitle && clientTitle == tr.lastClientTitle &&
-		pinnedTitle == tr.lastPinnedTitle && reports == tr.lastReports &&
+		pinnedTitle == tr.lastPinnedTitle && alias == tr.lastAlias && reports == tr.lastReports &&
 		it.progressValue == tr.lastProgressValue && it.order == tr.lastOrder &&
 		it.activity.State == tr.lastActivity && it.activity.Count == tr.lastActivityCount &&
 		!notifNew {
@@ -440,6 +436,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	tr.lastTitle = title
 	tr.lastClientTitle = clientTitle
 	tr.lastPinnedTitle = pinnedTitle
+	tr.lastAlias = alias
 	tr.lastReports = reports
 	tr.lastProgressValue = it.progressValue
 	tr.lastOrder = it.order
@@ -450,7 +447,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	pos := it.order
 	ev := statusEvent{
 		ID: it.id, Status: status, Title: title, ClientTitle: clientTitle,
-		PinnedTitle: pinnedTitle, CreatedAt: it.createdAt, ReportsActivity: reports,
+		PinnedTitle: pinnedTitle, Alias: alias, CreatedAt: it.createdAt, ReportsActivity: reports,
 		ProgressValue: it.progressValue, Order: &pos,
 		Activity: it.activity.State, ActivityCount: it.activity.Count,
 	}
@@ -664,7 +661,7 @@ func (m *SessionManager) snapshot() []statusEvent {
 		it := snapItem{
 			rank: rankOf(rank, id, ordered),
 			ev: statusEvent{
-				ID: id, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
+				ID: id, Alias: s.alias, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
 				CreatedAt: s.createdAt,
 			},
 			handler:   s.handler,

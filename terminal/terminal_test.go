@@ -142,6 +142,61 @@ func TestResizeControlIsAccepted(t *testing.T) {
 	readUntil(t, ws, []byte("after-resize"), 2*time.Second)
 }
 
+// TestResizeCeilingFitsScreen pins applySize's PTY-and-screen agreement at the
+// top of the range: an oversized client resize clamps to a size vt.Screen
+// accepts whole, so the winsize the child reads is the grid the wire carries.
+func TestResizeCeilingFitsScreen(t *testing.T) {
+	cols, rows := clampResize(65535, 1<<30)
+	if cols != maxResizeCols || rows != maxResizeRows {
+		t.Fatalf("clampResize(65535, 1<<30) = %d, %d, want %d, %d", cols, rows, maxResizeCols, maxResizeRows)
+	}
+	s := vt.New(defaultRows, defaultCols)
+	s.Resize(rows, cols)
+	if s.Width != cols || s.Height != rows {
+		t.Errorf("vt.Screen sized %d x %d for a clamped %d x %d resize", s.Height, s.Width, rows, cols)
+	}
+}
+
+// TestUnrecognizedControlTypeIsLogSafe drives the one control field logged as
+// client-chosen text outside LogID. JSONHandler is the sink because it escapes
+// CR/LF but emits C1 and bidi runes raw, so the rune checks below go red
+// without the sanitizer.
+func TestUnrecognizedControlTypeIsLogSafe(t *testing.T) {
+	var buf bytes.Buffer
+	h := NewHandler([]string{"/bin/cat"},
+		WithLogger(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))))
+	defer h.Close()
+
+	unsafeRunes := []rune{'\u009b', '\u202e', '\u2028'}
+	hostile := "x" + string(unsafeRunes) + strings.Repeat("A", 4096)
+	d := h.handleControl(nil, &clientState{}, mustJSON(t, controlMsg{Type: hostile}), nil)
+	if !d.parsed || d.known {
+		t.Fatalf("disposition parsed=%v known=%v, want parsed and unknown", d.parsed, d.known)
+	}
+
+	var rec struct {
+		Msg  string `json:"msg"`
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(buf.Bytes(), &rec); err != nil {
+		t.Fatalf("log is not one JSON record: %v\n%q", err, buf.String())
+	}
+	if rec.Msg != "terminal: unrecognized control type" {
+		t.Fatalf("logged %q, want the unrecognized-control record", rec.Msg)
+	}
+	for _, r := range unsafeRunes {
+		if strings.ContainsRune(buf.String(), r) {
+			t.Errorf("log carries unsafe rune %U verbatim:\n%q", r, buf.String())
+		}
+	}
+	if !strings.HasPrefix(rec.Type, "x   A") {
+		t.Errorf("logged type = %q, want the sanitized prefix", rec.Type)
+	}
+	if len(rec.Type) > maxLoggedControlTypeBytes+len("...") {
+		t.Errorf("logged type is %d bytes, want at most %d", len(rec.Type), maxLoggedControlTypeBytes+len("..."))
+	}
+}
+
 // TestBadControlMessageIgnored: a malformed JSON control frame
 // must not tear down the connection — we keep the pipe open so a
 // buggy client can recover.

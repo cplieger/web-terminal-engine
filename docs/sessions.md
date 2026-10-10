@@ -111,6 +111,12 @@ The server resolves each session's `title` from four sources, in this order:
 
 Every attached client shows the same label without computing it again. `pinnedTitle` travels beside it, so a client can tell a chosen name from an inferred one.
 
+### Aliases
+
+Each session also has an `alias`, a short public name a browser can put in a page address. It is 1 to 64 characters of letters, digits, `_` and `-`, and no two live sessions share one. The server picks a random 8-character alias when it creates the session. An alias grants nothing: a client attaches with the session `id`, never with the alias.
+
+A host can give a session a better name with `(*SessionManager).SetSessionAlias(id, alias)`. It returns `false` and changes nothing for an unknown session, a value outside that alphabet or length, or a value another live session holds. The create response, the session list and the status stream all carry the alias, and the next status sweep pushes a change to every client.
+
 ### Several clients on one session
 
 When several clients share a session, a live resize goes to the last writer. When a client disconnects, the screen relaxes to the smallest size among the clients that remain.

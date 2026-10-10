@@ -36,7 +36,7 @@ The policy has no wildcards, accepts no `Origin: null`, and cannot be switched o
 
 A session id lets whoever holds it attach to the session and resume it. The engine treats it as a secret in two places.
 
-In logs, pass every session id through `LogID(id)`. It keeps the first 8 bytes, cut back to a whole UTF-8 character, and adds an ellipsis. A client can send any bytes as a resume id, and a plain byte prefix could put invalid UTF-8 into your logs.
+In logs, pass every session id through `LogID(id)`. It keeps the first 8 bytes, cut back to a whole UTF-8 character, and adds an ellipsis. A client can send any bytes as a resume id, so `LogID` also replaces line breaks, control characters and bidirectional-text controls with spaces, and invalid UTF-8 with U+FFFD. A hostile id cannot start a fake log line or reorder the text around it.
 
 In caches, the engine sets `Cache-Control: no-store` on the whole session surface:
 

@@ -37,6 +37,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
+	"github.com/cplieger/runesafe/v2"
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 	"github.com/creack/pty"
 )
@@ -204,11 +205,10 @@ const (
 	minResizeCols = 20
 	minResizeRows = 5
 
-	// maxResizeCols/maxResizeRows bound the eagerly-allocated grid. The VT
-	// screen allocates cols*rows Cells, so the winsize field width (0xFFFF)
-	// is not a memory bound: a 65535x65535 resize allocates ~4.3e9 Cells
-	// (>250 GB) and OOMs the host. Cap far above any real display but well
-	// below OOM territory; raise for a genuine ultra-wide layout.
+	// maxResizeCols/maxResizeRows bound a client's resize. vt.Screen caps its
+	// grid at 1000 for memory (vt's maxDimension owns why), so a larger value
+	// here would size the PTY past the screen; TestResizeCeilingFitsScreen
+	// pins the two together.
 	maxResizeCols = 1000
 	maxResizeRows = 1000
 
@@ -238,6 +238,9 @@ const (
 	// against the resume ledger (see ephemeralInputControl). Declared with
 	// resumeAckFlagEphemeralInput.
 	ctlTypeEphemeralInput = "ephemeralInput"
+	// maxLoggedControlTypeBytes bounds the client-chosen type an unrecognized
+	// control logs; every real control type is under 16 bytes.
+	maxLoggedControlTypeBytes = 32
 
 	// defaultScrollbackCapacity is the number of scrollback lines the server
 	// retains for replay and for demand-paged history requests. It is the
@@ -426,6 +429,8 @@ func WithOriginPolicy(p *OriginPolicy) Option {
 }
 
 // WithOnProcessExit registers a callback invoked when the child process exits.
+// The child's final output is on the screen by then, unless a process still
+// holding the terminal keeps it open past a one-second drain bound.
 func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
@@ -1207,7 +1212,11 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		"pid", pid, "command", loggedCommand, "cols", cols, "rows", rows)
 
 	// PTY reader goroutine — feeds VT screen and notifies clients.
-	h.wg.Go(func() { h.readLoop(ctx) })
+	readDone := make(chan struct{})
+	h.wg.Go(func() {
+		defer close(readDone)
+		h.readLoop(ctx)
+	})
 	// Flush scheduler — sends screen updates to all clients.
 	h.wg.Go(func() { h.flushLoop(ctx) })
 	// Periodic per-session cost line, when the consumer asked for one. Stopped
@@ -1222,6 +1231,7 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		// os/exec is done with this pid, so the zombie sweep may stop excluding
 		// it. One mutex, no allocation, and ahead of anything that can block.
 		spawnForget(pid)
+		awaitReadDrain(readDone)
 		// Retain the outcome BEFORE procExitCh closes, so any reader that sees
 		// Exited() == true also sees the final exit error (the status sweep reads
 		// the pair through exitOutcome). Nothing here can panic — a mutex and one
@@ -1336,6 +1346,37 @@ func startSessionPTY(cmd *exec.Cmd, cols, rows int) (*os.File, error) {
 	return ptmx, err
 }
 
+// exitDrainBound caps how long the process monitor waits, after the child is
+// reaped, for readLoop to drain the PTY to EOF/EIO. It must be finite: a
+// backgrounded process still holding the slave keeps the master open, so the
+// read may never end on its own.
+const exitDrainBound = time.Second
+
+// awaitReadDrain blocks until readDone closes or exitDrainBound elapses, so the
+// exit callback, procExitCh and the ptmx close all follow the child's final
+// output instead of racing it.
+func awaitReadDrain(readDone <-chan struct{}) {
+	if hold := testExitDrainHold.Load(); hold != nil {
+		(*hold)()
+	}
+	t := time.NewTimer(exitDrainBound)
+	defer t.Stop()
+	select {
+	case <-readDone:
+	case <-t.C:
+	}
+}
+
+// testExitDrainHold, when non-nil, is invoked by awaitReadDrain before it waits,
+// and testPTYReadHold by readLoop after a read returns data and before the data
+// reaches the screen. Test-only: together they hold the reader at the instant the
+// monitor starts draining, which no real timing reaches deterministically. Atomic
+// for the same reason as testResumeBatchHold. Never set in production.
+var (
+	testExitDrainHold atomic.Pointer[func()]
+	testPTYReadHold   atomic.Pointer[func()]
+)
+
 func (h *Handler) readLoop(ctx context.Context) {
 	buf := make([]byte, ptyReadBuf)
 	for {
@@ -1346,6 +1387,9 @@ func (h *Handler) readLoop(ctx context.Context) {
 		}
 		n, err := h.ptmx.Read(buf)
 		if n > 0 {
+			if hold := testPTYReadHold.Load(); hold != nil {
+				(*hold)()
+			}
 			h.handlePTYData(buf[:n])
 		}
 		if err != nil {
@@ -2301,7 +2345,8 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 		// framing in the read loop; nothing else to do.
 		d.known = true
 	default:
-		h.cfg.logger.Debug("terminal: unrecognized control type", "type", c.Type)
+		h.cfg.logger.Debug("terminal: unrecognized control type",
+			"type", runesafe.SanitizeSingleLineBounded(c.Type, maxLoggedControlTypeBytes))
 	}
 	return d
 }
@@ -2311,7 +2356,7 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 // idle-but-healthy socket from one iOS froze during sleep; the pong (or
 // any other frame) clears its probe. Best-effort: a write failure means
 // the socket is already gone, which the client's probe timeout will catch.
-func (h *Handler) handlePing(ws *websocket.Conn) {
+func (*Handler) handlePing(ws *websocket.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ws.Write(ctx, websocket.MessageBinary, encodePongMsg()) //nolint:errcheck // best-effort liveness reply

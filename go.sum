@@ -1,7 +1,7 @@
 github.com/coder/websocket v1.8.15 h1:6B2JPeOGlpff2Uz6vOEH1Vzpi0iUz20A+lPVhPHtNUA=
 github.com/coder/websocket v1.8.15/go.mod h1:NX3SzP+inril6yawo5CQXx8+fk145lPDC6pumgx0mVg=
-github.com/cplieger/runesafe/v2 v2.1.1 h1:RE5LVy0ebepMs3Gky6DKgFrV0ykODk2W8OGVa8Zm0H8=
-github.com/cplieger/runesafe/v2 v2.1.1/go.mod h1:cB0JYmCjfU+VzKAFWnhYfJL8OK0+d196ZSwh+Ohr+0k=
+github.com/cplieger/runesafe/v3 v3.0.0 h1:kswlOohhxhTqCLP/tATUqqoQvqXYVrcWjouRQE4EP3w=
+github.com/cplieger/runesafe/v3 v3.0.0/go.mod h1:fRNhoxNxl4NHo4xkFyf5hePwPE7lGwcuGYN9MwyKZDU=
 github.com/creack/pty v1.1.24 h1:bJrF4RRfyJnbTJqzRLHzcGaZK1NeM5kTC9jGgovnR1s=
 github.com/creack/pty v1.1.24/go.mod h1:08sCNb52WyoAwi2QDyzUCTgcvVFhUzewun7wtTfvcwE=
 golang.org/x/sys v0.49.0 h1:XbzkgYJHdqh/8m2Uu0W/dQv8nktxx4BFHp1M0gROTXA=

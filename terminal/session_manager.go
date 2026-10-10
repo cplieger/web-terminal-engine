@@ -33,7 +33,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/runesafe/v2"
+	"github.com/cplieger/runesafe/v3"
 )
 
 // SessionID identifies one session: the value Create mints (128-bit

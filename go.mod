@@ -1,10 +1,10 @@
 module github.com/cplieger/web-terminal-engine/v6
 
-go 1.27.1
+go 1.27.2
 
 require (
 	github.com/coder/websocket v1.8.15
-	github.com/cplieger/runesafe/v2 v2.1.0
+	github.com/cplieger/runesafe/v2 v2.1.1
 	github.com/creack/pty v1.1.24
-	golang.org/x/sys v0.48.0
+	golang.org/x/sys v0.49.0
 )

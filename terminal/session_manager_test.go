@@ -235,13 +235,10 @@ func TestSessionManagerWSAttach(t *testing.T) {
 }
 
 // TestSessionManager_ConcurrentCreateCloseList stresses the manager's own
-// mutex, documented "Safe for concurrent use": many goroutines Create,
-// List, Close, and toggle client presence concurrently while the always-on
-// sweepLoop reads the same maps/counters. Run under -race to surface data
-// races on sessions/trackers and the created/closed/reaped counters. The
-// registry and pingStat carry dedicated -race tests; the manager only had
-// incidental sweepLoop coverage. catFactory keeps each PTY alive so Close is
-// the only remover. Uses a done-channel barrier so no new import is needed.
+// mutex, documented "Safe for concurrent use": many goroutines Create, List,
+// Close, and toggle client presence while the always-on sweepLoop reads the
+// same maps. Run under -race to surface data races on sessions and trackers.
+// catFactory keeps each PTY alive so Close is the only remover.
 func TestSessionManager_ConcurrentCreateCloseList(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })

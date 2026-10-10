@@ -21,6 +21,6 @@ func reapAlive(int, string) bool { return false }
 
 func reapTerm(int) bool { return false }
 
-func reapKill(int) bool { return false }
+func reapKill(int) {}
 
 func reapResident([]int) uint64 { return 0 }

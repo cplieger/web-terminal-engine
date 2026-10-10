@@ -86,7 +86,6 @@ type ParserState struct {
 	numParams uint8            // total slots used in pParams
 	numGroups uint8            // number of semicolon-separated groups
 	curParam  uint16           // current param being accumulated
-	paramSeen bool             // whether any digit was seen for curParam
 
 	pIntermed [maxIntermed]byte
 	numInterm uint8

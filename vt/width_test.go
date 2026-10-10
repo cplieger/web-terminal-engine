@@ -204,22 +204,12 @@ func TestWideRangesSortedNonOverlapping(t *testing.T) {
 	}
 }
 
-// TestTablesNotBehindStdlibUnicode guards the one drift the generated tables
-// cannot self-report. runeWidth answers from TWO Unicode sources: the
-// generated wideRanges/emojiRanges (pinned to tablesUnicodeVersion by
-// scripts/gen-width-tables.py) and the stdlib's own Mn/Me/Cf tables, which
-// track whatever UCD release the toolchain ships. The tables LEADING the
-// stdlib is the normal, harmless state — they are generated from the newest
-// UCD long before a Go release picks it up, so a codepoint can be wide before
-// it is categorized. The tables TRAILING the stdlib is not: the stdlib would
-// then know a codepoint the width tables have never seen, and a rune assigned
-// in the newer release could be classified zero-width by one half while the
-// other half still treats it as unassigned-and-narrow.
-//
-// Nothing else notices, because the generator records its UCD release only in
-// a comment. Failure here means one action: bump UNICODE_VERSION in
-// scripts/gen-width-tables.py, re-run it, and re-run ./vt/... plus the
-// display-conformance tiers.
+// TestTablesNotBehindStdlibUnicode guards runeWidth's two Unicode sources:
+// the generated tables (tablesUnicodeVersion) and the stdlib's Mn/Me/Cf
+// tables. The tables may lead the stdlib; trailing it lets a rune the newer
+// release assigns read zero-width on one half and narrow on the other.
+// On failure, bump UNICODE_VERSION in scripts/gen-width-tables.py, re-run
+// it, then re-run ./vt/... and the display-conformance tiers.
 func TestTablesNotBehindStdlibUnicode(t *testing.T) {
 	tables, err := parseUnicodeVersion(tablesUnicodeVersion)
 	if err != nil {

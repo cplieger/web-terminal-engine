@@ -231,8 +231,8 @@ func reapAlive(pid int, marker string) bool {
 	return reapMembership(pid, []byte(reapMarkerEnv+"="+marker), make([]byte, reapEnvMaxBytes)) != reapOutside
 }
 
-// reapTerm sends SIGTERM to pid; reapKill sends SIGKILL. Both report whether the
-// signal was delivered.
+// reapTerm sends SIGTERM to pid and reports whether the signal was delivered;
+// reapKill sends SIGKILL.
 //
 // Signalling goes through a pidfd, never a bare kill(pid), for the reason
 // containment_linux.go's termLive states: a pid read from an enumeration can
@@ -240,7 +240,7 @@ func reapAlive(pid int, marker string) bool {
 // that defect in either boundary.
 func reapTerm(pid int) bool { return reapSignal(pid, unix.SIGTERM) }
 
-func reapKill(pid int) bool { return reapSignal(pid, unix.SIGKILL) }
+func reapKill(pid int) { _ = reapSignal(pid, unix.SIGKILL) }
 
 func reapSignal(pid int, sig unix.Signal) bool {
 	pidfd, err := unix.PidfdOpen(pid, 0)

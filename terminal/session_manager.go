@@ -317,9 +317,6 @@ type SessionManager struct {
 	subsMu        sync.Mutex
 	idleWindow    time.Duration
 	activeClients int
-	created       uint64
-	closed        uint64
-	reaped        uint64
 }
 
 // NewSessionManager returns a manager that builds each session's handler with
@@ -427,7 +424,6 @@ func (m *SessionManager) create() (SessionInfo, error) {
 		m.layout.Selected = PaneLeft
 	}
 	n := len(m.sessions)
-	m.created++
 	m.mu.Unlock()
 
 	m.logger.Info("session: created", "session", LogID(id), "sessions", n)
@@ -830,7 +826,6 @@ func (m *SessionManager) Close(id SessionID) bool {
 		delete(m.sessions, id)
 		m.dropFromOrderLocked(id)
 		m.dropFromLayoutLocked(id)
-		m.closed++
 	}
 	m.mu.Unlock()
 	if !ok {
@@ -1350,7 +1345,6 @@ func (m *SessionManager) maybeReap() {
 	m.sessions = make(map[SessionID]*session)
 	m.order = nil
 	m.layout = defaultPaneLayout()
-	m.reaped += uint64(len(victims))
 	m.mu.Unlock()
 	for _, s := range victims {
 		s.handler.Close()

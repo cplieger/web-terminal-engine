@@ -47,13 +47,11 @@ func newTestReap(t *testing.T) (*sessionReap, *recordingHandler) {
 
 // requireSetsid skips when util-linux's setsid is unavailable, since the escape
 // case cannot be staged without it.
-func requireSetsid(t *testing.T) string {
+func requireSetsid(t *testing.T) {
 	t.Helper()
-	path, err := exec.LookPath("setsid")
-	if err != nil {
+	if _, err := exec.LookPath("setsid"); err != nil {
 		t.Skipf("setsid not available: %v", err)
 	}
-	return path
 }
 
 // startMarked spawns a shell carrying the domain's marker and returns the head.

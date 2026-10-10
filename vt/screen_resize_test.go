@@ -464,3 +464,60 @@ func TestResizeAllocationCostIsPerRowNotPerCell(t *testing.T) {
 // cost two-sidedly and to name its own deletion once the guard landed. The guard
 // landed (screen.go, resizeSavedMain), so the test is gone and the case moved into
 // TestResizeToTheSameSizeIsAllocationFree above, which now drives both screens.
+
+// TestScreenDimensionsAreCapped pins the memory bound on a caller-supplied
+// size: the grid is allocated eagerly, so an uncapped 65535x65535 request would
+// allocate ~4.3e9 cells. Every path that sizes a grid (New, Resize, and the
+// saved main buffer Resize rebuilds under the alt screen) must stop at 1000.
+func TestScreenDimensionsAreCapped(t *testing.T) {
+	const ceiling = 1000
+	assertDims := func(t *testing.T, s *Screen, rows, cols int) {
+		t.Helper()
+		if s.Height != rows || s.Width != cols {
+			t.Errorf("Height x Width = %d x %d, want %d x %d", s.Height, s.Width, rows, cols)
+		}
+		if len(s.Cells) != rows {
+			t.Fatalf("len(Cells) = %d, want %d", len(s.Cells), rows)
+		}
+		if len(s.Cells[0]) != cols || len(s.Cells[rows-1]) != cols {
+			t.Errorf("row widths = %d, %d, want %d", len(s.Cells[0]), len(s.Cells[rows-1]), cols)
+		}
+	}
+
+	t.Run("New caps an oversized request", func(t *testing.T) {
+		assertDims(t, New(65535, 65535), ceiling, ceiling)
+	})
+	t.Run("New keeps a size at the ceiling", func(t *testing.T) {
+		assertDims(t, New(ceiling, ceiling), ceiling, ceiling)
+	})
+	t.Run("Resize caps an oversized request", func(t *testing.T) {
+		s := New(24, 80)
+		s.Resize(1<<30, 65535)
+		assertDims(t, s, ceiling, ceiling)
+		if s.scrollBottom != ceiling-1 || s.rightMargin != ceiling-1 {
+			t.Errorf("scrollBottom, rightMargin = %d, %d, want %d", s.scrollBottom, s.rightMargin, ceiling-1)
+		}
+	})
+	t.Run("Resize caps each dimension independently", func(t *testing.T) {
+		s := New(24, 80)
+		s.Resize(30, 65535)
+		assertDims(t, s, 30, ceiling)
+		s.Resize(65535, 90)
+		assertDims(t, s, ceiling, 90)
+	})
+	t.Run("Resize caps the saved main buffer under the alt screen", func(t *testing.T) {
+		s := New(24, 80)
+		if _, err := s.Write([]byte("\x1b[?1049h")); err != nil {
+			t.Fatalf("alt enter: %v", err)
+		}
+		s.Resize(65535, 65535)
+		if len(s.savedMainCells) != ceiling || len(s.savedMainCells[0]) != ceiling {
+			t.Fatalf("saved main = %d x %d, want %d x %d",
+				len(s.savedMainCells), len(s.savedMainCells[0]), ceiling, ceiling)
+		}
+		if _, err := s.Write([]byte("\x1b[?1049l")); err != nil {
+			t.Fatalf("alt exit: %v", err)
+		}
+		assertDims(t, s, ceiling, ceiling)
+	})
+}

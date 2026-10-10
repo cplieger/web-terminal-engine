@@ -190,7 +190,7 @@ const autoTitleConfirm = 500 * time.Millisecond
 // correct one. While a candidate is inside its confirmation window the previous
 // title is HELD rather than reset to the cwd, so `vim` giving way to `less` does
 // not detour through the directory name.
-func (m *SessionManager) confirmAutoTitle(s *session, in *statusRaw, tr *statusTracker) {
+func (*SessionManager) confirmAutoTitle(s *session, in *statusRaw, tr *statusTracker) {
 	p := in.autoProbe
 	if !p.ok {
 		return // no information this sweep (OSC-titled, exited, unsupported platform)

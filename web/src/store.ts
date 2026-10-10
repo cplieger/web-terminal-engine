@@ -810,11 +810,10 @@ export class LineStore {
    * Record the server's retained-history bounds from a resumeAck so the
    * renderer can tell a genuine trim from a still-loading state.
    *
-   * `committed` is deliberately NOT stored. The replay-jump prediction needs
-   * it, but it takes it as an argument from the ack being processed — reading a
-   * stored copy would risk predicting from a previous ack's value, which is the
-   * same class of defect as predicting from a mutated `highest`.
+   * `committed` is deliberately not stored: the replay-jump prediction takes it
+   * from the ack being processed, and a stored copy could carry a previous ack's.
    */
+  // deadset:ignore DS1801 -- published LineStore method; dropping the leading parameter would break its callers
   noteResumeBounds(_committed: number, oldestIndex: number): void {
     if (Number.isInteger(oldestIndex) && oldestIndex >= 0) {
       this.serverOldest = oldestIndex;

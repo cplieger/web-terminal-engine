@@ -2311,7 +2311,7 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 // idle-but-healthy socket from one iOS froze during sleep; the pong (or
 // any other frame) clears its probe. Best-effort: a write failure means
 // the socket is already gone, which the client's probe timeout will catch.
-func (h *Handler) handlePing(ws *websocket.Conn) {
+func (*Handler) handlePing(ws *websocket.Conn) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	ws.Write(ctx, websocket.MessageBinary, encodePongMsg()) //nolint:errcheck // best-effort liveness reply

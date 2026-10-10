@@ -374,7 +374,7 @@ type commandCaptureHandler struct {
 	records *[]slog.Record
 }
 
-func (h commandCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (commandCaptureHandler) Enabled(context.Context, slog.Level) bool { return true }
 func (h commandCaptureHandler) Handle(_ context.Context, r slog.Record) error {
 	*h.records = append(*h.records, r.Clone())
 	return nil

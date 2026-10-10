@@ -129,7 +129,6 @@ func (s *Screen) handleParam(b byte) {
 	if b == ';' {
 		s.pushParam(true)
 	} else {
-		s.paramSeen = true
 		v := min(uint32(s.curParam)*10+uint32(b-'0'), maxCSIArgValue)
 		// min caps v at maxCSIArgValue (65535), so the narrowing cannot overflow.
 		s.curParam = uint16(v)
@@ -157,7 +156,6 @@ func (s *Screen) pushParam(newGroup bool) {
 		s.pGroupLen[gStart]++
 	}
 	s.curParam = 0
-	s.paramSeen = false
 
 	if newGroup {
 		if s.numGroups < maxParams && s.numParams < maxParams {
@@ -189,7 +187,6 @@ func (s *Screen) parserClear() {
 	s.numParams = 0
 	s.numGroups = 0
 	s.curParam = 0
-	s.paramSeen = false
 	s.numInterm = 0
 	s.ignoring = false
 	s.privateMarker = 0

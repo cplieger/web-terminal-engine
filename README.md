@@ -4,7 +4,7 @@
 
 web-terminal-engine puts a real terminal in a web page, with a Go server that runs each program in a PTY and a TypeScript renderer that draws it in the browser.
 
-The server keeps each terminal's screen and scrollback, so a browser that reconnects, reloads or opens a second tab gets the same screen back. Sessions end when the server restarts. The Go module needs Go 1.27.1 or later and a Unix-like system such as Linux or macOS, and depends on `coder/websocket`, `creack/pty`, `golang.org/x/sys` and `cplieger/runesafe/v2`. The TypeScript package has no runtime dependencies. web-terminal-engine is licensed under MPL-2.0.
+The server keeps each terminal's screen and scrollback, so a browser that reconnects, reloads or opens a second tab gets the same screen back. Sessions end when the server restarts. The Go module needs Go 1.27.2 or later and a Unix-like system such as Linux or macOS, and depends on `coder/websocket`, `creack/pty`, `golang.org/x/sys` and `cplieger/runesafe/v3`. The TypeScript package has no runtime dependencies. web-terminal-engine is licensed under MPL-2.0.
 
 ## Why use it
 

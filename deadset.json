@@ -1,16 +1,1 @@
-{
-  "target": { "kind": "library" },
-  "ts": {
-    "test_files": [
-      "**/*.test.{ts,tsx,mts,cts}",
-      "**/*.test-d.{ts,tsx,mts,cts}",
-      "**/*.spec-d.{ts,tsx,mts,cts}",
-      "**/*.spec.*",
-      "**/__tests__/**",
-      "**/__mocks__/**",
-      "**/test-d/**",
-      "web/src/**/*-setup.ts",
-      "web/src/**/test-helpers/**"
-    ]
-  }
-}
+{ "target": { "kind": "library" } }

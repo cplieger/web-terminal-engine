@@ -1251,3 +1251,184 @@ describe("connection: an unmanaged connection's defaults", () => {
     expect(resume[0]!["haveThrough"]).toBe(-1);
   });
 });
+
+// The lifetime latch, from the side no other suite drives: a ConnectionCallbacks
+// member may call dispose() on the connection that is invoking it, so the
+// connection has to stop where it stands rather than finish the handler it was
+// in. Each case below disposes from inside one callback and asserts the step
+// AFTER that callback never ran. The observables are the injected collaborators
+// (the mode state, the mouse, the renderer's resume seam) and the wire, because
+// those outlive the connection and are where a continued handler would show.
+describe("connection: a callback that disposes the connection mid-handler", () => {
+  let resyncGesture: ReturnType<typeof vi.fn<() => void>>;
+
+  /** A connection whose mode state and mouse the test can read afterwards. */
+  function install(extra: Partial<ConnectionCallbacks> = {}): Connection {
+    resyncGesture = vi.fn<() => void>();
+    onMessage = vi.fn<(msg: ServerMessage) => void>();
+    onOpen = vi.fn<() => void>();
+    onClose = vi.fn<() => void>();
+    onServerRestart = vi.fn<() => void>();
+    onResumeBounds = vi.fn<(committed: number, oldest: number) => void>();
+    onWireIncompatible = vi.fn<(d: WireIncompatibility) => void>();
+    maybeFetchHistory = vi.fn<() => void>();
+    handleHistoryReply = vi.fn<FakeRenderer["handleHistoryReply"]>();
+    noteSolicited = vi.fn<(fromAbs: number, end: number) => void>();
+    clearSolicited = vi.fn<() => void>();
+    resumeTransitions = [];
+    conn = createConnection({
+      ...connectionDeps(spyRenderer()),
+      mouse: { resyncGesture },
+      callbacks: { ...baseCallbacks(), ...extra },
+    });
+    return conn;
+  }
+
+  beforeEach(() => {
+    sockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+  });
+
+  afterEach(() => {
+    conn.dispose();
+    vi.useRealTimers();
+  });
+
+  it("an initialSize provider that disposes sends nothing on the socket", () => {
+    install({
+      initialSize: () => {
+        conn.dispose();
+        return { cols: 80, rows: 24 };
+      },
+    });
+    conn.setSession(freshId("dispose-size"));
+    const sock = latest();
+
+    sock.fireOpen();
+
+    // The provider runs before the resize and the resume, so continuing would
+    // announce a geometry and claim a replay boundary for a session the
+    // consumer has already torn down — and the server would hold that
+    // attachment open against a client that will never read from it.
+    expect(sock.send).not.toHaveBeenCalled();
+    expect(onOpen).not.toHaveBeenCalled();
+  });
+
+  it("an onWireVersionMismatch handler that disposes stops the ack from reaching the store", () => {
+    install({
+      onWireVersionMismatch: () => {
+        conn.dispose();
+      },
+    });
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    conn.setSession(freshId("dispose-mismatch"));
+    const sock = latest();
+    sock.fireOpen();
+    sock.send.mockClear();
+
+    sock.fireMessage(resumeAckFrame({ version: WIRE_PROTOCOL_VERSION + 1 }));
+
+    // The warning is the whole point of the callback, so it must still have
+    // happened; everything the handler does afterwards belongs to a live
+    // connection, and a resume transition applied here would move a bound
+    // store on behalf of an instance that no longer owns it.
+    expect(warnSpy).toHaveBeenCalled();
+    expect(resumeTransitions).toEqual([]);
+    expect(controlsOfType(sock, "upgrade")).toEqual([]);
+  });
+
+  it("an onServerRestart handler that disposes stops an unconfirmed seeded epoch mid-reset", () => {
+    install({
+      onServerRestart: () => {
+        onServerRestart();
+        conn.dispose();
+      },
+    });
+    const id = freshId("dispose-seeded");
+    conn.adoptPersistedEpoch(id, 4242);
+    conn.setSession(id);
+    const sock = latest();
+    sock.fireOpen();
+
+    sock.fireMessage(resumeAckFrame({ serverEpoch: 0 }));
+
+    expect(onServerRestart).toHaveBeenCalledTimes(1);
+    expect(resumeTransitions).toEqual([]);
+  });
+
+  it("an onResumeBounds handler that disposes stops the gesture resync", () => {
+    install({
+      onResumeBounds: (committed, oldest) => {
+        onResumeBounds(committed, oldest);
+        conn.dispose();
+      },
+    });
+    conn.setSession(freshId("dispose-bounds"));
+    const sock = latest();
+    sock.fireOpen();
+
+    sock.fireMessage(resumeAckFrame({ committed: 120, oldestIndex: 7 }));
+
+    // The resync is a best-effort REPORT written to the socket, so running it
+    // here would encode a mouse state onto a closed transport; the ack's own
+    // effects (the bounds) are delivered before the callback and stand.
+    expect(onResumeBounds).toHaveBeenCalledWith(120, 7);
+    expect(resyncGesture).not.toHaveBeenCalled();
+  });
+
+  it("disconnect on a disposed connection does not reach back into the renderer", () => {
+    install();
+    conn.setSession(freshId("dispose-disconnect"));
+    latest().fireOpen();
+    conn.dispose();
+    const afterDispose = clearSolicited.mock.calls.length;
+
+    conn.disconnect();
+
+    // A hand-composed graph may dispose the transport and keep the renderer, so
+    // a teardown running here would release a solicited window the renderer
+    // holds for whatever is driving it now.
+    expect(afterDispose).toBeGreaterThan(0);
+    expect(clearSolicited.mock.calls).toHaveLength(afterDispose);
+  });
+});
+
+describe("connection: a close event from a superseded socket", () => {
+  beforeEach(() => {
+    sockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    installConsumer();
+  });
+
+  afterEach(() => {
+    conn.dispose();
+    vi.useRealTimers();
+  });
+
+  it("does not tear down the socket that replaced it", () => {
+    conn.setSession(freshId("stale-close"));
+    const stale = latest();
+    // Captured BEFORE the supersession: the abort removes the listener, and the
+    // window this guard exists for is the one where the event was already
+    // dispatched to it. Calling the captured handler is that window.
+    const staleClose = stale.listeners.get("close")?.[0];
+    expect(staleClose).toBeTypeOf("function");
+
+    conn.reconnectNow();
+    const live = latest();
+    live.fireOpen();
+    expect(live).not.toBe(stale);
+
+    staleClose!({ code: 1006, reason: "" });
+
+    // Reporting this close would tell the consumer the terminal went away while
+    // a healthy socket is attached, and the reconnect it schedules would open a
+    // SECOND socket beside the live one. The window is the backoff floor plus
+    // its jitter, well short of the liveness probe's own staleness deadline.
+    expect(onClose).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(2_000);
+    expect(sockets).toHaveLength(2);
+  });
+});

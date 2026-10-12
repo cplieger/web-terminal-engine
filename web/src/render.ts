@@ -1352,10 +1352,9 @@ export function createRenderer(opts: RendererOptions): Renderer {
     if (el === null) {
       return null;
     }
+    // Non-negative: rowAtViewportTop answers only with a CONTENT row, and
+    // isContentRow requires a parsed index that resolves back to that element.
     const abs = rowAbs(el);
-    if (abs < 0) {
-      return null;
-    }
     return {
       abs,
       screenTop: el.offsetTop - scroll.currentScrollTop(),
@@ -1468,10 +1467,10 @@ export function createRenderer(opts: RendererOptions): Renderer {
       abs >= gap.hi
         ? Math.max(gap.lo, gap.hi - budget, floor) // approaching from BELOW the gap's top
         : Math.max(gap.lo, floor); // approaching from above: start at the gap's low edge
+    // At least 1, so no caller has to re-check it: every gap the store returns
+    // satisfies `hi > lo` and `hi > pagingFloor`, and `budget` is at least 1,
+    // which puts `fromAbs` strictly below `gap.hi` on both approaches.
     const maxLines = Math.min(budget, gap.hi - fromAbs);
-    if (maxLines < 1) {
-      return;
-    }
     requestHistoryFn(fromAbs, maxLines);
   }
 

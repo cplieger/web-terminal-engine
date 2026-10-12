@@ -1454,3 +1454,88 @@ describe("an unchanged gap marker stays quiet", () => {
     expect(inserts.mock.calls.filter((c) => c[0] === el)).toEqual([]);
   });
 });
+
+describe("the width cache is BOUNDED, not unbounded", () => {
+  it(
+    "drops its measurements once the per-glyph map is full",
+    () => {
+      // The flat tier covers the first 256 code points; everything above it is
+      // keyed in a map, so an application printing a large alphabet (CJK, emoji,
+      // a Unicode torture test) grows it one entry per distinct glyph and face.
+      // Unbounded, that map IS a leak for the lifetime of the terminal; the
+      // behaviour is that a full cache is dropped and re-measured, so the cost
+      // is re-measurement rather than memory.
+      const FIRST = 0x100;
+      const MAX = 20_000;
+      const glyph = (i: number): string => String.fromCodePoint(FIRST + i);
+      // Exactly MAX + 1 distinct keys, spread over rows of one frame.
+      const CHUNK = 1000;
+      const rows: WireRun[][] = [];
+      for (let start = 0; start <= MAX; start += CHUNK) {
+        rows.push(
+          row(
+            // An ASCII lead so the probe glyph is never the one under the
+            // caret, which the overlay measures a second time on every frame.
+            "x" +
+              Array.from({ length: Math.min(CHUNK, MAX + 1 - start) }, (_, i) =>
+                glyph(start + i),
+              ).join(""),
+          ),
+        );
+      }
+      paint({ rows });
+      expect(timesMeasured(glyph(0), "base")).toBe(1);
+
+      paint({ rows: [row("x" + glyph(0))], base: rows.length + 10 });
+
+      // Served from a cache that still held it, this stays at 1.
+      expect(timesMeasured(glyph(0), "base")).toBe(2);
+    },
+    // Twenty thousand real text measurements through a real Canvas2D.
+    30_000,
+  );
+});
+
+describe("an armed view restore and the content it describes", () => {
+  it("is abandoned when the indices restart under it", () => {
+    paint({ rows: [row("a"), row("b"), row("c"), row("d"), row("e")] });
+    parkReaderAt(3);
+    const view = render.captureViewMemory();
+    expect(view).not.toBeNull();
+
+    render.bind(new LineStore(), { view });
+    expect(render.pendingRestoreAbs()).toBe(view!.abs);
+
+    // A full reset restarts the index space at 0, so the saved anchor names a
+    // line number that now belongs to unrelated content. Re-asserting it would
+    // park the reader at whatever happens to occupy that index in the new
+    // session, which is a position nobody chose.
+    render.resetScrollback();
+
+    expect(render.pendingRestoreAbs()).toBeNull();
+  });
+});
+
+
+describe("the read anchor and content that restarted under it", () => {
+  it("announces no shift when the indices restarted in the same pass", () => {
+    // The anchor is captured before the pass mutates anything, so after a full
+    // reset it names an element that is gone AND an index the new session has
+    // reused. Holding "the row at index 3" there drags the viewport onto a line
+    // the reader never chose; the new session's own follow state owns it.
+    frameMode = "manual";
+    paint({ rows: [row("a"), row("b"), row("c"), row("d"), row("e"), row("f")] });
+    drainFrames();
+    vi.spyOn(scroll, "isUserScrolledUp").mockReturnValue(true);
+    vi.spyOn(scroll, "currentScrollTop").mockReturnValue(35);
+    const shift = vi.spyOn(scroll, "adjustForContentShift");
+
+    // A reset and the new session's first frame, drained together.
+    render.resetScrollback();
+    paint({ rows: [row("A"), row("B"), row("C")], base: 10 });
+    runFrame();
+
+    expect(rowIndices()).toEqual([10, 11, 12]);
+    expect(shift).not.toHaveBeenCalled();
+  });
+});

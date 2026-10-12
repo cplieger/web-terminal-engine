@@ -1456,44 +1456,39 @@ describe("an unchanged gap marker stays quiet", () => {
 });
 
 describe("the width cache is BOUNDED, not unbounded", () => {
-  it(
-    "drops its measurements once the per-glyph map is full",
-    () => {
-      // The flat tier covers the first 256 code points; everything above it is
-      // keyed in a map, so an application printing a large alphabet (CJK, emoji,
-      // a Unicode torture test) grows it one entry per distinct glyph and face.
-      // Unbounded, that map IS a leak for the lifetime of the terminal; the
-      // behaviour is that a full cache is dropped and re-measured, so the cost
-      // is re-measurement rather than memory.
-      const FIRST = 0x100;
-      const MAX = 20_000;
-      const glyph = (i: number): string => String.fromCodePoint(FIRST + i);
-      // Exactly MAX + 1 distinct keys, spread over rows of one frame.
-      const CHUNK = 1000;
-      const rows: WireRun[][] = [];
-      for (let start = 0; start <= MAX; start += CHUNK) {
-        rows.push(
-          row(
-            // An ASCII lead so the probe glyph is never the one under the
-            // caret, which the overlay measures a second time on every frame.
-            "x" +
-              Array.from({ length: Math.min(CHUNK, MAX + 1 - start) }, (_, i) =>
-                glyph(start + i),
-              ).join(""),
-          ),
-        );
-      }
-      paint({ rows });
-      expect(timesMeasured(glyph(0), "base")).toBe(1);
+  it("drops its measurements once the per-glyph map is full", () => {
+    // The flat tier covers the first 256 code points; everything above it is
+    // keyed in a map, so an application printing a large alphabet (CJK, emoji,
+    // a Unicode torture test) grows it one entry per distinct glyph and face.
+    // Unbounded, that map IS a leak for the lifetime of the terminal; the
+    // behaviour is that a full cache is dropped and re-measured, so the cost
+    // is re-measurement rather than memory.
+    const FIRST = 0x100;
+    const MAX = 20_000;
+    const glyph = (i: number): string => String.fromCodePoint(FIRST + i);
+    // Exactly MAX + 1 distinct keys, spread over rows of one frame.
+    const CHUNK = 1000;
+    const rows: WireRun[][] = [];
+    for (let start = 0; start <= MAX; start += CHUNK) {
+      rows.push(
+        row(
+          // An ASCII lead so the probe glyph is never the one under the
+          // caret, which the overlay measures a second time on every frame.
+          "x" +
+            Array.from({ length: Math.min(CHUNK, MAX + 1 - start) }, (_, i) =>
+              glyph(start + i),
+            ).join(""),
+        ),
+      );
+    }
+    paint({ rows });
+    expect(timesMeasured(glyph(0), "base")).toBe(1);
 
-      paint({ rows: [row("x" + glyph(0))], base: rows.length + 10 });
+    paint({ rows: [row("x" + glyph(0))], base: rows.length + 10 });
 
-      // Served from a cache that still held it, this stays at 1.
-      expect(timesMeasured(glyph(0), "base")).toBe(2);
-    },
-    // Twenty thousand real text measurements through a real Canvas2D.
-    30_000,
-  );
+    // Served from a cache that still held it, this stays at 1.
+    expect(timesMeasured(glyph(0), "base")).toBe(2);
+  }, 30_000); // Twenty thousand real text measurements through a real Canvas2D.
 });
 
 describe("an armed view restore and the content it describes", () => {
@@ -1515,7 +1510,6 @@ describe("an armed view restore and the content it describes", () => {
     expect(render.pendingRestoreAbs()).toBeNull();
   });
 });
-
 
 describe("the read anchor and content that restarted under it", () => {
   it("announces no shift when the indices restarted in the same pass", () => {

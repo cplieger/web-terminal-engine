@@ -475,6 +475,7 @@ func TestDispatchFrame_StaleFrameDropsStateKeepsDurable(t *testing.T) {
 func dialOwnHandler(t *testing.T, cmd []string) (*Handler, *websocket.Conn, func()) {
 	t.Helper()
 	h := NewHandler(cmd, WithWorkDir("/"), WithLogger(nil))
+	shutdownOnCleanup(t, h)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -619,27 +620,19 @@ func wireFrameMaxCounter(b []byte) (maxCounter int, full bool) {
 var tickCounterRe = regexp.MustCompile(`T(\d+)`)
 
 func TestResumeBatch_AtomicOnTheSocketUnderLiveOutput(t *testing.T) {
-	// The gpt-R4-shaped ordering contract, observed from the client, in the
-	// backpressured shape the fable RACE review proved necessary: a loopback
-	// reader gives the batch a sub-ms write window that no 50ms flush pass
-	// ever lands in, so the un-backpressured version of this test passed
-	// against the PRE-FIX code. Each round therefore sends the resume and
-	// then STOPS READING under an unthrottled emitter — kernel socket
-	// buffers fill, the batch's writes block mid-sequence, and live flushes
-	// get a real window to misorder. Two oracles, both from the probe that
-	// caught the revert:
-	//   I1 — between the resumeAck and the batch's window frame, only
-	//        modes/title (and tolerated transport acks) may appear;
-	//   I4 — no FULL screen frame may ever carry a max T<n> counter BELOW
-	//        the highest already delivered (a stale batch window written
-	//        after newer live content: the regression the race caused).
-	h, ws, cleanup := dialOwnHandler(t,
-		[]string{"/bin/sh", "-c", "i=0; while :; do i=$((i+1)); echo T$i; done"})
+	// Each round sends a resume and stops reading under an unthrottled
+	// emitter, so the batch's writes block mid-sequence and live flushes get
+	// a real window to misorder; a loopback reader drains too fast to open
+	// one. Oracles: I1, between the resumeAck and the batch's window frame
+	// only modes/title (and transport acks) may appear; I4, no FULL screen
+	// frame may carry a max T<n> below the highest already delivered.
+	//
+	// The emitter is bounded so one that outlives the test still ends.
+	_, ws, cleanup := dialOwnHandler(t,
+		[]string{"/bin/sh", "-c", `i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); echo T$i; done`})
 	defer cleanup()
-	_ = h
-	// Huge scroll bursts under an unthrottled emitter exceed the client
-	// library's default 32KB read limit, which CLOSES the conn (the 0.15s
-	// instant-death failure shape; fable's probe hit it first).
+	// Scroll bursts exceed coder/websocket's default 32KB read limit, which
+	// closes the conn.
 	ws.SetReadLimit(1 << 26)
 	sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 24})
 

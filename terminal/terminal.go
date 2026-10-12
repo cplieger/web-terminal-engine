@@ -667,9 +667,10 @@ type Handler struct {
 	// goroutines needs h.mu or an atomic, including anything added to Close.
 	// (It is also reassigned to nil on the start-failure path below.)
 	contain *sessionCgroup
-	// reap is this session's marker reap domain, nil when the consumer opted
-	// out. Read under exactly the same rules as contain above: written here
-	// before the monitor goroutine is created, read only by that goroutine.
+	// reap is this session's marker reap domain, nil until a spawn starts, after
+	// a failed spawn, or when its marker could not be minted. Read under exactly the same rules as
+	// contain above: written before the monitor goroutine is created, read only
+	// by that goroutine.
 	reap       *sessionReap
 	procExitCh chan struct{}
 	// done closes once EVERY goroutine this handler started has returned: the PTY
@@ -841,22 +842,12 @@ func (h *Handler) Close() {
 
 // Shutdown ends the session and waits for its teardown to finish, bounded by
 // ctx. It returns ctx.Err() if the budget expires first and nil once every
-// goroutine the handler started has returned.
-//
-// This is the form for a caller that is about to stop the process. Close alone
-// leaves the cgroup teardown, the /proc sweep and the client notification in
-// flight, and a process that exits underneath them loses whatever had not
-// finished. Under a container that is absorbed by the runtime tearing the
-// container down; outside one, or across an in-process restart, it is not.
-//
-// The wait is worth more than its own success: an expiry is the only signal that
-// a teardown exceeded its budget, which is otherwise silent. Log it. There is no
-// useful branch to take, because the caller is stopping either way.
-//
-// Timing to size ctx against: cmd.WaitDelay bounds the child's reap at 5s, and
-// the containment and marker-domain ladders each spend up to three containGrace
-// windows plus a /proc scan. A grace shorter than that is a deliberate choice to
-// hear about the overrun rather than to wait it out.
+// goroutine the handler started has returned. Call it, not Close, before the
+// process exits: Close leaves the cgroup teardown, the /proc sweep and the
+// client notification in flight. An expiry is the only sign a teardown overran,
+// so log it. Size ctx for the child's reap, at most 5s, plus the escape
+// teardown: about a second for a tree that must be killed, under ten for one
+// that keeps forking or cannot act on SIGKILL.
 func (h *Handler) Shutdown(ctx context.Context) error {
 	h.Close()
 	return h.wait(ctx)

@@ -2,19 +2,15 @@
 
 package terminal
 
-// Tests for zombie reaping.
-//
-// One deliberate omission: nothing here calls sweepZombies or StartZombieReaper
-// against the live process. A sweep collects EVERY orphan zombie parented on this
-// process that the engine did not spawn, and in a test binary that set includes
-// the not-yet-waited children of every sibling test — the containment and reap
-// tests spawn real processes with exec.Command and reap them by hand. A global
-// sweep here would steal their statuses and fail them at random. The pieces are
-// tested individually, and the property that actually matters (the sweep never
-// touches a pid os/exec owns) is asserted on reapIfUnowned, which is the guard
-// the sweep is built out of.
+// Nothing here sweeps the shared test binary: a sweep would steal the statuses
+// of sibling tests' unwaited exec.Command children. The property that matters
+// (the sweep never touches a pid os/exec owns) is asserted on reapIfUnowned.
+// Every test that sets the child-subreaper flag runs in its own test binary
+// (subreaperChild), since the flag would adopt sibling tests' grandchildren.
 
 import (
+	"bytes"
+	"flag"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -24,6 +20,42 @@ import (
 	"testing"
 	"time"
 )
+
+// subreaperHelperEnv names the one subreaper test a re-run test binary hosts.
+const subreaperHelperEnv = "WTE_TEST_SUBREAPER_HELPER"
+
+// inSubreaperHelper reports whether this binary was re-run to host test name
+// alone: the variable must name it and -test.run must select only it, so an
+// inherited variable cannot turn a shared run into helper mode.
+func inSubreaperHelper(name string) bool {
+	run := flag.Lookup("test.run")
+	return name != "" && os.Getenv(subreaperHelperEnv) == name &&
+		run != nil && run.Value.String() == "^"+name+"$"
+}
+
+// subreaperChild reports whether this process is t's own helper binary, and in
+// the parent re-runs t alone there and relays its verdict. The child-subreaper
+// flag is process-wide and nothing here unsets it: in the shared binary every
+// orphaned descendant of a sibling test would become this process's zombie.
+func subreaperChild(t *testing.T) bool {
+	t.Helper()
+	if inSubreaperHelper(t.Name()) {
+		return true
+	}
+	cmd := exec.CommandContext(t.Context(), os.Args[0], // #nosec G204 -- this test binary
+		"-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v", "-test.timeout=1m")
+	cmd.Env = append(os.Environ(), subreaperHelperEnv+"="+t.Name())
+	out, err := cmd.CombinedOutput()
+	switch {
+	case err != nil:
+		t.Fatalf("helper binary for %s failed: %v\n%s", t.Name(), err, out)
+	case bytes.Contains(out, []byte("--- SKIP: "+t.Name())):
+		t.Skipf("helper binary skipped:\n%s", out)
+	case !bytes.Contains(out, []byte("--- PASS: "+t.Name())):
+		t.Fatalf("helper binary never ran %s:\n%s", t.Name(), out)
+	}
+	return false
+}
 
 // registered reports whether pid is currently in the os/exec-owned registry.
 func registered(pid int) bool {
@@ -144,10 +176,13 @@ func asExitError(err error, target **exec.ExitError) bool {
 // reaping it is what frees the pid slot. Uses one pid this test created and never
 // a sweep, for the reason in the file header.
 func TestReapIfUnownedCollectsAnOrphanZombie(t *testing.T) {
+	t.Parallel()
+	if !subreaperChild(t) {
+		return
+	}
 	if err := installSubreaper(); err != nil {
 		t.Skipf("cannot become a child subreaper: %v", err)
 	}
-	// Not parallel: it installs a process-wide flag and inspects orphan state.
 
 	// The middle shell exits at once, orphaning the sleep; the subreaper flag
 	// re-parents it here, and it becomes our zombie when the sleep ends.
@@ -268,6 +303,9 @@ func writeTemp(t *testing.T, content string) string {
 // millisecond, and 0 means the default rather than a hot loop.
 func TestStartZombieReaperStopsCleanlyAndFloorsTheInterval(t *testing.T) {
 	t.Parallel()
+	if !subreaperChild(t) {
+		return
+	}
 	if zombieSweepFloor < time.Second {
 		t.Errorf("zombieSweepFloor = %v; a sub-second floor would spend real CPU re-walking /proc", zombieSweepFloor)
 	}

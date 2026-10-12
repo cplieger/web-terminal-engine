@@ -506,21 +506,21 @@ func eventsPopulated(body string) bool {
 	return false
 }
 
-// termLive sends SIGTERM to every live member and reports how many were signalled.
+// termLive sends SIGTERM to every live member and returns the pids signalled.
 //
 // Signalling goes through a pidfd, never a bare kill(pid): a pid read from
 // cgroup.procs can exit and be recycled before the signal lands, and this package
 // rejects pid-set based containment partly on that hazard. Refusing to ship a
 // smaller instance of the same defect costs about ten lines.
-func (s *sessionCgroup) termLive() int {
-	sent := 0
+func (s *sessionCgroup) termLive() []int {
+	var sent []int
 	for _, pid := range s.liveProcs() {
 		pidfd, err := unix.PidfdOpen(pid, 0)
 		if err != nil {
 			continue // already gone
 		}
 		if err := unix.PidfdSendSignal(pidfd, unix.SIGTERM, nil, 0); err == nil {
-			sent++
+			sent = append(sent, pid)
 		}
 		_ = unix.Close(pidfd)
 	}
@@ -590,9 +590,11 @@ func (s *sessionCgroup) teardownOnce() {
 	survivors := len(s.liveProcs())
 	residentBytes := readUint(filepath.Join(s.dir, "memory.current"))
 	termed := s.termLive()
-	forced := 0
+	forced := map[int]struct{}{}
 	if !s.waitDrained(containGrace) {
-		forced = len(s.liveProcs())
+		for _, pid := range s.liveProcs() {
+			forced[pid] = struct{}{}
+		}
 	}
 
 	if err := s.killAll(); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -604,13 +606,12 @@ func (s *sessionCgroup) teardownOnce() {
 	if survivors > 0 {
 		// Only fires when containment reclaimed something. term_reclaimed means a
 		// well-behaved process nobody had signalled; kill_forced means something
-		// ignored SIGTERM. Clamped: the two counts are separate snapshots, and a
-		// fork between them could otherwise print a negative.
+		// was still alive when SIGTERM's window closed.
 		s.log.Warn("terminal: containment reclaimed escaped processes",
 			"session", LogID(s.id),
 			"survivors", survivors,
-			"term_reclaimed", max(termed-forced, 0),
-			"kill_forced", forced,
+			"term_reclaimed", termReclaimed(termed, forced),
+			"kill_forced", len(forced),
 			"resident_bytes", residentBytes)
 	}
 }

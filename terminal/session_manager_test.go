@@ -33,15 +33,11 @@ func hasDirective(header, want string) bool {
 }
 
 // shutdownManager tears a manager down and fails the test if any teardown did
-// not finish inside the budget. Most callers use it from t.Cleanup, which is why
-// it builds its own context instead of taking t.Context(): t.Context is already
-// cancelled by the time cleanups run, so a wait against it would report an
-// expiry on every single test.
-//
-// The budget is deliberately generous against the real ceiling (cmd.WaitDelay
-// bounds the child reap at 5s, and the containment and marker ladders each spend
-// up to three containGrace windows), so a failure here means teardown genuinely
-// hung rather than that the runner was loaded.
+// not finish inside the budget. It builds its own context because t.Context is
+// already cancelled when cleanups run, so a wait against it would expire on
+// every test. The budget is generous against cmd.WaitDelay's 5s and the ladder
+// bound sessionReap.teardownOnce states, so a failure means teardown hung rather
+// than that the runner was loaded.
 func shutdownManager(t *testing.T, m *SessionManager) {
 	t.Helper()
 	const budget = 20 * time.Second

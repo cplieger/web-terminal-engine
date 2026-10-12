@@ -139,10 +139,13 @@ On Linux, a closed session does not leave processes behind. A child that calls `
 
 The engine spawns every session with one unguessable environment variable, `WT_SESSION_REAP`. `execve` copies it into every descendant, and it survives both `setsid()` and the move to init. At session end the engine finds every process that still carries it and stops them in four steps. It waits, sends `SIGTERM`, waits again, then sends `SIGKILL`. It logs one `session reap reclaimed escaped processes` line with `survivors`, `term_reclaimed`, `kill_forced` and `resident_bytes`, and only when it had to reclaim something.
 
-This needs no capability, no cgroup, no mount and no PID namespace. In an unprivileged container, reclaiming a `setsid()` escapee took 354 ms, and a full scan of 17,547 processes took about 81 ms. Reaping is always on, with two limits:
+This needs no capability, no cgroup, no mount and no PID namespace. In an unprivileged container, reclaiming a `setsid()` escapee took 354 ms, and a full scan of 17,547 processes took about 81 ms. Reaping is always on, with three limits:
 
 - A descendant that `execve`s with a deliberately emptied environment escapes it.
-- A tree that forks during teardown can outrun one scan. Each step scans again rather than reusing the first list.
+- A tree that forks during teardown can outrun one scan. Each step scans again rather than reusing the first list, and the `SIGKILL` step repeats its scan until it finds no session process, up to eight times. A tree that keeps forking through all eight escapes it.
+- A process stuck in an uninterruptible kernel wait, shown as state `D` in `ps`, ends only when that wait does. A hung NFS or FUSE mount can cause this. Teardown stops waiting for it after the eighth scan.
+
+In the last two cases the engine logs `session reap could not end escaped processes` with a `remaining` count.
 
 The engine's value is the only assignment to `WT_SESSION_REAP` in the child environment. It removes that key from your `WithEnv` and from the server's inherited environment before it adds its own. Setting the variable yourself therefore does nothing, and a server started inside one of these sessions does not pass its parent's value on.
 

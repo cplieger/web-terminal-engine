@@ -78,8 +78,11 @@ func startMarked(t *testing.T, s *sessionReap, script string) *exec.Cmd {
 		t.Fatalf("start marked tree: %v", err)
 	}
 	t.Cleanup(func() {
-		for _, pid := range reapFindByMarker(s.marker) {
-			reapKill(pid)
+		// Debian's dash 0.5.12 forks even a lone `sleep 60`, so a one-pass
+		// kill races the shell's fork and orphans the sleep.
+		s.killUntilGone(reapKill)
+		if left := reapFindByMarker(s.marker); len(left) != 0 {
+			t.Errorf("marked tree still alive after cleanup: %v", left)
 		}
 		_, _ = cmd.Process.Wait()
 	})
@@ -262,6 +265,194 @@ func TestReapTeardownEscalatesToKillForASIGTERMIgnorer(t *testing.T) {
 	if forced, _ := attrs["kill_forced"].(int64); forced < 1 {
 		t.Errorf("kill_forced = %v, want >= 1 for a tree that discards SIGTERM", attrs["kill_forced"])
 	}
+}
+
+// A survivor that keeps forking outruns any single scan: children born between
+// the SIGKILL round's scan and the forker's own kill are in no snapshot. The
+// unpaced loop makes that window certain rather than likely; `sleep 1` bounds
+// what a failed run leaves behind. Not parallel: the loop holds about a
+// thousand processes, which would slow every sibling's /proc scan.
+func TestReapTeardownKillsChildrenForkedAfterItsScan(t *testing.T) {
+	s, rec := newTestReap(t)
+	head := startMarked(t, s, `sh -c 'trap "" TERM; while :; do sleep 1 & done' & wait`)
+	waitForMembers(t, s, 3)
+	if err := head.Process.Kill(); err != nil {
+		t.Fatalf("kill head: %v", err)
+	}
+	_, _ = head.Process.Wait()
+
+	s.teardown()
+
+	if left := reapFindByMarker(s.marker); len(left) != 0 {
+		t.Fatalf("teardown left %d marked process(es) a forking survivor spawned after a scan: %v", len(left), left)
+	}
+	attrs, ok := rec.find("terminal: session reap reclaimed escaped processes")
+	if !ok {
+		t.Fatal("no reclaim WARN for an escalated teardown")
+	}
+	if forced, _ := attrs["kill_forced"].(int64); forced < 1 {
+		t.Errorf("kill_forced = %v, want >= 1 for a tree that discards SIGTERM", attrs["kill_forced"])
+	}
+}
+
+// A SIGTERM handler can fork before it exits, so the SIGTERM step's snapshot
+// draining says nothing about the domain: the handler's child is in no earlier
+// scan. The counts pin that the two members that did exit on SIGTERM are
+// reclaimed, and only the newborn is forced. Not parallel: the counts need dash
+// to run its trap inside one containGrace window.
+func TestReapTeardownKillsWhatASIGTERMHandlerForks(t *testing.T) {
+	s, rec := newTestReap(t)
+	head := startMarked(t, s, `sh -c 'trap "sleep 60 & exit 0" TERM; sleep 60 & wait' & wait`)
+	waitForMembers(t, s, 3)
+	if err := head.Process.Kill(); err != nil {
+		t.Fatalf("kill head: %v", err)
+	}
+	_, _ = head.Process.Wait()
+
+	s.teardown()
+
+	if left := reapFindByMarker(s.marker); len(left) != 0 {
+		t.Fatalf("teardown returned with the SIGTERM handler's child alive: %v", left)
+	}
+	attrs, ok := rec.find("terminal: session reap reclaimed escaped processes")
+	if !ok {
+		t.Fatal("no reclaim WARN for an escalated teardown")
+	}
+	if got, _ := attrs["term_reclaimed"].(int64); got != 2 {
+		t.Errorf("term_reclaimed = %v, want 2: the shell and its sleep both ended on SIGTERM", attrs["term_reclaimed"])
+	}
+	if got, _ := attrs["kill_forced"].(int64); got != 1 {
+		t.Errorf("kill_forced = %v, want 1: only the handler's child needed SIGKILL", attrs["kill_forced"])
+	}
+}
+
+// A survivor that forks during the settle window owes its child SIGTERM: a
+// SIGTERM step reusing the first scan would skip it and leave it to SIGKILL.
+// The shell catches TERM, then waits once more and exits, so with every member
+// termed nothing is forced. Not parallel: the fork must land inside the window,
+// 100 ms after the shell starts and before containGrace runs out.
+func TestReapTeardownSIGTERMsAChildBornInTheSettleWindow(t *testing.T) {
+	s, rec := newTestReap(t)
+	head := startMarked(t, s, `sh -c 'trap : TERM; sleep 0.1; sleep 60 & wait; wait' & wait`)
+	waitForMembers(t, s, 3)
+	if err := head.Process.Kill(); err != nil {
+		t.Fatalf("kill head: %v", err)
+	}
+	_, _ = head.Process.Wait()
+
+	s.teardown()
+
+	if left := reapFindByMarker(s.marker); len(left) != 0 {
+		t.Fatalf("teardown left marked process(es): %v", left)
+	}
+	attrs, ok := rec.find("terminal: session reap reclaimed escaped processes")
+	if !ok {
+		t.Fatal("no reclaim WARN for an escalated teardown")
+	}
+	if got, _ := attrs["term_reclaimed"].(int64); got != 2 {
+		t.Errorf("term_reclaimed = %v, want 2: the shell and the sleep it forked in the window both ended on SIGTERM", attrs["term_reclaimed"])
+	}
+	if got, _ := attrs["kill_forced"].(int64); got != 0 {
+		t.Errorf("kill_forced = %v, want 0: nothing ignored SIGTERM", attrs["kill_forced"])
+	}
+}
+
+// A failed SIGKILL send must leave the pid owed: recording it as signalled
+// would make the next scan look settled and return with the process alive.
+func TestReapKillRetriesAFailedSend(t *testing.T) {
+	t.Parallel()
+	s, rec := newTestReap(t)
+	startMarked(t, s, `exec sleep 60`)
+	pid := waitForMembers(t, s, 1)[0]
+
+	attempts := 0
+	forced := s.killUntilGone(func(p int) bool {
+		attempts++
+		if attempts == 1 {
+			return false
+		}
+		return reapKill(p)
+	})
+
+	if left := reapFindByMarker(s.marker); len(left) != 0 {
+		t.Fatalf("killUntilGone returned with %v alive after one failed send", left)
+	}
+	if _, ok := forced[pid]; !ok || len(forced) != 1 {
+		t.Errorf("forced = %v, want only %d, whose second send succeeded", forced, pid)
+	}
+	if _, ok := rec.find("terminal: session reap could not end escaped processes"); ok {
+		t.Error("logged a failure for a process the retry ended")
+	}
+}
+
+// A member every send fails on is reported, not silently left running, and
+// counts as forced, or term_reclaimed would credit SIGTERM with it.
+func TestReapKillLogsWhatItCouldNotEnd(t *testing.T) {
+	t.Parallel()
+	s, rec := newTestReap(t)
+	startMarked(t, s, `exec sleep 60`)
+	pid := waitForMembers(t, s, 1)[0]
+
+	forced := s.killUntilGone(func(int) bool { return false })
+
+	if _, ok := forced[pid]; !ok || len(forced) != 1 {
+		t.Errorf("forced = %v, want only %d, which SIGTERM did not end", forced, pid)
+	}
+	if got := termReclaimed([]int{pid}, forced); got != 0 {
+		t.Errorf("termReclaimed = %d, want 0 for a member still alive", got)
+	}
+	attrs, ok := rec.find("terminal: session reap could not end escaped processes")
+	if !ok {
+		t.Fatal("no WARN for a member that outlived every round")
+	}
+	if got, _ := attrs["remaining"].(int64); got != 1 {
+		t.Errorf("remaining = %v, want 1", attrs["remaining"])
+	}
+}
+
+// An accepted SIGKILL is not an exit: a task in an uninterruptible wait takes
+// the signal and stays alive. The fake accepts every send and ends nothing,
+// which stages that task without a hung mount.
+func TestReapKillReportsAMemberThatOutlivesAnAcceptedKill(t *testing.T) {
+	t.Parallel()
+	s, rec := newTestReap(t)
+	startMarked(t, s, `exec sleep 60`)
+	pid := waitForMembers(t, s, 1)[0]
+
+	sends := 0
+	forced := s.killUntilGone(func(int) bool {
+		sends++
+		return true
+	})
+
+	if _, ok := forced[pid]; !ok || len(forced) != 1 {
+		t.Errorf("forced = %v, want only %d", forced, pid)
+	}
+	if sends != 1 {
+		t.Errorf("sends = %d, want 1: an accepted kill is not resent", sends)
+	}
+	attrs, ok := rec.find("terminal: session reap could not end escaped processes")
+	if !ok {
+		t.Fatal("no WARN for a member still alive after its kill was accepted")
+	}
+	if got, _ := attrs["remaining"].(int64); got != 1 {
+		t.Errorf("remaining = %v, want 1", attrs["remaining"])
+	}
+}
+
+func TestTermReclaimed(t *testing.T) {
+	t.Parallel()
+	forced := map[int]struct{}{20: {}, 99: {}}
+	t.Run("a child born after SIGTERM hides no reclaimed member", func(t *testing.T) {
+		if got := termReclaimed([]int{10, 11, 20}, forced); got != 2 {
+			t.Errorf("termReclaimed = %d, want 2: 10 and 11 exited, 20 was forced, 99 was never termed", got)
+		}
+	})
+	t.Run("nothing termed", func(t *testing.T) {
+		if got := termReclaimed(nil, forced); got != 0 {
+			t.Errorf("termReclaimed = %d, want 0", got)
+		}
+	})
 }
 
 // Two sessions must be mutually invisible, or one tab's teardown ends another's

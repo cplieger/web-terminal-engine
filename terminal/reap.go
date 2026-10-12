@@ -9,14 +9,14 @@ import (
 	"time"
 )
 
-// Session reaping is the capability-free answer to a PTY child that escapes the
-// engine's signal-scoped boundaries: a setsid() process leaves its process group
-// and session, so neither kill(-pgid) nor the PTY-close SIGHUP reaches it. Each
-// session's child gets an unguessable environment marker, which execve copies to
-// every descendant and which survives setsid() and re-parenting, so the session's
-// processes are a /proc scan. env -i escapes it (Containment is the stronger
-// opt-in boundary), and each escalation rescans so only a fork racing the final
-// SIGKILL round can outrun it. Reaping is unconditional.
+// Session reaping ends a PTY child that escapes the engine's signal-scoped
+// boundaries: a setsid() process leaves its process group and session, so
+// neither kill(-pgid) nor the PTY-close SIGHUP reaches it. Each session's child
+// gets an unguessable environment marker, which execve copies to every
+// descendant through setsid() and re-parenting, so the session is a /proc scan.
+// env -i escapes it (Containment is the stronger opt-in boundary), as does a
+// tree out-forking reapKillRounds SIGKILL rescans or a task held in an
+// uninterruptible wait past them.
 
 const (
 	// reapMarkerEnv names the variable every session's process tree inherits;
@@ -36,6 +36,13 @@ const (
 	// never a full scan, which is why the settle window costs microseconds
 	// rather than another 81ms pass.
 	reapPoll = 20 * time.Millisecond
+
+	// reapKillRounds caps the SIGKILL rescans. A forker dies in the round that
+	// first scans it and its children in the next, so a single forker's tree
+	// empties in three; a tree still populated after this many is out-forking every
+	// scan, which only Containment's cgroup.kill can end, or holds a task in an
+	// uninterruptible wait that no signal ends sooner.
+	reapKillRounds = 8
 )
 
 // sessionReap is one session's reap domain: the marker its tree carries, plus
@@ -125,47 +132,40 @@ func (s *sessionReap) teardown() {
 	s.once.Do(s.teardownOnce)
 }
 
-// teardownOnce is the escalation ladder: settle, SIGTERM, settle, SIGKILL.
-//
-// It mirrors sessionCgroup.teardownOnce step for step, including the WARN's
-// field names, so an operator reading logs cannot tell which boundary reclaimed
-// a session — only that one did. The one structural difference is that a cgroup
-// has a pollable cgroup.events file and a marker domain does not, so each settle
-// window polls the known members instead of waiting on the kernel.
-//
-// The common case is one scan and no log line at all: a well-behaved tree is
-// already gone when the head is reaped, so the first pass finds nothing.
+// teardownOnce is the escalation ladder: settle, SIGTERM, settle, SIGKILL. It
+// mirrors sessionCgroup.teardownOnce, WARN field names included, so logs never
+// say which boundary reclaimed a session; each settle window polls the known
+// members because a marker domain has no cgroup.events to wait on. A clean tree
+// costs one scan and no log line. The worst case is two containGrace windows
+// plus reapKillRounds rounds of one window each, and every step's scan can
+// itself spend containGrace on a pid mid-execve.
 func (s *sessionReap) teardownOnce() {
 	members := reapFindByMarker(s.marker)
 	if len(members) == 0 {
 		return
 	}
 	// cmd.Wait returning means the HEAD was reaped, not that the tree finished.
-	// Give the ordinary exit path its window before signalling anything.
-	if s.waitGone(members, containGrace) {
-		if members = reapFindByMarker(s.marker); len(members) == 0 {
-			return
-		}
+	// Give the ordinary exit path its window, then scan again whether or not the
+	// first list drained: a survivor can fork during the window, and its child
+	// is owed SIGTERM too.
+	s.waitGone(members, containGrace)
+	if members = reapFindByMarker(s.marker); len(members) == 0 {
+		return
 	}
 
 	residentBytes := reapResident(members)
 	survivors := len(members)
-	termed := 0
+	var termed []int
 	for _, pid := range members {
 		if reapTerm(pid) {
-			termed++
+			termed = append(termed, pid)
 		}
 	}
 
-	forced := 0
-	if !s.waitGone(members, containGrace) {
-		left := reapFindByMarker(s.marker)
-		forced = len(left)
-		for _, pid := range left {
-			reapKill(pid)
-		}
-		s.waitGone(left, containGrace)
-	}
+	// Unconditional: a SIGTERM handler can fork and then exit, so the snapshot
+	// draining proves nothing about the domain.
+	s.waitGone(members, containGrace)
+	forced := s.killUntilGone(reapKill)
 
 	// Fires only when something had to be reclaimed. term_reclaimed and
 	// kill_forced separate a tree that honoured SIGTERM from one that had to be
@@ -173,17 +173,61 @@ func (s *sessionReap) teardownOnce() {
 	s.log.Warn("terminal: session reap reclaimed escaped processes",
 		"session", LogID(s.id),
 		"survivors", survivors,
-		"term_reclaimed", max(termed-forced, 0),
-		"kill_forced", forced,
+		"term_reclaimed", termReclaimed(termed, forced),
+		"kill_forced", len(forced),
 		"resident_bytes", residentBytes)
 }
 
+// killUntilGone SIGKILLs every member through kill and rescans until a scan
+// finds the domain empty, for at most reapKillRounds rounds, and returns every
+// pid it found alive. One scan is a snapshot, so a member forking between the
+// scan and its own kill leaves a child no single pass reaches. A failed send is
+// retried next round; an accepted one is not resent, but it is not an exit
+// either (a task in an uninterruptible wait acts on it only when the wait ends),
+// so only an empty scan returns early. Logs what it could not end.
+func (s *sessionReap) killUntilGone(kill func(pid int) bool) (forced map[int]struct{}) {
+	forced = map[int]struct{}{}
+	sent := map[int]struct{}{}
+	for range reapKillRounds {
+		left := reapFindByMarker(s.marker)
+		if len(left) == 0 {
+			return forced
+		}
+		for _, pid := range left {
+			forced[pid] = struct{}{}
+			if _, done := sent[pid]; !done && kill(pid) {
+				sent[pid] = struct{}{}
+			}
+		}
+		s.waitGone(left, containGrace)
+	}
+	if left := reapFindByMarker(s.marker); len(left) != 0 {
+		s.log.Warn("terminal: session reap could not end escaped processes",
+			"session", LogID(s.id),
+			"remaining", len(left))
+	}
+	return forced
+}
+
+// termReclaimed counts the SIGTERMed pids that needed no SIGKILL. Matching by
+// pid rather than subtracting counts keeps a child born after SIGTERM, which is
+// forced but was never termed, from hiding a member that did exit.
+func termReclaimed(termed []int, forced map[int]struct{}) int {
+	n := 0
+	for _, pid := range termed {
+		if _, killed := forced[pid]; !killed {
+			n++
+		}
+	}
+	return n
+}
+
 // waitGone polls the given pids until none is still a live member of this
-// domain, or the budget expires. Reports whether the set drained.
+// domain, or the budget expires.
 //
-// Checks only the pids handed to it, never the whole host: the expensive full
-// scan happens once per escalation step, not once per poll.
-func (s *sessionReap) waitGone(pids []int, budget time.Duration) bool {
+// Checks only the pids handed to it, never the whole host, so a poll never
+// costs a full scan.
+func (s *sessionReap) waitGone(pids []int, budget time.Duration) {
 	deadline := time.Now().Add(budget)
 	for {
 		alive := false
@@ -193,11 +237,8 @@ func (s *sessionReap) waitGone(pids []int, budget time.Duration) bool {
 				break
 			}
 		}
-		if !alive {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
+		if !alive || time.Now().After(deadline) {
+			return
 		}
 		time.Sleep(reapPoll)
 	}

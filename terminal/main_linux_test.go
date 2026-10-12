@@ -10,6 +10,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -17,10 +18,14 @@ import (
 // TestMain fails the run when a child process outlives the tests. A session's
 // child survives its socket closing until the handler is shut down, and one
 // that inherited SIGHUP ignored and does not exit on EIO keeps running after
-// the test binary exits.
+// the test binary exits. A zombie child counts too: nothing ever waited on it.
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if leaked := awaitNoLiveChildren(waitPatience); len(leaked) > 0 {
+	if !inSubreaperHelper(os.Getenv(subreaperHelperEnv)) && isChildSubreaper() {
+		fmt.Fprintln(os.Stderr, "FAIL: a test made the shared test binary a child subreaper (run it through subreaperChild)")
+		code = 1
+	}
+	if leaked := awaitNoChildren(waitPatience); len(leaked) > 0 {
 		fmt.Fprintf(os.Stderr, "FAIL: %d child process(es) outlived their test (shut the handler down in t.Cleanup):\n", len(leaked))
 		for _, pid := range leaked {
 			fmt.Fprintf(os.Stderr, "  pid %d: %s\n", pid, cmdlineOf(pid))
@@ -36,34 +41,40 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// awaitNoLiveChildren polls until no non-zombie child of this process remains,
+func isChildSubreaper() bool {
+	var on int32
+	err := unix.Prctl(unix.PR_GET_CHILD_SUBREAPER, uintptr(unsafe.Pointer(&on)), 0, 0, 0)
+	return err == nil && on != 0
+}
+
+// awaitNoChildren polls until this process has no child, live or zombie,
 // returning the survivors when patience runs out. A Close-only teardown kills
-// asynchronously, so a child seen once is not yet a leak.
-func awaitNoLiveChildren(patience time.Duration) []int {
+// and waits asynchronously, so a child seen once is not yet a leak.
+func awaitNoChildren(patience time.Duration) []int {
 	deadline := time.Now().Add(patience)
 	for {
-		live := liveChildren()
-		if len(live) == 0 || time.Now().After(deadline) {
-			return live
+		left := children()
+		if len(left) == 0 || time.Now().After(deadline) {
+			return left
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 }
 
-func liveChildren() []int {
+func children() []int {
 	self := os.Getpid()
 	paths, _ := filepath.Glob("/proc/[0-9]*/stat")
-	var live []int
+	var out []int
 	for _, p := range paths {
-		state, ppid, ok := statStateAndPPID(p)
-		if !ok || ppid != self || state == 'Z' {
+		_, ppid, ok := statStateAndPPID(p)
+		if !ok || ppid != self {
 			continue
 		}
 		if pid, err := strconv.Atoi(filepath.Base(filepath.Dir(p))); err == nil {
-			live = append(live, pid)
+			out = append(out, pid)
 		}
 	}
-	return live
+	return out
 }
 
 func cmdlineOf(pid int) string {
@@ -71,5 +82,11 @@ func cmdlineOf(pid int) string {
 	if err != nil {
 		return "(cmdline unreadable)"
 	}
-	return strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
+	if s := strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " ")); s != "" {
+		return s
+	}
+	if state, _, ok := statStateAndPPID(fmt.Sprintf("/proc/%d/stat", pid)); ok && state == 'Z' {
+		return "(zombie: never waited on)"
+	}
+	return ""
 }

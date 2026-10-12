@@ -22,14 +22,11 @@ import (
 )
 
 // waitPatience bounds every test-owned poll in this package: how long a test
-// waits for an asynchronous effect to become observable before it calls the
-// subject hung. Deliberately generous against the real ceilings (cmd.WaitDelay
-// bounds a child's reap at 5s, and the containment and marker teardown ladders
-// each spend up to three containGrace windows), and the same budget
-// shutdownManager allows teardown, so an expiry means the subject genuinely hung
-// rather than that the runner was loaded. No poll using it asserts promptness —
-// that is what makes it test-owned patience rather than a production budget, and
-// why widening it cannot hide a defect. A poll must still fail closed with a
+// waits for an asynchronous effect before it calls the subject hung. It is the
+// budget shutdownManager allows teardown, generous against cmd.WaitDelay's 5s
+// and the ladder bound sessionReap.teardownOnce states, so an expiry means a
+// hang rather than a loaded runner. No poll using it asserts promptness, which
+// is why widening it cannot hide a defect. A poll must still fail closed with a
 // diagnostic naming what it waited for; a bare sleep is never the fix.
 const waitPatience = 20 * time.Second
 

@@ -33,13 +33,28 @@ import (
 // diagnostic naming what it waited for; a bare sleep is never the fix.
 const waitPatience = 20 * time.Second
 
+// shutdownOnCleanup ends h's session when t finishes and fails t if the
+// teardown overruns. Closing the socket does not end a session, so a test that
+// starts a child without this leaves it running past the test.
+func shutdownOnCleanup(t *testing.T, h *Handler) {
+	t.Helper()
+	t.Cleanup(func() {
+		// context.Background(): t.Context() is already cancelled in a cleanup.
+		ctx, cancel := context.WithTimeout(context.Background(), waitPatience)
+		defer cancel()
+		if err := h.Shutdown(ctx); err != nil {
+			t.Errorf("Handler.Shutdown(ctx) = %v, want nil (teardown must finish within %v)", err, waitPatience)
+		}
+	})
+}
+
 // dialHandler stands up the handler on an httptest server and opens
 // a WebSocket client against it. Returns the open connection and a
-// cleanup func. Uses /bin/cat so tests don't depend on dtach being
-// installed in the workspace.
+// cleanup func; the handler itself is shut down by t.Cleanup.
 func dialHandler(t *testing.T, cmd []string) (*websocket.Conn, func()) {
 	t.Helper()
 	h := NewHandler(cmd, WithWorkDir("/"))
+	shutdownOnCleanup(t, h)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -1750,6 +1765,7 @@ func readUntilClose(t *testing.T, ws *websocket.Conn, timeout time.Duration) web
 // leading NUL included, counted as input.
 func TestTypedFraming_latchSequence(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithWorkDir("/"))
+	shutdownOnCleanup(t, h)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -1927,6 +1943,7 @@ func TestTypedFraming_preLatchKeepsV3Semantics(t *testing.T) {
 // frame boundaries.
 func TestParseFallback_countsBytes(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithWorkDir("/"))
+	shutdownOnCleanup(t, h)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)

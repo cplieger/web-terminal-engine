@@ -319,7 +319,7 @@ type SessionManager struct {
 	// keys of sessions, maintained at the four sites that change the set (create
 	// appends, Close removes, the reaper and Shutdown clear). A slice rather than
 	// a position per session: a reorder writes one value and a close leaves no
-	// gap. Not persisted, because it does not outlive the PTY children it orders.
+	// gap. Held in memory; CaptureSessionSet exports it.
 	order         []SessionID
 	layout        PaneLayout
 	wg            sync.WaitGroup
@@ -327,6 +327,17 @@ type SessionManager struct {
 	subsMu        sync.Mutex
 	idleWindow    time.Duration
 	activeClients int
+	// orderGen and layoutGen count successful CLIENT writes (SetSessionOrder,
+	// SetPaneLayout) and nothing else: RestoreSessionSet compares them to tell
+	// an arrangement a client chose during the restore, which wins, from its own.
+	orderGen  uint64
+	layoutGen uint64
+	// closed is set by Shutdown in the block that empties the set; createWith
+	// refuses after it so no process starts into a manager nothing tears down.
+	closed bool
+	// restoring is true while RestoreSessionSet runs; create and the layout read
+	// answer 503 meanwhile.
+	restoring bool
 }
 
 // NewSessionManager returns a manager that builds each session's handler with
@@ -381,30 +392,60 @@ func NewSessionManager(factory func(id SessionID) *Handler, opts ...ManagerOptio
 }
 
 // Create starts a new session (eagerly spawning its process at a default size)
-// and returns its id.
+// and returns its id. After Shutdown it returns ErrManagerClosed.
 func (m *SessionManager) Create() (SessionID, error) {
-	info, err := m.create()
+	info, err := m.createWith(CreateSpec{})
 	return info.ID, err
 }
 
-// create is Create plus the SessionInfo describing what it stored, so
-// handleCreate can echo the values every later enumeration reports for this
-// session instead of re-deriving them.
-//
-// Both fields it carries beyond the id are ones a client sorts by, and both were
-// wrong when re-derived. A second time.Now() gave the newest tab a createdAt
-// matching neither List nor the status stream. A zero Order claimed position 0,
-// the FRONT of the strip, for the session just appended to the back — so a client
-// that trusted the 201 put its new tab first and then watched it jump when the
-// next status event corrected it.
-func (m *SessionManager) create() (SessionInfo, error) {
+// ErrManagerClosed is returned by Create and CreateWith once Shutdown has run.
+var ErrManagerClosed = errors.New("terminal: session manager is shut down")
+
+// CreateSpec is CreateWith's per-session input. The zero value creates exactly
+// what Create does.
+type CreateSpec struct {
+	// Build replaces the manager's factory for this one session; nil uses the
+	// factory. Called with the manager lock held: it must not call back into
+	// the manager.
+	Build func(id SessionID) *Handler
+	// Alias is applied when it is valid and no live session holds it; otherwise
+	// a fresh alias is minted. The returned SessionInfo.Alias says which.
+	Alias string
+	// PinnedTitle is sanitized like SetSessionPinnedTitle; "" pins nothing.
+	PinnedTitle string
+}
+
+// CreateWith creates one session from spec. The alias and pinned title are in
+// place before the session is first listed or streamed. After Shutdown it
+// returns ErrManagerClosed and starts nothing.
+func (m *SessionManager) CreateWith(spec CreateSpec) (SessionInfo, error) {
+	return m.createWith(spec)
+}
+
+// createStartedHook runs between StartEager and the insert; a test seam for a
+// Shutdown that lands while a create forks. A no-op in production.
+var createStartedHook = func() {}
+
+// createWith returns the SessionInfo describing what it stored, so handleCreate
+// echoes the createdAt and Order every later enumeration reports. Both are sort
+// keys: a re-derived createdAt matched neither List nor the stream, and a zero
+// Order put the newest tab at the FRONT of a strip until the next status event.
+func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return SessionInfo{}, ErrManagerClosed
+	}
 	id, err := newSessionID()
 	if err != nil {
 		m.mu.Unlock()
 		return SessionInfo{}, err
 	}
-	h := m.factory(id)
+	build := spec.Build
+	if build == nil {
+		build = m.factory
+	}
+	h := build(id)
 	m.mu.Unlock()
 
 	// Eager start outside the lock: spawning a process should not block other
@@ -413,20 +454,33 @@ func (m *SessionManager) create() (SessionInfo, error) {
 	if err := h.StartEager(); err != nil {
 		return SessionInfo{}, err
 	}
+	createStartedHook()
 
 	now := time.Now()
 	m.mu.Lock()
+	// Shutdown may have run while the process forked; its victim list did not
+	// include this handler, so it is closed here or nothing ever would.
+	if m.closed {
+		m.mu.Unlock()
+		h.Close()
+		return SessionInfo{}, ErrManagerClosed
+	}
 	// Refresh the idle clock so the reaper cannot reap a session created while the
 	// manager is idle (activeClients == 0) before its first client attaches. Same
 	// reading as createdAt: they describe one event, and two calls to time.Now()
 	// only invite a reader to wonder which is authoritative.
 	m.idleSince = now
+	alias := spec.Alias
+	if !validSessionAlias(alias) || m.aliasHeldLocked(alias) {
+		alias = m.mintAliasLocked()
+	}
+	pinned := sanitizeTitle(spec.PinnedTitle, maxPinnedTitleRunes)
 	// autoTitle starts at the command basename (the ladder's last rung): the
 	// sweep refines it to a foreground-process or cwd name, but a List served
-	// before the first sweep must still name the session.
-	alias := m.mintAliasLocked()
+	// before the first sweep must still name the session. The alias and pin are
+	// written in this same block so no reader sees the session without them.
 	m.sessions[id] = &session{
-		id: id, alias: alias, handler: h, createdAt: now, autoTitle: h.commandBase(),
+		id: id, alias: alias, pinnedTitle: pinned, handler: h, createdAt: now, autoTitle: h.commandBase(),
 	}
 	// Newest session last, which is where a new tab belongs. A client that has
 	// arranged its tabs keeps that arrangement; only the new id moves.
@@ -442,7 +496,10 @@ func (m *SessionManager) create() (SessionInfo, error) {
 	m.logger.Info("session: created", "session", LogID(id), "sessions", n)
 	// A freshly eager-started session is idle until it produces output; the
 	// status stream corrects that within a tick if the process died instantly.
-	return SessionInfo{ID: id, Alias: alias, Status: StatusIdle, CreatedAt: now, Order: order}, nil
+	return SessionInfo{
+		ID: id, Alias: alias, PinnedTitle: pinned, Title: pinned,
+		Status: StatusIdle, CreatedAt: now, Order: order,
+	}, nil
 }
 
 // logIDPrefixBytes is how much of a session token may reach a log: 8 bytes of
@@ -585,6 +642,7 @@ func (m *SessionManager) SetSessionOrder(ids []SessionID) bool {
 	// Cloned: the caller's slice is a decoded request body, and keeping it would
 	// let a later write through that same slice reorder the manager's state.
 	m.order = slices.Clone(ids)
+	m.orderGen++
 	return true
 }
 
@@ -628,14 +686,6 @@ func (l *PaneLayout) shown(side PaneSide) *SessionID {
 		return l.Right
 	}
 	return l.Left
-}
-
-func (l *PaneLayout) show(side PaneSide, id SessionID) {
-	if side == PaneRight {
-		l.Right = &id
-		return
-	}
-	l.Left = &id
 }
 
 func (l *PaneLayout) invalidShape() string {
@@ -704,6 +754,7 @@ func (m *SessionManager) SetPaneLayout(l PaneLayout) (verdict LayoutVerdict, rea
 		l.Handle = 0.5
 	}
 	m.layout = clonePaneLayout(l)
+	m.layoutGen++
 	return LayoutOK, ""
 }
 
@@ -717,8 +768,9 @@ func (m *SessionManager) PaneLayout() PaneLayout {
 }
 
 // dropFromLayoutLocked empties the panes showing id, moves Selected to a shown
-// pane and refills an emptied record from the order: an interim record, valid
-// until the client's next write replaces it. Caller holds m.mu.
+// pane and refills an emptied record from the order (normalizeSetLayout's
+// rules): an interim record, valid until the client's next write replaces it.
+// Caller holds m.mu.
 func (m *SessionManager) dropFromLayoutLocked(id SessionID) {
 	l := &m.layout
 	if l.Left != nil && *l.Left == id {
@@ -727,17 +779,7 @@ func (m *SessionManager) dropFromLayoutLocked(id SessionID) {
 	if l.Right != nil && *l.Right == id {
 		l.Right = nil
 	}
-	if l.shown(l.Selected) == nil && l.shown(l.Selected.other()) != nil {
-		l.Selected = l.Selected.other()
-	}
-	if l.Left != nil || l.Right != nil {
-		return
-	}
-	if len(m.order) == 0 {
-		m.layout = defaultPaneLayout()
-		return
-	}
-	l.show(l.Selected, m.order[0])
+	m.layout = normalizePaneLayout(m.layout, m.order)
 }
 
 // sessionActivity reads the WithSessionActivity source for id, or the zero value
@@ -760,6 +802,12 @@ func (m *SessionManager) sessionActivity(id SessionID) SessionActivity {
 // released, so one wedged handler stalls only this call, never every manager
 // path.
 func (m *SessionManager) List() []SessionInfo {
+	return m.listSnapshot(nil)
+}
+
+// listSnapshot is List; a non-nil layout receives the pane layout read under
+// the same m.mu hold as the session set, so the two describe one state.
+func (m *SessionManager) listSnapshot(layout *PaneLayout) []SessionInfo {
 	type listItem struct {
 		handler    *Handler
 		lastStatus string
@@ -791,6 +839,9 @@ func (m *SessionManager) List() []SessionInfo {
 			it.latched = tr.latched != ""
 		}
 		items = append(items, it)
+	}
+	if layout != nil {
+		*layout = clonePaneLayout(m.layout)
 	}
 	m.mu.Unlock()
 
@@ -919,8 +970,8 @@ func (m *SessionManager) aliasHeldLocked(alias string) bool {
 var aliasEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 // mintAliasLocked returns a random alias no live session holds. Random rather
-// than a counter because sessions do not survive a restart: a counter would
-// hand an old URL's name to a different tab.
+// than a counter: a counter would hand an old URL's name to a different tab in
+// a set that was not restored.
 func (m *SessionManager) mintAliasLocked() string {
 	for {
 		var b [5]byte
@@ -998,14 +1049,9 @@ func (m *SessionManager) WithdrawStatusLatch(id SessionID, want string, seq uint
 // the budget expired with teardowns outstanding, naming how many, and nil when
 // everything finished.
 //
-// A manager is SINGLE-USE. Shutdown cancels the status sweep and the idle reaper
-// and nothing restarts them, so a manager reused afterwards serves sessions with
-// no status stream and no idle reaping. Build a new one instead.
-//
-// Sessions are signalled first and waited on second, deliberately. Each teardown
-// can spend several containGrace windows, so closing and waiting one session at a
-// time would make the total scale with the tab count; signalling all of them
-// first overlaps those windows inside one budget.
+// A manager is SINGLE-USE: nothing restarts its loops, and every later Create
+// or CreateWith returns ErrManagerClosed. Sessions are all signalled before any
+// is waited on, so their containGrace windows overlap inside one budget.
 func (m *SessionManager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	if m.reaperCancel != nil {
@@ -1023,6 +1069,7 @@ func (m *SessionManager) Shutdown(ctx context.Context) error {
 	m.sessions = make(map[SessionID]*session)
 	m.order = nil
 	m.layout = defaultPaneLayout()
+	m.closed = true
 	loopsDone := m.loopsDone
 	m.mu.Unlock()
 	for _, s := range victims {
@@ -1129,13 +1176,35 @@ func (m *SessionManager) RESTHandler() http.Handler {
 }
 
 func (m *SessionManager) handleCreate(w http.ResponseWriter, _ *http.Request) {
-	info, err := m.create()
+	if m.refuseWhileRestoring(w) {
+		return
+	}
+	info, err := m.createWith(CreateSpec{})
+	if errors.Is(err, ErrManagerClosed) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
+		return
+	}
 	if err != nil {
 		m.logger.Error("session: create failed", "error", err)
 		http.Error(w, "create failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusCreated, info)
+}
+
+// refuseWhileRestoring answers 503 RestoringMessage with Retry-After: 1 while
+// RestoreSessionSet runs, and reports whether it did. The body's "error" field
+// is what web-terminal-ui shows on its loading overlay.
+func (m *SessionManager) refuseWhileRestoring(w http.ResponseWriter) bool {
+	m.mu.Lock()
+	restoring := m.restoring
+	m.mu.Unlock()
+	if !restoring {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": RestoringMessage})
+	return true
 }
 
 func (m *SessionManager) handleList(w http.ResponseWriter, _ *http.Request) {
@@ -1168,6 +1237,9 @@ func (m *SessionManager) handleSetOrder(w http.ResponseWriter, r *http.Request) 
 }
 
 func (m *SessionManager) handleGetLayout(w http.ResponseWriter, _ *http.Request) {
+	if m.refuseWhileRestoring(w) {
+		return
+	}
 	writeJSON(w, http.StatusOK, m.PaneLayout())
 }
 
@@ -1467,29 +1539,13 @@ func newSessionID() (SessionID, error) {
 	return SessionID(hex.EncodeToString(b[:])), nil
 }
 
-// writeJSON writes a session-surface JSON response. Its only callers are the
-// responses that carry session ids in full — handleCreate (201, the new id),
-// handleList (200, every live id) and handleGetLayout (200, the shown ids) —
-// which is why no-store is set here rather than left to each consumer.
-//
-// A session id IS a capability: it is the credential /ws attaches and resumes
-// with, which is why this package refuses to log one whole (see LogID). A 200/201
-// JSON body with no Cache-Control is heuristically cacheable under RFC 9111, so
-// without this header the same value the engine will not put in a log file can be
-// written to a browser's disk cache or held by an intermediary. Consumers were
-// closing that gap unevenly — web-terminal-kiro wrapped the surface in its own
-// no-store middleware, web-terminal-server set no cache directive at all — and a
-// credential's cache policy belongs to whoever issues the credential, so the
-// default lives here. A consumer may still add a broader policy of its own (kiro
-// covers its /api/tools and /api/health routes the same way); setting the same
-// header twice is idempotent.
-//
-// This is the surface's one UNCONDITIONAL setter, and the difference from
-// withNoStore is deliberate: that wrapper yields to a Cache-Control an outer
-// consumer already set, because the responses it covers carry no credential and
-// only their URL is sensitive. These bodies CONTAIN session ids, so their
-// prohibition is not the consumer's to relax, and the value is written whatever
-// an outer stack asked for.
+// writeJSON writes a session-surface JSON response: the bodies that carry
+// session ids in full (create, list, the layout read) and their 503 refusals.
+// A session id is the /ws credential (see LogID), and a 2xx JSON body without
+// Cache-Control is heuristically cacheable under RFC 9111, so no-store is set
+// here and UNCONDITIONALLY: unlike withNoStore, which yields to an outer policy
+// because its responses carry no credential, this prohibition is not the
+// consumer's to relax.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	h := w.Header()
 	h.Set("Content-Type", "application/json")

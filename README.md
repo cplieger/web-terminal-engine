@@ -4,7 +4,7 @@
 
 web-terminal-engine puts a real terminal in a web page, with a Go server that runs each program in a PTY and a TypeScript renderer that draws it in the browser.
 
-The server keeps each terminal's screen and scrollback, so a browser that reconnects, reloads or opens a second tab gets the same screen back. Sessions end when the server restarts. The Go module needs Go 1.27.2 or later and a Unix-like system such as Linux or macOS, and depends on `coder/websocket`, `creack/pty`, `golang.org/x/sys` and `cplieger/runesafe/v3`. The TypeScript package has no runtime dependencies. web-terminal-engine is licensed under MPL-2.0.
+The server keeps each terminal's screen and scrollback, so a browser that reconnects, reloads or opens a second tab gets the same screen back. A host can [restore sessions](docs/session-restore.md) after a restart. The Go module needs Go 1.27.2 or later and Linux, macOS or another Unix-like system, and depends on `coder/websocket`, `creack/pty`, `golang.org/x/sys` and `cplieger/runesafe/v3`. The TypeScript package has no runtime dependencies. web-terminal-engine is licensed under MPL-2.0.
 
 ## Why use it
 
@@ -128,6 +128,7 @@ The engine reads these sequences and does nothing with them:
 ## Documentation
 
 - [Sessions and processes](docs/sessions.md) covers the session manager, its routes, statuses and process cleanup.
+- [Restoring sessions](docs/session-restore.md) covers saving the session set and bringing it back after a restart.
 - [Security for embedders](docs/security-model.md) covers origins, session ids, caching and logs.
 - [Scrollback and reconnect](docs/scrollback.md) covers history depth, paging and restoring after a reload.
 - [Colors, links and input](docs/rendering.md) covers the palette, contrast, character width, links, keyboard and mouse.

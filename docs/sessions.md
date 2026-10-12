@@ -31,6 +31,8 @@ A handler stops in one of two ways:
 
 Each `POST /api/sessions` starts a process. `WithCreateGate(mw)` wraps the whole REST handler in your own middleware, for example a rate limit that picks out session creation.
 
+`(*SessionManager).Create()` starts a session from the factory. `(*SessionManager).CreateWith(spec)` does the same with a `CreateSpec`: `Build` replaces the factory for that one session, `Alias` names it when the alias is valid and free, and `PinnedTitle` pins its title. The alias and the title are in place before any client can list the session. After `Shutdown`, both `Create` and `CreateWith` return `ErrManagerClosed` and start nothing, and `POST /api/sessions` answers 503.
+
 The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdleReaper`, `WithStatusClassifier` and `WithSessionActivity`.
 
 `(*SessionManager).Shutdown(ctx)` signals every session before it waits on any of them, so their teardown windows overlap. When the budget runs out, it reports how many sessions were still unfinished. A manager is single-use. `Shutdown` stops the status sweep and the idle reaper and starts neither again.
@@ -67,6 +69,12 @@ A `PUT` must carry `open`, `handle` and `selected`. The server answers 400 with 
 The server keeps the record valid on its own. The first session of an empty layout shows on the left. A closing session leaves its pane, the selection moves to a pane that still shows something, and an empty record is refilled from the order. The idle reaper and `Shutdown` reset the record.
 
 A client reads the layout once at load, and the status stream does not carry layout changes. When one viewer writes a new layout, another open viewer keeps its old layout until it reloads. A reload restores whatever the last writer stored, as it does for the order.
+
+While `RestoreSessionSet` runs, `POST /api/sessions` and `GET /api/sessions/layout` answer 503 with `Retry-After: 1` and the body `{"error":"restoring tabs"}`. The list, the status stream and both `PUT` routes keep working. A client that waits for the layout read to succeed and lists afterwards sees the whole restored set.
+
+## Saving and restoring the session set
+
+Sessions end when the server stops. [Restoring sessions](session-restore.md) covers how a host saves the session set and brings it back after a restart.
 
 ## Status, activity and titles
 
@@ -113,7 +121,7 @@ Every attached client shows the same label without computing it again. `pinnedTi
 
 ### Aliases
 
-Each session also has an `alias`, a short public name a browser can put in a page address. It is 1 to 64 characters of letters, digits, `_` and `-`, and no two live sessions share one. The server picks a random 8-character alias when it creates the session. An alias grants nothing: a client attaches with the session `id`, never with the alias.
+Each session also has an `alias`, a short public name a browser can put in a page address. It is 1 to 64 characters of letters, digits, `_` and `-`, and no two live sessions share one. The server picks a random 8-character alias when it creates the session, unless `CreateWith` names one that is valid and free. An alias grants nothing: a client attaches with the session `id`, never with the alias.
 
 A host can give a session a better name with `(*SessionManager).SetSessionAlias(id, alias)`. It returns `false` and changes nothing for an unknown session, a value outside that alphabet or length, or a value another live session holds. The create response, the session list and the status stream all carry the alias, and the next status sweep pushes a change to every client.
 

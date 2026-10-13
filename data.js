@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1791337627066,
-  "repoUrl": "https://github.com/cplieger/web-terminal-engine",
+  "lastUpdate": 1791931248285,
+  "repoUrl": "https://github.com/cplieger/ci",
   "entries": {
     "Benchmark": [
       {
@@ -510,6 +510,70 @@ window.BENCHMARK_DATA = {
             "name": "BenchmarkScreenWrite",
             "value": 22671,
             "range": "± 228.5",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "tribble-trouble[bot]",
+            "username": "tribble-trouble[bot]",
+            "email": "338123824+tribble-trouble[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "c0fd11f07f039f4aba63c4e461884a9f652b5193",
+          "message": "chore(deps): update module golang.org/x/exp to v0.0.0-20261013213113-2ab7f3cbc5fb (#810)\n\nCo-authored-by: tribble-trouble[bot] <338123824+tribble-trouble[bot]@users.noreply.github.com>",
+          "timestamp": "2026-10-13T22:10:39Z",
+          "url": "https://github.com/cplieger/ci/commit/c0fd11f07f039f4aba63c4e461884a9f652b5193"
+        },
+        "date": 1791931248010,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "BenchmarkRenderRowWire - B/op",
+            "value": 592,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkRenderRowWire - allocs/op",
+            "value": 11,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkRenderRowWire",
+            "value": 1615,
+            "range": "± 33",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkScreenWrite - B/op",
+            "value": 4480,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkScreenWrite - allocs/op",
+            "value": 11,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkScreenWrite",
+            "value": 24943.5,
+            "range": "± 414",
             "unit": "ns/op",
             "extra": "10 samples, median"
           }

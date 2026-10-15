@@ -29,7 +29,8 @@ func inputClassifier(msg string) (string, bool) {
 func (m *SessionManager) computeStatusFromHandler(h *Handler, tr *statusTracker) string {
 	in := statusRaw{handler: h}
 	in.read()
-	return m.computeStatus(&in, tr)
+	st, _ := m.computeStatus(&in, tr)
+	return st
 }
 
 func handlerOf(t *testing.T, m *SessionManager, id SessionID) *Handler {
@@ -173,13 +174,13 @@ func TestComputeStatusFreshLatchOutranksActiveProgress(t *testing.T) {
 			// Sweep N: the poisoned snapshot — fresh notification, progress
 			// still reading active.
 			in := &statusRaw{progress: 3, notifMsg: tc.msg, notifSeq: 1}
-			if st := m.computeStatus(in, tr); st != tc.want {
+			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("poisoned snapshot: status = %q, want %q", st, tc.want)
 			}
 			// Sweep N+1: progress cleared, nothing new — the latch persists
 			// (the old code landed here on idle).
 			in = &statusRaw{progress: 0, notifMsg: tc.msg, notifSeq: 1}
-			if st := m.computeStatus(in, tr); st != tc.want {
+			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("after progress clears: status = %q, want %q", st, tc.want)
 			}
 		})
@@ -197,12 +198,12 @@ func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
 	tr := &statusTracker{}
 
 	in := &statusRaw{progress: 3, notifMsg: "Response complete", notifSeq: 1}
-	if st := m.computeStatus(in, tr); st != StatusDone {
+	if st, _ := m.computeStatus(in, tr); st != StatusDone {
 		t.Fatalf("poisoned snapshot: status = %q, want %q", st, StatusDone)
 	}
 	// Same active progress, no new notification: the latch is stale now and
 	// the genuine working phase supersedes it.
-	if st := m.computeStatus(in, tr); st != StatusWorking {
+	if st, _ := m.computeStatus(in, tr); st != StatusWorking {
 		t.Fatalf("next sweep: status = %q, want %q", st, StatusWorking)
 	}
 	if tr.latched != "" {
@@ -212,7 +213,7 @@ func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
 	// correct (in production the queued turn's own end brings its own
 	// "Response complete" with a new sequence).
 	in = &statusRaw{progress: 0, notifMsg: "Response complete", notifSeq: 1}
-	if st := m.computeStatus(in, tr); st != StatusIdle {
+	if st, _ := m.computeStatus(in, tr); st != StatusIdle {
 		t.Fatalf("after the working phase ends: status = %q, want %q", st, StatusIdle)
 	}
 }
@@ -245,6 +246,7 @@ func TestComputeStatusNoWorkingFromOutput(t *testing.T) {
 func TestReportsActivitySticky(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep() // List serves what the last sweep emitted, so sweep by hand
 	id, err := m.Create()
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -252,6 +254,7 @@ func TestReportsActivitySticky(t *testing.T) {
 	h := handlerOf(t, m, id)
 
 	reports := func() bool {
+		_ = m.diffStatuses()
 		for _, info := range m.List() {
 			if info.ID == id {
 				return info.ReportsActivity
@@ -274,13 +277,12 @@ func TestReportsActivitySticky(t *testing.T) {
 	}
 }
 
-// TestListCarriesRefinedStatus is the reload regression guard: GET
-// /api/sessions must report the same refined status the SSE stream pushes.
-// List used to compute only coarse liveness (idle/exited) and ignored the
-// tracker, so a page reload — whose stream-open reconcile GETs the list and
-// repaints every tab dot from it — visibly downgraded a latched done/input dot
-// back to the hollow idle state until the next real status transition.
-func TestListCarriesRefinedStatus(t *testing.T) {
+// TestListCarriesCommittedStatus is the reload regression guard: GET
+// /api/sessions must report the same status the SSE stream pushes. A list that
+// computed only coarse liveness (idle/exited) would make a page reload, whose
+// stream-open reconcile repaints every tab dot from it, downgrade a latched
+// done/input dot back to the hollow idle state until the next transition.
+func TestListCarriesCommittedStatus(t *testing.T) {
 	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
 	t.Cleanup(func() { shutdownManager(t, m) })
 	m.stopSweep() // drive the sweep by hand, deterministically
@@ -321,12 +323,14 @@ func TestListCarriesRefinedStatus(t *testing.T) {
 	}
 }
 
-// TestListExitedWinsOverStaleSweptStatus verifies live process exit outranks
-// the sweep's last computed status in List: a session whose process died since
-// the last sweep reports exited immediately, never an up-to-a-tick-stale
-// done/working.
-func TestListExitedWinsOverStaleSweptStatus(t *testing.T) {
-	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
+// TestPointInTimeReadsAgreeAcrossACrash pins that List and the snapshot serve
+// the sweep's committed (status, statusSeq) pair while a crash is not yet swept:
+// a crashed status beside the previous status's number would let a reader's ack
+// cover the crash before it is numbered. The crash then takes its own number.
+func TestPointInTimeReadsAgreeAcrossACrash(t *testing.T) {
+	m := NewSessionManager(func(SessionID) *Handler {
+		return NewHandler([]string{"/bin/sh", "-c", "read x; exit 3"}, WithWorkDir("/"), WithLogger(nil))
+	}, WithStatusClassifier(inputClassifier))
 	t.Cleanup(func() { shutdownManager(t, m) })
 	m.stopSweep()
 
@@ -336,15 +340,32 @@ func TestListExitedWinsOverStaleSweptStatus(t *testing.T) {
 	}
 	h := handlerOf(t, m, id)
 	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
-	_ = m.diffStatuses() // the sweep records done
-
-	// The process dies with no further sweep: exit must win over the stale done.
-	h.Close()
+	n := eventFor(t, m.diffStatuses(), id).StatusSeq
+	if _, err := h.ptmx.WriteString("\n"); err != nil {
+		t.Fatalf("write to pty: %v", err)
+	}
 	waitExited(t, h)
-	for _, info := range m.List() {
-		if info.ID == id && info.Status != StatusExited {
-			t.Fatalf("List status = %q, want %q (exit outranks the stale swept status)", info.Status, StatusExited)
+
+	li := listedInfo(t, m, id)
+	if li.Status != StatusDone || li.StatusSeq != n {
+		t.Errorf("List = (%q, %d), want the committed (%q, %d)", li.Status, li.StatusSeq, StatusDone, n)
+	}
+	for _, ev := range m.snapshot() {
+		if ev.ID == id && (ev.Status != StatusDone || ev.StatusSeq != n) {
+			t.Errorf("snapshot = (%q, %d), want the committed (%q, %d)", ev.Status, ev.StatusSeq, StatusDone, n)
 		}
+	}
+
+	m.markSessionSeen(id, li.StatusSeq)
+	crash := eventFor(t, m.diffStatuses(), id)
+	if crash.Status != StatusCrashed || crash.StatusSeq != n+1 || crash.SeenSeq != n {
+		t.Fatalf("crash event = (%q, %d, seen %d), want (%q, %d, seen %d)",
+			crash.Status, crash.StatusSeq, crash.SeenSeq, StatusCrashed, n+1, n)
+	}
+	m.markSessionSeen(id, crash.StatusSeq)
+	read := eventFor(t, m.diffStatuses(), id)
+	if read.StatusSeq != n+1 || read.SeenSeq != n+1 {
+		t.Errorf("after acking the crash = (%d, seen %d), want (%d, seen %d)", read.StatusSeq, read.SeenSeq, n+1, n+1)
 	}
 }
 
@@ -633,12 +654,10 @@ func TestBroadcastDropsSlowSubscriber(t *testing.T) {
 }
 
 // TestDiffStatusesWedgedHandlerDoesNotStallManager pins the lock split in
-// diffStatuses / List / snapshot: a handler stuck under its own h.mu (a wedged
-// PTY callback, a stalled classifier input) stalls only the paths that must
-// read THAT handler's state (the sweep, a List over it) — never the manager
-// lock itself. Pre-split, those paths held m.mu across the handler getters
-// 4×/s, so one stuck handler froze every m.mu path (create, close, title PUT,
-// WS attach, SSE subscribe) for as long as it stayed stuck.
+// diffStatuses: a handler stuck under its own h.mu (a wedged PTY callback, a
+// stalled classifier input) stalls only the sweep, which must read THAT
+// handler's state, never the manager lock itself, and never List or a new
+// subscriber's snapshot, which serve the committed record and read no handler.
 func TestDiffStatusesWedgedHandlerDoesNotStallManager(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
@@ -648,8 +667,7 @@ func TestDiffStatusesWedgedHandlerDoesNotStallManager(t *testing.T) {
 	}
 	h := handlerOf(t, m, id)
 
-	// Wedge the handler: hold its h.mu so every status getter blocks. Both the
-	// sweep and a List() must genuinely block on it (they read handler state).
+	// Wedge the handler: hold its h.mu so every status getter blocks.
 	h.mu.Lock()
 	unwedged := false
 	defer func() {
@@ -658,45 +676,42 @@ func TestDiffStatusesWedgedHandlerDoesNotStallManager(t *testing.T) {
 		}
 	}()
 	sweepDone := make(chan struct{})
-	listDone := make(chan struct{})
 	go func() {
 		_ = m.diffStatuses() // blocks in phase 2 on the wedged handler
 		close(sweepDone)
 	}()
-	go func() {
-		_ = m.List() // blocks in its handler-read phase on the wedged handler
-		close(listDone)
-	}()
 	select {
 	case <-sweepDone:
 		t.Fatal("diffStatuses returned while the handler was wedged; the test lost its premise")
-	case <-listDone:
-		t.Fatal("List returned while the handler was wedged; the test lost its premise")
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	// The manager lock must stay available while both are stuck: a pure-m.mu
-	// path (the title PUT) completes promptly.
-	titleDone := make(chan struct{})
-	go func() {
-		m.SetSessionTitle(id, "still responsive")
-		close(titleDone)
-	}()
-	select {
-	case <-titleDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SetSessionTitle blocked while a handler was wedged: a handler getter is being called under m.mu again")
+	// With the sweep stuck in phase 2, a pure-m.mu path (the title PUT), List and
+	// the snapshot all complete promptly.
+	for name, read := range map[string]func(){
+		"SetSessionTitle": func() { m.SetSessionTitle(id, "still responsive") },
+		"List":            func() { _ = m.List() },
+		"snapshot":        func() { _ = m.snapshot() },
+	} {
+		done := make(chan struct{})
+		go func() {
+			read()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Errorf("%s blocked while a handler was wedged: it reads handler state or holds m.mu across a getter", name)
+		}
 	}
 
-	// Unwedge; both stuck paths complete.
+	// Unwedge; the stuck sweep completes.
 	h.mu.Unlock()
 	unwedged = true
-	for name, ch := range map[string]chan struct{}{"diffStatuses": sweepDone, "List": listDone} {
-		select {
-		case <-ch:
-		case <-time.After(2 * time.Second):
-			t.Fatalf("%s did not finish after the handler was released", name)
-		}
+	select {
+	case <-sweepDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("diffStatuses did not finish after the handler was released")
 	}
 }
 

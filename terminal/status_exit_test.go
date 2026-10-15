@@ -307,7 +307,7 @@ func TestCrashedOutranksEveryProgressStateAndLatch(t *testing.T) {
 						progress: ps.value, progressValue: -1,
 						exited: true, crashed: ex.crashed,
 					}
-					if st := m.computeStatus(in, tr); st != ex.want {
+					if st, _ := m.computeStatus(in, tr); st != ex.want {
 						t.Errorf("status = %q, want %q (exit outranks progress %d and latch %q)",
 							st, ex.want, ps.value, la.set)
 					}
@@ -318,8 +318,8 @@ func TestCrashedOutranksEveryProgressStateAndLatch(t *testing.T) {
 }
 
 // TestListReportsCrashedForAFailedExit checks the point-in-time read agrees with
-// the stream: List and the SSE initial sync go through refinedStatus, and the two
-// sources MUST agree about HOW a session ended, or a reload silently downgrades a
+// the stream: List serves the sweep's committed record, and the two sources
+// MUST agree about HOW a session ended, or a reload silently downgrades a
 // crashed tab to a plain exited one.
 func TestListReportsCrashedForAFailedExit(t *testing.T) {
 	m := NewSessionManager(func(SessionID) *Handler {
@@ -335,6 +335,9 @@ func TestListReportsCrashedForAFailedExit(t *testing.T) {
 	h := handlerOf(t, m, id)
 	waitExited(t, h)
 
+	if ev := eventFor(t, m.diffStatuses(), id); ev.Status != StatusCrashed {
+		t.Errorf("sweep event status = %q, want %q", ev.Status, StatusCrashed)
+	}
 	found := false
 	for _, info := range m.List() {
 		if info.ID != id {
@@ -347,9 +350,5 @@ func TestListReportsCrashedForAFailedExit(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("session %s missing from List", id)
-	}
-	// The sweep's own view has to match it.
-	if ev := eventFor(t, m.diffStatuses(), id); ev.Status != StatusCrashed {
-		t.Errorf("sweep event status = %q, want %q", ev.Status, StatusCrashed)
 	}
 }

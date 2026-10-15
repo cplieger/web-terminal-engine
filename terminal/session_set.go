@@ -60,22 +60,24 @@ var (
 
 // CaptureSessionSet snapshots the live set: the sessions, their order and the
 // layout as one manager state. resume is called once per kept session, outside
-// the manager lock (it may call List). A cleanly exited session (StatusExited)
-// is left out. A crashed one is kept. Only the first MaxSessionSetSessions in
-// display order are kept. A token over MaxResumeTokenBytes or not
-// valid UTF-8 is dropped, and when the set would still marshal past
-// MaxSessionSetBytes, tokens are dropped from the last session backwards until
-// it fits, so the result always passes ParseSessionSet once marshalled.
+// the manager lock (it may call List). A session whose process has exited
+// cleanly is left out, read live; a crashed one is kept. Only the first
+// MaxSessionSetSessions in display order are kept. A token over
+// MaxResumeTokenBytes or not valid UTF-8 is dropped, then tokens are dropped
+// from the last session backwards until the set marshals within
+// MaxSessionSetBytes, so the result always passes ParseSessionSet.
 func (m *SessionManager) CaptureSessionSet(resume func(SessionInfo) string) SessionSet {
 	var layout PaneLayout
-	list := m.listSnapshot(&layout)
-	return captureSessionSet(list, layout, resume)
+	var cleanExit []bool
+	list := m.listSnapshot(&layout, &cleanExit)
+	return captureSessionSet(list, cleanExit, layout, resume)
 }
 
-func captureSessionSet(list []SessionInfo, layout PaneLayout, resume func(SessionInfo) string) SessionSet {
+// captureSessionSet builds the set from list; cleanExit[i] drops list[i].
+func captureSessionSet(list []SessionInfo, cleanExit []bool, layout PaneLayout, resume func(SessionInfo) string) SessionSet {
 	kept := make([]SessionInfo, 0, len(list))
 	for i := range list {
-		if list[i].Status != StatusExited && len(kept) < MaxSessionSetSessions {
+		if !cleanExit[i] && len(kept) < MaxSessionSetSessions {
 			kept = append(kept, list[i])
 		}
 	}

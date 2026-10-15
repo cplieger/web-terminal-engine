@@ -9,10 +9,6 @@ import (
 
 var propTitles = []string{"", "fix build", "日本語", "a b c"}
 
-func propStatus(r *rand.Rand) string {
-	return []string{StatusIdle, StatusWorking, StatusExited, StatusCrashed, StatusInput}[r.IntN(5)]
-}
-
 // propSide picks a session id from ids, or nil.
 func propSide(r *rand.Rand, ids []SessionID) *SessionID {
 	if len(ids) == 0 || r.IntN(3) == 0 {
@@ -27,14 +23,16 @@ func TestSessionSetLayout_roundTripsThroughParse(t *testing.T) {
 		r := rand.New(rand.NewPCG(seed, seed^0x9e3779b97f4a7c15))
 		n := r.IntN(9)
 		list := make([]SessionInfo, n)
+		cleanExit := make([]bool, n)
 		ids := make([]SessionID, n)
 		tokens := make(map[SessionID]string, n)
 		for i := range list {
 			ids[i] = SessionID(fmt.Sprintf("id-%d", i))
 			list[i] = SessionInfo{
 				ID: ids[i], Alias: fmt.Sprintf("alias-%d", i),
-				PinnedTitle: propTitles[r.IntN(len(propTitles))], Status: propStatus(r),
+				PinnedTitle: propTitles[r.IntN(len(propTitles))],
 			}
+			cleanExit[i] = r.IntN(4) == 0
 			if r.IntN(2) == 0 {
 				tokens[ids[i]] = fmt.Sprintf("sess_%d", r.Uint32())
 			}
@@ -48,7 +46,7 @@ func TestSessionSetLayout_roundTripsThroughParse(t *testing.T) {
 			layout.Selected = PaneRight
 		}
 
-		set := captureSessionSet(list, layout, func(info SessionInfo) string { return tokens[info.ID] })
+		set := captureSessionSet(list, cleanExit, layout, func(info SessionInfo) string { return tokens[info.ID] })
 		data, err := json.Marshal(set)
 		if err != nil {
 			t.Fatalf("seed %d: json.Marshal = %v", seed, err)

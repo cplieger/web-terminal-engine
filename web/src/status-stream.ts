@@ -93,6 +93,15 @@ export interface SessionInfo {
   /** how many sources produced `activity`: >= 1 whenever `activity` is non-empty,
    *  0 when it is empty or the host does not count them. */
   readonly activityCount?: number;
+  /** numbers the occurrence of `status`: it rises by one each time the status
+   *  changes or a fresh notification re-latches it, and never falls for one id.
+   *  Absent (or 0) means nothing numbered yet, including from an older server. */
+  readonly statusSeq?: number;
+  /** the highest `statusSeq` any reader acknowledged through
+   *  `PUT /api/sessions/{id}/seen`. Never falls for one id and never exceeds
+   *  `statusSeq`; a status that calls for attention is unread while
+   *  `statusSeq > seenSeq`. */
+  readonly seenSeq?: number;
 }
 
 /** SessionStatus is one session's current status as carried on the status

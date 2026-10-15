@@ -10,7 +10,6 @@ import (
 	"net/http/httptest"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -130,50 +129,28 @@ func TestCaptureSessionSet(t *testing.T) {
 	}
 }
 
-// The activity source runs in List's second phase, after the session set was
-// read; a create and a layout write made there must not reach the snapshot.
-func TestCaptureSessionSet_readsOneManagerState(t *testing.T) {
-	var (
-		m     *SessionManager
-		first SessionID
-		armed atomic.Bool
-	)
-	m = NewSessionManager(catFactory, WithSessionActivity(func(SessionID) SessionActivity {
-		if armed.CompareAndSwap(true, false) {
-			late, err := m.CreateWith(CreateSpec{Alias: "alias-late"})
-			if err != nil {
-				t.Errorf("CreateWith during the capture: %v", err)
-				return SessionActivity{}
-			}
-			setLayout(t, m, PaneLayout{Left: new(first), Right: new(late.ID), Selected: PaneRight, Handle: 0.4, Open: true})
-		}
-		return SessionActivity{}
-	}))
+// Capture drops a cleanly exited session as soon as it has exited, before any
+// sweep commits the exit, while List still serves the committed status.
+func TestCaptureSessionSet_readsExitLive(t *testing.T) {
+	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
 	m.stopSweep()
-	info, err := m.CreateWith(CreateSpec{Alias: "alias-first"})
+	ended, err := m.CreateWith(CreateSpec{Alias: "alias-ended", Build: handlerRunning(t, "/bin/true")})
 	if err != nil {
 		t.Fatalf("CreateWith: %v", err)
 	}
-	first = info.ID
+	if _, err := m.CreateWith(CreateSpec{Alias: "alias-live"}); err != nil {
+		t.Fatalf("CreateWith: %v", err)
+	}
+	waitExited(t, handlerOf(t, m, ended.ID))
 
-	armed.Store(true)
+	if st := listedInfo(t, m, ended.ID).Status; st != StatusIdle {
+		t.Errorf("List status = %q, want %q (no sweep has committed the exit)", st, StatusIdle)
+	}
 	got := m.CaptureSessionSet(func(SessionInfo) string { return "" })
-	if armed.Load() {
-		t.Fatal("the activity source never ran during the capture, so the test proves nothing")
-	}
-
-	want := SessionSet{
-		Version:  SessionSetVersion,
-		Sessions: []SessionSetEntry{{Alias: "alias-first"}},
-		Layout:   SessionSetLayout{Left: new(0), Selected: PaneLeft, Handle: 0.5},
-	}
-	if !sameSessionSet(got, want) {
-		t.Errorf("captured %+v layout %s, want the state before the concurrent writes %+v layout %s",
-			got.Sessions, fmtSetLayout(got.Layout), want.Sessions, fmtSetLayout(want.Layout))
-	}
-	if n := len(m.List()); n != 2 {
-		t.Errorf("List() after the capture has %d sessions, want 2 (the concurrent create ran)", n)
+	want := []SessionSetEntry{{Alias: "alias-live"}}
+	if !slices.Equal(got.Sessions, want) {
+		t.Errorf("Sessions = %+q, want %+q (the exited session left out before any sweep)", got.Sessions, want)
 	}
 }
 
@@ -185,7 +162,7 @@ func TestCaptureSessionSet_fitsTheByteLimit(t *testing.T) {
 		list[i] = SessionInfo{ID: SessionID(fmt.Sprintf("id-%03d", i)), Alias: fmt.Sprintf("alias-%03d", i), Status: StatusIdle}
 	}
 	token := strings.Repeat("\x00", MaxResumeTokenBytes)
-	set := captureSessionSet(list, PaneLayout{Left: new(list[0].ID), Selected: PaneLeft, Handle: 0.5},
+	set := captureSessionSet(list, make([]bool, len(list)), PaneLayout{Left: new(list[0].ID), Selected: PaneLeft, Handle: 0.5},
 		func(SessionInfo) string { return token })
 
 	data, err := json.Marshal(set)

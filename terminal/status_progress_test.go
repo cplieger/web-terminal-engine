@@ -58,7 +58,7 @@ func TestComputeStatusProgressStateMapping(t *testing.T) {
 			t.Cleanup(func() { shutdownManager(t, m) })
 			tr := &statusTracker{}
 			in := &statusRaw{progress: tc.progress, progressValue: -1}
-			if st := m.computeStatus(in, tr); st != tc.want {
+			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("progress %d: status = %q, want %q", tc.progress, st, tc.want)
 			}
 		})
@@ -139,7 +139,7 @@ func TestComputeStatusFreshNotificationOutranksProgressState(t *testing.T) {
 			t.Cleanup(func() { shutdownManager(t, m) })
 			tr := &statusTracker{}
 			in := &statusRaw{progress: tc.progress, progressValue: -1, notifMsg: tc.msg, notifSeq: 1}
-			if st := m.computeStatus(in, tr); st != tc.want {
+			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("fresh %q with progress %d: status = %q, want %q", tc.msg, tc.progress, st, tc.want)
 			}
 		})
@@ -175,13 +175,13 @@ func TestComputeStatusNewProgressStateSupersedesStaleLatch(t *testing.T) {
 
 			// Sweep 1: the turn ends, done latches.
 			in := &statusRaw{progress: 0, progressValue: -1, notifMsg: "Response complete", notifSeq: 1}
-			if st := m.computeStatus(in, tr); st != StatusDone {
+			if st, _ := m.computeStatus(in, tr); st != StatusDone {
 				t.Fatalf("sweep 1: status = %q, want %q", st, StatusDone)
 			}
 			// Sweep 2: a new progress state, no new notification. The latch is
 			// stale now and the program's state wins.
 			in = &statusRaw{progress: tc.progress, progressValue: -1, notifMsg: "Response complete", notifSeq: 1}
-			if st := m.computeStatus(in, tr); st != tc.want {
+			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("sweep 2 with progress %d: status = %q, want %q", tc.progress, st, tc.want)
 			}
 			if tr.latched != "" {
@@ -232,19 +232,19 @@ func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 
 			for sweep := 1; sweep <= 4; sweep++ {
 				in := &statusRaw{progress: 4, progressValue: tc.value, notifMsg: tc.msg, notifSeq: 1}
-				if st := m.computeStatus(in, tr); st != tc.want {
+				if st, _ := m.computeStatus(in, tr); st != tc.want {
 					t.Fatalf("sweep %d: status = %q, want %q", sweep, st, tc.want)
 				}
 			}
 			// A climbing percentage is still the same state, so it must not
 			// re-open the question either (kiro-cli's context usage grows).
 			in := &statusRaw{progress: 4, progressValue: tc.value + 5, notifMsg: tc.msg, notifSeq: 1}
-			if st := m.computeStatus(in, tr); st != tc.want {
+			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("after the percentage moves: status = %q, want %q", st, tc.want)
 			}
 			// The latch is not stuck: the program leaving state 4 clears it.
 			in = &statusRaw{progress: tc.resumeTo, progressValue: -1, notifMsg: tc.msg, notifSeq: 1}
-			if st := m.computeStatus(in, tr); st != tc.resumed {
+			if st, _ := m.computeStatus(in, tr); st != tc.resumed {
 				t.Errorf("after resuming to state %d: status = %q, want %q", tc.resumeTo, st, tc.resumed)
 			}
 			if tr.latched != "" {
@@ -262,7 +262,7 @@ func TestComputeStatusPausedStateStandsAloneWithoutLatch(t *testing.T) {
 	t.Cleanup(func() { shutdownManager(t, m) })
 	tr := &statusTracker{}
 	in := &statusRaw{progress: 4, progressValue: 40, notifMsg: "", notifSeq: 0}
-	if st := m.computeStatus(in, tr); st != StatusWarning {
+	if st, _ := m.computeStatus(in, tr); st != StatusWarning {
 		t.Errorf("status = %q, want %q", st, StatusWarning)
 	}
 }

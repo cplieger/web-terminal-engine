@@ -17,17 +17,12 @@ const (
 	// GET (list). It is also the path a create gate throttles (see
 	// WithCreateGate).
 	SessionsPath = "/api/sessions"
-	// SessionsSubtreePath is the session REST subtree: DELETE /{id} (close),
-	// PUT /{id}/title (set the client-fallback title), PUT + DELETE
-	// /{id}/pinned-title (set / clear the user's name), PUT /order (set the
-	// shared display order every viewer sees) and GET + PUT /layout (read / set
-	// the shared pane layout). ServeMux treats the trailing-slash pattern as a
-	// distinct mount, so the REST handler is mounted at both SessionsPath and
-	// this subtree to receive every method.
-	//
-	// /order and /layout are literal segments where their siblings take an
-	// {id}. ServeMux prefers the more specific literal, and no session id can
-	// collide with them (ids are hex), so the patterns cannot overlap.
+	// SessionsSubtreePath is the session REST subtree: DELETE /{id}, PUT
+	// /{id}/title, PUT + DELETE /{id}/pinned-title, PUT /{id}/seen, PUT /order
+	// and GET + PUT /layout. ServeMux treats the trailing-slash pattern as a
+	// distinct mount, so the REST handler is mounted here and at SessionsPath.
+	// /order and /layout are literal segments, which ServeMux prefers over the
+	// {id} wildcard, and no hex session id can collide with them.
 	SessionsSubtreePath = "/api/sessions/"
 	// SessionEventsPath is the session status stream (SSE) route. It is a more
 	// specific pattern than SessionsSubtreePath, so ServeMux routes it to the
@@ -137,34 +132,13 @@ type SessionHandlers struct {
 	Events http.Handler
 }
 
-// MountSessionRoutes wires the session-manager HTTP surface on mux — the
-// engine-owned mount contract, in code:
-//
-//	WSPath              -> h.WS     (terminal WebSocket, ?session=<id>)
-//	SessionsPath        -> h.REST   (POST create, GET list; create-gated)
-//	SessionsSubtreePath -> h.REST   (DELETE /{id}, PUT /{id}/title,
-//	                                 PUT + DELETE /{id}/pinned-title,
-//	                                 PUT /order, GET + PUT /layout;
-//	                                 create-gated)
-//	SessionEventsPath   -> h.Events (status SSE)
-//
-// Exactly these four mounts and no others: the engine's debug or future
-// routes never appear implicitly, and any addition to the set is a
-// release-noted API change (see the path constants). The handlers are passed
-// in — normally WebSocketHandler, RESTHandler, and EventsHandler of one
-// SessionManager, which MountAPI wires for you — so a consumer's tests can
-// exercise routing and middleware with stubs, without a real PTY.
-//
-// The mount shape encodes two ServeMux subtleties consumers previously
-// re-derived by hand: the REST handler needs BOTH the exact path and the
-// subtree mount (its internal patterns span /api/sessions and
-// /api/sessions/{id}...), and the SSE path, being more specific than the
-// subtree, routes to events rather than the REST DELETE /{id} pattern.
-//
-// The REST mounts are wrapped in the surface's cache policy (withNoStore),
-// outside any create gate, so every response on a token-bearing path states
-// Cache-Control — including the ones no handler writes. WS and Events are not
-// wrapped: one is a handshake, the other sets its own stricter value.
+// MountSessionRoutes wires exactly four mounts on mux, the engine-owned route
+// set: WSPath to h.WS, SessionsPath and SessionsSubtreePath to h.REST (create
+// gated, and wrapped in withNoStore outside the gate), and SessionEventsPath to
+// h.Events. Each REST route is listed at SessionsSubtreePath; any addition is a
+// release-noted API change. The SSE path is more specific than the subtree, so
+// it routes to h.Events. The handlers are passed in, normally one manager's
+// (MountAPI wires them), so a consumer's tests can stub them.
 func MountSessionRoutes(mux *http.ServeMux, h SessionHandlers, opts ...MountOption) {
 	var c mountConfig
 	for _, o := range opts {

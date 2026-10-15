@@ -112,6 +112,11 @@ type statusEvent struct {
 	// surface it renders it on, exactly as it does the terminal stream.
 	Notification    string `json:"notification,omitempty"`
 	NotificationSeq uint64 `json:"notificationSeq,omitempty"`
+	// StatusSeq numbers the Status beside it (see SessionInfo.StatusSeq) and
+	// SeenSeq is the session's seen floor (see SessionInfo.SeenSeq). Not carried
+	// on a Removed event.
+	StatusSeq uint64 `json:"statusSeq,omitempty"`
+	SeenSeq   uint64 `json:"seenSeq,omitempty"`
 	// ProgressValue is the OSC 9;4 percentage for this session: -1 when absent or
 	// unknown, else 0-100 (see Handler.ProgressValue). Always carried — a session
 	// that has reported no percentage is not a session at 0%, so the field must
@@ -126,10 +131,11 @@ type statusEvent struct {
 }
 
 // statusTracker holds the per-session state the status computation needs beyond
-// the handler: the last emitted status/title/progress percentage (to detect
-// changes), the last notification sequence classified and the last one
-// delivered, the latched needs-input/done state, and the automatic-title
-// confirmation window.
+// the handler: the last emitted status/title/OSC title/progress percentage (to
+// detect changes, and the committed record List and snapshot serve), the last
+// notification sequence classified and the last one delivered, the latched
+// needs-input/done state, the status occurrence number and seen floor, and the
+// automatic-title confirmation window.
 type statusTracker struct {
 	candidateSince  time.Time // when candidatePGID was first observed
 	lastStatus      string
@@ -141,8 +147,17 @@ type statusTracker struct {
 	// lastActivity is the last emitted secondary activity state. Without it the
 	// field changes silently and only surfaces when something else moves.
 	lastActivity string
+	// lastOSCTitle is the OSC rung behind lastTitle, which point-in-time reads
+	// compose with the stored titles.
+	lastOSCTitle string
 	notifSeen    uint64
 	latchSeq     uint64
+	// statusSeq numbers each status occurrence (see sweepSession) and seenSeq is
+	// the highest one a reader acknowledged (markSessionSeen); lastSeenSeq is the
+	// seenSeq last emitted, so an ack reaches every subscriber.
+	statusSeq   uint64
+	seenSeq     uint64
+	lastSeenSeq uint64
 	// notifDelivered is the last notification sequence CARRIED on an event.
 	// Separate from notifSeen, which only advances when a classifier consumed the
 	// message: delivery is unconditional, so the two would otherwise disagree for
@@ -163,6 +178,45 @@ type statusTracker struct {
 	// under one state emits nothing.
 	lastActivityCount int
 	lastReports       bool // last emitted reportsActivity (to detect a false->true flip)
+}
+
+// numberOccurrence advances statusSeq when status is a new occurrence: a change
+// from the last emitted status, or a fresh latch. A re-latched done or input
+// repeats the status string, so only fresh tells it apart from a repeated
+// frame. Call it before lastStatus takes status.
+func (tr *statusTracker) numberOccurrence(status string, fresh bool) {
+	if status != tr.lastStatus || fresh {
+		tr.statusSeq++
+	}
+}
+
+// committedRecord is a session's handler-derived record as the last sweep
+// emitted it, plus its seen floor. List and snapshot serve only this, so a
+// point-in-time read never pairs a status with another status's number or
+// carries a value no sweep emitted, which no later frame would correct.
+type committedRecord struct {
+	status        string
+	activity      string
+	oscTitle      string
+	statusSeq     uint64
+	seenSeq       uint64
+	activityCount int
+	progressValue int
+	reports       bool
+}
+
+// committedOf reads tr's committed record, or the new-session defaults when no
+// sweep has emitted one yet. Callers hold m.mu.
+func committedOf(tr *statusTracker) committedRecord {
+	if tr == nil || tr.lastStatus == "" {
+		// Not tr.lastProgressValue: a fresh tracker's zero means 0%.
+		return committedRecord{status: StatusIdle, progressValue: progressAbsent}
+	}
+	return committedRecord{
+		status: tr.lastStatus, activity: tr.lastActivity, oscTitle: tr.lastOSCTitle,
+		statusSeq: tr.statusSeq, seenSeq: tr.seenSeq, activityCount: tr.lastActivityCount,
+		progressValue: tr.lastProgressValue, reports: tr.lastReports,
+	}
 }
 
 // autoTitleConfirm is how long a foreground process must hold the terminal
@@ -389,7 +443,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	// A notification the tracker has not delivered yet. Read BEFORE
 	// computeStatus, which advances the separate classifier cursor.
 	notifNew := it.notifSeq > tr.notifDelivered
-	status := m.computeStatus(it, tr)
+	status, fresh := m.computeStatus(it, tr)
 	// The stored titles are re-read under m.mu — a PUT during phase 2 must not
 	// be masked by the phase-1 capture.
 	clientTitle := s.clientTitle
@@ -406,7 +460,9 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	// reportsActivity is sticky: progress stays >= 0 once any OSC 9;4 has been
 	// seen (state 0 is "cleared", not "never seen" = -1), and a latched
 	// notification is the other genuine OSC 9 signal. The client reveals the
-	// tab's activity dot only when this is set.
+	// tab's activity dot only when this is set. The secondary activity is
+	// deliberately not an input: folding it in would reveal the dot for a
+	// background task.
 	reports := it.progress >= 0 || tr.latched != ""
 	// Emit on a raw client-title or pinned-name change too: a PUT can change
 	// only one of those (OSC title and status unchanged), and a consumer
@@ -429,9 +485,12 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 		pinnedTitle == tr.lastPinnedTitle && alias == tr.lastAlias && reports == tr.lastReports &&
 		it.progressValue == tr.lastProgressValue && it.order == tr.lastOrder &&
 		it.activity.State == tr.lastActivity && it.activity.Count == tr.lastActivityCount &&
-		!notifNew {
+		tr.seenSeq == tr.lastSeenSeq && !notifNew {
 		return statusEvent{}, false
 	}
+	tr.numberOccurrence(status, fresh)
+	tr.lastSeenSeq = tr.seenSeq
+	tr.lastOSCTitle = it.oscTitle
 	tr.lastStatus = status
 	tr.lastTitle = title
 	tr.lastClientTitle = clientTitle
@@ -450,6 +509,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 		PinnedTitle: pinnedTitle, Alias: alias, CreatedAt: it.createdAt, ReportsActivity: reports,
 		ProgressValue: it.progressValue, Order: &pos,
 		Activity: it.activity.State, ActivityCount: it.activity.Count,
+		StatusSeq: tr.statusSeq, SeenSeq: tr.seenSeq,
 	}
 	// A notification rides along on the sweep that first observes it, and only
 	// that sweep: it is an event, so replaying it on a later status-only change
@@ -484,16 +544,14 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 // Working comes ONLY from OSC 9;4 progress — never from raw output activity — so
 // a program that reports no progress never flaps to working merely because the
 // user is typing at its prompt (the reveal gate then keeps its dot hidden).
-func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) string {
+func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) (status string, freshLatch bool) {
 	if in.exited {
-		// Top precedence, and the split lives here rather than in the caller so
-		// every status consumer (sweep, List, SSE snapshot) reads one rule: a
-		// dead session's LAST progress state or latch says nothing useful about
-		// how it died.
+		// Top precedence: a dead session's LAST progress state or latch says
+		// nothing useful about how it died.
 		if in.crashed {
-			return StatusCrashed
+			return StatusCrashed, false
 		}
-		return StatusExited
+		return StatusExited, false
 	}
 	latchedNow := m.applyNotification(in, tr)
 	// A progress-reporting program (kiro-cli, Claude Code) drives its status from
@@ -515,14 +573,14 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) string 
 	if st, ok := progressStatus(in.progress); ok && !latchedNow &&
 		(tr.latched == "" || progressSupersedesLatch(in.progress)) {
 		tr.latched = ""
-		return st
+		return st, false
 	}
 	// A latched notification state (needs-input or done) persists through the
 	// quiet gap after the turn until a progress state that contradicts it arrives.
 	if tr.latched != "" {
-		return tr.latched
+		return tr.latched, latchedNow
 	}
-	return StatusIdle
+	return StatusIdle, false
 }
 
 // progressStatus maps an OSC 9;4 progress state to the status it reports, and
@@ -633,66 +691,40 @@ func (m *SessionManager) unsubscribe(ch chan statusEvent) {
 }
 
 // snapshot returns the current status of every session for the initial sync a
-// new subscriber receives, in compareSessionOrder, via the same refinedStatus
-// read List serves (the two sources must agree, on order as well as on status;
-// see refinedStatus and compareSessionOrder).
+// new subscriber receives, in compareSessionOrder, from the same committed
+// tracker record List serves (the two sources must agree, on order as well as
+// on status; see committedOf and compareSessionOrder).
 //
-// Two-phase like diffStatuses and List: manager state under m.mu, handler
-// getters after it is released. The screen-derived inputs come from ONE
-// statusSnapshot call per handler, so the initial sync cannot pair one session's
-// progress state with a percentage read a moment later. No notification is
-// replayed here: a notification is an event, and a subscriber joining later did
-// not miss a state.
+// One m.mu hold and no handler getter, so a wedged handler cannot stall a new
+// subscriber. No notification is replayed here: a notification is an event,
+// and a subscriber joining later did not miss a state.
 func (m *SessionManager) snapshot() []statusEvent {
 	type snapItem struct {
-		handler    *Handler
-		lastStatus string
-		autoTitle  string
-		ev         statusEvent
-		rank       int
-		latched    bool
+		ev   statusEvent
+		rank int
 	}
 	m.mu.Lock()
 	rank := m.rankLocked()
 	ordered := len(m.order)
-	items := make([]snapItem, 0, len(m.sessions))
+	out := make([]snapItem, 0, len(m.sessions))
 	for id, s := range m.sessions {
-		tr := m.trackers[id]
-		it := snapItem{
+		rec := committedOf(m.trackers[id])
+		out = append(out, snapItem{
 			rank: rankOf(rank, id, ordered),
 			ev: statusEvent{
 				ID: id, Alias: s.alias, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
-				CreatedAt: s.createdAt,
+				CreatedAt: s.createdAt, Status: rec.status,
+				Title: effectiveTitle(&titleSources{
+					pinned: s.pinnedTitle, osc: rec.oscTitle,
+					client: s.clientTitle, auto: s.autoTitle,
+				}),
+				ProgressValue: rec.progressValue, ReportsActivity: rec.reports,
+				Activity: rec.activity, ActivityCount: rec.activityCount,
+				StatusSeq: rec.statusSeq, SeenSeq: rec.seenSeq,
 			},
-			handler:   s.handler,
-			autoTitle: s.autoTitle,
-		}
-		if tr != nil {
-			it.lastStatus = tr.lastStatus
-			it.latched = tr.latched != ""
-		}
-		items = append(items, it)
+		})
 	}
 	m.mu.Unlock()
-
-	out := make([]snapItem, 0, len(items))
-	for i := range items {
-		it := &items[i]
-		it.ev.Status = refinedStatus(it.lastStatus, it.handler)
-		sc := it.handler.statusSnapshot()
-		it.ev.Title = effectiveTitle(&titleSources{
-			pinned: it.ev.PinnedTitle, osc: sc.title,
-			client: it.ev.ClientTitle, auto: it.autoTitle,
-		})
-		it.ev.ProgressValue = sc.progressValue
-		it.ev.ReportsActivity = sc.progress >= 0 || it.latched
-		// Post-lock, for the reason statusRaw.activity gives, and carried here or a
-		// reload shows no mark until the value next changes.
-		act := m.sessionActivity(it.ev.ID)
-		it.ev.Activity = act.State
-		it.ev.ActivityCount = act.Count
-		out = append(out, *it)
-	}
 	// Same order List serves, for the same reason it sorts at all: this is an
 	// ENUMERATION of the session set, and a client building a tab strip from it
 	// reads the sequence as the strip's order. Phase 1 ranged m.sessions, so

@@ -48,6 +48,7 @@ The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdl
 | `GET` and `PUT /api/sessions/layout` | Reads and sets the pane layout every viewer shares. |
 | `PUT /api/sessions/{id}/title` | Stores a title the client derived, such as the first line the user submitted. |
 | `PUT` and `DELETE /api/sessions/{id}/pinned-title` | Sets and clears a name the user chose. |
+| `PUT /api/sessions/{id}/seen` | Marks the session's status as read for every reader, with the body `{"seq": N}`. |
 
 ### Display order
 
@@ -70,7 +71,7 @@ The server keeps the record valid on its own. The first session of an empty layo
 
 A client reads the layout once at load, and the status stream does not carry layout changes. When one viewer writes a new layout, another open viewer keeps its old layout until it reloads. A reload restores whatever the last writer stored, as it does for the order.
 
-While `RestoreSessionSet` runs, `POST /api/sessions` and `GET /api/sessions/layout` answer 503 with `Retry-After: 1` and the body `{"error":"restoring tabs"}`. The list, the status stream and both `PUT` routes keep working. A client that waits for the layout read to succeed and lists afterwards sees the whole restored set.
+While `RestoreSessionSet` runs, `POST /api/sessions` and `GET /api/sessions/layout` answer 503 with `Retry-After: 1` and the body `{"error":"restoring tabs"}`. The list, the status stream and every `PUT` route keep working. A client that waits for the layout read to succeed and lists afterwards sees the whole restored set.
 
 ## Saving and restoring the session set
 
@@ -101,12 +102,22 @@ Each status event also carries:
 
 - `progressValue`, the `OSC 9;4` percentage, or -1 when the program reported none. -1 is not 0%.
 - `notification` and `notificationSeq` for a fresh OSC 9 message, so a consumer with no classifier still receives it.
+- `statusSeq`, which numbers the occurrence of `status`. It rises by one each time the status changes or a fresh classified notification latches it again, so a second `done` in a row is a new occurrence.
+- `seenSeq`, the highest `statusSeq` any reader acknowledged. A status that calls for attention, such as `done` or `input`, is unread while `statusSeq` is above `seenSeq`.
+
+Both numbers never fall for one session, and both are absent until the first sweep numbers something. The session list carries them too.
+
+### Seen state
+
+`PUT /api/sessions/{id}/seen` with `{"seq": N}` raises the session's `seenSeq` to N, capped at its current `statusSeq`. An ack older than the stored value changes nothing, so a lagging window or device can never hide a newer status. An N above `statusSeq` is accepted and capped, so a 204 confirms the floor reached N only for an N the client received. The route answers 204, including for a no-op, 404 for an unknown session and 400 for a body without an unsigned integer `seq`. The next sweep pushes the new `seenSeq` to every subscriber, so a status read on one device stops counting as unread on all the others. Seen state lives in memory only: a restored session is a new process with a new id and starts with nothing to have seen.
+
+The session list and a new subscriber's first frame carry what the last sweep emitted for every field the sweep derives, so they always agree with the stream. A change such as a process exit reaches them at the next sweep, at most 250 ms later.
 
 ### Background activity
 
 `WithSessionActivity(fn)` reports a second value beside the status, for a background task that outlives the turn that started it. `activity` is `""` for none, `working` while a background task runs, `waiting` when it is stopped and resumable with nobody being asked, and `input` when it waits for the user. `activityCount` is the number of sources in that state, 1 or more whenever `activity` is set. Both fields are always present.
 
-The engine calls `fn` once per session on each status sweep, on each session list, and for each new status-stream subscriber. These calls come from different goroutines, so `fn` must be safe for concurrent use, must not block and must not do I/O. Activity never enters the status, never touches the latch, and never sets `reportsActivity`, so a background task does not light the tab's turn indicator. Without the option, every session's activity is empty.
+The engine calls `fn` once per session on each status sweep. The session list and a new status-stream subscriber's first frame carry the value the last sweep read. `fn` must be safe for concurrent use with the host's own writers, must not block and must not do I/O. Activity never enters the status, never touches the latch, and never sets `reportsActivity`, so a background task does not light the tab's turn indicator. Without the option, every session's activity is empty.
 
 ### Titles
 

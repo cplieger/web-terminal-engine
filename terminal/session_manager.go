@@ -121,8 +121,17 @@ type SessionInfo struct {
 	Order int `json:"order"`
 	// ActivityCount is how many sources produced Activity: >= 1 whenever Activity
 	// is non-empty, 0 when it is empty or the host does not count.
-	ActivityCount   int  `json:"activityCount"`
-	ReportsActivity bool `json:"reportsActivity"`
+	ActivityCount int `json:"activityCount"`
+	// StatusSeq numbers the occurrence of the Status beside it: it rises by one
+	// each time the status changes or a fresh notification re-latches it, and
+	// never falls for one id. 0 (absent on the wire) means nothing numbered yet.
+	StatusSeq uint64 `json:"statusSeq,omitempty"`
+	// SeenSeq is the highest StatusSeq any reader acknowledged through
+	// PUT /api/sessions/{id}/seen. It never falls for one id and never exceeds
+	// StatusSeq; a status that calls for attention is unread while
+	// StatusSeq > SeenSeq.
+	SeenSeq         uint64 `json:"seenSeq,omitempty"`
+	ReportsActivity bool   `json:"reportsActivity"`
 }
 
 // Session status values. The manager derives every one of them from two inputs —
@@ -222,11 +231,11 @@ func WithStatusClassifier(fn func(notification string) (status string, ok bool))
 
 // WithSessionActivity supplies a per-session SECONDARY activity state, carried
 // to clients beside Status and never merged into it. The engine PULLS: fn is
-// called once per session on each status sweep, on each List (GET
-// /api/sessions), and on each new SSE subscriber's initial sync — different
-// goroutines, so it must be SAFE FOR CONCURRENT USE, must not block and must not
-// perform I/O. Return the zero SessionActivity for a session with none; unset
-// (the default) leaves every session's activity empty.
+// called once per session on each status sweep, and List and a new SSE
+// subscriber's initial sync carry the value the last sweep read. fn must be
+// SAFE FOR CONCURRENT USE with the host's own writers, must not block and must
+// not perform I/O. Return the zero SessionActivity for a session with none;
+// unset (the default) leaves every session's activity empty.
 func WithSessionActivity(fn func(id SessionID) SessionActivity) ManagerOption {
 	return func(c *managerConfig) { c.activity = fn }
 }
@@ -264,21 +273,10 @@ type titleSources struct {
 
 // effectiveTitle combines a session's title sources in precedence order:
 // explicit beats inferred. The user's pinned name wins outright; then the live
-// OSC window title, when the program set one; then a client-derived title a
-// client asked us to remember; then the server's own inference (foreground
-// process / cwd / command).
-//
-// The last two rungs DO compete for one shipping consumer, so their order is a
-// live decision rather than a future one: the generic preset pushes no client
-// title, but an agent host that pushes one through SetSessionTitle competes with
-// auto directly, because the program it runs may set no OSC title at all. The
-// earlier note here claimed the agent's program always sets one; measured, it
-// does not, which leaves the osc rung permanently empty for that consumer.
-//
-// Pure by design: the OSC title comes from a handler getter (h.mu) and the other
-// three from manager state (m.mu), and every caller (List, snapshot,
-// diffStatuses) reads them under their own locks — never one lock nested in the
-// other.
+// OSC window title; then a client-derived title; then the server's own
+// inference. The last two compete for real: an agent host pushes a client title
+// for a program that may set no OSC title at all. Pure, so no caller nests the
+// sweep's handler lock (the OSC title) inside m.mu (the stored titles).
 func effectiveTitle(src *titleSources) string {
 	if src.pinned != "" {
 		return src.pinned
@@ -796,70 +794,59 @@ func (m *SessionManager) sessionActivity(id SessionID) SessionActivity {
 // List returns all sessions in compareSessionOrder: the shared display order,
 // then oldest first, then id.
 //
-// Two-phase like diffStatuses: manager state (session set, client titles,
-// tracker state) is captured under m.mu, then the handler getters (Title /
-// Exited / Progress — each takes that handler's h.mu) run after m.mu is
-// released, so one wedged handler stalls only this call, never every manager
-// path.
+// One m.mu hold over the record the last sweep emitted (see committedOf), with
+// no handler getter, so a wedged handler cannot stall it.
 func (m *SessionManager) List() []SessionInfo {
-	return m.listSnapshot(nil)
+	return m.listSnapshot(nil, nil)
 }
 
 // listSnapshot is List; a non-nil layout receives the pane layout read under
-// the same m.mu hold as the session set, so the two describe one state.
-func (m *SessionManager) listSnapshot(layout *PaneLayout) []SessionInfo {
+// the same m.mu hold as the session set, so the two describe one state. A
+// non-nil cleanExit receives one entry per returned session, in the returned
+// order: whether its process has exited cleanly, read live after m.mu is
+// released.
+func (m *SessionManager) listSnapshot(layout *PaneLayout, cleanExit *[]bool) []SessionInfo {
 	type listItem struct {
-		handler    *Handler
-		lastStatus string
-		autoTitle  string
-		info       SessionInfo
-		rank       int
-		latched    bool
+		handler   *Handler
+		info      SessionInfo
+		rank      int
+		cleanExit bool
 	}
 	m.mu.Lock()
 	rank := m.rankLocked()
 	ordered := len(m.order)
 	items := make([]listItem, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		it := listItem{
+		rec := committedOf(m.trackers[s.id])
+		items = append(items, listItem{
 			info: SessionInfo{
 				ID: s.id, Alias: s.alias, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
-				CreatedAt: s.createdAt,
+				CreatedAt: s.createdAt, Status: rec.status,
+				Title: effectiveTitle(&titleSources{
+					pinned: s.pinnedTitle, osc: rec.oscTitle,
+					client: s.clientTitle, auto: s.autoTitle,
+				}),
+				ReportsActivity: rec.reports, Activity: rec.activity, ActivityCount: rec.activityCount,
+				StatusSeq: rec.statusSeq, SeenSeq: rec.seenSeq,
 			},
 			// Held beside the info rather than in info.Order: the published field is
 			// the DENSE index assigned below, and one field carrying two meanings
 			// across a sort is how a future edit publishes raw ranks by accident.
 			// snapshot keeps the same split.
-			rank:      rankOf(rank, s.id, ordered),
-			handler:   s.handler,
-			autoTitle: s.autoTitle,
-		}
-		if tr := m.trackers[s.id]; tr != nil {
-			it.lastStatus = tr.lastStatus
-			it.latched = tr.latched != ""
-		}
-		items = append(items, it)
+			rank:    rankOf(rank, s.id, ordered),
+			handler: s.handler,
+		})
 	}
 	if layout != nil {
 		*layout = clonePaneLayout(m.layout)
 	}
 	m.mu.Unlock()
 
-	for i := range items {
-		it := &items[i]
-		it.info.Status = refinedStatus(it.lastStatus, it.handler)
-		it.info.Title = effectiveTitle(&titleSources{
-			pinned: it.info.PinnedTitle, osc: it.handler.Title(),
-			client: it.info.ClientTitle, auto: it.autoTitle,
-		})
-		// reportsActivity mirrors the status stream: sticky once any OSC 9;4
-		// progress has been seen (Progress() >= 0), or a notification latched.
-		// The secondary activity below is deliberately NOT an input here: folding
-		// it in would reveal the PRIMARY dot for a background task.
-		it.info.ReportsActivity = it.handler.Progress() >= 0 || it.latched
-		act := m.sessionActivity(it.info.ID)
-		it.info.Activity = act.State
-		it.info.ActivityCount = act.Count
+	if cleanExit != nil {
+		for i := range items {
+			exited, crashed := items[i].handler.exitOutcome()
+			items[i].cleanExit = exited && !crashed
+		}
 	}
 	slices.SortFunc(items, func(a, b listItem) int {
 		return compareSessionOrder(
@@ -874,9 +861,15 @@ func (m *SessionManager) listSnapshot(layout *PaneLayout) []SessionInfo {
 	// violation, hence unreachable — but a wire contract should not rest on that)
 	// both claim the same position.
 	out := make([]SessionInfo, 0, len(items))
+	if cleanExit != nil {
+		*cleanExit = make([]bool, 0, len(items))
+	}
 	for i := range items {
 		items[i].info.Order = i
 		out = append(out, items[i].info)
+		if cleanExit != nil {
+			*cleanExit = append(*cleanExit, items[i].cleanExit)
+		}
 	}
 	return out
 }
@@ -1137,30 +1130,14 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 	})
 }
 
-// RESTHandler serves the session REST API: POST SessionsPath (create),
-// GET SessionsPath (list), PUT /api/sessions/order (set the shared display
-// order), GET + PUT /api/sessions/layout (read / set the shared pane layout),
-// DELETE /api/sessions/{id} (close),
-// PUT /api/sessions/{id}/title (set the client-derived automatic title), and
-// PUT + DELETE /api/sessions/{id}/pinned-title (set / clear the user's name).
-//
-// The order and layout routes are literal segments where the others take an
-// {id}, which ServeMux prefers over a wildcard, and no session id can collide
-// with them (ids are hex).
-// Its internal patterns are absolute, so it only functions on the SessionsPath +
-// SessionsSubtreePath mounts — MountSessionRoutes / MountAPI perform them
-// (the route-set contract lives there); exported so consumer tests can stub it.
-//
-// Every response the returned handler produces states Cache-Control: no-store
-// unless the header is already set (see withNoStore). The wrapper sits upstream
-// of the mux rather than in the handlers so it also covers the responses the mux
-// SYNTHESIZES — a 404 for an unserved path, a 405 for a method a path does not
-// serve, a path-cleaning redirect — which are exactly the responses no handler
-// is invoked to write, and which land on paths carrying a session id. Wrapping
-// here rather than only at the mount also means a consumer that mounts this
-// handler itself, without MountSessionRoutes, still gets the policy; the create
-// gate is the one thing this site cannot reach, which is why MountSessionRoutes
-// wraps again outside it.
+// RESTHandler serves the session REST API: create, list, close, the shared
+// order and layout, the client and pinned titles, and PUT
+// /api/sessions/{id}/seen (raise the session's seen floor). Its patterns are
+// absolute, so it works only on the SessionsPath and SessionsSubtreePath
+// mounts, which MountSessionRoutes and MountAPI perform and whose docs own the
+// route set. Every response, those the inner mux synthesizes included, states
+// Cache-Control: no-store unless already set (see withNoStore). Exported so
+// consumer tests can stub it.
 func (m *SessionManager) RESTHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sessions", m.handleCreate)
@@ -1172,6 +1149,7 @@ func (m *SessionManager) RESTHandler() http.Handler {
 	mux.HandleFunc("PUT /api/sessions/{id}/title", m.handleSetTitle)
 	mux.HandleFunc("PUT /api/sessions/{id}/pinned-title", m.handleSetPinnedTitle)
 	mux.HandleFunc("DELETE /api/sessions/{id}/pinned-title", m.handleClearPinnedTitle)
+	mux.HandleFunc("PUT /api/sessions/{id}/seen", m.handleSetSeen)
 	return withNoStore(mux)
 }
 
@@ -1316,6 +1294,67 @@ func (m *SessionManager) handleClearPinnedTitle(w http.ResponseWriter, r *http.R
 		return
 	}
 	http.Error(w, "unknown session", http.StatusNotFound)
+}
+
+// handleSetSeen serves PUT /api/sessions/{id}/seen {"seq": N}: 204 once
+// markSessionSeen applied it (an older or future N is clamped, not refused, so
+// the floor reaches N only for an N the session has numbered), 404 on an
+// unknown id, 400 on a body decodeSeenBody refuses.
+func (m *SessionManager) handleSetSeen(w http.ResponseWriter, r *http.Request) {
+	seq, ok := decodeSeenBody(w, r)
+	if !ok {
+		return
+	}
+	if m.markSessionSeen(SessionID(r.PathValue("id")), seq) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Error(w, "unknown session", http.StatusNotFound)
+}
+
+// markSessionSeen raises id's seen floor to seq, capped at the latest
+// occurrence so a forged or future number cannot cover one that has not
+// happened, and never lowered, so a lagging reader cannot hide a newer cue. It
+// returns false for an unknown session; a session no sweep has tracked yet
+// has nothing to cover and returns true unchanged.
+func (m *SessionManager) markSessionSeen(id SessionID, seq uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.sessions[id]; !ok {
+		return false
+	}
+	if tr := m.trackers[id]; tr != nil {
+		tr.seenSeq = max(tr.seenSeq, min(seq, tr.statusSeq))
+	}
+	return true
+}
+
+// maxSeenBodyBytes bounds the seen body, which carries one integer.
+const maxSeenBodyBytes = 256
+
+// decodeSeenBody reads the seq out of a PUT /api/sessions/{id}/seen body,
+// answering 400 itself when it cannot. seq must be present and an unsigned
+// integer (encoding/json refuses a sign, a fraction, an exponent and a string
+// for uint64), and trailing data is refused as in decodeOrderBody.
+func decodeSeenBody(w http.ResponseWriter, r *http.Request) (uint64, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSeenBodyBytes)
+	var body struct {
+		Seq *uint64 `json:"seq"`
+	}
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return 0, false
+	}
+	if body.Seq == nil {
+		http.Error(w, "body must carry a seq", http.StatusBadRequest)
+		return 0, false
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		http.Error(w, "unexpected data after the body", http.StatusBadRequest)
+		return 0, false
+	}
+	return *body.Seq, true
 }
 
 // decodeTitleBody reads the shared {"title": "..."} envelope both title routes
@@ -1503,30 +1542,6 @@ func (m *SessionManager) maybeReap() {
 		s.handler.Close()
 		m.logger.Info("session: reaped (no client for idle window)", "session", LogID(s.id))
 	}
-}
-
-// refinedStatus computes a session's status for a point-in-time read (List and
-// the SSE snapshot) from the sweep's last computed status: that value carries
-// the working/done/input refinement, so GET /api/sessions agrees with what the
-// status stream pushes. Both sources MUST agree — a reloading client paints its
-// activity dots from whichever answers last, and when List still reported the
-// coarse liveness status a reload visibly downgraded a latched done/input dot
-// back to idle until the next real transition. Process exit is checked live and
-// always wins (it is definitive, while lastStatus can lag a sweep tick behind),
-// and it carries the same exited-vs-crashed split the sweep applies, so the two
-// sources cannot disagree about HOW a session ended either; an empty lastStatus
-// (created within the current sweep tick) is the new-session default, idle.
-func refinedStatus(lastStatus string, h *Handler) string {
-	if exited, crashed := h.exitOutcome(); exited {
-		if crashed {
-			return StatusCrashed
-		}
-		return StatusExited
-	}
-	if lastStatus != "" {
-		return lastStatus
-	}
-	return StatusIdle
 }
 
 // newSessionID returns a 128-bit crypto-random hex id, used as both the routing

@@ -274,12 +274,12 @@ func TestSessionManager_ConcurrentCreateCloseList(t *testing.T) {
 
 // TestSessionManagerSetSessionTitle verifies the client-fallback title: on a
 // known id SetSessionTitle stores the fallback so List() reports it while the
-// OSC title is empty (a fresh session's handler.Title() is empty), an OSC title
-// then wins over the fallback (OSC-first precedence), and an unknown id returns
-// false.
+// OSC title is empty (a fresh session has none), a swept OSC title then wins
+// over the fallback (OSC-first precedence), and an unknown id returns false.
 func TestSessionManagerSetSessionTitle(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep() // List serves the OSC title the last sweep emitted
 	id, err := m.Create()
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -325,6 +325,7 @@ func TestSessionManagerSetSessionTitle(t *testing.T) {
 	// OSC-first: an OSC window title (set via OSC 2, which needs no PTY reply)
 	// wins over the stored client fallback.
 	handlerOf(t, m, id).handlePTYData([]byte("\x1b]2;osc label\x07"))
+	_ = m.diffStatuses()
 	if got := titleOf(); got != "osc label" {
 		t.Fatalf("List Title with OSC title set = %q, want %q (OSC wins)", got, "osc label")
 	}

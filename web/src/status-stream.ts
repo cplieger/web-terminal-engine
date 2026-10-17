@@ -35,7 +35,7 @@ export interface SessionInfo {
   /** the session's short public name, safe to put in a URL: 1 to 64 characters
    *  of `[A-Za-z0-9_-]`, unique among live sessions, and NOT a capability
    *  (nothing attaches with it; only `id` does). The server mints a random one
-   *  and a host may replace it (web-terminal-kiro sets the kiro-cli thread id).
+   *  and a host may replace it (for example with its program's own session id).
    *  Absent from a server before 6.2 and from a status event carrying
    *  `removed`. Untrusted wire text: validate it before use. */
   readonly alias?: string;
@@ -73,7 +73,7 @@ export interface SessionInfo {
    *  server accepts it and it becomes the arrangement every device sees. */
   readonly order?: number;
   /** true once the session has emitted a genuine activity signal — OSC 9;4
-   *  progress (kiro-cli, Claude Code, …) or a classified OSC 9 notification.
+   *  progress or a classified OSC 9 notification.
    *  Sticky for the session's life. Consumers reveal the per-tab activity dot
    *  only when this is set; a program that emits no OSC 9 signal (a plain shell)
    *  keeps its tab dot hidden. */

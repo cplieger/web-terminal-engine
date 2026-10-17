@@ -88,7 +88,7 @@ func TestSetSessionAlias(t *testing.T) {
 		alias string
 		want  bool
 	}{
-		{name: "kiro_thread_id", id: a, alias: "sess_6f1c2b9e-0d4a-4e7b-9a51-3c2d1e0f9a8b", want: true},
+		{name: "prefixed_uuid", id: a, alias: "task_0b8e4f12-7c3d-4a59-8e21-5f6a7b8c9d0e", want: true},
 		{name: "max_length", id: a, alias: strings.Repeat("x", 64), want: true},
 		{name: "over_max_length", id: a, alias: strings.Repeat("x", 65)},
 		{name: "empty", id: a, alias: ""},
@@ -143,15 +143,15 @@ func TestDiffStatuses_emitsAnAliasChangeAndNothingWhenUnchanged(t *testing.T) {
 		t.Fatalf("quiescent sweep emitted %+v", evs)
 	}
 
-	if !m.SetSessionAlias(id, "sess_thread") {
+	if !m.SetSessionAlias(id, "host_alias") {
 		t.Fatal("SetSessionAlias = false")
 	}
 	evs := m.diffStatuses()
-	if len(evs) != 1 || evs[0].Alias != "sess_thread" {
-		t.Fatalf("sweep after SetSessionAlias = %+v, want one event with alias sess_thread", evs)
+	if len(evs) != 1 || evs[0].Alias != "host_alias" {
+		t.Fatalf("sweep after SetSessionAlias = %+v, want one event with alias host_alias", evs)
 	}
 
-	if !m.SetSessionAlias(id, "sess_thread") {
+	if !m.SetSessionAlias(id, "host_alias") {
 		t.Fatal("SetSessionAlias(same value) = false")
 	}
 	if evs := m.diffStatuses(); len(evs) != 0 {
@@ -160,7 +160,7 @@ func TestDiffStatuses_emitsAnAliasChangeAndNothingWhenUnchanged(t *testing.T) {
 }
 
 func FuzzValidSessionAlias_matchesTheGrammar(f *testing.F) {
-	for _, s := range []string{"", "a", "sess_0-9", "a,b", "a%41", "caf\u00e9", strings.Repeat("z", 64), strings.Repeat("z", 65), "\x00"} {
+	for _, s := range []string{"", "a", "tab_0-9", "a,b", "a%41", "caf\u00e9", strings.Repeat("z", 64), strings.Repeat("z", 65), "\x00"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {

@@ -1230,11 +1230,11 @@ describe("connection: an unmanaged connection's defaults", () => {
   });
 
   it("a consumer's wsPath replaces the default endpoint", () => {
-    unmanaged({ wsPath: "/api/shell/ws" }).connect();
+    unmanaged({ wsPath: "/api/term/ws" }).connect();
 
-    // marotte serves its shell at /api/shell/ws. Ignoring the override sends
+    // A host can serve its terminal at /api/term/ws. Ignoring the override sends
     // every consumer to /ws, where nothing is listening.
-    expect(new URL(latest().url).pathname).toBe("/api/shell/ws");
+    expect(new URL(latest().url).pathname).toBe("/api/term/ws");
   });
 
   it("a connection whose renderer holds nothing asks for a full retained replay", () => {

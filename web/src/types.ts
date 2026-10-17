@@ -61,7 +61,7 @@ export interface ScreenMessage {
   /**
    * True when the app issued ED3 (`CSI 3 J`, "erase saved lines") this frame:
    * the client drops its scrollback history (all lines below `base`), matching
-   * a real terminal. Inline TUIs (kiro-cli) emit ED3 on every resize redraw to
+   * a real terminal. Inline TUIs can emit ED3 on every resize redraw to
    * discard the previous frame; honoring it stops stale frames accumulating.
    */
   scrollbackCleared?: boolean;

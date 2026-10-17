@@ -66,15 +66,11 @@ import (
 type SessionID string
 
 // SessionInfo is the public description of one session, returned by List and
-// carried on the status stream.
-//
-// Three of its fields are title-shaped; they are not interchangeable:
-//   - Title is the RESOLVED display title (effectiveTitle) — what a consumer
-//     renders unless it has a reason not to.
-//   - PinnedTitle is the USER's name, set and cleared only by a human action.
-//   - ClientTitle is a CLIENT-DERIVED automatic title: a guess a client
-//     computed and asked the server to remember (today, the agent UI's latched
-//     first submitted line). Client-supplied, but not user-authored.
+// carried on the status stream. Its three title fields are not interchangeable:
+//   - Title is the resolved display title (effectiveTitle), what a consumer renders.
+//   - PinnedTitle is the user's name, set and cleared only by a human action.
+//   - ClientTitle is an automatic title a client computed and asked the server to
+//     remember (for example a session's first submitted line); not user-authored.
 type SessionInfo struct {
 	CreatedAt time.Time `json:"createdAt"`
 	ID        SessionID `json:"id"`    // marshals as a plain string; the wire shape is unchanged
@@ -220,11 +216,12 @@ func WithManagerOriginPolicy(p *OriginPolicy) ManagerOption {
 }
 
 // WithStatusClassifier maps an OSC 9 notification message to a session status
-// (return ok=false to ignore a message). This keeps the engine generic: web-terminal-kiro
-// maps kiro-cli's "Permission required" to input and "Response complete" to
-// done, while a plain shell server sets no classifier and gets working/idle from
-// output activity only. A classified input status latches (persists while the
-// process waits) until the turn resumes or a done message clears it.
+// (return ok=false to ignore a message). The consumer decides which of its
+// program's messages mean needs-input and which mean done; a server that sets
+// no classifier gets its status from OSC 9;4 progress and process liveness
+// only, with no needs-input or done latch. A classified input status latches
+// (persists while the process waits) until the turn resumes or a done message
+// clears it.
 func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
 	return func(c *managerConfig) { c.classifier = fn }
 }
@@ -274,7 +271,7 @@ type titleSources struct {
 // effectiveTitle combines a session's title sources in precedence order:
 // explicit beats inferred. The user's pinned name wins outright; then the live
 // OSC window title; then a client-derived title; then the server's own
-// inference. The last two compete for real: an agent host pushes a client title
+// inference. The last two compete for real: a host can push a client title
 // for a program that may set no OSC title at all. Pure, so no caller nests the
 // sweep's handler lock (the OSC title) inside m.mu (the stored titles).
 func effectiveTitle(src *titleSources) string {
@@ -929,8 +926,8 @@ func (m *SessionManager) SetSessionAlias(id SessionID, alias string) bool {
 	return true
 }
 
-// maxSessionAliasLen bounds an alias; a kiro-cli session id ("sess_" plus a
-// UUID, 41 characters) is the longest host value in use.
+// maxSessionAliasLen bounds an alias; 64 leaves room for a UUID plus a short
+// prefix.
 const maxSessionAliasLen = 64
 
 func validSessionAlias(s string) bool {
@@ -1105,19 +1102,14 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 		}
 		m.mu.Unlock()
 		if !ok {
-			// Unknown session: accept the upgrade and close with the
-			// DEFINITIVE application code (4004), which the client reads and
-			// routes to its ended state — a pre-upgrade 404 is unreadable
-			// from browser JS (an opaque code-1006 failure) and condemned
-			// clients to an endless reconnect loop against a session that
-			// will never exist. The upgrade goes through acceptWS so this path
-			// applies the SAME origin policy as a live session's socket
-			// (WithManagerOriginPolicy); it used to hardcode nil options, which
-			// silently ignored a configured allowlist here and answered a
-			// legitimately-embedded client 403 instead of the readable 4004.
-			// A non-WebSocket GET gets Accept's own 426 — the same answer the
-			// known-session path gives, so a plain probe can no longer
-			// distinguish session existence (the old 404-vs-426 oracle).
+			// Unknown session: accept the upgrade and close with the readable
+			// application code 4004, which the client routes to its ended
+			// state; a pre-upgrade 404 reaches browser JS as an opaque 1006 and
+			// loops reconnects. acceptWS applies the SAME origin policy as a
+			// live session's socket (WithManagerOriginPolicy), so an embedded
+			// client from an allowed origin gets 4004, not 403. A non-WebSocket
+			// GET gets Accept's own 426, as on the known-session path, so a
+			// probe cannot tell whether a session exists.
 			ws, err := acceptWS(w, r, m.originPolicy)
 			if err != nil {
 				return // acceptWS or Accept already wrote the response (403/426)

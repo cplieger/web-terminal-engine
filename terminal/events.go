@@ -1,13 +1,11 @@
 package terminal
 
 // The status stream (Server-Sent Events at /api/sessions/events) drives each
-// tab's activity indicator. A single sweep recomputes every session's status on
-// a fixed interval and pushes only changes to subscribers, which debounces the
-// working/idle flap for free. Status derives from process liveness, OSC 9;4
-// progress, and output activity (working/idle/exited, or crashed when the
-// process died badly); a consumer's classifier
-// maps an OSC 9 notification to a latched needs-input or done state (Tier 2).
-// One stream serves all tabs (not one per tab) to stay under the browser's
+// tab's activity indicator. One sweep recomputes every session's status on a
+// fixed interval and pushes only changes, which debounces the working/idle
+// flap. Status derives from process liveness and OSC 9;4 progress; a
+// consumer's classifier maps an OSC 9 notification to a latched needs-input or
+// done state. One stream serves all tabs to stay under the browser's
 // per-origin connection cap.
 
 import (
@@ -554,22 +552,14 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) (status
 		return StatusExited, false
 	}
 	latchedNow := m.applyNotification(in, tr)
-	// A progress-reporting program (kiro-cli, Claude Code) drives its status from
-	// its OSC 9;4 progress: an active state (1 value, 3 indeterminate) means the
-	// agent is working, and the error and warning states are states in exactly
-	// the same sense — they persist until the program itself changes them, rather
-	// than being events that fire once.
-	// A progress state supersedes a latch from an EARLIER sweep (a new turn
-	// starting clears the stale done/input dot) — but never one applied in THIS
-	// sweep: at a turn boundary the snapshot can pair the fresh "Response
-	// complete" / "Permission required" notification with a progress value that
-	// still reads active (the notification flushed a chunk ahead of the
-	// progress-off), and clearing the just-set latch here would consume the
-	// notification for good (notifSeen has advanced) — the next sweep then lands
-	// on idle and the tab's done/input dot is silently lost. Honoring the fresh
-	// latch is self-correcting: if the agent truly is still working, the next
-	// sweep's progress state supersedes the now-stale latch — provided it is one
-	// that CONTRADICTS the latch, which is progressSupersedesLatch's job.
+	// An active OSC 9;4 state (1 value, 3 indeterminate) means working; error
+	// and warning persist until the program changes them. A progress state
+	// supersedes a latch from an EARLIER sweep (a new turn clears the stale
+	// done/input dot) but never one applied in THIS sweep: a turn-boundary
+	// snapshot can pair a fresh done or needs-input notification with a progress
+	// value still active (flushed a chunk ahead of progress-off), and clearing the
+	// fresh latch would lose that dot for good, since notifSeen has advanced. The
+	// next sweep's progress supersedes it if progressSupersedesLatch says so.
 	if st, ok := progressStatus(in.progress); ok && !latchedNow &&
 		(tr.latched == "" || progressSupersedesLatch(in.progress)) {
 		tr.latched = ""
@@ -598,29 +588,14 @@ func progressStatus(progress int) (string, bool) {
 	return "", false
 }
 
-// progressSupersedesLatch reports whether an OSC 9;4 progress state CONTRADICTS a
-// latched notification status, which is what earns it the right to clear one.
-// Only ever asked about a state progressStatus accepts.
-//
-// States 1 and 3 assert that an operation is under way, which contradicts both
-// latches: "the turn finished" and "blocked, waiting on you" both say nothing is
-// running. State 2 asserts a failure, an OUTCOME that must not stay masked by a
-// stale success — a build that has since failed outranks an earlier "done".
-//
-// State 4 is the one that does not contradict either, and the specs are explicit
-// about why: it is Windows' TBPF_PAUSED, "progress is currently stopped ... but
-// can be resumed by the user. No error condition exists". That is not a rival
-// claim to a needs-input latch, it is the SAME claim with less detail, and it is
-// equally compatible with a finished turn, where nothing is progressing. Treating
-// it as a rival (it was, by symmetry with state 2, until this was measured) hands
-// the tab to the progress channel one sweep — 250ms — after the notification.
-// kiro-cli makes that failure routine rather than theoretical: it sets state 4
-// BECAUSE it is blocked on an approval, and parks state 4 at its context-usage
-// percentage once idle, so the needs-input ring survived a quarter second of a
-// minutes-long wait and the green done dot the same fraction of an idle period —
-// the latter only above its 60% context threshold, which is what made the loss
-// look intermittent. A latch this state cannot clear is not stuck: the moment the
-// program resumes (1 or 3), fails (2), or dies, that supersedes it.
+// progressSupersedesLatch reports whether an OSC 9;4 state contradicts a latched
+// notification status and so may clear it. Asked only of states progressStatus
+// accepts. States 1 and 3 say work is under way; 2 reports a failure, which must
+// not stay masked by a stale "done". State 4 (iTerm2's warning, Windows'
+// TBPF_PAUSED: "No error condition exists") starts no work and reports no
+// failure, so it does not clear a latch; it persists, so as a rival it would take
+// the tab one sweep (250ms) after the notification. A latch state 4 cannot clear
+// ends when the program resumes (1 or 3), fails (2) or dies.
 func progressSupersedesLatch(progress int) bool {
 	return progress != 4
 }

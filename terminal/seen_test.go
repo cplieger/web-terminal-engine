@@ -113,7 +113,7 @@ func TestStatusSeq_numbering(t *testing.T) {
 	t.Run("a status change advances by one", func(t *testing.T) {
 		m := seenManager(t)
 		id, h := seenSession(t, m)
-		h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+		h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 		done := eventFor(t, m.diffStatuses(), id)
 		h.handlePTYData([]byte("\x1b]9;4;3\x07"))
 		ev := eventFor(t, m.diffStatuses(), id)
@@ -124,9 +124,9 @@ func TestStatusSeq_numbering(t *testing.T) {
 	t.Run("a re-latched done advances by one", func(t *testing.T) {
 		m := seenManager(t)
 		id, h := seenSession(t, m)
-		h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+		h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 		first := eventFor(t, m.diffStatuses(), id)
-		h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+		h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 		ev := eventFor(t, m.diffStatuses(), id)
 		if ev.Status != StatusDone || ev.StatusSeq != first.StatusSeq+1 {
 			t.Errorf("done -> done = (%q, %d), want (%q, %d)", ev.Status, ev.StatusSeq, StatusDone, first.StatusSeq+1)
@@ -262,7 +262,7 @@ func TestSeenSeq_onTheWire(t *testing.T) {
 	sc := bufio.NewScanner(resp.Body)
 	assertSeqKeys(t, "snapshot frame", nextData(t, sc, id), 1, 1)
 
-	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+	h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 	evs := m.diffStatuses()
 	for i := range evs {
 		m.broadcast(&evs[i])
@@ -360,7 +360,7 @@ func TestPointInTimeReadsCarryTheCommittedRecord(t *testing.T) {
 		src := newActivitySource()
 		m := seenManager(t, WithSessionActivity(src.read))
 		id, h := seenSession(t, m)
-		h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+		h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 		ev := eventFor(t, m.diffStatuses(), id)
 		src.set(id, SessionActivity{State: ActivityWorking, Count: 1})
 		li, sn := listed(t, m, id), snapped(t, m, id)

@@ -46,7 +46,7 @@ describe("wsURL property", () => {
       fc.property(
         fc.constantFrom("http:", "https:"),
         fc.domain(),
-        fc.constantFrom("/ws", "/api/shell/ws", "/terminal/socket"),
+        fc.constantFrom("/ws", "/api/term/ws", "/terminal/socket"),
         (proto, host, path) => {
           expect(wsURL(proto, host).endsWith("/ws")).toBe(true);
           expect(wsURL(proto, host, path).endsWith(path)).toBe(true);
@@ -57,7 +57,7 @@ describe("wsURL property", () => {
 
   it("normalizes a path without a leading slash", () => {
     expect(wsURL("http:", "example.com", "ws")).toBe("ws://example.com/ws");
-    expect(wsURL("https:", "example.com", "api/shell/ws")).toBe("wss://example.com/api/shell/ws");
+    expect(wsURL("https:", "example.com", "api/term/ws")).toBe("wss://example.com/api/term/ws");
   });
 
   it("produces a parseable URL with the expected scheme and path", () => {
@@ -65,7 +65,7 @@ describe("wsURL property", () => {
       fc.property(
         fc.constantFrom("http:", "https:"),
         fc.domain(),
-        fc.constantFrom("/ws", "/api/shell/ws"),
+        fc.constantFrom("/ws", "/api/term/ws"),
         (proto, host, path) => {
           const url = wsURL(proto, host, path);
           const parsed = new URL(url);

@@ -301,20 +301,11 @@ func TestAltScreenEnterExitPreservesMain(t *testing.T) {
 }
 
 // TestExitAltScreen1049RestoresPen verifies CSI ?1049l restores the main
-// screen's SGR pen, so an attribute set inside the alt session cannot leak into
-// the rendition the parent shell draws with. DECRESET 1049 is "Use Normal Screen
-// Buffer and restore cursor as in DECRC" (xterm ctlseqs), and DECRC restores
-// character attributes alongside the position (see restoreCursor), so the pen
-// travels with the cursor.
-//
-// This is the property that makes the engine immune to the class of bug kiro-cli
-// 2.19.1 fixed by writing SGR 0 after ?1049l: nothing here needs that trailing
-// reset. Underline is the attribute that bug stranded, so it is the one used.
-//
-// A DECSET mode flag is deliberately NOT in the restore set, and the second
-// assertion pins that asymmetry as intentional rather than a second leak: only
-// the cursor's own DECRC state is saved and restored here, while a mode flag is
-// session state the application owns and turns off itself.
+// screen's SGR pen: DECRESET 1049 restores the cursor as in DECRC (xterm
+// ctlseqs), and DECRC restores character attributes (see restoreCursor). So no
+// trailing SGR 0 is needed after ?1049l to keep an alt-session attribute from
+// leaking. The second assertion pins that a DECSET mode flag is NOT restored:
+// it is session state the application owns.
 func TestExitAltScreen1049RestoresPen(t *testing.T) {
 	s := New(5, 10)
 	s.Write([]byte("\x1b[1m"))     // main-screen pen: bold
@@ -322,7 +313,7 @@ func TestExitAltScreen1049RestoresPen(t *testing.T) {
 	if s.style != (Style{}) {
 		t.Errorf("enter 1049: pen = %+v, want zero (1049 resets SGR on entry)", s.style)
 	}
-	s.Write([]byte("\x1b[4m"))     // underline, the attribute the upstream bug stranded
+	s.Write([]byte("\x1b[4m"))     // underline, set only inside the alt session
 	s.Write([]byte("\x1b[?2004h")) // a mode flag turned on inside the alt session
 	s.Write([]byte("\x1b[?1049l"))
 	if want := (Style{Bold: true}); s.style != want {

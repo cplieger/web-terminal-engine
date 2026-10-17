@@ -117,8 +117,8 @@ var csiMain = [256]csiHandler{
 	},
 	// SGR — select graphic rendition. CSI > Pp;Pv m (XTMODKEYS) and
 	// CSI ? Pp m (XTQMODKEYS) are key-option controls, not SGR, so a marked
-	// form is a no-op rather than routed to applySGR (kiro-cli emits
-	// CSI > 4 ; 1 m at init, which would otherwise apply bogus attributes).
+	// form is a no-op rather than routed to applySGR (a program that emits
+	// CSI > 4 ; 1 m at init would otherwise get bogus attributes).
 	'm': func(s *Screen) {
 		if s.privateMarker == 0 {
 			s.applySGR()

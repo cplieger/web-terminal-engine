@@ -1,25 +1,11 @@
-// Boundary and guard behaviour of the line store, at the sites where the
-// existing suites drive the code but assert nothing that distinguishes an
-// off-by-one from the real edge.
-//
-// Three themes, each with a defect it is written against:
-//
-//  - The PROVISIONAL FLOOR (`unconfirmedFrom`, read on the wire as
-//    `replayBoundary()`). Every mistake here is a wrong `haveThrough`: too high
-//    and the server never re-sends rows this client only ever saw the
-//    application draw, which is the frozen-composer bug the floor exists to
-//    prevent. So the floor's guards are driven with the frames that reach them —
-//    a malformed base, an empty chunk, a frame straddling a frozen alt window.
-//  - RESIDENCY (the tail cap, the browse budget, the cap flip). The invariants
-//    are cheap to state and expensive to get wrong: a live window row must never
-//    be reclassified as disposable cache, the rows within the prefetch band of
-//    the reader must never be evicted, and `oldestIndex()`/`highestIndex()` must
-//    name lines the store actually holds after a pass that removed some.
-//  - HOSTILE OR MALFORMED FRAMES. `changed` indices outside the grid, a
-//    negative base, a snapshot whose run array has a hole. Each of these
-//    reaches a guard whose absence is a crash or a silently wiped store.
-//
-// Pure data structure, no DOM.
+// Boundary and guard behaviour of the line store, where other suites drive the
+// code without telling an off-by-one from the real edge. Pure data, no DOM.
+//  - The provisional floor (`unconfirmedFrom`, sent as `replayBoundary()`): too
+//    high a `haveThrough` and the server never re-sends rows the client only saw
+//    drawn, the frozen-input-box bug.
+//  - Residency: a live window row is never cache, the prefetch band is never
+//    evicted, and oldestIndex()/highestIndex() name lines the store holds.
+//  - Malformed frames: out-of-grid `changed`, a negative base, a holed run array.
 
 import { describe, it, expect, vi } from "vitest";
 import { LineStore, PREFETCH_THRESHOLD } from "./store.js";
@@ -791,7 +777,7 @@ describe("LineStore.fromSnapshot: payloads from outside the program", () => {
     // A saved floor of 0 means the saving store had confirmed none of what it
     // held, and zero is a legitimate floor — treating it as absent makes the
     // hydrated store claim its whole tail, and the server then replays nothing
-    // above it, which is the frozen-composer bug across a page reload.
+    // above it, which is the frozen-input-box bug across a page reload.
     const restored = LineStore.fromSnapshot({
       v: 1,
       serverEpoch: 1,

@@ -1,6 +1,6 @@
 // Keyboard event → terminal byte sequence mapping, mirroring xterm.js's
-// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline, Ink
-// and the host application get the keys they expect. Modifier digit per the
+// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline and
+// full-screen programs get the keys they expect. Modifier digit per the
 // xterm/VT520 convention: 1=Shift, 2=Alt, 4=Ctrl, 8=Meta, summed then +1 for
 // CSI 1;{n}{letter}. DECCKM and DECKPAM come from the injected mode state,
 // which the server's modes frame keeps current.
@@ -162,9 +162,9 @@ const KEYPAD_SS3: Record<string, string | undefined> = {
 
 // -- Kitty keyboard protocol (progressive enhancement) ----------------------
 // Under an active kitty flag, keys that do NOT produce text are encoded per the
-// kitty protocol so an app that enabled it (Codex via crossterm) gets
-// unambiguous key events. Only the disambiguate flag (0x1) is honored; the
-// server masks off 0x2/0x4/0x8/0x10, so the CSI ?u query reports only 0x1.
+// kitty protocol so an app that enabled it gets unambiguous key events. Only
+// the disambiguate flag (0x1) is honored; the server masks off
+// 0x2/0x4/0x8/0x10, so the CSI ?u query reports only 0x1.
 // Text-producing keys still flow through the hidden textarea as text (this
 // encoder returns "ignore" for them), per the spec and the IME model.
 
@@ -485,9 +485,9 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
   // handle them. Heuristic: only take Ctrl+letter when Shift is NOT
   // held AND the letter is one of the ones xterm consumes (a-z),
   // skipping the few that browsers commonly reserve.
-  // (We deliberately pass Ctrl+R / Ctrl+T / Ctrl+W through to the PTY
-  // — the host application's Ctrl+T transcript view depends on it. Users on macOS
-  // who want browser-reserved combos can use Cmd instead.)
+  // (Ctrl+R, Ctrl+T and Ctrl+W still go to the PTY: readline binds them to
+  // reverse search, transpose and word rubout, and full-screen programs bind
+  // them too. On macOS, Cmd reaches the browser's own combos.)
 
   // Shift+PageUp / Shift+PageDown — local scrollback navigation
   // (matches xterm.js KeyboardResultType.PAGE_UP/PAGE_DOWN).

@@ -641,13 +641,12 @@ func TestApplySize_ptyAndScreenAgreeOnTheAppliedSize(t *testing.T) {
 	})
 }
 
-// TestRedrawSettle_ESUDoesNotRelease pins the regression that motivated the
-// settle hold: kiro-cli brackets its post-resize transcript reprint in many
-// small DEC 2026 BSU/ESU chunks, and the first chunk's ESU used to clear the
-// screen-level resize hold (vt.Screen.ReleaseFlush zeroes FlushHoldUntil), so
-// every flush pass between brackets streamed a mid-reprint window — visible
-// history churn on every phone keyboard/rotation resize. The handler-level
-// hold must survive the ESU.
+// TestRedrawSettle_ESUDoesNotRelease pins why the settle hold exists: an inline
+// TUI can bracket its post-resize transcript reprint in many small DEC 2026
+// BSU/ESU chunks, and an ESU clears the screen-level resize hold
+// (vt.Screen.ReleaseFlush zeroes FlushHoldUntil). The handler-level hold must
+// survive the ESU, or every flush pass between brackets streams a mid-reprint
+// window.
 func TestRedrawSettle_ESUDoesNotRelease(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Close()
@@ -747,7 +746,7 @@ func TestRedrawSettle_capBoundsContinuousOutput(t *testing.T) {
 // end to end on the real handlePTYData -> buildFrame path: while the settle
 // hold is active buildFrame emits nothing and returns the retry deadline; once
 // the redraw goes quiet the next pass emits one frame carrying the settled
-// window and, when the redraw began with ED3 (kiro-cli's reprint signature),
+// window and, when the redraw began with ED3 (an inline TUI's reprint signature),
 // the scrollbackCleared signal — the client swaps old content for new in one
 // atomic repaint instead of watching the reprint stream through.
 func TestRedrawSettle_buildFrameHeldThenSettles(t *testing.T) {
@@ -1331,7 +1330,7 @@ func TestHandleResize_belowMinimumIsFlooredUp(t *testing.T) {
 }
 
 // TestEnsureStarted_reaperInvokesOnProcessExitWithStatus exercises the
-// process-reaper goroutine added in cycle 1 (the `go func(){ cmd.Wait();
+// process-reaper goroutine (the `go func(){ cmd.Wait();
 // onProcessExit(werr); cancel() }` in ensureStarted). TestNewHandler_WithOnProcessExit
 // only calls the stored callback directly and never spawns a child, so the real
 // reaper path -- reap the child, forward cmd.Wait's exit status to onProcessExit --
@@ -1398,24 +1397,14 @@ func TestHandlePTYData_writesDeviceQueryResponseToPTY(t *testing.T) {
 	}
 }
 
-// TestHandleResume_frameOrderByAltState pins the resume frame-ordering invariant
-// behind findings l-f38 and h-f1: on resume with committed history beyond the
-// client's haveThrough, the server delivers the current-window screen frame and
-// the scroll replay in an order that depends on the live alt state, because the
-// window frame is what sets the client's alt flag and the client drops scroll
-// frames while that flag is set (store.ts applyScroll).
-//   - MAIN screen (InAltScreen=false): the window frame must PRECEDE the replay,
-//     so a client with a stale alt flag (disconnected in alt, app left alt while
-//     away) leaves alt before the replayed history lands; otherwise it is
-//     silently dropped (finding l-f38). The window must also be a full repaint at
-//     the committed base (num_changed == screen_height, base == committed).
-//   - ALT screen (InAltScreen=true): the replay must PRECEDE the window frame, so
-//     a client not yet in alt (fresh load / second tab on an in-alt session)
-//     stores the main-screen history before the window frame flips it into alt;
-//     otherwise that history is dropped (the h-f1 regression).
-//
-// In both arms the window frame must carry the live alt state (offset-26 bit3),
-// so a mutant hardcoding it false is caught.
+// TestHandleResume_frameOrderByAltState pins the resume frame order: the window
+// frame sets the client's alt flag and, while it is set, the client drops scroll
+// rows at or above its frozen window base (store.ts applyScroll). On MAIN the
+// window PRECEDES the replay as a full repaint at the committed base, so a
+// client with a stale alt flag leaves alt before history lands; on ALT the
+// replay PRECEDES the window, so a client not yet in alt stores main-screen
+// history before the flip. Both arms check the window frame's alt bit (offset 26
+// bit 3).
 func TestHandleResume_frameOrderByAltState(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1752,11 +1741,11 @@ func readUntilClose(t *testing.T, ws *websocket.Conn, timeout time.Duration) web
 }
 
 // TestTypedFraming_latchSequence pins the v4 happy path end to end, including
-// the adversarial-review F1 payload: after bootstrap (binary resume, arms) +
+// a sentinel-shaped payload: after bootstrap (binary resume, arms) +
 // text upgrade (latches), a binary frame that IS a byte-exact v3 control frame
 // (0x00 + {"type":"ping"}) must reach the PTY as literal input — the latch
 // retired the sentinel, so nothing is consumed as control anymore. Delivery is
-// proven three ways (impl-review finding 2): the echo carries the JSON, NO
+// proven three ways: the echo carries the JSON, NO
 // pong frame is ever sent (a sentinel mis-parse would have answered the ping),
 // and the session ledger advances by EXACTLY len(payload) — every byte,
 // leading NUL included, counted as input.
@@ -1785,7 +1774,8 @@ func TestTypedFraming_latchSequence(t *testing.T) {
 	// Post-latch text controls still dispatch (resize via text keeps the pipe healthy).
 	sendText(t, ws, []byte(`{"type":"resize","cols":90,"rows":30}`))
 
-	// The F1 payload: valid v3 control bytes sent as post-latch binary input.
+	// The sentinel-shaped payload: valid v3 control bytes sent as post-latch
+	// binary input.
 	payload := append([]byte{0x00}, []byte(`{"type":"ping"}`)...)
 	wctx, wcancel := context.WithTimeout(t.Context(), time.Second)
 	defer wcancel()
@@ -1834,8 +1824,8 @@ func TestTypedFraming_latchSequence(t *testing.T) {
 }
 
 // TestTypedFraming_textSizeLimits pins the wsReadLimit boundary for text
-// controls empirically (impl-review finding 5: verify coder/websocket's
-// boundary semantics rather than assuming them): a valid control padded to
+// controls empirically (coder/websocket's boundary semantics are verified,
+// not assumed): a valid control padded to
 // EXACTLY wsReadLimit bytes must still dispatch (and latch), while one byte
 // over must close the connection with 1009 StatusMessageTooBig — enforced by
 // the transport before handler code runs.
@@ -1881,7 +1871,7 @@ func TestTypedFraming_textSizeLimits(t *testing.T) {
 // TestTypedFraming_textPolicyCloses pins the server's text-frame policy: text
 // before the arm, unparseable text after the arm, empty text, and invalid
 // UTF-8 all close the connection with the documented status codes — never
-// latching, never guessing, never reaching the PTY (review F3/F7).
+// latching, never guessing, never reaching the PTY.
 func TestTypedFraming_textPolicyCloses(t *testing.T) {
 	tests := []struct {
 		name       string

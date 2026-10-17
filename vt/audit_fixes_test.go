@@ -7,8 +7,8 @@ import "testing"
 
 // --- P0: marker-aware CSI dispatch (m / u / s / r) ---
 
-// XTMODKEYS (CSI > Pp ; Pv m) must NOT be routed to SGR. kiro-cli emits
-// ESC[>4;1m at init; before the fix that set bold+underline on the live style.
+// XTMODKEYS (CSI > Pp ; Pv m) must NOT be routed to SGR: a program that emits
+// ESC[>4;1m at init would otherwise set bold+underline on the live style.
 func TestXTMODKEYS_NotTreatedAsSGR(t *testing.T) {
 	s := New(5, 20)
 	s.Write([]byte("\x1b[>4;1m"))

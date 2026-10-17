@@ -271,7 +271,7 @@ func TestOSC9ProgressStatePersists(t *testing.T) {
 			s.Write([]byte("building...\r\n"))
 			s.Write([]byte("\x1b[2;3H\x1b[31mred\x1b[0m"))
 			s.Write([]byte("\x1b]2;some title" + term.seq))
-			s.Write(osc9("Response complete", term.seq))
+			s.Write(osc9("Task finished", term.seq))
 			wantProgress(t, s, 2, 75)
 
 			// A later progress sequence changes it.
@@ -302,7 +302,7 @@ func TestOSC9FormDiscrimination(t *testing.T) {
 		payload  string
 		wantNote string // "" = must NOT be captured as a notification
 	}{
-		{name: "plain message", payload: "Response complete", wantNote: "Response complete"},
+		{name: "plain message", payload: "Task finished", wantNote: "Task finished"},
 		{name: "message starting with a digit", payload: "4 files changed", wantNote: "4 files changed"},
 		{name: "message that is a decimal", payload: "0.5 done", wantNote: "0.5 done"},
 		{name: "message with a semicolon", payload: "done; next up", wantNote: "done; next up"},

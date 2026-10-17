@@ -204,9 +204,9 @@ func TestOSC9NotificationLeavesTitleUnchanged(t *testing.T) {
 
 func TestOSC9CapturesNotificationST(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]9;Response complete\x1b\\"))
-	if s.Notification != "Response complete" {
-		t.Fatalf("Notification = %q, want %q", s.Notification, "Response complete")
+	s.Write([]byte("\x1b]9;Task finished\x1b\\"))
+	if s.Notification != "Task finished" {
+		t.Fatalf("Notification = %q, want %q", s.Notification, "Task finished")
 	}
 	if s.NotificationSeq != 1 {
 		t.Fatalf("NotificationSeq = %d, want 1", s.NotificationSeq)
@@ -215,32 +215,32 @@ func TestOSC9CapturesNotificationST(t *testing.T) {
 
 func TestOSC9CapturesNotificationBEL(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]9;Permission required\x07"))
-	if s.Notification != "Permission required" {
-		t.Fatalf("Notification = %q, want %q", s.Notification, "Permission required")
+	s.Write([]byte("\x1b]9;Approval needed\x07"))
+	if s.Notification != "Approval needed" {
+		t.Fatalf("Notification = %q, want %q", s.Notification, "Approval needed")
 	}
 }
 
 // A repeated identical message must still advance the sequence so the status
-// layer detects the new edge (two "Permission required" in a row are two events).
+// layer detects the new edge (two "Approval needed" in a row are two events).
 func TestOSC9SeqAdvancesOnRepeat(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]9;Permission required\x07"))
-	s.Write([]byte("\x1b]9;Permission required\x07"))
+	s.Write([]byte("\x1b]9;Approval needed\x07"))
+	s.Write([]byte("\x1b]9;Approval needed\x07"))
 	if s.NotificationSeq != 2 {
 		t.Fatalf("NotificationSeq = %d, want 2", s.NotificationSeq)
 	}
 }
 
 // TestOSC9ConEmuProgress verifies the ConEmu progress subcommand (OSC 9 ; 4 ; st)
-// is captured into Progress, not into Notification. kiro-cli emits it while the
-// agent works, which the status layer maps to a working indicator.
+// is captured into Progress, not into Notification. A program emits it while it
+// works, which the status layer maps to a working indicator.
 func TestOSC9ConEmuProgress(t *testing.T) {
 	s := New(24, 80)
 	if s.Progress != -1 {
 		t.Fatalf("initial Progress = %d, want -1 (none seen)", s.Progress)
 	}
-	// Indeterminate progress (state 3): agent working.
+	// Indeterminate progress (state 3): work under way.
 	s.Write([]byte("\x1b]9;4;3\x07"))
 	if s.Progress != 3 {
 		t.Fatalf("after 9;4;3, Progress = %d, want 3", s.Progress)
@@ -292,8 +292,8 @@ func TestSanitizeNotification(t *testing.T) {
 	}{
 		{"c0 + del stripped, printable kept", "done\tnow\x7f\n!", "donenow!"},
 		{"c1 controls stripped", "a\u0085b\u009cc", "abc"},
-		// The classes the hand-rolled C0/C1 loop used to pass (the u07
-		// deferral finding): Bidi_Control reordering runes and the JS line
+		// The classes a C0/C1-only filter passes:
+		// Bidi_Control reordering runes and the JS line
 		// terminators must not survive into log lines or status events.
 		{"bidi controls stripped", "ok\u202etxt.exe\u202cend", "oktxt.exeend"},
 		{"bidi isolates + alm stripped", "\u2066x\u2069\u061cy\u200e\u200f", "xy"},

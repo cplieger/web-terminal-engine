@@ -2,7 +2,7 @@ package vt
 
 import "testing"
 
-// --- Unbounded buffer growth (P1 findings) ---
+// --- Unbounded buffer growth ---
 
 func TestOSCBufferBounded(t *testing.T) {
 	s := New(24, 80)
@@ -55,7 +55,7 @@ func TestCSIIntermedBounded(t *testing.T) {
 	}
 }
 
-// --- CSI param clamping (P1 finding: DoS via huge loop counts) ---
+// --- CSI param clamping (DoS via huge loop counts) ---
 
 func TestShiftLeftLargeN(t *testing.T) {
 	s := New(24, 80)

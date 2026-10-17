@@ -34,7 +34,7 @@ func TestSessionSetLayout_roundTripsThroughParse(t *testing.T) {
 			}
 			cleanExit[i] = r.IntN(4) == 0
 			if r.IntN(2) == 0 {
-				tokens[ids[i]] = fmt.Sprintf("sess_%d", r.Uint32())
+				tokens[ids[i]] = fmt.Sprintf("tab_%d", r.Uint32())
 			}
 		}
 		layout := PaneLayout{Left: propSide(r, ids), Right: propSide(r, ids), Handle: r.Float64(), Open: r.IntN(2) == 0}

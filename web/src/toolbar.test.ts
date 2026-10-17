@@ -327,8 +327,8 @@ describe("bindMobileToolbar: DECCKM-aware arrows", () => {
 describe("bindMobileToolbar: applyStickyCtrl under kitty disambiguate", () => {
   // The toolbar path must be byte-identical with the physical-keyboard
   // encoder: the spec's unshifted-key rule folds a shifted glyph into its
-  // base codepoint + the shift modifier bit (judgement finding: ':' encoded
-  // 58;5u from the toolbar vs 59;6u from a real keyboard).
+  // base codepoint + the shift modifier bit (':' must not encode 58;5u from
+  // the toolbar vs 59;6u from a real keyboard).
   let send: ReturnType<typeof vi.fn<(bytes: string) => void>>;
   let fixture: ReturnType<typeof makeToolbar>;
 

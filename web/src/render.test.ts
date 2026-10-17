@@ -1,8 +1,8 @@
-// A captured WS frame sequence (typing "abc", space, "d", LEFT, LEFT, "X") goes
+// A WS frame sequence (typing "abc", space, "d", LEFT, LEFT, "X") goes
 // through renderer.handleScreen and the DOM is inspected after each step. The
-// visible cursor here is the inverse-video character Ink draws, and it must move
-// when row 19 changes by exactly the cursor cell: after each frame the
-// inverse-styled span sits at the column msg.cursor[1] names.
+// visible cursor here is an inverse-video character the program draws, and it
+// must move when row 19 changes by exactly the cursor cell: after each frame
+// the inverse-styled span sits at the column msg.cursor[1] names.
 
 import { describe, it, expect, beforeEach } from "vitest";
 import type { Renderer } from "./render.js";
@@ -26,9 +26,9 @@ HTMLCanvasElement.prototype.getContext = function fakeGetContext(): unknown {
   return ctx;
 } as typeof HTMLCanvasElement.prototype.getContext;
 
-// One row payload describing a the host application prompt at the bottom of the
-// terminal: `<text default> <inverse char> <trailing spaces>`. The
-// inverse char is the visible cursor.
+// One row payload describing a program's prompt at the bottom of the terminal:
+// `<text default> <inverse char> <trailing spaces>`. The inverse char is the
+// visible cursor.
 function row19(textBeforeCursor: string, cursorChar: string, padTo = 120): WireRun[] {
   const trailing = padTo - textBeforeCursor.length - cursorChar.length;
   return [
@@ -57,7 +57,7 @@ function frame(rowsByIdx: Record<number, WireRun[]>, cursor: [number, number]): 
     rows,
     cursor,
     changed,
-    cursorHidden: true, // the host application hides the native cursor
+    cursorHidden: true, // the program hides the native cursor
     cursorStyle: 0,
     cursorBlink: true,
   };
@@ -113,7 +113,7 @@ describe("render: cursor cell updates with inline inverse-video character", () =
     expectInverseAtCol(outputEl, 19, 5, " ");
 
     // After Left arrow: row 19 = "abc " + inv "d" + trailing; cursor (19,4)
-    // Note inverse char is now 'd' (Ink moved cursor onto the 'd').
+    // Note inverse char is now 'd' (the program moved its cursor onto the 'd').
     await flushFrame(frame({ 19: row19("abc ", "d") }, [19, 4]));
     expectInverseAtCol(outputEl, 19, 4, "d");
 

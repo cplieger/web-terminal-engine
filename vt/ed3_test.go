@@ -8,9 +8,9 @@ import (
 // TestED3RaisesScrollbackClearedNotScreen verifies CSI 3 J ("erase saved
 // lines") raises the ScrollbackCleared signal — which the terminal layer uses
 // to clear its scrollback ring — WITHOUT erasing the visible screen. xterm's
-// ED3 clears only the scrollback buffer. Inline TUIs (kiro-cli) emit ED3 on
-// every resize redraw to discard the previous frame; honoring it is exactly
-// what stops a real terminal from accumulating stale frames on resize.
+// ED3 clears only the scrollback buffer. Inline TUIs can emit ED3 on every
+// resize redraw to discard the previous frame; honoring it is exactly what
+// stops a real terminal from accumulating stale frames on resize.
 func TestED3RaisesScrollbackClearedNotScreen(t *testing.T) {
 	s := New(5, 20)
 	s.Write([]byte("hello"))

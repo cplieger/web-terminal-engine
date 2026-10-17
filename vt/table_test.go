@@ -48,13 +48,16 @@ func TestStateTableESCGoesToEscape(t *testing.T) {
 	}
 }
 
-// TestStateTableSosPmApcTerminatesOnST verifies the SOS/PM/APC string state
-// transitions to Ground on the 8-bit ST (0x9C), as does the OSC string state.
-func TestStateTableSosPmApcTerminatesOnST(t *testing.T) {
-	if got := stateTable[stSosPmApcString][0x9C].next(); got != stGround {
-		t.Errorf("stateTable[SosPmApcString][0x9C].next() = %d, want stGround (%d)", got, stGround)
-	}
-	if got := stateTable[stOscString][0x9C].next(); got != stGround {
-		t.Errorf("stateTable[OscString][0x9C].next() = %d, want stGround (%d)", got, stGround)
+// TestSosPmApcKeeps0x9CAsPayload verifies a 0x9C byte inside an SOS, PM or
+// APC string is a UTF-8 continuation byte: the string is swallowed whole.
+func TestSosPmApcKeeps0x9CAsPayload(t *testing.T) {
+	for name, intro := range map[string]string{"SOS": "\x1bX", "PM": "\x1b^", "APC": "\x1b_"} {
+		t.Run(name, func(t *testing.T) {
+			s := New(2, 20)
+			s.Write([]byte(intro + "\u00dcber\x1b\\X")) // U+00DC is C3 9C
+			if got := s.RowString(0); got != "X" {
+				t.Errorf("RowString(0) = %q, want %q (string swallowed whole)", got, "X")
+			}
+		})
 	}
 }

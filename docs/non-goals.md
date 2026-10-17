@@ -1,6 +1,6 @@
 # Unsupported VT features
 
-This page lists the VT and DEC features the engine leaves out on purpose, the device queries it answers and its sequence length limits. It is for a developer who checks whether a program will work in it, or who is about to report a missing sequence.
+This page lists the VT and DEC features the engine leaves out on purpose, the device queries it answers, its sequence length limits and its string terminators. It is for a developer who checks whether a program will work in it, or who is about to report a missing sequence.
 
 ## Left out on purpose
 
@@ -32,6 +32,10 @@ The [esctest2](https://github.com/ThomasDickey/esctest2) conformance suite check
 ## Length limits
 
 The engine buffers at most 4096 bytes of an OSC payload and 256 bytes of a DECRQSS or XTGETTCAP query. A longer sequence is dropped whole rather than applied cut short, and a dropped query gets no reply. An OSC 52 copy of more than about 3 KB of text, or an OSC 8 link of about 4 KB or more, therefore does nothing.
+
+## String terminators
+
+An OSC ends with BEL or the 7-bit ST (`ESC \`), and a DCS, SOS, PM or APC string ends with the 7-bit ST. A CAN or SUB byte cancels any of them. The 8-bit ST byte (`0x9C`) does not end a string, because in UTF-8 it is part of characters such as `Ü`, so it stays in the payload.
 
 ## The kitty keyboard protocol
 

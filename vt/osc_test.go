@@ -99,18 +99,31 @@ func TestOSCAbortedByCANDoesNotCorrupt(t *testing.T) {
 	}
 }
 
-// TestOSCTerminatedBy8BitST verifies the 8-bit ST (0x9C) terminates an OSC and
-// the title is set.
-func TestOSCTerminatedBy8BitST(t *testing.T) {
-	s := New(5, 80)
-	s.Write([]byte("\x1b]2;Hello"))
-	s.Write([]byte{0x9C}) // 8-bit ST
-	if s.pState != stGround {
-		t.Errorf("0x9C in OscString: state=%d, want Ground", s.pState)
-	}
-	if s.Title != "Hello" {
-		t.Errorf("OSC title after 0x9C: got %q, want Hello", s.Title)
-	}
+// TestOSCKeeps0x9CAsPayload verifies a 0x9C byte inside an OSC is a UTF-8
+// continuation byte, not an 8-bit ST that would cut the payload.
+func TestOSCKeeps0x9CAsPayload(t *testing.T) {
+	t.Run("osc8_link_with_U+011C_applies_whole", func(t *testing.T) {
+		s := New(2, 40)
+		url := "https://example.com/\u011c/rest" // U+011C is C4 9C
+		s.Write([]byte("\x1b]8;;" + url + "\x07X"))
+		if got := s.Cells[0][0].Hyperlink; got != url {
+			t.Errorf("OSC 8 linked %q, want %q", got, url)
+		}
+		if got := s.RowString(0); got != "X" {
+			t.Errorf("RowString(0) = %q, want %q (no payload printed)", got, "X")
+		}
+	})
+
+	t.Run("osc2_title_with_U+00DC_applies_whole", func(t *testing.T) {
+		s := New(2, 40)
+		s.Write([]byte("\x1b]2;\u00dcber\x07")) // U+00DC is C3 9C
+		if s.Title != "\u00dcber" {
+			t.Errorf("OSC 2 title = %q, want %q", s.Title, "\u00dcber")
+		}
+		if got := s.RowString(0); got != "" {
+			t.Errorf("RowString(0) = %q, want empty (no payload printed)", got)
+		}
+	})
 }
 
 // TestOSCAbortedBySUB verifies SUB aborts an OSC without dispatching the title.
@@ -126,14 +139,18 @@ func TestOSCAbortedBySUB(t *testing.T) {
 	}
 }
 
-// TestOSCNoTerminatorThenNewSequence verifies an unterminated OSC is abandoned
-// when a fresh ESC sequence begins, which then takes effect.
-func TestOSCNoTerminatorThenNewSequence(t *testing.T) {
+// TestOSCTerminatedByESCAppliesThenCSIRuns verifies an ESC that starts a new
+// sequence ends the OSC through its exit action (osc_end in
+// vt100.net/emu/dec_ansi_parser), so the OSC applies and the CSI runs.
+func TestOSCTerminatedByESCAppliesThenCSIRuns(t *testing.T) {
 	s := New(5, 80)
-	s.Write([]byte("\x1b]8;params;http://example.com")) // no terminator
-	s.Write([]byte("\x1b[1;1H"))                        // new sequence starts fresh
-	if row, col := s.CursorPos(); row != 0 || col != 0 {
-		t.Fatalf("expected cursor at 0,0 after OSC abort via ESC, got %d,%d", row, col)
+	s.Write([]byte("\x1b]8;params;http://example.com")) // no BEL or ST
+	s.Write([]byte("\x1b[1;1HX"))
+	if got := s.Cells[0][0].Ch; got != 'X' {
+		t.Errorf("Cells[0][0].Ch = %q, want 'X' (CSI following an OSC terminated by ESC moved the cursor)", got)
+	}
+	if got := s.Cells[0][0].Hyperlink; got != "http://example.com" {
+		t.Errorf("Cells[0][0].Hyperlink = %q, want %q (ESC dispatched the OSC 8)", got, "http://example.com")
 	}
 }
 

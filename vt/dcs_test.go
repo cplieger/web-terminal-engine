@@ -196,17 +196,27 @@ func TestUnknownDCSNotBuffered(t *testing.T) {
 	}
 }
 
-// TestDCS8BitSTTerminates verifies the 8-bit ST (0x9C) terminates a DECRQSS and
-// produces a response.
-func TestDCS8BitSTTerminates(t *testing.T) {
-	s := New(24, 80)
-	s.Write([]byte("\x1bP$qm")) // DECRQSS for SGR
-	s.Write([]byte{0x9C})       // 8-bit ST
-	if s.pState != stGround {
-		t.Errorf("8-bit ST did not terminate DCS: state=%d", s.pState)
+// TestDCSKeepsC1BytesAsPayload verifies a C1-range byte inside a DCS is a
+// UTF-8 continuation byte: it neither ends the DCS nor starts a sequence.
+func TestDCSKeepsC1BytesAsPayload(t *testing.T) {
+	cases := []struct{ name, in string }{
+		{"passthrough_with_U+00DC", "\x1bPz\u00dcber\x1b\\X"},              // C3 9C, 8-bit ST
+		{"ignore_with_U+00DC", "\x1bP1<\u00dcber\x1b\\X"},                  // C3 9C, 8-bit ST
+		{"ignore_with_U+011B_starts_no_csi", "\x1bP1<\u011b31mred\x1b\\X"}, // C4 9B, 8-bit CSI
 	}
-	if len(s.response) == 0 {
-		t.Error("DECRQSS with 8-bit ST produced no response")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(2, 20)
+			s.Write([]byte(tc.in))
+			if got := s.RowString(0); got != "X" {
+				t.Errorf("RowString(0) = %q, want %q (DCS payload swallowed whole)", got, "X")
+			}
+			plain := New(2, 20)
+			plain.Write([]byte("X"))
+			if got, want := s.Cells[0][0].Style, plain.Cells[0][0].Style; got != want {
+				t.Errorf("Cells[0][0].Style = %+v, want %+v (no SGR ran)", got, want)
+			}
+		})
 	}
 }
 

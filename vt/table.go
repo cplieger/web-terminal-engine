@@ -2,7 +2,8 @@ package vt
 
 // VT500 flat state-transition table: [14 states][256 bytes] → packed action+nextState.
 // Based on Paul Williams' canonical parser (vt100.net/emu/dec_ansi_parser)
-// with modern extensions: colon=subparam, C1 suppressed in Ground under UTF-8.
+// with modern extensions: colon=subparam, C1 suppressed in Ground and string
+// payloads under UTF-8.
 
 // action enumerates parser actions.
 type action uint8
@@ -79,7 +80,6 @@ func init() {
 	buildOscString()
 	buildSosPmApcString()
 
-	// Apply anywhere transitions to all states EXCEPT Ground for C1 (0x80-0x9F)
 	applyAnywhere()
 
 	// Verify completeness
@@ -362,7 +362,8 @@ func buildSosPmApcString() {
 }
 
 // applyAnywhere applies the "anywhere" transitions for CAN, SUB, ESC, and C1.
-// C1 (0x80-0x9F) anywhere transitions are NOT applied to Ground (UTF-8 mode).
+// C1 (0x80-0x9F) anywhere transitions are NOT applied to Ground or the string
+// states (UTF-8 mode).
 func applyAnywhere() {
 	for si := range numStates {
 		s := si
@@ -379,9 +380,12 @@ func applyAnywhere() {
 			continue // suppress C1 anywhere in Ground (UTF-8 mode)
 		}
 
-		// C1 controls in non-Ground states
-		// 0x80-0x8F: execute + Ground
-		if s != stDcsPassthrough && s != stOscString && s != stSosPmApcString {
+		// C1 controls in non-Ground states. The string states keep their own
+		// 0x80-0xFF rows, 8-bit ST included: a raw C1 byte there is a UTF-8
+		// continuation byte ("Ü" is C3 9C), so only a C0 byte (ESC, CAN, SUB,
+		// and BEL for an OSC) ends a string, as in Ghostty's parse_table.zig.
+		if s != stDcsPassthrough && s != stDcsIgnore && s != stOscString && s != stSosPmApcString {
+			// 0x80-0x8F: execute + Ground
 			setRange(s, 0x80, 0x8F, mkT(actExecute, stGround))
 			// 0x90 (DCS): → DcsEntry
 			stateTable[s][0x90] = mkT(actNone, stDcsEntry)
@@ -403,19 +407,6 @@ func applyAnywhere() {
 			stateTable[s][0x9E] = mkT(actNone, stSosPmApcString)
 			// 0x9F (APC): → SosPmApcString
 			stateTable[s][0x9F] = mkT(actNone, stSosPmApcString)
-		}
-
-		// For DcsPassthrough: 0x9C (ST) causes unhook (exit action) + Ground
-		if s == stDcsPassthrough {
-			stateTable[s][0x9C] = mkT(actNone, stGround)
-		}
-		// For OscString: 0x9C (ST) causes osc_end (exit action) + Ground
-		if s == stOscString {
-			stateTable[s][0x9C] = mkT(actNone, stGround)
-		}
-		// For SosPmApcString: 0x9C (ST) → Ground
-		if s == stSosPmApcString {
-			stateTable[s][0x9C] = mkT(actNone, stGround)
 		}
 	}
 }

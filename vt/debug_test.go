@@ -7,7 +7,7 @@ import (
 
 func TestBasicRender(t *testing.T) {
 	s := New(30, 120)
-	input := "\x1b]0;app\x07\x1b[?1h\x1b[?1049h\x1b[H\x1b[2JHello World\r\nLine 2\r\n\x1b[38;2;144;70;255mColored text\x1b[0m"
+	input := "\x1b]0;app\x07\x1b[?1h\x1b[?1049h\x1b[H\x1b[2JHello World\r\nLine 2\r\n\x1b[38;2;200;120;40mColored text\x1b[0m"
 	s.Write([]byte(input))
 	if s.RowString(0) != "Hello World" {
 		t.Errorf("Row 0 = %q, want 'Hello World'", s.RowString(0))

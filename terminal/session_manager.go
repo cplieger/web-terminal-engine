@@ -73,8 +73,8 @@ type SessionID string
 //     renders unless it has a reason not to.
 //   - PinnedTitle is the USER's name, set and cleared only by a human action.
 //   - ClientTitle is a CLIENT-DERIVED automatic title: a guess a client
-//     computed and asked the server to remember (today, the agent UI's latched
-//     first submitted line). Client-supplied, but not user-authored.
+//     computed and asked the server to remember (for example, a session's first
+//     submitted line). Client-supplied, but not user-authored.
 type SessionInfo struct {
 	CreatedAt time.Time `json:"createdAt"`
 	ID        SessionID `json:"id"`    // marshals as a plain string; the wire shape is unchanged
@@ -275,7 +275,7 @@ type titleSources struct {
 // effectiveTitle combines a session's title sources in precedence order:
 // explicit beats inferred. The user's pinned name wins outright; then the live
 // OSC window title; then a client-derived title; then the server's own
-// inference. The last two compete for real: an agent host pushes a client title
+// inference. The last two compete for real: a host can push a client title
 // for a program that may set no OSC title at all. Pure, so no caller nests the
 // sweep's handler lock (the OSC title) inside m.mu (the stored titles).
 func effectiveTitle(src *titleSources) string {

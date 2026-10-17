@@ -125,7 +125,7 @@ describe("render (store-backed, brick 3)", () => {
     expect(outputEl.children[2]?.firstElementChild).toBe(span2);
   });
 
-  it("updates a row in place when its content changes (Ink redraw)", async () => {
+  it("updates a row in place when its content changes (a program redraw)", async () => {
     render.handleScreen(screenMsg(0, [row("spin -")], [0]));
     await tick();
     const firstEl = outputEl.children[0];
@@ -214,9 +214,9 @@ describe("render (store-backed, brick 3)", () => {
   });
 
   it("renders a burst larger than the per-frame budget across multiple frames", async () => {
-    // A /chat session restore (or `cat bigfile`) dumps thousands of lines in
-    // one wire frame. The store ingests them at once; the renderer must drain
-    // them in budgeted batches without losing or duplicating any.
+    // A session's transcript replay (or `cat bigfile`) dumps thousands of
+    // lines in one wire frame. The store ingests them at once; the renderer
+    // must drain them in budgeted batches without losing or duplicating any.
     const N = 700; // > MAX_ROWS_PER_FRAME (300)
     const texts = Array.from({ length: N }, (_, i) => `burst ${i}`);
     render.handleScroll(scrollMsg(0, texts));

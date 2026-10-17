@@ -17,8 +17,8 @@ import (
 // inherits every orphan in the container by re-parenting, and Go's os/exec waits
 // only on the children IT created. So every process whose own parent died —
 // which for an agent shell means every language server, every git it forked, the
-// lot — becomes a permanent zombie parked on the server. Measured on the
-// container this was written for: 17,323 zombies (12,508 git, 3,155 gopls)
+// lot — becomes a permanent zombie parked on the server. Measured on one
+// long-running agent-shell container: 17,323 zombies (12,508 git, 3,155 gopls)
 // against 88 live processes, all with the server as their parent, none of them
 // reachable by any consumer's own wait().
 //

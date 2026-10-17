@@ -185,7 +185,7 @@ func TestComputeStatusFreshLatchOutranksActiveProgress(t *testing.T) {
 
 // TestComputeStatusStaleLatchStillClearedByWorking verifies the fresh-latch
 // precedence lasts one sweep only (self-correcting): when progress remains
-// active on the NEXT sweep with no new notification — the agent genuinely kept
+// active on the NEXT sweep with no new notification — the program genuinely kept
 // working, e.g. a queued follow-up turn — the now-stale latch clears and the
 // session reports working.
 func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {

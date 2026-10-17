@@ -128,9 +128,9 @@ describe("OSC 8 hyperlink rendering", () => {
     // underline), the anchor hugs exactly the URL text, so it keeps the
     // persistent `.term-autolink` underline — this is what makes the SECOND
     // line of a wrapped URL visibly a link on a phone.
-    const full = "https://amzn.example/start/#/device?user_code=ABCD-EFGH";
+    const full = "https://example.com/docs/guide/install?step=12#on-linux-x64";
     const runs: WireRun[] = [
-      { t: "device?user_code=ABCD-EFGH", f: -1, b: -1, a: 1024, uc: -1, u: full },
+      { t: "install?step=12#on-linux-x64", f: -1, b: -1, a: 1024, uc: -1, u: full },
     ];
     const msg = frame({ 0: runs }, [0, 0]);
     await flushFrame(msg);
@@ -141,7 +141,7 @@ describe("OSC 8 hyperlink rendering", () => {
     // The tail row's anchor carries the FULL joined href, not the visible
     // fragment (the truncated-tap bug), and opens safely.
     expect(a.getAttribute("href")).toBe(full);
-    expect(a.textContent).toBe("device?user_code=ABCD-EFGH");
+    expect(a.textContent).toBe("install?step=12#on-linux-x64");
     expect(a.target).toBe("_blank");
     expect(a.rel).toBe("noopener noreferrer");
   });

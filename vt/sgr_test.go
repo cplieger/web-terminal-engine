@@ -224,13 +224,13 @@ func TestSGRSubparamColon256(t *testing.T) {
 // (38;2;R;G;B).
 func TestSGRSubparamSemicolonLegacyRGB(t *testing.T) {
 	s := New(1, 10)
-	s.Write([]byte("\x1b[38;2;144;70;255mX"))
+	s.Write([]byte("\x1b[38;2;200;120;40mX"))
 	cell := s.Cells[0][0]
 	if cell.Style.FG.Type != 3 {
 		t.Fatalf("expected RGB color type 3, got %d", cell.Style.FG.Type)
 	}
-	if cell.Style.FG.R != 144 || cell.Style.FG.G != 70 || cell.Style.FG.B != 255 {
-		t.Errorf("RGB: got R=%d G=%d B=%d, want 144,70,255",
+	if cell.Style.FG.R != 200 || cell.Style.FG.G != 120 || cell.Style.FG.B != 40 {
+		t.Errorf("RGB: got R=%d G=%d B=%d, want 200,120,40",
 			cell.Style.FG.R, cell.Style.FG.G, cell.Style.FG.B)
 	}
 }

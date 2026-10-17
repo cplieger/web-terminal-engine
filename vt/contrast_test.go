@@ -426,14 +426,13 @@ func TestMinimumContrastLeavesOSC4QueryAlone(t *testing.T) {
 	}
 }
 
-// TestMinimumContrastLiftsAnOSC8Link replays the byte sequence a TUI writes for
-// a markdown link, captured from a live PTY session: an OSC 8 hyperlink wrapping
-// SGR 34 link text, then the closing OSC 8. It pins that the run reaching the
+// TestMinimumContrastLiftsAnOSC8Link writes an OSC 8 hyperlink wrapping SGR 34
+// link text, then the closing OSC 8. It pins that the run reaching the
 // client keeps the href AND carries a legible color.
 func TestMinimumContrastLiftsAnOSC8Link(t *testing.T) {
-	const captured = "see \x1b]8;;https://example.com/x\x07\x1b[34mthe example page\x1b[39m\x1b]8;;\x07 here"
+	const linked = "see \x1b]8;;https://example.com/x\x07\x1b[34mthe example page\x1b[39m\x1b]8;;\x07 here"
 	s := New(1, 40, WithMinimumContrast(wcagAA))
-	s.Write([]byte(captured))
+	s.Write([]byte(linked))
 
 	var link *WireRun
 	for i, run := range s.RenderRowWire(0) {

@@ -44,8 +44,8 @@ describe("LineStore invariants (property)", () => {
 
   it("retained count never exceeds max(cap, screen height) with interleaved screen frames", () => {
     // The scroll-only property above never exercises the live-window guard
-    // (win.height stays 0), which is exactly how the R2 adversarial finding —
-    // scroll bursts above a stale window escaping the cap — slipped past it.
+    // (win.height stays 0), so scroll bursts above a stale window escaping
+    // the cap slipped past it.
     // This drives BOTH frame kinds, including bases that jump ahead of and
     // behind retained content, and asserts the hard bound plus the window's
     // integrity after every operation.

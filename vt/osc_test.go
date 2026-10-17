@@ -240,7 +240,7 @@ func TestOSC9ConEmuProgress(t *testing.T) {
 	if s.Progress != -1 {
 		t.Fatalf("initial Progress = %d, want -1 (none seen)", s.Progress)
 	}
-	// Indeterminate progress (state 3): agent working.
+	// Indeterminate progress (state 3): work under way.
 	s.Write([]byte("\x1b]9;4;3\x07"))
 	if s.Progress != 3 {
 		t.Fatalf("after 9;4;3, Progress = %d, want 3", s.Progress)

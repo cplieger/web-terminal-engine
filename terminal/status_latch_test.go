@@ -39,7 +39,7 @@ func TestWithdrawStatusLatchClearsInputAndTheSweepRecomputes(t *testing.T) {
 		want     string
 	}{
 		{name: "idle under a cleared progress state", progress: "\x1b]9;4;0\x07", want: StatusIdle},
-		{name: "warning under the parked context percentage", progress: "\x1b]9;4;4;72\x07", want: StatusWarning},
+		{name: "warning under a state-4 report", progress: "\x1b]9;4;4;72\x07", want: StatusWarning},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -51,9 +51,9 @@ func TestAutolinkSingleRow(t *testing.T) {
 // href — the old per-row client regex left row 2 unlinked and row 1's href
 // truncated at the wrap column (a broken tap on narrow screens).
 func TestAutolinkWrappedRow(t *testing.T) {
-	const url = "https://amzn.awsapps.com/start/#/device?user_code=ABCD-EFGH"
-	s := New(5, 40) // 60-char URL wraps at col 40 after the 15-char prefix
-	if _, err := s.Write([]byte("Open this URL: " + url)); err != nil {
+	const url = "https://example.com/docs/guide/install?step=12#on-linux-x64"
+	s := New(5, 40) // 59-char URL wraps at col 40 after the 15-char prefix
+	if _, err := s.Write([]byte("Open the link: " + url)); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
@@ -422,7 +422,7 @@ func TestAutolinkWideCharBoundary(t *testing.T) {
 }
 
 // hardWrapLines writes each line as its own logical line (CR LF between them),
-// which is how an Ink-style TUI emits text it wrapped itself: the terminal never
+// which is how a TUI that wraps its own text emits it: the terminal never
 // autowraps, so no soft-wrap flag is recorded.
 func hardWrapLines(t *testing.T, s *Screen, lines ...string) {
 	t.Helper()
@@ -431,20 +431,19 @@ func hardWrapLines(t *testing.T, s *Screen, lines ...string) {
 	}
 }
 
-// TestAutolinkAppHardWrapJoined pins a phone bug measured at 41 columns: an
-// Ink-style TUI wraps a long URL itself, re-emitting
-// an 8-column indent on each continuation, so the terminal sees three separate
-// full-width lines. Every row must carry an anchor with the WHOLE href — before
-// the indent-aware join, row 0 got an href truncated at the break
-// ("https://github.com/example/widget", which silently opened the repo instead
-// of the job) and rows 1 and 2 got no anchor at all, hence no underline.
+// TestAutolinkAppHardWrapJoined pins a phone-width case at 41 columns: a TUI
+// wraps a long URL itself, re-emitting an 8-column indent on each continuation,
+// so the terminal sees three separate full-width lines. Every row must carry an
+// anchor with the WHOLE href: a join blind to the indent truncates row 0's href
+// at the break ("https://github.com/example/widget", which silently opens the
+// repo instead of the job) and gives rows 1 and 2 no anchor, hence no underline.
 func TestAutolinkAppHardWrapJoined(t *testing.T) {
-	const url = "https://github.com/example/widget/actions/runs/31094602847/job/92593457519"
+	const url = "https://github.com/example/widget/actions/runs/12345678901/job/98765432109"
 	s := New(6, 41)
 	hardWrapLines(t, s,
 		"        https://github.com/example/widget", // 8 + 33 = 41, exactly full
-		"        /actions/runs/31094602847/job/925", // 8 + 33 = 41, exactly full
-		"        93457519",
+		"        /actions/runs/12345678901/job/987", // 8 + 33 = 41, exactly full
+		"        65432109",
 	)
 	var joined strings.Builder
 	for y := range 3 {

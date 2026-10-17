@@ -591,11 +591,11 @@ func progressStatus(progress int) (string, bool) {
 // progressSupersedesLatch reports whether an OSC 9;4 state contradicts a latched
 // notification status and so may clear it. Asked only of states progressStatus
 // accepts. States 1 and 3 say work is under way; 2 reports a failure, which must
-// not stay masked by a stale "done". State 4 is Windows' TBPF_PAUSED ("progress
-// is currently stopped ... No error condition exists"), which agrees with both a
-// needs-input latch and a finished turn; as a rival it would take the tab one
-// sweep (250ms) after the notification. A latch state 4 cannot clear ends when
-// the program resumes (1 or 3), fails (2) or dies.
+// not stay masked by a stale "done". State 4 (iTerm2's warning, Windows'
+// TBPF_PAUSED: "No error condition exists") starts no work and reports no
+// failure, so it does not clear a latch; it persists, so as a rival it would take
+// the tab one sweep (250ms) after the notification. A latch state 4 cannot clear
+// ends when the program resumes (1 or 3), fails (2) or dies.
 func progressSupersedesLatch(progress int) bool {
 	return progress != 4
 }

@@ -93,7 +93,7 @@ describe("LineStore", () => {
     ]);
   });
 
-  it("updates a line in place when content changes (Ink rewriting a window row)", () => {
+  it("updates a line in place when content changes (a program rewriting a window row)", () => {
     const s = new LineStore();
     s.applyScreen(screenMsg(0, 2, { 0: "spin -", 1: "" }));
     s.drainChanges();
@@ -179,11 +179,11 @@ describe("LineStore", () => {
   });
 
   it("batch headroom comes from history only: a batch never eats live-window rows", () => {
-    // R1 adversarial finding (fable/gpt): with a valid consumer cap near the
-    // terminal height (cap 64 -> batch 4, screen height 62), retained history
-    // at the overflow moment (3 rows) is SMALLER than the batch. The batch
-    // target must stop at the window base rather than evicting window rows —
-    // an evicted window row's index lands in everEvictedThrough, after which
+    // With a valid consumer cap near the terminal height (cap 64 -> batch 4,
+    // screen height 62), retained history at the overflow moment (3 rows) is
+    // SMALLER than the batch. The batch target must stop at the window base
+    // rather than evicting window rows — an evicted window row's index lands
+    // in everEvictedThrough, after which
     // guard 2 drops every repaint of that row until the base advances (a
     // permanently blank top row on a stable-base full-screen program).
     const height = 62;
@@ -208,9 +208,9 @@ describe("LineStore", () => {
   });
 
   it("a cap at or below the screen height keeps the full screen (history budget, floored at the window)", () => {
-    // gpt R1 F1: scrollbackLines is public now, so a cap smaller than the
-    // terminal (8 vs a 24-row screen) is reachable. The cap governs HISTORY;
-    // the live screen is never truncated by it.
+    // scrollbackLines is public, so a cap smaller than the terminal (8 vs a
+    // 24-row screen) is reachable. The cap governs HISTORY; the live screen is
+    // never truncated by it.
     const height = 24;
     const winRows = (base: number): Record<number, string> => {
       const out: Record<number, string> = {};
@@ -269,13 +269,13 @@ describe("LineStore", () => {
   });
 
   it("a scroll burst above a stale window cannot escape the cap (the resume-replay shape)", () => {
-    // R2 adversarial finding (claude): the window guard stopped the eviction
-    // LOOP once the oldest key reached the window base, but applyScroll does
+    // A window guard that stops the eviction LOOP once the oldest key reaches
+    // the window base lets history committed ABOVE the window — a resume
+    // replay delivered before its window frame, or a malformed stream — escape
+    // the cap entirely (20k lines retained at cap 64), because applyScroll does
     // not restore the tail invariant (only a screen frame runs
-    // truncateBelowWindow), so history committed ABOVE the window — a resume
-    // replay delivered before its window frame, or a malformed stream —
-    // escaped the cap entirely (measured: 20k lines retained at cap 64).
-    // The skip-over-window walk bounds every apply at max(cap, window height).
+    // truncateBelowWindow). The skip-over-window walk bounds every apply at
+    // max(cap, window height).
     const height = 24;
     const winRows = (base: number): Record<number, string> => {
       const out: Record<number, string> = {};
@@ -311,9 +311,9 @@ describe("LineStore", () => {
     // ...the surviving band is the NEWEST replay lines (evicted oldest-first;
     // the ones adjacent to the incoming window), so once the window frame
     // advances past the seam the retained set converges back to one
-    // contiguous block. (R3 finding: a newest-first trim instead parked a
-    // permanent interior hole that resume — which replays only above
-    // haveThrough — could never backfill.)
+    // contiguous block. (A newest-first trim instead parks a permanent
+    // interior hole that resume — which replays only above haveThrough —
+    // can never backfill.)
     expect(s.getLine(523)).toBeDefined();
     expect(s.getLine(124)).toBeUndefined();
     // ...and was NOT poisoned as stale: a repaint of the window base row is

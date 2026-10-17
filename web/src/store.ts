@@ -1775,9 +1775,9 @@ export class LineStore {
     // arrive in. Evicting that band OLDEST-first keeps the NEWEST lines —
     // the ones adjacent to the incoming window — so after the window
     // advances the retained set converges back to one contiguous block
-    // (R3 adversarial finding: the earlier newest-first tail trim parked a
-    // permanent interior hole under the live screen that resume, which
-    // replays only above haveThrough, could never backfill).
+    // (a newest-first tail trim parks a permanent interior hole under the
+    // live screen that resume, which replays only above haveThrough, can
+    // never backfill).
     // everEvictedThrough advances over every TAIL eviction, including the
     // hopped band — safe for the window frame that follows a replay because
     // apply-line guard 2 exempts the live window (see applyLine).

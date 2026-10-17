@@ -1,5 +1,5 @@
 // Keyboard event → terminal byte sequence mapping, mirroring xterm.js's
-// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline, Ink
+// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline, TUIs
 // and the host application get the keys they expect. Modifier digit per the
 // xterm/VT520 convention: 1=Shift, 2=Alt, 4=Ctrl, 8=Meta, summed then +1 for
 // CSI 1;{n}{letter}. DECCKM and DECKPAM come from the injected mode state,

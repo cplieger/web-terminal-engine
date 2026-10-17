@@ -94,7 +94,7 @@ Each session carries a status the server derives:
 
 `OSC 9;4` progress is read with iTerm2's state meanings. A session the server closed itself, through `Close`, the idle reaper or a shutdown, ends as `exited`. That way a routine restart never reports a failure.
 
-`input` and `done` come from an OSC 9 notification passed through the classifier you install with `WithStatusClassifier`. Such a latch holds until a later progress state contradicts it. The active states 1 and 3 and the error state 2 contradict it. The paused state 4 does not, because "stopped, resumable by the user" agrees with a needs-input latch.
+`input` and `done` come from an OSC 9 notification passed through the classifier you install with `WithStatusClassifier`. Such a latch holds until a later progress state contradicts it. The active states 1 and 3 and the error state 2 contradict it. The paused state 4 does not, because it starts no work and reports no failure.
 
 Some programs notify when a wait starts and stay silent when it ends. A consumer that sees the end from its own sources reads the latch with `(*SessionManager).StatusLatch(id)`. It returns the latched status, the notification sequence that set it, and whether the session is tracked. `WithdrawStatusLatch(id, want, seq)` clears it as a compare-and-swap. It refuses an unknown session, a `want` other than `input` or `done`, a latch that no longer equals `want`, and a latch a newer notification set after `seq`. A slow poller can therefore never erase a fresh request. The next sweep recomputes the status from progress alone.
 

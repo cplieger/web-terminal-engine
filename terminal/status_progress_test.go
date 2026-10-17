@@ -142,11 +142,8 @@ func TestComputeStatusFreshNotificationOutranksProgressState(t *testing.T) {
 // The active states do (nothing is running while a turn is done or blocked), and
 // so does the error state, an outcome that must not stay masked by a stale "done"
 // when a build has since failed.
-//
-// State 4 is the exception and has its own test below: it is the paused state,
-// which asserts the same thing a needs-input latch does and nothing that a
-// finished turn denies, so it is not a rival claim. It was in this table until
-// that was measured — see progressSupersedesLatch.
+// State 4 is the exception and has its own test below: it starts no work and
+// reports no failure, so it is no rival claim (progressSupersedesLatch).
 func TestComputeStatusNewProgressStateSupersedesStaleLatch(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -181,32 +178,39 @@ func TestComputeStatusNewProgressStateSupersedesStaleLatch(t *testing.T) {
 	}
 }
 
-// TestComputeStatusPausedStateDoesNotStealLatch pins the state-4 exception
-// against two shapes an emitter can produce, BOTH coexisting with a latch it
-// posted in the same breath: `4;100` while input is pending, and a parked
-// `4;<percent>` once done. State 4 persists, so a state-4 report allowed to
-// clear a latch would take the tab one sweep (250ms) after the notification
-// and keep it for the whole wait. The cases run several sweeps because the
-// fresh-latch rule already covers the first.
+// TestComputeStatusPausedStateDoesNotStealLatch pins OSC 9;4 state 4 (iTerm2's
+// warning, Windows' paused) as no rival to a latched notification status: it
+// starts no work and reports no failure, so at any value and over any number of
+// sweeps it keeps a needs-input or done latch, while a later 1, 3 or 2 clears
+// it. The cases run several sweeps because the fresh-latch rule already covers
+// the first.
 func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 	cases := []struct {
 		name     string
 		msg      string
 		value    int
 		want     string
-		resumeTo int // the state the program moves to, which MUST clear the latch
+		resumeTo int // the state that follows state 4, which MUST clear the latch
 		resumed  string
 	}{
 		{
-			name: "input pending keeps needs-input", msg: "Approval needed",
+			name: "state 4 at 100 keeps needs-input until state 3", msg: "Approval needed",
 			value: 100, want: StatusInput, resumeTo: 3, resumed: StatusWorking,
 		},
 		{
-			name: "parked percentage keeps done", msg: "Task finished",
+			name: "state 4 at 0 keeps needs-input until state 1", msg: "Approval needed",
+			value: 0, want: StatusInput, resumeTo: 1, resumed: StatusWorking,
+		},
+		{
+			name: "state 4 at 40 keeps needs-input until state 2", msg: "Approval needed",
+			value: 40, want: StatusInput, resumeTo: 2, resumed: StatusFailed,
+		},
+		{
+			name: "state 4 at 72 keeps done until state 3", msg: "Task finished",
 			value: 72, want: StatusDone, resumeTo: 3, resumed: StatusWorking,
 		},
 		{
-			name: "a failure still supersedes", msg: "Task finished",
+			name: "state 4 at 72 keeps done until state 2", msg: "Task finished",
 			value: 72, want: StatusDone, resumeTo: 2, resumed: StatusFailed,
 		},
 	}
@@ -222,19 +226,18 @@ func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 					t.Fatalf("sweep %d: status = %q, want %q", sweep, st, tc.want)
 				}
 			}
-			// A climbing percentage is still the same state, so it must not
-			// re-open the question either (a parked percentage can climb).
+			// A new state-4 value is still state 4, so it keeps the latch too.
 			in := &statusRaw{progress: 4, progressValue: tc.value + 5, notifMsg: tc.msg, notifSeq: 1}
 			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("after the percentage moves: status = %q, want %q", st, tc.want)
 			}
-			// The latch is not stuck: the program leaving state 4 clears it.
+			// The latch is not stuck: leaving state 4 clears it.
 			in = &statusRaw{progress: tc.resumeTo, progressValue: -1, notifMsg: tc.msg, notifSeq: 1}
 			if st, _ := m.computeStatus(in, tr); st != tc.resumed {
 				t.Errorf("after resuming to state %d: status = %q, want %q", tc.resumeTo, st, tc.resumed)
 			}
 			if tr.latched != "" {
-				t.Errorf("latch = %q, want cleared once the program left state 4", tr.latched)
+				t.Errorf("latch = %q, want cleared once state 4 ended", tr.latched)
 			}
 		})
 	}

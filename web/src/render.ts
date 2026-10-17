@@ -330,8 +330,8 @@ export function createRenderer(opts: RendererOptions): Renderer {
   let historyBudgetFn: (() => number) | null = opts.historyBudget ?? null;
 
   // Rows awaiting a DOM (re)build, drained at most MAX_ROWS_PER_FRAME per frame:
-  // a session restore or `cat bigfile` dumps thousands of lines in one frame,
-  // and building them in one rAF hangs a constrained device. The drain is
+  // a session's transcript replay or `cat bigfile` dumps thousands of lines in
+  // one frame, and building them in one rAF hangs a constrained device. The drain is
   // VIEWPORT-FIRST (live-window rows, then scrollback newest->oldest so the
   // backlog fills upward, offscreen above the pinned viewport), and the cursor
   // row is always built so the caret never lags.

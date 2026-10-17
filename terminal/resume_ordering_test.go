@@ -19,8 +19,8 @@ import (
 )
 
 // These tests pin the resume/live-flush write-ordering contract (the
-// reconnect-during-output race, R4 adversarial finding): handleResume's
-// snapshot+batch and dispatchFrame's per-client payload loop are serialized by
+// reconnect-during-output race): handleResume's snapshot+batch and
+// dispatchFrame's per-client payload loop are serialized by
 // clientState.writeMu; a frame built before a resume snapshot is stripped by
 // the resumeGen check to its durable payloads (scroll chunks and clipboard,
 // which the batch does not re-deliver) rather than written whole after the
@@ -311,10 +311,9 @@ func (p *dispatchProbe) staleFrame() *flushFrame {
 // payloads (screen/modes/title) after the batch — they would regress the
 // client to pre-snapshot state the batch superseded — while its DURABLE
 // payloads must still be written, because the batch's replay starts above the
-// client's haveThrough and does not re-deliver the frame's scroll lines (RACE
-// round-2 finding, claude+gpt — under ring-cap pressure they may not even be
-// in the ring anymore), and the clipboard is a consumed one-shot no later
-// frame will carry.
+// client's haveThrough and does not re-deliver the frame's scroll lines (under
+// ring-cap pressure they may not even be in the ring anymore), and the
+// clipboard is a consumed one-shot no later frame will carry.
 func TestDispatchFrame_StaleFrameDropsStateKeepsDurable(t *testing.T) {
 	t.Run("stale frame delivers durables in order, drops state", func(t *testing.T) {
 		// Order is asserted strictly: first the frame's clipboard, then its
@@ -758,12 +757,12 @@ func TestResumeBatch_AtomicOnTheSocketUnderLiveOutput(t *testing.T) {
 }
 
 func TestResumeBatch_DeterministicBlockAdvanceRelease(t *testing.T) {
-	// The gpt-prescribed contract test, made deterministic by the
-	// testResumeBatchHold seam: block a REAL resume batch after its writes
-	// (snapshot C delivered, write lock still held), COMMIT new history to
-	// the scrollback ring while it is held (a live pass builds and must
-	// block in dispatch), then release and assert from the client's stream
-	// that (1) nothing interleaved into the held batch, (2) the lines
+	// A contract test made deterministic by the testResumeBatchHold seam:
+	// block a REAL resume batch after its writes (snapshot C delivered, write
+	// lock still held), COMMIT new history to the scrollback ring while it is
+	// held (a live pass builds and must block in dispatch), then release and
+	// assert from the client's stream that (1) nothing interleaved into the
+	// held batch, (2) the lines
 	// committed during the hold arrive as SCROLL frames after it — the
 	// payload class the resume replay can never re-deliver, so this pins
 	// delay-not-drop where it matters — and (3) a FULL repaint follows (the
@@ -903,10 +902,9 @@ drain:
 }
 
 func TestResume_SnapshotResetForcesFullPostBatchFrame(t *testing.T) {
-	// Pins that handleResume itself takes the builder reset (fable round-3
-	// F1: the line moved into the snapshot's h.mu section had no test — the
-	// gate test resets the builder by hand, and the seam test's whole-window
-	// burst makes any diff full vacuously). Oracle: on a QUIESCENT handler,
+	// Pins that handleResume itself takes the builder reset (the gate test
+	// resets the builder by hand, and the seam test's whole-window burst
+	// makes any diff full vacuously). Oracle: on a QUIESCENT handler,
 	// a resume is followed by a second FULL screen frame — the flush pass
 	// handleResume's markDirty wakes, building against the reset cache, so
 	// every window row re-emits with no new PTY output. Without the reset

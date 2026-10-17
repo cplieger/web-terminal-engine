@@ -134,7 +134,7 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
     // Cmd+V, Cmd+R) and stay with the browser, exactly as the legacy path
     // carves them out — and as the kitty terminal itself consumes its own
     // emulator shortcuts instead of reporting them. Reporting these ate
-    // copy-on-macOS inside kitty apps (judgement finding, fixed 2026-07).
+    // copy-on-macOS inside kitty apps.
     // Meta combined with ctrl/alt still reports (vector below).
     spec: "DEVIATION (browser chrome): meta(super)+a alone is NOT reported -> ignore (spec table: 97;9u)",
     key: "a",

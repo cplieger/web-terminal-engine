@@ -14,7 +14,7 @@ import (
 // on a pid os/exec owns (spawnRegistry): taking that status makes cmd.Wait
 // report "no child processes". A periodic sweep, not a SIGCHLD handler:
 // signal.Notify is process-global state a library should not take, and a
-// zombie costs nothing for a few seconds.
+// zombie costs only a PID slot until the next sweep.
 
 const (
 	// zombieSweepDefault is the sweep interval when a consumer passes 0. Long

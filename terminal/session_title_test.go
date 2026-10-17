@@ -55,7 +55,8 @@ func TestEffectiveTitlePrecedence(t *testing.T) {
 	}
 }
 
-// TestPinnedTitleOutranksAutomaticSources is R4 end to end through the manager:
+// TestPinnedTitleOutranksAutomaticSources pins title precedence end to end
+// through the manager:
 // a pinned name wins over both a client-derived title and the automatic title,
 // and clearing it reveals the source below rather than a blank label. The
 // "reveals a real name" half is the whole reason the pin MASKS the automatic

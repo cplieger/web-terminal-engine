@@ -1330,7 +1330,7 @@ func TestHandleResize_belowMinimumIsFlooredUp(t *testing.T) {
 }
 
 // TestEnsureStarted_reaperInvokesOnProcessExitWithStatus exercises the
-// process-reaper goroutine added in cycle 1 (the `go func(){ cmd.Wait();
+// process-reaper goroutine (the `go func(){ cmd.Wait();
 // onProcessExit(werr); cancel() }` in ensureStarted). TestNewHandler_WithOnProcessExit
 // only calls the stored callback directly and never spawns a child, so the real
 // reaper path -- reap the child, forward cmd.Wait's exit status to onProcessExit --
@@ -1741,11 +1741,11 @@ func readUntilClose(t *testing.T, ws *websocket.Conn, timeout time.Duration) web
 }
 
 // TestTypedFraming_latchSequence pins the v4 happy path end to end, including
-// the adversarial-review F1 payload: after bootstrap (binary resume, arms) +
+// a sentinel-shaped payload: after bootstrap (binary resume, arms) +
 // text upgrade (latches), a binary frame that IS a byte-exact v3 control frame
 // (0x00 + {"type":"ping"}) must reach the PTY as literal input — the latch
 // retired the sentinel, so nothing is consumed as control anymore. Delivery is
-// proven three ways (impl-review finding 2): the echo carries the JSON, NO
+// proven three ways: the echo carries the JSON, NO
 // pong frame is ever sent (a sentinel mis-parse would have answered the ping),
 // and the session ledger advances by EXACTLY len(payload) — every byte,
 // leading NUL included, counted as input.
@@ -1774,7 +1774,8 @@ func TestTypedFraming_latchSequence(t *testing.T) {
 	// Post-latch text controls still dispatch (resize via text keeps the pipe healthy).
 	sendText(t, ws, []byte(`{"type":"resize","cols":90,"rows":30}`))
 
-	// The F1 payload: valid v3 control bytes sent as post-latch binary input.
+	// The sentinel-shaped payload: valid v3 control bytes sent as post-latch
+	// binary input.
 	payload := append([]byte{0x00}, []byte(`{"type":"ping"}`)...)
 	wctx, wcancel := context.WithTimeout(t.Context(), time.Second)
 	defer wcancel()
@@ -1823,8 +1824,8 @@ func TestTypedFraming_latchSequence(t *testing.T) {
 }
 
 // TestTypedFraming_textSizeLimits pins the wsReadLimit boundary for text
-// controls empirically (impl-review finding 5: verify coder/websocket's
-// boundary semantics rather than assuming them): a valid control padded to
+// controls empirically (coder/websocket's boundary semantics are verified,
+// not assumed): a valid control padded to
 // EXACTLY wsReadLimit bytes must still dispatch (and latch), while one byte
 // over must close the connection with 1009 StatusMessageTooBig — enforced by
 // the transport before handler code runs.
@@ -1870,7 +1871,7 @@ func TestTypedFraming_textSizeLimits(t *testing.T) {
 // TestTypedFraming_textPolicyCloses pins the server's text-frame policy: text
 // before the arm, unparseable text after the arm, empty text, and invalid
 // UTF-8 all close the connection with the documented status codes — never
-// latching, never guessing, never reaching the PTY (review F3/F7).
+// latching, never guessing, never reaching the PTY.
 func TestTypedFraming_textPolicyCloses(t *testing.T) {
 	tests := []struct {
 		name       string

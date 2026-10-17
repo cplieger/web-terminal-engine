@@ -50,7 +50,7 @@ describe("makeClampingScrollEl clamps like a real scroller", () => {
     // The whole design under test exists because a browser does NOT remember
     // the larger offset. A fixture that clamps for display while retaining the
     // old number models a container that never loses a position — the fiction
-    // that let the tab-switch bug through review.
+    // that hides the tab-switch bug.
     const s = makeClampingScrollEl(1000, 200);
     s.el.scrollTop = 800;
     s.setScrollHeight(300);

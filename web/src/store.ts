@@ -1100,8 +1100,7 @@ export class LineStore {
      * The store used to derive it from `viewportAbs >= win.base`, and every
      * failure of that derivation was a real defect. It read a window descriptor
      * that step 4 of this very transition RETIRES, so the answer was wrong for
-     * every predicted replay jump (r2's confirmed high, patched by capturing the
-     * value earlier — a fix that left the hazard in place). With no descriptor at
+     * every predicted replay jump. With no descriptor at
      * all, which is the DOMINANT shape here (this ack is the first frame of its
      * batch, so it precedes the window frame, and a hydrated store persists no
      * window), the fallback was wrong in both directions: "not following" strands
@@ -1822,7 +1821,7 @@ export class LineStore {
     if (hopped) {
       // The cursor hopped the window or a browse interval, so the minimum
       // retained key is not the cursor: recompute both bounds once per pass
-      // (bounded scan; once per PASS, never per victim — R3 perf finding).
+      // (bounded scan; once per PASS, never per victim).
       let min = -1;
       let max = -1;
       for (const k of this.lines.keys()) {
@@ -1900,8 +1899,8 @@ export class LineStore {
     // the alt frame. This keeps the retention bound (max(maxLines, window
     // height)) and the guard-2 window exemption defined over the MAIN screen,
     // the region alt exit must restore, rather than over a phantom range
-    // mixing the main base with the alt height (R4 review, all three models:
-    // a smaller alt frame otherwise appeared to lower the bound below the
+    // mixing the main base with the alt height (a smaller alt frame otherwise
+    // appeared to lower the bound below the
     // protected main rows, and the exemption described rows that were not the
     // writable screen).
     const next: WindowState = {

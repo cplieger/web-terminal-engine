@@ -50,9 +50,7 @@ func goldenFrames() map[string][]byte {
 		"resumeack-ephemeralinput": encodeResumeAck(7, 1234567890, 200, 10, resumeAckFlags{EphemeralInput: true}),
 		// ackOnly: bare ack (type + inputAck, no body), ack=42.
 		"ackonly": encodeAckOnly(42),
-		// clipboard (opcode 6): OSC 52 text for the system clipboard. Fixture
-		// added 2026-07 (judgement finding): its cross-language layout was
-		// previously pinned only by two independently hand-written tests.
+		// clipboard (opcode 6): OSC 52 text for the system clipboard.
 		"clipboard": encodeClipboardMsg([]byte("copy me")),
 		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002,
 		// kitty disambiguate flag (1).

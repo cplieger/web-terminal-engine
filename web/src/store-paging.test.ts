@@ -909,8 +909,8 @@ describe("LineStore paging: dropBrowseCache", () => {
 describe("LineStore paging: classification survives every removal path", () => {
   // Classification lives in a second container keyed by the same indices
   // (`browse`), so it is only as correct as its least-maintained deletion path.
-  // Two paths did not maintain it and both were found by review rather than by
-  // these tests: ED3's applyScrollbackCleared, and truncateBelowWindow — which
+  // Two paths are easy to miss: ED3's applyScrollbackCleared, and
+  // truncateBelowWindow — which
   // fires on every soft-keyboard resize, the most common event on the device
   // this design exists for. Every removal now goes through one private
   // forget(); these cases pin the OUTCOME at each entry point so the next path

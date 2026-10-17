@@ -292,8 +292,8 @@ func TestSanitizeNotification(t *testing.T) {
 	}{
 		{"c0 + del stripped, printable kept", "done\tnow\x7f\n!", "donenow!"},
 		{"c1 controls stripped", "a\u0085b\u009cc", "abc"},
-		// The classes the hand-rolled C0/C1 loop used to pass (the u07
-		// deferral finding): Bidi_Control reordering runes and the JS line
+		// The classes a C0/C1-only filter passes:
+		// Bidi_Control reordering runes and the JS line
 		// terminators must not survive into log lines or status events.
 		{"bidi controls stripped", "ok\u202etxt.exe\u202cend", "oktxt.exeend"},
 		{"bidi isolates + alm stripped", "\u2066x\u2069\u061cy\u200e\u200f", "xy"},

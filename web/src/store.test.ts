@@ -1,4 +1,4 @@
-// Unit tests for the absolute-index line store (brick 2). These pin the
+// Unit tests for the absolute-index line store. These pin the
 // properties the rebuild depends on: idempotent apply (no duplicates on
 // re-delivery), correct absolute-index accounting, eviction with stale-drop,
 // hole-skipping iteration, and alt-screen routing. Pure data structure, no DOM.
@@ -233,8 +233,8 @@ describe("LineStore", () => {
   });
 
   it("an alt-screen frame does not disturb the main window's retention floor", () => {
-    // R4 (all three models): updateWindowCursor used to copy the ALT grid's
-    // height into win.height, so a smaller alt frame (12 rows over a 24-row
+    // If updateWindowCursor copied the ALT grid's height into win.height, a
+    // smaller alt frame (12 rows over a 24-row
     // main screen) lowered the advertised bound below the protected main rows
     // and pointed the guard-2 exemption at a phantom range. The alt grid's
     // height lives in altRows; win keeps the MAIN screen's geometry — the
@@ -254,8 +254,8 @@ describe("LineStore", () => {
     s.applyScreen(screenMsg(0, 12, { 0: "alt row" }, { altActive: true }));
     expect(s.isAlt()).toBe(true);
     expect(lineTexts(s).length).toBe(height); // main rows untouched
-    // The separating observable (R5 review: without it this test passed under
-    // the reverted fix): the window descriptor still reports the MAIN screen's
+    // The separating observable (without it this test passes with the fix
+    // reverted): the window descriptor still reports the MAIN screen's
     // geometry during alt — the retention floor and the guard-2 exemption are
     // defined over it, and it is what alt exit restores. The alt grid's own
     // height lives in the altRows.
@@ -330,7 +330,7 @@ describe("LineStore", () => {
   });
 
   it("converges to one contiguous block after the window advances past a replay seam", () => {
-    // R3/R4 adversarial rounds: eviction direction inside the above-window
+    // Eviction direction inside the above-window
     // band is load-bearing. Oldest-first keeps the NEWEST replay lines
     // adjacent to the incoming window, so once the window frame lands at the
     // replay head and output streams on, the stale rows and the seam evict

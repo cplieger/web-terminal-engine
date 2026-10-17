@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -98,18 +99,31 @@ func TestOSCAbortedByCANDoesNotCorrupt(t *testing.T) {
 	}
 }
 
-// TestOSCTerminatedBy8BitST verifies the 8-bit ST (0x9C) terminates an OSC and
-// the title is set.
-func TestOSCTerminatedBy8BitST(t *testing.T) {
-	s := New(5, 80)
-	s.Write([]byte("\x1b]2;Hello"))
-	s.Write([]byte{0x9C}) // 8-bit ST
-	if s.pState != stGround {
-		t.Errorf("0x9C in OscString: state=%d, want Ground", s.pState)
-	}
-	if s.Title != "Hello" {
-		t.Errorf("OSC title after 0x9C: got %q, want Hello", s.Title)
-	}
+// TestOSCKeeps0x9CAsPayload verifies a 0x9C byte inside an OSC is a UTF-8
+// continuation byte, not an 8-bit ST that would cut the payload.
+func TestOSCKeeps0x9CAsPayload(t *testing.T) {
+	t.Run("osc8_link_with_U+011C_applies_whole", func(t *testing.T) {
+		s := New(2, 40)
+		url := "https://example.com/\u011c/rest" // U+011C is C4 9C
+		s.Write([]byte("\x1b]8;;" + url + "\x07X"))
+		if got := s.Cells[0][0].Hyperlink; got != url {
+			t.Errorf("OSC 8 linked %q, want %q", got, url)
+		}
+		if got := s.RowString(0); got != "X" {
+			t.Errorf("RowString(0) = %q, want %q (no payload printed)", got, "X")
+		}
+	})
+
+	t.Run("osc2_title_with_U+00DC_applies_whole", func(t *testing.T) {
+		s := New(2, 40)
+		s.Write([]byte("\x1b]2;\u00dcber\x07")) // U+00DC is C3 9C
+		if s.Title != "\u00dcber" {
+			t.Errorf("OSC 2 title = %q, want %q", s.Title, "\u00dcber")
+		}
+		if got := s.RowString(0); got != "" {
+			t.Errorf("RowString(0) = %q, want empty (no payload printed)", got)
+		}
+	})
 }
 
 // TestOSCAbortedBySUB verifies SUB aborts an OSC without dispatching the title.
@@ -122,17 +136,6 @@ func TestOSCAbortedBySUB(t *testing.T) {
 	}
 	if s.Title == "aborted" {
 		t.Fatal("SUB in OSC dispatched title (exit action fired)")
-	}
-}
-
-// TestOSCNoTerminatorThenNewSequence verifies an unterminated OSC is abandoned
-// when a fresh ESC sequence begins, which then takes effect.
-func TestOSCNoTerminatorThenNewSequence(t *testing.T) {
-	s := New(5, 80)
-	s.Write([]byte("\x1b]8;params;http://example.com")) // no terminator
-	s.Write([]byte("\x1b[1;1H"))                        // new sequence starts fresh
-	if row, col := s.CursorPos(); row != 0 || col != 0 {
-		t.Fatalf("expected cursor at 0,0 after OSC abort via ESC, got %d,%d", row, col)
 	}
 }
 
@@ -149,15 +152,53 @@ func TestOSCAllDigitPayloadNoSeparator(t *testing.T) {
 	}
 }
 
-// TestOSCUnhandledIdLeavesTitle verifies an unhandled OSC id (9) leaves the
-// window title unchanged. Driven through the public parser (ESC ] 9 ; … BEL).
-func TestOSCUnhandledIdLeavesTitle(t *testing.T) {
+// TestOSCMalformedCommandIsIgnored verifies an OSC whose command field is not
+// a plain decimal number runs no handler, even one that wraps to a handled id.
+func TestOSCMalformedCommandIsIgnored(t *testing.T) {
+	cases := []struct{ name, cmd string }{
+		{"wraps_to_osc_8", "18446744073709551624;;"},   // 2^64 + 8
+		{"wraps_to_osc_2", "18446744073709551618;new"}, // 2^64 + 2
+		{"empty_payload", ""},
+		{"no_digits", "new"},
+		{"trailing_letter", "2x;new"},
+		{"signed", "+2;new"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(2, 10)
+			s.Write([]byte("\x1b]2;keep\x07\x1b]8;;https://keep.example\x07A"))
+			s.Write([]byte("\x1b]" + tc.cmd + "\x07B"))
+			if s.Title != "keep" {
+				t.Errorf("Title = %q, want %q (unchanged)", s.Title, "keep")
+			}
+			if got := s.Cells[0][1].Hyperlink; got != "https://keep.example" {
+				t.Errorf("Cells[0][1].Hyperlink = %q, want %q (link still open)", got, "https://keep.example")
+			}
+		})
+	}
+}
+
+// TestOSCOmittedCommandIsOSC0 verifies an empty command field before ';' is
+// xterm's omitted parameter and sets both titles, as OSC 0 does.
+func TestOSCOmittedCommandIsOSC0(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b]2;window\x07\x1b]1;icon\x07"))
+	s.Write([]byte("\x1b];new\x07"))
+	if s.Title != "new" {
+		t.Errorf("Title = %q, want %q", s.Title, "new")
+	}
+	if s.iconTitle != "new" {
+		t.Errorf("iconTitle = %q, want %q", s.iconTitle, "new")
+	}
+}
+
+func TestOSC9NotificationLeavesTitleUnchanged(t *testing.T) {
 	s := New(1, 10)
 	const keep = "keep"
 	s.Title = keep
-	s.Write([]byte("\x1b]9;iTerm-only notification\x07")) // OSC 9 is unhandled here
+	s.Write([]byte("\x1b]9;iTerm-only notification\x07"))
 	if s.Title != keep {
-		t.Errorf("unhandled OSC 9: Title = %q, want %q (unchanged)", s.Title, keep)
+		t.Errorf("OSC 9 notification: Title = %q, want %q (unchanged)", s.Title, keep)
 	}
 }
 
@@ -570,6 +611,94 @@ func TestOSCDynamicColorAdvancesOneSlotPerSpec(t *testing.T) {
 		want := "\x1b]19;rgb:0000/0000/ffff\x1b\\"
 		if got := string(s.TakeResponse()); got != want {
 			t.Errorf("OSC 19 two-spec query = %q, want only the slot-19 reply %q", got, want)
+		}
+	})
+}
+
+// oscOfLen returns an OSC 8 sequence whose payload ("8;;" plus the URL) is n
+// bytes long, and that URL.
+func oscOfLen(t *testing.T, n int) (seq, url string) {
+	t.Helper()
+	url = "https://example.com/" + strings.Repeat("a", n-len("8;;https://example.com/"))
+	if got := len("8;;" + url); got != n {
+		t.Fatalf("fixture payload is %d bytes, want %d", got, n)
+	}
+	return "\x1b]8;;" + url + "\x07", url
+}
+
+// osc52OfLen returns an OSC 52 set whose payload ("52;;" plus the base64
+// text) is n bytes long, and the decoded text. n-4 must be a multiple of 4.
+func osc52OfLen(t *testing.T, n int) (seq, text string) {
+	t.Helper()
+	text = strings.Repeat("x", (n-len("52;;"))/4*3)
+	payload := "52;;" + base64.StdEncoding.EncodeToString([]byte(text))
+	if len(payload) != n {
+		t.Fatalf("fixture payload is %d bytes, want %d", len(payload), n)
+	}
+	return "\x1b]" + payload + "\x07", text
+}
+
+func TestOSCOverCapIsDiscardedWhole(t *testing.T) {
+	t.Run("osc52_over_cap_sets_no_clipboard", func(t *testing.T) {
+		s := New(2, 10)
+		seq, _ := osc52OfLen(t, maxOSCLen+4)
+		s.Write([]byte(seq))
+		if got := s.TakeClipboard(); got != nil {
+			t.Errorf("over-cap OSC 52 queued %d clipboard bytes, want none", len(got))
+		}
+	})
+
+	t.Run("osc52_at_cap_sets_the_clipboard", func(t *testing.T) {
+		s := New(2, 10)
+		seq, text := osc52OfLen(t, maxOSCLen)
+		s.Write([]byte(seq))
+		if got := string(s.TakeClipboard()); got != text {
+			t.Errorf("at-cap OSC 52 queued %d bytes, want the %d-byte text", len(got), len(text))
+		}
+	})
+
+	t.Run("osc8_over_cap_sets_no_link", func(t *testing.T) {
+		s := New(2, 10)
+		seq, _ := oscOfLen(t, maxOSCLen+1)
+		s.Write([]byte(seq + "X"))
+		if got := s.Cells[0][0].Hyperlink; got != "" {
+			t.Errorf("over-cap OSC 8 linked the cell to a %d-byte URL, want no link", len(got))
+		}
+	})
+
+	t.Run("osc8_at_cap_sets_the_link", func(t *testing.T) {
+		s := New(2, 10)
+		seq, url := oscOfLen(t, maxOSCLen)
+		s.Write([]byte(seq + "X"))
+		if got := s.Cells[0][0].Hyperlink; got != url {
+			t.Errorf("at-cap OSC 8 linked a %d-byte URL, want the %d-byte one", len(got), len(url))
+		}
+	})
+
+	t.Run("osc_after_an_overflowed_one_applies", func(t *testing.T) {
+		s := New(2, 10)
+		over52, _ := osc52OfLen(t, maxOSCLen+4)
+		over8, _ := oscOfLen(t, maxOSCLen+1)
+		s.Write([]byte(over52 + "\x1b]52;;aGVsbG8=\x07")) // base64("hello")
+		if got := string(s.TakeClipboard()); got != "hello" {
+			t.Errorf("OSC 52 after an overflowed one queued %q, want %q", got, "hello")
+		}
+		s.Write([]byte(over8 + "\x1b]8;;https://example.com\x07X"))
+		if got := s.Cells[0][0].Hyperlink; got != "https://example.com" {
+			t.Errorf("OSC 8 after an overflowed one linked %q, want %q", got, "https://example.com")
+		}
+	})
+
+	t.Run("osc_after_an_aborted_overflowed_one_applies", func(t *testing.T) {
+		for name, abort := range map[string]string{"CAN": "\x18", "SUB": "\x1a"} {
+			t.Run(name, func(t *testing.T) {
+				s := New(2, 10)
+				over52, _ := osc52OfLen(t, maxOSCLen+4)
+				s.Write([]byte(strings.TrimSuffix(over52, "\x07") + abort + "\x1b]52;;aGVsbG8=\x07"))
+				if got := string(s.TakeClipboard()); got != "hello" {
+					t.Errorf("OSC 52 after an overflowed one aborted by %s queued %q, want %q", name, got, "hello")
+				}
+			})
 		}
 	})
 }

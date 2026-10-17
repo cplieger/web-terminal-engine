@@ -155,8 +155,8 @@ func TestDECRQSS_UnsupportedQueries(t *testing.T) {
 }
 
 // TestDECRQSSBufferBoundedAtMax verifies the DECRQSS data buffer is capped at
-// maxDCSLen, and an oversized (garbage) query still yields an invalid response
-// and returns the parser to Ground after ST.
+// maxDCSLen, and an oversized query is dropped unanswered and returns the
+// parser to Ground after ST.
 func TestDECRQSSBufferBoundedAtMax(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1bP$q"))
@@ -169,8 +169,8 @@ func TestDECRQSSBufferBoundedAtMax(t *testing.T) {
 		t.Errorf("dcsBuf = %d, want %d (capped)", len(s.dcsBuf), maxDCSLen)
 	}
 	s.Write([]byte("\x1b\\"))
-	if !strings.HasPrefix(string(s.response), "\x1bP0$r") {
-		t.Errorf("oversized DECRQSS response = %q, want invalid (0$r) prefix", s.response)
+	if len(s.response) != 0 {
+		t.Errorf("oversized DECRQSS response = %q, want none", s.response)
 	}
 	if s.pState != stGround {
 		t.Errorf("state after ST = %d, want Ground", s.pState)
@@ -196,17 +196,27 @@ func TestUnknownDCSNotBuffered(t *testing.T) {
 	}
 }
 
-// TestDCS8BitSTTerminates verifies the 8-bit ST (0x9C) terminates a DECRQSS and
-// produces a response.
-func TestDCS8BitSTTerminates(t *testing.T) {
-	s := New(24, 80)
-	s.Write([]byte("\x1bP$qm")) // DECRQSS for SGR
-	s.Write([]byte{0x9C})       // 8-bit ST
-	if s.pState != stGround {
-		t.Errorf("8-bit ST did not terminate DCS: state=%d", s.pState)
+// TestDCSKeepsC1BytesAsPayload verifies a C1-range byte inside a DCS is a
+// UTF-8 continuation byte: it neither ends the DCS nor starts a sequence.
+func TestDCSKeepsC1BytesAsPayload(t *testing.T) {
+	cases := []struct{ name, in string }{
+		{"passthrough_with_U+00DC", "\x1bPz\u00dcber\x1b\\X"},              // C3 9C, 8-bit ST
+		{"ignore_with_U+00DC", "\x1bP1<\u00dcber\x1b\\X"},                  // C3 9C, 8-bit ST
+		{"ignore_with_U+011B_starts_no_csi", "\x1bP1<\u011b31mred\x1b\\X"}, // C4 9B, 8-bit CSI
 	}
-	if len(s.response) == 0 {
-		t.Error("DECRQSS with 8-bit ST produced no response")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(2, 20)
+			s.Write([]byte(tc.in))
+			if got := s.RowString(0); got != "X" {
+				t.Errorf("RowString(0) = %q, want %q (DCS payload swallowed whole)", got, "X")
+			}
+			plain := New(2, 20)
+			plain.Write([]byte("X"))
+			if got, want := s.Cells[0][0].Style, plain.Cells[0][0].Style; got != want {
+				t.Errorf("Cells[0][0].Style = %+v, want %+v (no SGR ran)", got, want)
+			}
+		})
 	}
 }
 
@@ -320,4 +330,72 @@ func TestDECRQSS_AdditionalSelectors(t *testing.T) {
 			}
 		})
 	}
+}
+
+// xtgettcapQuery returns an XTGETTCAP query whose data is 50 "Co" names
+// followed by tail, an unknown hex name, checking the data is n bytes long.
+func xtgettcapQuery(t *testing.T, tail string, n int) string {
+	t.Helper()
+	data := strings.Repeat("436F;", 50) + tail
+	if len(data) != n {
+		t.Fatalf("fixture data is %d bytes, want %d", len(data), n)
+	}
+	return "\x1bP+q" + data + "\x1b\\"
+}
+
+func TestDCSOverCap(t *testing.T) {
+	const co = "\x1bP1+r436F=323536\x1b\\"
+
+	t.Run("xtgettcap_over_cap_is_not_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte(xtgettcapQuery(t, "4141414141", maxDCSLen+4)))
+		if len(s.response) != 0 {
+			t.Errorf("over-cap XTGETTCAP replied %q, want no reply", s.response)
+		}
+	})
+
+	t.Run("xtgettcap_at_cap_is_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte(xtgettcapQuery(t, "414141", maxDCSLen)))
+		if got, want := string(s.response), strings.Repeat(co, 50)+"\x1bP0+r414141\x1b\\"; got != want {
+			t.Errorf("at-cap XTGETTCAP replied %q, want %q", got, want)
+		}
+	})
+
+	t.Run("xtgettcap_after_an_overflowed_one_is_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte(xtgettcapQuery(t, "4141414141", maxDCSLen+4) + "\x1bP+q436F\x1b\\"))
+		if got := string(s.response); got != co {
+			t.Errorf("XTGETTCAP after an overflowed one replied %q, want %q", got, co)
+		}
+	})
+
+	t.Run("xtgettcap_after_an_aborted_overflowed_one_is_answered", func(t *testing.T) {
+		for name, abort := range map[string]string{"CAN": "\x18", "SUB": "\x1a"} {
+			t.Run(name, func(t *testing.T) {
+				s := New(24, 80)
+				over := strings.TrimSuffix(xtgettcapQuery(t, "4141414141", maxDCSLen+4), "\x1b\\")
+				s.Write([]byte(over + abort + "\x1bP+q436F\x1b\\"))
+				if got := string(s.response); got != co {
+					t.Errorf("XTGETTCAP after an overflowed one aborted by %s replied %q, want %q", name, got, co)
+				}
+			})
+		}
+	})
+
+	t.Run("decrqss_over_cap_is_not_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte("\x1bP$q" + strings.Repeat("m", maxDCSLen+1) + "\x1b\\"))
+		if len(s.response) != 0 {
+			t.Errorf("over-cap DECRQSS replied %q, want no reply", s.response)
+		}
+	})
+
+	t.Run("decrqss_after_an_overflowed_one_is_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte("\x1bP$q" + strings.Repeat("m", maxDCSLen+1) + "\x1b\\" + "\x1bP$qr\x1b\\"))
+		if got, want := string(s.response), "\x1bP1$r1;24r\x1b\\"; got != want {
+			t.Errorf("DECRQSS after an overflowed one replied %q, want %q", got, want)
+		}
+	})
 }

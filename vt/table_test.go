@@ -47,14 +47,3 @@ func TestStateTableESCGoesToEscape(t *testing.T) {
 		}
 	}
 }
-
-// TestStateTableSosPmApcTerminatesOnST verifies the SOS/PM/APC string state
-// transitions to Ground on the 8-bit ST (0x9C), as does the OSC string state.
-func TestStateTableSosPmApcTerminatesOnST(t *testing.T) {
-	if got := stateTable[stSosPmApcString][0x9C].next(); got != stGround {
-		t.Errorf("stateTable[SosPmApcString][0x9C].next() = %d, want stGround (%d)", got, stGround)
-	}
-	if got := stateTable[stOscString][0x9C].next(); got != stGround {
-		t.Errorf("stateTable[OscString][0x9C].next() = %d, want stGround (%d)", got, stGround)
-	}
-}

@@ -26,8 +26,8 @@ func FuzzParser(f *testing.F) {
 		[]byte("\x1bP$qr\x1b\\"),              // DECRQSS DECSTBM
 		[]byte("\x1bP$q q\x1b\\"),             // DECRQSS DECSCUSR
 		[]byte("\x1bP+q\x1b\\"),               // unknown DCS
-		[]byte("\x90$q\x9c"),                  // 8-bit DCS
-		[]byte("\x98hello\x9c"),               // SOS
+		[]byte("\x90$q\x9c"),                  // 8-bit DCS bytes, printed as U+FFFD in Ground
+		[]byte("\x98hello\x9c"),               // 8-bit SOS bytes, printed as U+FFFD in Ground
 		[]byte("\x1bP$q\x1bP$qm\x1b\\\x1b\\"), // DCS inside DCS
 		// OSC.
 		[]byte("\x1b]2;title\x07"),   // OSC with BEL

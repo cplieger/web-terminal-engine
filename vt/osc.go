@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -50,30 +51,32 @@ func stripControlRunes(t string) string {
 	return b.String()
 }
 
-// dispatchOsc processes the buffered OSC payload and resets the buffer.
+// dispatchOsc processes the buffered OSC payload and resets the buffer. A
+// payload longer than maxOSCLen is dropped whole: its cut prefix would apply a
+// different value, such as a shorter clipboard text or another link target.
 //
 //nolint:gocyclo // flat dispatch over the OSC command ids
 func (s *Screen) dispatchOsc() {
 	payload := s.oscBuf
 	s.oscBuf = s.oscBuf[:0]
 
-	if len(payload) == 0 {
+	if s.oscOverflow {
 		return
 	}
 
-	// Parse numeric prefix (digits before first ';').
-	var id int
-	i := 0
-	for i < len(payload) && payload[i] >= '0' && payload[i] <= '9' {
-		id = id*10 + int(payload[i]-'0')
-		i++
+	// The command is the field before the first ';'. An empty one before ';' is
+	// xterm's omitted Ps, OSC 0 (misc.c do_osc); any other that is not a plain
+	// decimal below 2^31 runs nothing, so "2x;t" or a wrapping id cannot run OSC 2.
+	cmd, rest, hasSep := bytes.Cut(payload, []byte{';'})
+	id := 0
+	if len(cmd) > 0 || !hasSep {
+		n, err := strconv.ParseUint(string(cmd), 10, 31)
+		if err != nil {
+			return
+		}
+		id = int(n)
 	}
-
-	// Skip the ';' separator if present.
-	var data string
-	if i < len(payload) && payload[i] == ';' {
-		data = string(payload[i+1:])
-	}
+	data := string(rest)
 
 	switch id {
 	case 0:

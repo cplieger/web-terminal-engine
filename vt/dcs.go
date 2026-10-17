@@ -5,14 +5,9 @@ import (
 	"strconv"
 )
 
-// DCS (Device Control String) handlers.
-// Supported:
-//   - DECRQSS (DCS $ q <selector> ST) — Request Status String
-//
-// Routing: intermediate='$', final='q' → DECRQSS
-
 // dcsHook is called on entry to DcsPassthrough, and routes to the handler.
 func (s *Screen) dcsHook(finalByte byte) {
+	s.dcsOverflow = false
 	switch {
 	case s.numInterm == 1 && s.pIntermed[0] == '$' && finalByte == 'q':
 		s.dcsFunc = dcsDecrqss
@@ -31,18 +26,25 @@ func (s *Screen) dcsPut(b byte) {
 	case dcsDecrqss, dcsXTGetTcap:
 		if len(s.dcsBuf) < maxDCSLen {
 			s.dcsBuf = append(s.dcsBuf, b)
+		} else {
+			s.dcsOverflow = true
 		}
 	case dcsIgnored:
 	}
 }
 
-// dcsUnhook is called on exit from DcsPassthrough, dispatching the completed DCS.
+// dcsUnhook dispatches a DCS on a non-cancel transition out of DcsPassthrough;
+// CAN and SUB abort without calling it. Data longer than maxDCSLen is dropped
+// unanswered, as its cut prefix is a query the app never sent, such as a
+// shorter XTGETTCAP name.
 func (s *Screen) dcsUnhook() {
-	switch s.dcsFunc {
-	case dcsDecrqss:
-		s.handleDecrqss(s.dcsBuf)
-	case dcsXTGetTcap:
-		s.handleXTGetTcap(s.dcsBuf)
+	if !s.dcsOverflow {
+		switch s.dcsFunc {
+		case dcsDecrqss:
+			s.handleDecrqss(s.dcsBuf)
+		case dcsXTGetTcap:
+			s.handleXTGetTcap(s.dcsBuf)
+		}
 	}
 	s.dcsFunc = dcsNone
 }

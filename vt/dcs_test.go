@@ -321,3 +321,50 @@ func TestDECRQSS_AdditionalSelectors(t *testing.T) {
 		})
 	}
 }
+
+// xtgettcapQuery returns an XTGETTCAP query whose data is 50 "Co" names
+// followed by tail, an unknown hex name, checking the data is n bytes long.
+func xtgettcapQuery(t *testing.T, tail string, n int) string {
+	t.Helper()
+	data := strings.Repeat("436F;", 50) + tail
+	if len(data) != n {
+		t.Fatalf("fixture data is %d bytes, want %d", len(data), n)
+	}
+	return "\x1bP+q" + data + "\x1b\\"
+}
+
+func TestDCSOverCap(t *testing.T) {
+	const co = "\x1bP1+r436F=323536\x1b\\"
+
+	t.Run("xtgettcap_over_cap_is_not_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte(xtgettcapQuery(t, "4141414141", maxDCSLen+4)))
+		if len(s.response) != 0 {
+			t.Errorf("over-cap XTGETTCAP replied %q, want no reply", s.response)
+		}
+	})
+
+	t.Run("xtgettcap_at_cap_is_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte(xtgettcapQuery(t, "414141", maxDCSLen)))
+		if got, want := string(s.response), strings.Repeat(co, 50)+"\x1bP0+r414141\x1b\\"; got != want {
+			t.Errorf("at-cap XTGETTCAP replied %q, want %q", got, want)
+		}
+	})
+
+	t.Run("xtgettcap_after_an_overflowed_one_is_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte(xtgettcapQuery(t, "4141414141", maxDCSLen+4) + "\x1bP+q436F\x1b\\"))
+		if got := string(s.response); got != co {
+			t.Errorf("XTGETTCAP after an overflowed one replied %q, want %q", got, co)
+		}
+	})
+
+	t.Run("decrqss_over_cap_is_answered_invalid", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte("\x1bP$q" + strings.Repeat("m", maxDCSLen+1) + "\x1b\\"))
+		if got, want := string(s.response), "\x1bP0$r\x1b\\"; got != want {
+			t.Errorf("over-cap DECRQSS replied %q, want %q", got, want)
+		}
+	})
+}

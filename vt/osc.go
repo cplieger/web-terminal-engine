@@ -50,14 +50,16 @@ func stripControlRunes(t string) string {
 	return b.String()
 }
 
-// dispatchOsc processes the buffered OSC payload and resets the buffer.
+// dispatchOsc processes the buffered OSC payload and resets the buffer. A
+// payload longer than maxOSCLen is dropped whole: its cut prefix would apply a
+// different value, such as a shorter clipboard text or another link target.
 //
 //nolint:gocyclo // flat dispatch over the OSC command ids
 func (s *Screen) dispatchOsc() {
 	payload := s.oscBuf
 	s.oscBuf = s.oscBuf[:0]
 
-	if len(payload) == 0 {
+	if len(payload) == 0 || s.oscOverflow {
 		return
 	}
 

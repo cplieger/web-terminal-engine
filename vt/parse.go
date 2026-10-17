@@ -86,9 +86,12 @@ func (s *Screen) doAction(act action, b byte) {
 		s.dcsUnhook()
 	case actOscStart:
 		s.oscBuf = s.oscBuf[:0]
+		s.oscOverflow = false
 	case actOscPut:
 		if len(s.oscBuf) < maxOSCLen {
 			s.oscBuf = append(s.oscBuf, b)
+		} else {
+			s.oscOverflow = true
 		}
 	case actOscEnd:
 		s.dispatchOsc()

@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"encoding/base64"
 	"strings"
 	"testing"
 
@@ -570,6 +571,81 @@ func TestOSCDynamicColorAdvancesOneSlotPerSpec(t *testing.T) {
 		want := "\x1b]19;rgb:0000/0000/ffff\x1b\\"
 		if got := string(s.TakeResponse()); got != want {
 			t.Errorf("OSC 19 two-spec query = %q, want only the slot-19 reply %q", got, want)
+		}
+	})
+}
+
+// oscOfLen returns an OSC 8 sequence whose payload ("8;;" plus the URL) is n
+// bytes long, and that URL.
+func oscOfLen(t *testing.T, n int) (seq, url string) {
+	t.Helper()
+	url = "https://example.com/" + strings.Repeat("a", n-len("8;;https://example.com/"))
+	if got := len("8;;" + url); got != n {
+		t.Fatalf("fixture payload is %d bytes, want %d", got, n)
+	}
+	return "\x1b]8;;" + url + "\x07", url
+}
+
+// osc52OfLen returns an OSC 52 set whose payload ("52;;" plus the base64
+// text) is n bytes long, and the decoded text. n-4 must be a multiple of 4.
+func osc52OfLen(t *testing.T, n int) (seq, text string) {
+	t.Helper()
+	text = strings.Repeat("x", (n-len("52;;"))/4*3)
+	payload := "52;;" + base64.StdEncoding.EncodeToString([]byte(text))
+	if len(payload) != n {
+		t.Fatalf("fixture payload is %d bytes, want %d", len(payload), n)
+	}
+	return "\x1b]" + payload + "\x07", text
+}
+
+func TestOSCOverCapIsDiscardedWhole(t *testing.T) {
+	t.Run("osc52_over_cap_sets_no_clipboard", func(t *testing.T) {
+		s := New(2, 10)
+		seq, _ := osc52OfLen(t, maxOSCLen+4)
+		s.Write([]byte(seq))
+		if got := s.TakeClipboard(); got != nil {
+			t.Errorf("over-cap OSC 52 queued %d clipboard bytes, want none", len(got))
+		}
+	})
+
+	t.Run("osc52_at_cap_sets_the_clipboard", func(t *testing.T) {
+		s := New(2, 10)
+		seq, text := osc52OfLen(t, maxOSCLen)
+		s.Write([]byte(seq))
+		if got := string(s.TakeClipboard()); got != text {
+			t.Errorf("at-cap OSC 52 queued %d bytes, want the %d-byte text", len(got), len(text))
+		}
+	})
+
+	t.Run("osc8_over_cap_sets_no_link", func(t *testing.T) {
+		s := New(2, 10)
+		seq, _ := oscOfLen(t, maxOSCLen+1)
+		s.Write([]byte(seq + "X"))
+		if got := s.Cells[0][0].Hyperlink; got != "" {
+			t.Errorf("over-cap OSC 8 linked the cell to a %d-byte URL, want no link", len(got))
+		}
+	})
+
+	t.Run("osc8_at_cap_sets_the_link", func(t *testing.T) {
+		s := New(2, 10)
+		seq, url := oscOfLen(t, maxOSCLen)
+		s.Write([]byte(seq + "X"))
+		if got := s.Cells[0][0].Hyperlink; got != url {
+			t.Errorf("at-cap OSC 8 linked a %d-byte URL, want the %d-byte one", len(got), len(url))
+		}
+	})
+
+	t.Run("osc_after_an_overflowed_one_applies", func(t *testing.T) {
+		s := New(2, 10)
+		over52, _ := osc52OfLen(t, maxOSCLen+4)
+		over8, _ := oscOfLen(t, maxOSCLen+1)
+		s.Write([]byte(over52 + "\x1b]52;;aGVsbG8=\x07")) // base64("hello")
+		if got := string(s.TakeClipboard()); got != "hello" {
+			t.Errorf("OSC 52 after an overflowed one queued %q, want %q", got, "hello")
+		}
+		s.Write([]byte(over8 + "\x1b]8;;https://example.com\x07X"))
+		if got := s.Cells[0][0].Hyperlink; got != "https://example.com" {
+			t.Errorf("OSC 8 after an overflowed one linked %q, want %q", got, "https://example.com")
 		}
 	})
 }

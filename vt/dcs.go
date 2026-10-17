@@ -13,6 +13,7 @@ import (
 
 // dcsHook is called on entry to DcsPassthrough, and routes to the handler.
 func (s *Screen) dcsHook(finalByte byte) {
+	s.dcsOverflow = false
 	switch {
 	case s.numInterm == 1 && s.pIntermed[0] == '$' && finalByte == 'q':
 		s.dcsFunc = dcsDecrqss
@@ -31,18 +32,25 @@ func (s *Screen) dcsPut(b byte) {
 	case dcsDecrqss, dcsXTGetTcap:
 		if len(s.dcsBuf) < maxDCSLen {
 			s.dcsBuf = append(s.dcsBuf, b)
+		} else {
+			s.dcsOverflow = true
 		}
 	case dcsIgnored:
 	}
 }
 
-// dcsUnhook is called on exit from DcsPassthrough, dispatching the completed DCS.
+// dcsUnhook is called on exit from DcsPassthrough, dispatching the completed
+// DCS. An over-cap XTGETTCAP is dropped whole, as its cut last name could be
+// answered as one the app never asked for; an over-cap DECRQSS still gets the
+// invalid reply, because no selector is maxDCSLen bytes long.
 func (s *Screen) dcsUnhook() {
 	switch s.dcsFunc {
 	case dcsDecrqss:
 		s.handleDecrqss(s.dcsBuf)
 	case dcsXTGetTcap:
-		s.handleXTGetTcap(s.dcsBuf)
+		if !s.dcsOverflow {
+			s.handleXTGetTcap(s.dcsBuf)
+		}
 	}
 	s.dcsFunc = dcsNone
 }

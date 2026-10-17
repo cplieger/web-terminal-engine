@@ -1,6 +1,6 @@
 # Unsupported VT features
 
-This page lists the VT and DEC features the engine leaves out on purpose, and the device queries it answers. It is for a developer who checks whether a program will work in it, or who is about to report a missing sequence.
+This page lists the VT and DEC features the engine leaves out on purpose, the device queries it answers and its sequence length limits. It is for a developer who checks whether a program will work in it, or who is about to report a missing sequence.
 
 ## Left out on purpose
 
@@ -28,6 +28,10 @@ Several reports and queries that share the DCS or CSI parsers work:
 - DECRQCRA, the rectangle checksum, and the OSC 52 clipboard read-back are answered only when `Screen.AllowScreenReport` is on. Both put their reply into the PTY, so they are off by default.
 
 The [esctest2](https://github.com/ThomasDickey/esctest2) conformance suite checks the VT model. [CONTRIBUTING](../CONTRIBUTING.md) shows how to run it.
+
+## Length limits
+
+The engine buffers at most 4096 bytes of an OSC payload and 256 bytes of a DECRQSS or XTGETTCAP query. A longer OSC sequence or XTGETTCAP query is dropped whole rather than applied cut short. An OSC 52 copy of more than about 3 KB of text, or an OSC 8 link of about 4 KB or more, therefore does nothing. A longer DECRQSS still gets `DCS 0 $ r ST`, because no valid selector is that long.
 
 ## The kitty keyboard protocol
 

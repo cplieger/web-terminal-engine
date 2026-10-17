@@ -96,6 +96,8 @@ type ParserState struct {
 	ignoring  bool // set when params overflow
 	// Private marker for CSI (?, >, <, !)
 	privateMarker byte
+	oscOverflow   bool // the OSC payload ran past maxOSCLen
+	dcsOverflow   bool // the DCS data ran past maxDCSLen
 }
 
 // parserState enumerates the VT500-style state machine states.
@@ -134,5 +136,5 @@ const (
 	maxOSCLen   = 4096 // max bytes buffered for an OSC payload
 	maxParams   = 32   // max param slots (params + subparams)
 	maxIntermed = 2    // max intermediate bytes
-	maxDCSLen   = 256  // max DCS data for DECRQSS
+	maxDCSLen   = 256  // max DCS data for DECRQSS and XTGETTCAP
 )

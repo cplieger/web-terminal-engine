@@ -198,7 +198,7 @@ func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 		resumed  string
 	}{
 		{
-			name: "approval pending keeps needs-input", msg: "Approval needed",
+			name: "input pending keeps needs-input", msg: "Approval needed",
 			value: 100, want: StatusInput, resumeTo: 3, resumed: StatusWorking,
 		},
 		{
@@ -223,7 +223,7 @@ func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 				}
 			}
 			// A climbing percentage is still the same state, so it must not
-			// re-open the question either (a usage percentage grows).
+			// re-open the question either (a parked percentage can climb).
 			in := &statusRaw{progress: 4, progressValue: tc.value + 5, notifMsg: tc.msg, notifSeq: 1}
 			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("after the percentage moves: status = %q, want %q", st, tc.want)

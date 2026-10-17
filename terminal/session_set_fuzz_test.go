@@ -7,7 +7,7 @@ import (
 )
 
 func FuzzParseSessionSet_roundtrip(f *testing.F) {
-	f.Add([]byte(`{"version":1,"sessions":[{"alias":"sess_a","pinnedTitle":"fix build","resume":"r"},{"alias":"k3q7m2xa"}],` +
+	f.Add([]byte(`{"version":1,"sessions":[{"alias":"tab_a","pinnedTitle":"fix build","resume":"r"},{"alias":"k3q7m2xa"}],` +
 		`"layout":{"left":0,"right":1,"selected":"right","handle":0.5,"open":true}}`))
 	f.Add([]byte(`{"version":1,"sessions":[],"layout":{"left":null,"right":null,"selected":"left","handle":0.5,"open":false}}`))
 	f.Add([]byte(`{"version":1,"sessions":[],"layout":{"selected":"left","handle":0.5}}{"version":1}`))

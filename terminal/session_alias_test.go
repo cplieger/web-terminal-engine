@@ -160,7 +160,7 @@ func TestDiffStatuses_emitsAnAliasChangeAndNothingWhenUnchanged(t *testing.T) {
 }
 
 func FuzzValidSessionAlias_matchesTheGrammar(f *testing.F) {
-	for _, s := range []string{"", "a", "sess_0-9", "a,b", "a%41", "caf\u00e9", strings.Repeat("z", 64), strings.Repeat("z", 65), "\x00"} {
+	for _, s := range []string{"", "a", "tab_0-9", "a,b", "a%41", "caf\u00e9", strings.Repeat("z", 64), strings.Repeat("z", 65), "\x00"} {
 		f.Add(s)
 	}
 	f.Fuzz(func(t *testing.T, s string) {

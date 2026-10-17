@@ -588,25 +588,14 @@ func progressStatus(progress int) (string, bool) {
 	return "", false
 }
 
-// progressSupersedesLatch reports whether an OSC 9;4 progress state CONTRADICTS a
-// latched notification status, which is what earns it the right to clear one.
-// Only ever asked about a state progressStatus accepts.
-//
-// States 1 and 3 assert that an operation is under way, which contradicts both
-// latches: "the turn finished" and "blocked, waiting on you" both say nothing is
-// running. State 2 asserts a failure, an OUTCOME that must not stay masked by a
-// stale success — a build that has since failed outranks an earlier "done".
-//
-// State 4 is the one that does not contradict either, and the specs are explicit
-// about why: it is Windows' TBPF_PAUSED, "progress is currently stopped ... but
-// can be resumed by the user. No error condition exists". That is not a rival
-// claim to a needs-input latch, it is the SAME claim with less detail, and it is
-// equally compatible with a finished turn, where nothing is progressing. Treating
-// it as a rival hands the tab to the progress channel one sweep (250ms) after the
-// notification, and an emitter that sets state 4 while blocked on an approval, or
-// parks it at a usage percentage once idle, would lose the needs-input ring or
-// the done dot that way. A latch this state cannot clear is not stuck: the moment
-// the program resumes (1 or 3), fails (2), or dies, that supersedes it.
+// progressSupersedesLatch reports whether an OSC 9;4 state contradicts a latched
+// notification status and so may clear it. Asked only of states progressStatus
+// accepts. States 1 and 3 say work is under way; 2 reports a failure, which must
+// not stay masked by a stale "done". State 4 is Windows' TBPF_PAUSED ("progress
+// is currently stopped ... No error condition exists"), which agrees with both a
+// needs-input latch and a finished turn; as a rival it would take the tab one
+// sweep (250ms) after the notification. A latch state 4 cannot clear ends when
+// the program resumes (1 or 3), fails (2) or dies.
 func progressSupersedesLatch(progress int) bool {
 	return progress != 4
 }

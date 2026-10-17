@@ -194,7 +194,7 @@ func TestCaptureSessionSet_fitsTheByteLimit(t *testing.T) {
 }
 
 func TestParseSessionSet_accepts(t *testing.T) {
-	in := `{"version":1,"future":true,"sessions":[{"alias":"sess_a","pinnedTitle":"fix build","resume":"r"},{"alias":""}],` +
+	in := `{"version":1,"future":true,"sessions":[{"alias":"tab_a","pinnedTitle":"fix build","resume":"r"},{"alias":""}],` +
 		`"layout":{"left":0,"right":1,"selected":"right","handle":0.25,"open":true}}`
 	got, err := ParseSessionSet([]byte(in))
 	if err != nil {
@@ -202,7 +202,7 @@ func TestParseSessionSet_accepts(t *testing.T) {
 	}
 	want := SessionSet{
 		Version:  1,
-		Sessions: []SessionSetEntry{{Alias: "sess_a", PinnedTitle: "fix build", Resume: "r"}, {}},
+		Sessions: []SessionSetEntry{{Alias: "tab_a", PinnedTitle: "fix build", Resume: "r"}, {}},
 		Layout:   SessionSetLayout{Left: new(0), Right: new(1), Selected: PaneRight, Handle: 0.25, Open: true},
 	}
 	if !sameSessionSet(got, want) {

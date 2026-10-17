@@ -74,7 +74,7 @@ func TestCreateWith_appliesAliasAndPinnedTitle(t *testing.T) {
 		wantAlias string // "" means a minted alias
 		wantPin   string
 	}{
-		{"a free alias and a title", CreateSpec{Alias: "sess_free", PinnedTitle: "fix build"}, "sess_free", "fix build"},
+		{"a free alias and a title", CreateSpec{Alias: "tab_free", PinnedTitle: "fix build"}, "tab_free", "fix build"},
 		{"an alias a live session holds", CreateSpec{Alias: "held-alias"}, "", ""},
 		{"an alias with a slash", CreateSpec{Alias: "a/b"}, "", ""},
 		{"a 65-byte alias", CreateSpec{Alias: strings.Repeat("a", 65)}, "", ""},

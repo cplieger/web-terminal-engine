@@ -1111,9 +1111,9 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 			// state; a pre-upgrade 404 reaches browser JS as an opaque 1006 and
 			// loops reconnects. acceptWS applies the SAME origin policy as a
 			// live session's socket (WithManagerOriginPolicy), so an embedded
-			// client gets 4004, not 403. A non-WebSocket GET gets Accept's own
-			// 426, as on the known-session path, so a probe cannot tell whether
-			// a session exists.
+			// client from an allowed origin gets 4004, not 403. A non-WebSocket
+			// GET gets Accept's own 426, as on the known-session path, so a
+			// probe cannot tell whether a session exists.
 			ws, err := acceptWS(w, r, m.originPolicy)
 			if err != nil {
 				return // acceptWS or Accept already wrote the response (403/426)

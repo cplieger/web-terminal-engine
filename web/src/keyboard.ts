@@ -162,9 +162,9 @@ const KEYPAD_SS3: Record<string, string | undefined> = {
 
 // -- Kitty keyboard protocol (progressive enhancement) ----------------------
 // Under an active kitty flag, keys that do NOT produce text are encoded per the
-// kitty protocol so an app that enabled it (Codex via crossterm) gets
-// unambiguous key events. Only the disambiguate flag (0x1) is honored; the
-// server masks off 0x2/0x4/0x8/0x10, so the CSI ?u query reports only 0x1.
+// kitty protocol so an app that enabled it gets unambiguous key events. Only
+// the disambiguate flag (0x1) is honored; the server masks off
+// 0x2/0x4/0x8/0x10, so the CSI ?u query reports only 0x1.
 // Text-producing keys still flow through the hidden textarea as text (this
 // encoder returns "ignore" for them), per the spec and the IME model.
 

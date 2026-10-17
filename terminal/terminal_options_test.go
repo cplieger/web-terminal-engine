@@ -225,24 +225,13 @@ func TestNewHandler_EmptyCommand(t *testing.T) {
 	}
 }
 
-// TestNewHandler_ENVInjection verifies the advertised terminal identity — TERM,
-// COLORTERM, and TERM_PROGRAM(+_VERSION) — is injected into the spawned process
-// environment at spawn time (not stored in cfg.env). TERM_PROGRAM=iTerm.app
-// (>= 3.6.6) is the identity programs gate OSC 9;4 progress and DEC 2026
-// synchronized output on; see childEnv.
-//
-// The version is pinned to the exact string, not merely to the key's presence.
-// 3.6.6 is a floor programs gate OSC 9;4 progress on, so a regression to any
-// lower version silently loses progress reporting while a presence-only check
-// stays green.
-//
-// The last assertion closes the other half of that claim. childEnv's doc comment
-// justifies advertising this identity by stating the engine implements the
-// capabilities it unlocks, but nothing joins the advertisement to the
-// implementation except that sentence — a vt change that dropped DEC 2026 support
-// would leave terminal advertising it with every test still passing. Asserting the
-// mechanism here ties the two together, the way the repo's other parity tests tie
-// a library copy to its source.
+// TestNewHandler_ENVInjection verifies the advertised terminal identity (TERM,
+// COLORTERM, TERM_PROGRAM and TERM_PROGRAM_VERSION, see childEnv) is injected
+// into the spawned process environment at spawn time, not stored in cfg.env.
+// The version is pinned to its exact documented value (docs/sessions.md), so a
+// drift fails where a presence-only check stays green. The last assertion ties
+// the advertised DEC 2026 support to vt's implementation of it: without it a vt
+// change that dropped DEC 2026 would leave the identity advertising it.
 func TestNewHandler_ENVInjection(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"))
 	if err := h.ensureStarted(80, 24); err != nil {
@@ -280,8 +269,7 @@ func TestNewHandler_ENVInjection(t *testing.T) {
 			}
 		}
 		t.Errorf("TERM_PROGRAM_VERSION = %q, want exactly TERM_PROGRAM_VERSION=3.6.6: "+
-			"programs gate OSC 9;4 progress on iTerm.app >= 3.6.6, so anything below "+
-			"that floor loses progress reporting silently", got)
+			"the advertised iTerm2 identity is part of the documented session environment", got)
 	}
 
 	// Claim parity: the identity asserted above advertises DEC 2026 synchronized

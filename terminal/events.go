@@ -1,13 +1,11 @@
 package terminal
 
 // The status stream (Server-Sent Events at /api/sessions/events) drives each
-// tab's activity indicator. A single sweep recomputes every session's status on
-// a fixed interval and pushes only changes to subscribers, which debounces the
-// working/idle flap for free. Status derives from process liveness, OSC 9;4
-// progress, and output activity (working/idle/exited, or crashed when the
-// process died badly); a consumer's classifier
-// maps an OSC 9 notification to a latched needs-input or done state (Tier 2).
-// One stream serves all tabs (not one per tab) to stay under the browser's
+// tab's activity indicator. One sweep recomputes every session's status on a
+// fixed interval and pushes only changes, which debounces the working/idle
+// flap. Status derives from process liveness and OSC 9;4 progress; a
+// consumer's classifier maps an OSC 9 notification to a latched needs-input or
+// done state. One stream serves all tabs to stay under the browser's
 // per-origin connection cap.
 
 import (

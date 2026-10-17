@@ -343,10 +343,10 @@ describe("connectStatusStream", () => {
   it("carries the session alias through the parse", () => {
     const onStatus = vi.fn();
     const { fake } = mountFake({ onStatus });
-    fake.emit("message", JSON.stringify({ ...sample, alias: "sess_thread" }));
+    fake.emit("message", JSON.stringify({ ...sample, alias: "host_alias" }));
 
     const got = onStatus.mock.calls[0]![0] as SessionStatus;
-    expect(got.alias).toBe("sess_thread");
+    expect(got.alias).toBe("host_alias");
   });
 
   // The session-end split. The server reports "exited" for an ordinary end —

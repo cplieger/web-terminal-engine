@@ -222,9 +222,10 @@ func WithManagerOriginPolicy(p *OriginPolicy) ManagerOption {
 // WithStatusClassifier maps an OSC 9 notification message to a session status
 // (return ok=false to ignore a message). The consumer decides which of its
 // program's messages mean needs-input and which mean done; a server that sets
-// no classifier gets working/idle from progress and output activity only. A
-// classified input status latches (persists while the process waits) until the
-// turn resumes or a done message clears it.
+// no classifier gets its status from OSC 9;4 progress and process liveness
+// only, with no needs-input or done latch. A classified input status latches
+// (persists while the process waits) until the turn resumes or a done message
+// clears it.
 func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
 	return func(c *managerConfig) { c.classifier = fn }
 }
@@ -929,8 +930,8 @@ func (m *SessionManager) SetSessionAlias(id SessionID, alias string) bool {
 	return true
 }
 
-// maxSessionAliasLen bounds an alias with room for a prefixed UUID ("sess_"
-// plus a UUID is 41 characters).
+// maxSessionAliasLen bounds an alias; 64 leaves room for a UUID plus a short
+// prefix.
 const maxSessionAliasLen = 64
 
 func validSessionAlias(s string) bool {
@@ -1105,19 +1106,14 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 		}
 		m.mu.Unlock()
 		if !ok {
-			// Unknown session: accept the upgrade and close with the
-			// DEFINITIVE application code (4004), which the client reads and
-			// routes to its ended state — a pre-upgrade 404 is unreadable
-			// from browser JS (an opaque code-1006 failure) and condemned
-			// clients to an endless reconnect loop against a session that
-			// will never exist. The upgrade goes through acceptWS so this path
-			// applies the SAME origin policy as a live session's socket
-			// (WithManagerOriginPolicy); it used to hardcode nil options, which
-			// silently ignored a configured allowlist here and answered a
-			// legitimately-embedded client 403 instead of the readable 4004.
-			// A non-WebSocket GET gets Accept's own 426 — the same answer the
-			// known-session path gives, so a plain probe can no longer
-			// distinguish session existence (the old 404-vs-426 oracle).
+			// Unknown session: accept the upgrade and close with the readable
+			// application code 4004, which the client routes to its ended
+			// state; a pre-upgrade 404 reaches browser JS as an opaque 1006 and
+			// loops reconnects. acceptWS applies the SAME origin policy as a
+			// live session's socket (WithManagerOriginPolicy), so an embedded
+			// client gets 4004, not 403. A non-WebSocket GET gets Accept's own
+			// 426, as on the known-session path, so a probe cannot tell whether
+			// a session exists.
 			ws, err := acceptWS(w, r, m.originPolicy)
 			if err != nil {
 				return // acceptWS or Accept already wrote the response (403/426)

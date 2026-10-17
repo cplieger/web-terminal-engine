@@ -1,20 +1,13 @@
 package terminal
 
-// Status-layer tests for OSC 9, written against the OSC 9 spec brief.
-//
-// Two structural claims from the brief drive everything here:
-//
-//   - Form A (OSC 9;4) reports a STATE. It persists until the program changes
-//     it, so no timeout and no output activity may clear it. The brief's state
-//     table maps 1 and 3 to an active (working) state, 2 to an error state and 4
-//     to a warning state, read with iTerm2's semantics because the engine
+// Status-layer tests for OSC 9. Two structural claims drive them:
+//   - Form A (OSC 9;4) reports a STATE that persists until the program changes
+//     it; no timeout or output may clear it. States 1 and 3 are working, 2 an
+//     error and 4 a warning, read with iTerm2's semantics because the engine
 //     advertises TERM_PROGRAM=iTerm.app.
-//   - Form B (OSC 9;<message>) is an EVENT. It happens once. A consumer with no
-//     status classifier installed — a plain shell server's configuration — must
-//     still RECEIVE it, because "no classifier" means "I map notifications
-//     myself", not "discard them".
-//
-// Where these tests disagree with the current implementation, the brief wins.
+//   - Form B (OSC 9;<message>) is a one-shot EVENT. A consumer with no
+//     classifier must still RECEIVE it: "no classifier" means "I map
+//     notifications myself", not "discard them".
 
 import (
 	"testing"
@@ -34,7 +27,7 @@ func eventFor(t *testing.T, events []statusEvent, id SessionID) statusEvent {
 	return statusEvent{}
 }
 
-// TestComputeStatusProgressStateMapping walks the brief's state table through
+// TestComputeStatusProgressStateMapping walks the OSC 9;4 state table through
 // the status layer: an active state (1 value, 3 indeterminate) is working, the
 // error state (2) is failed, the warning state (4) is warning, and a cleared or
 // never-seen state is idle. No classifier is installed, because a progress state
@@ -65,16 +58,13 @@ func TestComputeStatusProgressStateMapping(t *testing.T) {
 	}
 }
 
-// TestComputeStatusFailedPersistsUntilProgressChanges pins the brief's "these
-// are STATES, not events" claim at the status layer for the error state: once a
+// TestComputeStatusFailedPersistsUntilProgressChanges pins the "OSC 9;4 reports
+// STATES, not events" claim at the status layer for the error state: once a
 // program reports OSC 9;4;2 the session stays failed across every later sweep,
 // through further output, and is cleared only by a NEW progress state from the
-// program. A failed build that quietly reverts to idle a moment later is a
-// missed failure.
-//
-// Note there is deliberately no elapsed-time assertion: computeStatus takes no
-// clock input at all, so a timeout could only arrive as a new code path. The
-// repeated sweeps below are what such a path would have to survive.
+// program. There is no elapsed-time assertion because computeStatus takes no
+// clock; the repeated sweeps are what a future timeout path would have to
+// survive.
 func TestComputeStatusFailedPersistsUntilProgressChanges(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
@@ -193,14 +183,11 @@ func TestComputeStatusNewProgressStateSupersedesStaleLatch(t *testing.T) {
 
 // TestComputeStatusPausedStateDoesNotStealLatch pins the state-4 exception
 // against two shapes an emitter can produce, BOTH coexisting with a latch it
-// posted itself in the same breath: `4;100` while an approval is pending (the
-// same claim as "Approval needed"), and `4;<usage>` once idle (parked alongside
-// "Task finished"). State 4 persists until the program changes it, so a state-4 report
-// allowed to clear a latch takes the tab one sweep — 250ms — after the
-// notification and keeps it for the whole wait or the whole idle period.
-//
-// Held across several sweeps deliberately: the bug was never in the first sweep,
-// which the fresh-latch rule already covered.
+// posted in the same breath: `4;100` while input is pending, and a parked
+// `4;<percent>` once done. State 4 persists, so a state-4 report allowed to
+// clear a latch would take the tab one sweep (250ms) after the notification
+// and keep it for the whole wait. The cases run several sweeps because the
+// fresh-latch rule already covers the first.
 func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -215,7 +202,7 @@ func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 			value: 100, want: StatusInput, resumeTo: 3, resumed: StatusWorking,
 		},
 		{
-			name: "parked context usage keeps done", msg: "Task finished",
+			name: "parked percentage keeps done", msg: "Task finished",
 			value: 72, want: StatusDone, resumeTo: 3, resumed: StatusWorking,
 		},
 		{
@@ -266,13 +253,10 @@ func TestComputeStatusPausedStateStandsAloneWithoutLatch(t *testing.T) {
 	}
 }
 
-// TestDiffStatusesDeliversNotificationWithoutClassifier is the generic gap. With
-// NO classifier installed (a plain shell server's configuration) an OSC 9
-// notification is currently observed and thrown away: applyNotification returns
-// early, nothing latches, and no event is emitted — the message never reaches a
-// subscriber. Per the brief a notification is an EVENT, so the engine's job is to
-// DELIVER it; deciding what it means is the consumer's. The event therefore
-// carries the text and its sequence number, and delivering one latches no status.
+// TestDiffStatusesDeliversNotificationWithoutClassifier: with NO classifier
+// installed an OSC 9 notification is still an EVENT the engine must DELIVER;
+// deciding what it means is the consumer's. The event carries the text and its
+// sequence number, and delivering one latches no status.
 func TestDiffStatusesDeliversNotificationWithoutClassifier(t *testing.T) {
 	m := NewSessionManager(catFactory) // no classifier: the generic consumer
 	t.Cleanup(func() { shutdownManager(t, m) })

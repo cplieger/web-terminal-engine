@@ -96,8 +96,7 @@ type Screen struct {
 	// been seen, else the state (0 off, 1 value, 2 error, 3 indeterminate,
 	// 4 paused). A program emits it while it is working, so the status
 	// layer maps an active state (1 or 3) to working. Set only by an OSC 9;4
-	// sequence; a program that never emits one leaves it at -1 (the signal that
-	// the status layer should fall back to output activity).
+	// sequence; a program that never emits one leaves it at -1.
 	Progress int
 	// ProgressValue holds the percentage carried by the last OSC 9;4 progress
 	// sequence: -1 when absent or unknown (no sequence seen yet, a state that

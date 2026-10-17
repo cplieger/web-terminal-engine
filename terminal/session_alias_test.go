@@ -88,7 +88,7 @@ func TestSetSessionAlias(t *testing.T) {
 		alias string
 		want  bool
 	}{
-		{name: "prefixed_uuid", id: a, alias: "sess_6f1c2b9e-0d4a-4e7b-9a51-3c2d1e0f9a8b", want: true},
+		{name: "prefixed_uuid", id: a, alias: "task_6f1c2b9e-0d4a-4e7b-9a51-3c2d1e0f9a8b", want: true},
 		{name: "max_length", id: a, alias: strings.Repeat("x", 64), want: true},
 		{name: "over_max_length", id: a, alias: strings.Repeat("x", 65)},
 		{name: "empty", id: a, alias: ""},
@@ -143,15 +143,15 @@ func TestDiffStatuses_emitsAnAliasChangeAndNothingWhenUnchanged(t *testing.T) {
 		t.Fatalf("quiescent sweep emitted %+v", evs)
 	}
 
-	if !m.SetSessionAlias(id, "sess_thread") {
+	if !m.SetSessionAlias(id, "host_alias") {
 		t.Fatal("SetSessionAlias = false")
 	}
 	evs := m.diffStatuses()
-	if len(evs) != 1 || evs[0].Alias != "sess_thread" {
-		t.Fatalf("sweep after SetSessionAlias = %+v, want one event with alias sess_thread", evs)
+	if len(evs) != 1 || evs[0].Alias != "host_alias" {
+		t.Fatalf("sweep after SetSessionAlias = %+v, want one event with alias host_alias", evs)
 	}
 
-	if !m.SetSessionAlias(id, "sess_thread") {
+	if !m.SetSessionAlias(id, "host_alias") {
 		t.Fatal("SetSessionAlias(same value) = false")
 	}
 	if evs := m.diffStatuses(); len(evs) != 0 {

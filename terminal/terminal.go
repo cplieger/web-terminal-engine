@@ -285,9 +285,7 @@ const DefaultScrollbackCapacity = defaultScrollbackCapacity
 // Exported because it is a cliff, not a preference: at or above it the client
 // can fetch any history the bounded resume replay withheld; below it the replay
 // carries the whole ring, so there is nothing withheld and nothing to fetch.
-// Configuring into the gap that used to exist between this and the replay bound
-// lost history outright. Prefer ClampScrollbackCapacity over comparing against
-// this yourself.
+// Prefer ClampScrollbackCapacity over comparing against this yourself.
 const MinPagingCapacity = paginationMinRing
 
 // ClampScrollbackCapacity turns an operator-supplied retained-history depth into
@@ -1295,13 +1293,14 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	return nil
 }
 
-// childEnv assembles a session's environment. TERM/COLORTERM unlock 256-color
-// and truecolor; TERM_PROGRAM=iTerm.app (>= 3.6.6) is the identity programs
-// gate OSC 9;4 progress and DEC 2026 synchronized output on. h.cfg.env is
-// appended last so WithEnv wins. The reap marker goes FIRST so the reap scan
-// reads a bounded environ prefix, and both sources are stripped of it: os/exec
-// keeps the last value of a repeated key, and an inherited marker (a server
-// started inside a session) would silently disable reaping.
+// childEnv assembles a session's environment. TERM/COLORTERM advertise 256-color
+// and truecolor; TERM_PROGRAM=iTerm.app at version 3.6.6 advertises an iTerm2
+// identity, whose OSC 9;4 progress and DEC 2026 synchronized output the engine
+// implements. h.cfg.env is appended last so WithEnv wins. The reap marker goes
+// FIRST so the reap scan reads a bounded environ prefix, and both sources are
+// stripped of it: os/exec keeps the last value of a repeated key, and an
+// inherited marker (a server started inside a session) would silently disable
+// reaping.
 func (h *Handler) childEnv(reap *sessionReap) []string {
 	inherited := stripReapMarker(os.Environ())
 	consumer := stripReapMarker(h.cfg.env)
@@ -2478,7 +2477,7 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	h.builder.Reset()
 	// Commit any pending drain to history at its absolute index before
 	// computing the replay, so lines that scrolled while the client was
-	// away are retained (the old code discarded them here).
+	// away are retained.
 	drained, wrapped := drainScrollback(h.screen)
 	// Match Build's guard: drain that straddles an alt-screen transition belongs to the
 	// buffer just left and must not enter main history.

@@ -146,14 +146,11 @@ func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
 	}
 }
 
-// TestComputeStatusFreshLatchOutranksActiveProgress pins the turn-boundary
-// race fix: when one sweep's snapshot pairs a NEW classified notification with
-// a progress value that still reads active (an emitter flushes its done
-// notification a chunk ahead of the OSC 9;4;0 progress-off, and a sweep tick
-// lands in the gap), the fresh latch wins — done/input, not working — and
-// persists once progress clears. The old code consumed the notification and
-// destroyed the just-set latch in the same call, landing every later sweep on
-// idle: the intermittently blank (hollow) tab dot at turn end. The poisoned
+// TestComputeStatusFreshLatchOutranksActiveProgress pins the turn boundary:
+// when one sweep's snapshot pairs a NEW classified notification with a progress
+// value that still reads active (an emitter flushes its done notification a
+// chunk ahead of the OSC 9;4;0 progress-off), the fresh latch wins and persists
+// once progress clears, instead of every later sweep landing on idle. The
 // pairing cannot be produced through handlePTYData (a chunk parses atomically
 // under h.mu), so the snapshot is constructed directly.
 func TestComputeStatusFreshLatchOutranksActiveProgress(t *testing.T) {
@@ -177,8 +174,7 @@ func TestComputeStatusFreshLatchOutranksActiveProgress(t *testing.T) {
 			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("poisoned snapshot: status = %q, want %q", st, tc.want)
 			}
-			// Sweep N+1: progress cleared, nothing new — the latch persists
-			// (the old code landed here on idle).
+			// Sweep N+1: progress cleared, nothing new — the latch persists.
 			in = &statusRaw{progress: 0, notifMsg: tc.msg, notifSeq: 1}
 			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("after progress clears: status = %q, want %q", st, tc.want)
@@ -191,7 +187,7 @@ func TestComputeStatusFreshLatchOutranksActiveProgress(t *testing.T) {
 // precedence lasts one sweep only (self-correcting): when progress remains
 // active on the NEXT sweep with no new notification — the agent genuinely kept
 // working, e.g. a queued follow-up turn — the now-stale latch clears and the
-// session reports working, exactly as before the fix.
+// session reports working.
 func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
 	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
 	t.Cleanup(func() { shutdownManager(t, m) })

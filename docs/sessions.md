@@ -142,7 +142,7 @@ When several clients share a session, a live resize goes to the last writer. Whe
 
 ## The processes a session starts
 
-A session's process inherits the server's environment plus a default terminal identity: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=iTerm.app` and `TERM_PROGRAM_VERSION=3.6.6`. Programs then detect truecolor, `OSC 9;4` progress reporting and DEC 2026 synchronized output. `WithEnv` values come after these defaults, so your entry for the same variable wins.
+A session's process inherits the server's environment plus a default terminal identity: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=iTerm.app` and `TERM_PROGRAM_VERSION=3.6.6`. This identity advertises truecolor, `OSC 9;4` progress reporting and DEC 2026 synchronized output, which the engine implements. `WithEnv` values come after these defaults, so your entry for the same variable wins.
 
 ### Session reaping
 

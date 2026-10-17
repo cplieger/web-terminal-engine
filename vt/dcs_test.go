@@ -155,8 +155,8 @@ func TestDECRQSS_UnsupportedQueries(t *testing.T) {
 }
 
 // TestDECRQSSBufferBoundedAtMax verifies the DECRQSS data buffer is capped at
-// maxDCSLen, and an oversized (garbage) query still yields an invalid response
-// and returns the parser to Ground after ST.
+// maxDCSLen, and an oversized query is dropped unanswered and returns the
+// parser to Ground after ST.
 func TestDECRQSSBufferBoundedAtMax(t *testing.T) {
 	s := New(24, 80)
 	s.Write([]byte("\x1bP$q"))
@@ -169,8 +169,8 @@ func TestDECRQSSBufferBoundedAtMax(t *testing.T) {
 		t.Errorf("dcsBuf = %d, want %d (capped)", len(s.dcsBuf), maxDCSLen)
 	}
 	s.Write([]byte("\x1b\\"))
-	if !strings.HasPrefix(string(s.response), "\x1bP0$r") {
-		t.Errorf("oversized DECRQSS response = %q, want invalid (0$r) prefix", s.response)
+	if len(s.response) != 0 {
+		t.Errorf("oversized DECRQSS response = %q, want none", s.response)
 	}
 	if s.pState != stGround {
 		t.Errorf("state after ST = %d, want Ground", s.pState)
@@ -360,11 +360,32 @@ func TestDCSOverCap(t *testing.T) {
 		}
 	})
 
-	t.Run("decrqss_over_cap_is_answered_invalid", func(t *testing.T) {
+	t.Run("xtgettcap_after_an_aborted_overflowed_one_is_answered", func(t *testing.T) {
+		for name, abort := range map[string]string{"CAN": "\x18", "SUB": "\x1a"} {
+			t.Run(name, func(t *testing.T) {
+				s := New(24, 80)
+				over := strings.TrimSuffix(xtgettcapQuery(t, "4141414141", maxDCSLen+4), "\x1b\\")
+				s.Write([]byte(over + abort + "\x1bP+q436F\x1b\\"))
+				if got := string(s.response); got != co {
+					t.Errorf("XTGETTCAP after an overflowed one aborted by %s replied %q, want %q", name, got, co)
+				}
+			})
+		}
+	})
+
+	t.Run("decrqss_over_cap_is_not_answered", func(t *testing.T) {
 		s := New(24, 80)
 		s.Write([]byte("\x1bP$q" + strings.Repeat("m", maxDCSLen+1) + "\x1b\\"))
-		if got, want := string(s.response), "\x1bP0$r\x1b\\"; got != want {
-			t.Errorf("over-cap DECRQSS replied %q, want %q", got, want)
+		if len(s.response) != 0 {
+			t.Errorf("over-cap DECRQSS replied %q, want no reply", s.response)
+		}
+	})
+
+	t.Run("decrqss_after_an_overflowed_one_is_answered", func(t *testing.T) {
+		s := New(24, 80)
+		s.Write([]byte("\x1bP$q" + strings.Repeat("m", maxDCSLen+1) + "\x1b\\" + "\x1bP$qr\x1b\\"))
+		if got, want := string(s.response), "\x1bP1$r1;24r\x1b\\"; got != want {
+			t.Errorf("DECRQSS after an overflowed one replied %q, want %q", got, want)
 		}
 	})
 }

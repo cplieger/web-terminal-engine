@@ -648,4 +648,17 @@ func TestOSCOverCapIsDiscardedWhole(t *testing.T) {
 			t.Errorf("OSC 8 after an overflowed one linked %q, want %q", got, "https://example.com")
 		}
 	})
+
+	t.Run("osc_after_an_aborted_overflowed_one_applies", func(t *testing.T) {
+		for name, abort := range map[string]string{"CAN": "\x18", "SUB": "\x1a"} {
+			t.Run(name, func(t *testing.T) {
+				s := New(2, 10)
+				over52, _ := osc52OfLen(t, maxOSCLen+4)
+				s.Write([]byte(strings.TrimSuffix(over52, "\x07") + abort + "\x1b]52;;aGVsbG8=\x07"))
+				if got := string(s.TakeClipboard()); got != "hello" {
+					t.Errorf("OSC 52 after an overflowed one aborted by %s queued %q, want %q", name, got, "hello")
+				}
+			})
+		}
+	})
 }

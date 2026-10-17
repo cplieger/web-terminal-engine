@@ -632,7 +632,14 @@ func TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength(t *testi
 			return "\x1b]52;c;" + strings.Repeat("aGVsbG8h", n/8+1) + "\x07"
 		},
 		"dcs_decrqss_query": func(n int) string {
-			return "\x1bP$q" + strings.Repeat("m", n) + "\x1b\\"
+			// A query past maxDCSLen is dropped unanswered; dcs_over_cap measures that.
+			return "\x1bP$q" + strings.Repeat("m", min(n, maxDCSLen)) + "\x1b\\"
+		},
+		"dcs_over_cap": func(n int) string {
+			return "\x1bP$q" + strings.Repeat("m", maxDCSLen+n) + "\x1b\\"
+		},
+		"osc_over_cap": func(n int) string {
+			return "\x1b]52;c;" + strings.Repeat("A", maxOSCLen+n) + "\x07"
 		},
 		"csi_parameter_list": func(n int) string {
 			return "\x1b[" + strings.Repeat("1;", n) + "1mx\r"
@@ -641,8 +648,8 @@ func TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength(t *testi
 	// 64 rather than 4 is the shortest measured length for the comparison: a
 	// handful of bytes can sit under a size class the allocator rounds up to, so
 	// the first step is a step in the ALLOCATOR and not in this package (the DCS
-	// reply measured 1 at 4 bytes and 2 from 64 bytes up, then stayed flat to
-	// 4000). The 4-byte case is still measured and logged, just not the baseline.
+	// reply measured 1 at 4 bytes and 2 from 64 bytes up to maxDCSLen). The
+	// 4-byte case is still measured and logged, just not the baseline.
 	lengths := []int{4, 64, 1024, 4000}
 
 	for name, build := range sequences {

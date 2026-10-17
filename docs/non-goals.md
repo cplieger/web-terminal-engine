@@ -31,7 +31,7 @@ The [esctest2](https://github.com/ThomasDickey/esctest2) conformance suite check
 
 ## Length limits
 
-The engine buffers at most 4096 bytes of an OSC payload and 256 bytes of a DECRQSS or XTGETTCAP query. A longer OSC sequence or XTGETTCAP query is dropped whole rather than applied cut short. An OSC 52 copy of more than about 3 KB of text, or an OSC 8 link of about 4 KB or more, therefore does nothing. A longer DECRQSS still gets `DCS 0 $ r ST`, because no valid selector is that long.
+The engine buffers at most 4096 bytes of an OSC payload and 256 bytes of a DECRQSS or XTGETTCAP query. A longer sequence is dropped whole rather than applied cut short, and a dropped query gets no reply. An OSC 52 copy of more than about 3 KB of text, or an OSC 8 link of about 4 KB or more, therefore does nothing.
 
 ## The kitty keyboard protocol
 

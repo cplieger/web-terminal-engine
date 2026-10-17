@@ -242,23 +242,12 @@ const (
 	// control logs; every real control type is under 16 bytes.
 	maxLoggedControlTypeBytes = 32
 
-	// defaultScrollbackCapacity is the number of scrollback lines the server
-	// retains for replay and for demand-paged history requests. It is the
-	// reachable depth of a session's history: how far back a user can scroll.
-	//
-	// 100000 is sized from real workloads rather than from another terminal's
-	// default. The largest agent session measured on a live box (2026-08, 193
-	// sessions on disk) rendered an estimated 53,000-73,000 terminal lines, and
-	// the p99 session ~61,000 — so a smaller ceiling truncates exactly the long
-	// sessions whose history is worth scrolling, while the median session
-	// (~2,500 lines) never reaches it. The cost is paid only as history is
-	// actually produced (the ring grows on demand, see scrollbackRing), at
-	// roughly 345 bytes per retained line: ~34 MB per session at the ceiling,
-	// against the 200-430 MB an agent CLI's process tree already costs.
-	//
-	// Operators override it per deployment with ScrollbackEnvVar; there is no
-	// "unlimited" sentinel, because a sufficiently large number IS unlimited
-	// once the ring stopped preallocating. 0 disables scrollback entirely.
+	// defaultScrollbackCapacity is the retained history depth, in lines, for
+	// replay and demand-paged history. Sized from measured long sessions (p99
+	// about 61,000 rendered lines, median about 2,500), so only long histories
+	// reach it. The ring grows on demand at about 345 bytes per line, about 34 MB
+	// at the ceiling. ScrollbackEnvVar overrides it: a large number is the
+	// "unlimited" setting, and 0 disables scrollback.
 	defaultScrollbackCapacity = 100_000
 )
 
@@ -433,20 +422,13 @@ func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
 
-// WithKeepUnfocused makes the server hold the child process in the "unfocused"
-// state for DEC 1004 focus reporting when keep is true: whenever the process
-// enables focus reporting (CSI ?1004h), the server writes a focus-out (ESC [ O)
-// to its PTY, and it never writes a focus-in. A process that gates behavior on
-// focus (for example one that only emits its OSC 9 notifications while it
-// believes it is unfocused) then keeps emitting, so the session manager's
-// status classifier can observe those notifications.
-//
-// keep=false reproduces the no-option default — real focus reporting, which is
-// what a generic terminal wants (vim, etc.) — so a consumer can thread its own
-// flag instead of conditionally appending the option. Later options win: the
-// last WithKeepUnfocused in the option list decides. The hold is one clause of
-// the server's DEC 1004 derivation, which also reads the attachment state and
-// every attached client's reported focus.
+// WithKeepUnfocused holds the child, when keep is true, in the "unfocused" DEC
+// 1004 state: whenever it enables focus reporting (CSI ?1004h) the server writes
+// a focus-out (ESC [ O) to its PTY and never a focus-in, so a program that only
+// emits OSC 9 notifications while unfocused keeps emitting them for the status
+// classifier. keep=false is the default, real focus reporting. The last
+// WithKeepUnfocused in the option list wins. The hold is one clause of the
+// server's DEC 1004 derivation, beside attachment state and each client's focus.
 func WithKeepUnfocused(keep bool) Option {
 	return func(c *handlerConfig) { c.keepUnfocused = keep }
 }
@@ -1804,70 +1786,29 @@ func durableSubset(clipboardPayload []byte, scrollPayloads [][]byte) [][]byte {
 	return append(durable, scrollPayloads...)
 }
 
-// writeClientPayloads writes one dispatch pass's payload sequence to one
-// client, under the resume gate, and reports whether anything was written:
-//
-//   - The socket's writeMu is acquired BLOCKING: a resume batch in flight
-//     delays this sequence rather than dropping it, because the frame's
-//     payloads are not regenerable — buildFrame has already committed its
-//     scrollLines to the ring and consumed the one-shots (scrollbackCleared,
-//     clipboard, bell), so a skipped frame would be a permanent scrollback
-//     hole for the resuming client (its post-batch haveThrough jumps past
-//     the missing lines, and resume replays only above haveThrough). The
-//     cost is bounded: the batch's own writes run under a 10s budget, a
-//     healthy batch is milliseconds, and only the resuming client's
-//     goroutine waits — but the pass's wg.Wait does inherit that bound on
-//     top of its own 5s write budget (the pre-existing wedged-client
-//     exposure, same class, larger constant; see dispatchFrame's comment).
-//
-//   - A frame whose resume generation no longer matches was built BEFORE
-//     the batch's screen snapshot, so its STATE payloads (screen, modes,
-//     title) are dropped: writing them after the batch would regress the
-//     client to pre-snapshot state the batch already superseded. Its
-//     DURABLE payloads (scroll chunks, clipboard) are still written,
-//     because the batch does not re-deliver them: the frame's scroll lines
-//     sit at or below the snapshot's committed index while the resuming
-//     client's haveThrough — its own window bottom — already spans their
-//     indices, so the batch's LinesFrom(haveThrough+1) replay starts PAST
-//     them (and under ring-cap pressure they may already be evicted from
-//     the ring entirely); dropping them would be a permanent scrollback
-//     hole. The clipboard payload is a consumed one-shot (OSC 52) no later
-//     frame will carry again. Writing scroll after the batch is safe:
-//     chunks carry absolute indices and the client applies them
-//     idempotently. Two residuals, accepted and bounded:
-//
-//     1. The client's alt gate now accepts
-//     history strictly below its frozen main win.base (store.ts
-//     applyScroll), so a client the batch flipped into alt STORES the
-//     durable chunk instead of dropping it — the lines surface at alt
-//     exit's store rebuild. Only a client bundle predating that fix still
-//     drops there, losing exactly what pre-split code lost; wire-compatible
-//     both ways.
-//
-//     2. Bell and the ED3 scrollbackCleared flag ride the dropped screen
-//     payload and are lost for the resuming client alone, when its resume
-//     acquires the write lock inside the window between this frame's
-//     registry.Snapshot() (buildFrame's first statement, before any row
-//     renders) and this goroutine's writeMu acquisition — a full render
-//     plus a full payload encode, i.e. milliseconds under a heavy drain,
-//     not microseconds. The ED3 loss self-heals at the app's next ED3
-//     (an inline TUI re-emits it on every resize redraw); until then that
-//     client over-retains history the server dropped.
-//
-// A nil state is tolerated for frames constructed without a registry
-// snapshot (tests); buildFrame always populates writers, so production
-// frames never take the ungated path.
-//
-// Returns the ack value actually stamped on the written payloads (the
-// captured ack, or the restamped one on a strip) and whether anything was
-// written — so the caller's delivered bookkeeping records what the wire
-// carried, never a pre-resume value a strip replaced.
+// writeClientPayloads writes one dispatch pass's payloads to one client under
+// the resume gate. It returns the ack actually stamped on the written payloads
+// (restamped on a strip) and whether anything was written, so the caller's
+// delivered bookkeeping records what the wire carried. A nil state (test
+// frames built without a registry snapshot) is written ungated.
 func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen uint64, payloads, durable [][]byte) (uint64, bool) {
 	stripped := false
 	if st != nil {
+		// BLOCKING: a resume batch in flight delays this frame rather than
+		// dropping it. buildFrame already committed its scroll lines to the ring
+		// and consumed the one-shots, and resume replays only above haveThrough,
+		// so a skipped frame is a permanent scrollback hole. The batch's writes
+		// run under a 10s budget, which this pass's wg.Wait inherits.
 		st.writeMu.Lock()
 		defer st.writeMu.Unlock()
 		if st.resumeGen.Load() != gen {
+			// Built before the batch's snapshot: drop the state payloads (screen,
+			// modes, title), which would regress the client, and keep the durable
+			// ones. The batch replays above haveThrough, which already spans these
+			// scroll lines, and the clipboard is a one-shot; absolute indices make a
+			// late scroll chunk idempotent. Bell and the ED3 flag ride the dropped
+			// screen payload and are lost for this client alone; ED3 heals at the
+			// app's next ED3.
 			payloads = durable
 			stripped = true
 		}
@@ -2623,17 +2564,11 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) {
 
 // armRedrawSettle starts the redraw-settle hold: flushes stay suppressed until
 // the child's redraw output has been quiet for redrawSettleQuiet, capped at
-// redrawSettleCap from now. Caller holds h.mu.
-//
-// This exists because the screen-level flush hold (vt.Screen.HoldFlush) cannot
-// hide a SIGWINCH redraw: it shares its deadline with DEC 2026, and the child's
-// first CSI ?2026l (ESU) clears it. An inline TUI can bracket its post-resize
-// transcript reprint in many small BSU/ESU chunks, so the first chunk released
-// the resize hold milliseconds in, and every subsequent flush pass streamed a
-// mid-reprint window to the clients — on a phone, seconds of history visibly
-// churning through the screen after each keyboard/rotation resize. The settle
-// hold is handler-level state the child's escape sequences cannot touch: the
-// redraw is over when the child goes quiet, not when it closes a bracket.
+// redrawSettleCap from now. Caller holds h.mu. vt.Screen.HoldFlush cannot hide
+// a SIGWINCH redraw: it shares DEC 2026's deadline, so the first CSI ?2026l of
+// an inline TUI's chunked reprint releases it and clients see the reprint churn.
+// This hold is handler state escape sequences cannot touch: the redraw ends when
+// the child goes quiet, not when it closes a bracket.
 func (h *Handler) armRedrawSettle(now time.Time) {
 	h.redrawSettleUntil = now.Add(redrawSettleCap)
 	// The arm itself counts as activity so the hold lasts at least

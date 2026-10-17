@@ -66,15 +66,11 @@ import (
 type SessionID string
 
 // SessionInfo is the public description of one session, returned by List and
-// carried on the status stream.
-//
-// Three of its fields are title-shaped; they are not interchangeable:
-//   - Title is the RESOLVED display title (effectiveTitle) — what a consumer
-//     renders unless it has a reason not to.
-//   - PinnedTitle is the USER's name, set and cleared only by a human action.
-//   - ClientTitle is a CLIENT-DERIVED automatic title: a guess a client
-//     computed and asked the server to remember (for example, a session's first
-//     submitted line). Client-supplied, but not user-authored.
+// carried on the status stream. Its three title fields are not interchangeable:
+//   - Title is the resolved display title (effectiveTitle), what a consumer renders.
+//   - PinnedTitle is the user's name, set and cleared only by a human action.
+//   - ClientTitle is an automatic title a client computed and asked the server to
+//     remember (for example a session's first submitted line); not user-authored.
 type SessionInfo struct {
 	CreatedAt time.Time `json:"createdAt"`
 	ID        SessionID `json:"id"`    // marshals as a plain string; the wire shape is unchanged

@@ -1,6 +1,6 @@
 // Keyboard event → terminal byte sequence mapping, mirroring xterm.js's
-// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline, TUIs
-// and the host application get the keys they expect. Modifier digit per the
+// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline and
+// full-screen programs get the keys they expect. Modifier digit per the
 // xterm/VT520 convention: 1=Shift, 2=Alt, 4=Ctrl, 8=Meta, summed then +1 for
 // CSI 1;{n}{letter}. DECCKM and DECKPAM come from the injected mode state,
 // which the server's modes frame keeps current.
@@ -485,9 +485,9 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
   // handle them. Heuristic: only take Ctrl+letter when Shift is NOT
   // held AND the letter is one of the ones xterm consumes (a-z),
   // skipping the few that browsers commonly reserve.
-  // (We deliberately pass Ctrl+R / Ctrl+T / Ctrl+W through to the PTY
-  // — the host application's Ctrl+T transcript view depends on it. Users on macOS
-  // who want browser-reserved combos can use Cmd instead.)
+  // (Ctrl+R, Ctrl+T and Ctrl+W still go to the PTY: readline binds them to
+  // reverse search, transpose and word rubout, and full-screen programs bind
+  // them too. On macOS, Cmd reaches the browser's own combos.)
 
   // Shift+PageUp / Shift+PageDown — local scrollback navigation
   // (matches xterm.js KeyboardResultType.PAGE_UP/PAGE_DOWN).

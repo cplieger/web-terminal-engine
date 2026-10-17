@@ -433,25 +433,12 @@ export class LineStore {
   private paging = false;
 
   /**
-   * The highest index the APPLICATION erased (ED3), or -1. A second watermark
-   * beside `everEvictedThrough` because the two answer different questions and
-   * only one of them is a trim.
-   *
-   * `everEvictedThrough` means "we dropped this to stay inside a memory
-   * budget" and drives the "earlier output trimmed" affordance. ED3 is not
-   * that: the app discarded its own scrollback, so a marker would be permanent
-   * noise under an inline TUI that clears on every resize redraw, and ED3
-   * leaves it alone. That left NOTHING refusing an erased index, and a page
-   * reply whose data timeout had already released single-flight comes back
-   * UNCORRELATED — through the ordinary scroll path, classified TAIL, so
-   * outside the cache budget and the TTL both. It never leaves.
-   *
-   * Refusing an erased index is unconditionally safe within an epoch: the server's
-   * ring `Clear()` preserves `committed`, so an erased absolute index is never
-   * reused, and no legitimate later frame can carry one. The companion reprint an
-   * app emits in the same tick lands at NEW indices above everything the client
-   * held, which is why this watermark tracks what was actually DROPPED rather than
-   * the cleared bound — the bound would also refuse that reprint.
+   * The highest index the application erased (ED3), or -1. Not
+   * `everEvictedThrough`, which marks budget trims and drives the "earlier output
+   * trimmed" marker that ED3 must not show. Without it a late, uncorrelated page
+   * reply lands as TAIL, outside the cache budget and TTL, and never leaves. Safe
+   * within an epoch: the ring's `Clear()` keeps `committed`, so no erased index is
+   * reused. It tracks what was dropped; the cleared bound would refuse the reprint.
    */
   private erasedThrough = -1;
 
@@ -536,23 +523,12 @@ export class LineStore {
   private unconfirmedFrom = Number.POSITIVE_INFINITY;
 
   /**
-   * The resume REPLAY-EXCLUSION BOUNDARY: the highest index this client will not
-   * ask the server to re-send. Send this as `haveThrough`, never `highestIndex()`.
-   *
-   * The two differ by whatever the store holds provisionally, and that
-   * difference is a correctness bug once it reaches the wire. While a store has
-   * no socket (a background tab) it observes no base advance, so its window rows
-   * keep the content the app drew there, and claiming down to the window's
-   * bottom row tells the server "no need to re-send those" about rows whose
-   * committed content this client has never seen. The server replays strictly
-   * above `haveThrough`, so the provisional copies are never corrected and
-   * surface as scrollback under the new window: measured as a TUI's frozen
-   * composer box parked above the live region after almost every tab switch.
-   *
-   * NOT a residency fact and NOT "the highest confirmed row": the index this
-   * returns may be one the store never held or has since evicted. The only
-   * guarantee is `replayBoundary() <= highestIndex()`, with equality whenever
-   * nothing held is provisional.
+   * The resume replay-exclusion boundary: the highest index this client will not
+   * ask the server to re-send. Send it as `haveThrough`, never `highestIndex()`: a
+   * background tab's window rows hold what the app drew there, and claiming them
+   * means their committed content is never re-sent, so a stale input box surfaces
+   * as scrollback. It may name an index never held or since evicted; the only
+   * guarantee is `replayBoundary() <= highestIndex()`, equal when none is provisional.
    */
   replayBoundary(): number {
     if (this.highest < 0) {
@@ -1754,33 +1730,21 @@ export class LineStore {
   }
 
   private enforceCap(): void {
-    // The gate and the victim
-    // target read `tailCount`, not `lines.size`. Browse cache lives under its
-    // OWN budget, enforced at page-apply time, so live output must not be able
-    // to evict a page the reader is browsing — at the default batch that would
-    // be up to 93 cache lines per applied line.
+    // The gate and the victim target read `tailCount`, not `lines.size`: browse
+    // cache has its OWN budget, enforced at page-apply time, so live output must
+    // not evict a page the reader is browsing (up to 93 cache lines per applied
+    // line at the default batch).
     if (this.tailCount <= this.tailBound) {
       return;
     }
     const target = this.tailBound - evictionBatch(this.tailBound) + 1;
-    // ONE oldest-first eviction walk that SKIPS the live window. The window
-    // is never evictable — the screen is documented as a fixed,
-    // always-present block, so the cap is a HISTORY budget floored at the
-    // live screen (a cap at or below the terminal height keeps the full
-    // screen with zero scrollback). Content ABOVE the window (a resume
-    // replay delivered before its window frame; a malformed stream that
-    // never advances the base) is ordinary evictable history too: the
-    // cursor hops over the window and keeps walking, so the bound
-    // size <= max(maxLines, window height) holds whatever shape the frames
-    // arrive in. Evicting that band OLDEST-first keeps the NEWEST lines —
-    // the ones adjacent to the incoming window — so after the window
-    // advances the retained set converges back to one contiguous block
-    // (a newest-first tail trim parks a permanent interior hole under the
-    // live screen that resume, which replays only above haveThrough, can
-    // never backfill).
-    // everEvictedThrough advances over every TAIL eviction, including the
-    // hopped band — safe for the window frame that follows a replay because
-    // apply-line guard 2 exempts the live window (see applyLine).
+    // ONE oldest-first eviction walk that SKIPS the live window: the cap is a
+    // history budget floored at the screen height. Content above the window (a
+    // replay delivered before its window frame, a malformed stream) is evictable,
+    // so size <= max(maxLines, window height) holds for any frame order. Oldest-
+    // first keeps the lines next to the window; a newest-first trim leaves a hole
+    // under the live screen that resume cannot backfill. everEvictedThrough also
+    // covers the hopped band, safe because applyLine's guard 2 exempts the window.
     const winBottom = this.win.height > 0 ? this.win.base + this.win.height - 1 : -1;
     const hasWindow = this.win.height > 0;
     let cursor = this.oldest;

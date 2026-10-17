@@ -425,7 +425,7 @@ func (s *Screen) CursorPos() (row, col int) {
 }
 
 // Resize adjusts the screen dimensions, preserving existing content where
-// possible. When dimensions actually change, cells are cleared so the host application's
+// possible. When dimensions actually change, cells are cleared so the application's
 // SIGWINCH redraw starts from a clean slate; on a no-op resize (e.g. client
 // reconnect at the same size), content is preserved. Each dimension is floored
 // at 1 and capped at 1000.

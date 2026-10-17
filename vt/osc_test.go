@@ -192,15 +192,13 @@ func TestOSCOmittedCommandIsOSC0(t *testing.T) {
 	}
 }
 
-// TestOSCUnhandledIdLeavesTitle verifies an unhandled OSC id (9) leaves the
-// window title unchanged. Driven through the public parser (ESC ] 9 ; … BEL).
-func TestOSCUnhandledIdLeavesTitle(t *testing.T) {
+func TestOSC9NotificationLeavesTitleUnchanged(t *testing.T) {
 	s := New(1, 10)
 	const keep = "keep"
 	s.Title = keep
-	s.Write([]byte("\x1b]9;iTerm-only notification\x07")) // OSC 9 is unhandled here
+	s.Write([]byte("\x1b]9;iTerm-only notification\x07"))
 	if s.Title != keep {
-		t.Errorf("unhandled OSC 9: Title = %q, want %q (unchanged)", s.Title, keep)
+		t.Errorf("OSC 9 notification: Title = %q, want %q (unchanged)", s.Title, keep)
 	}
 }
 

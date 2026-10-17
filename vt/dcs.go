@@ -33,9 +33,10 @@ func (s *Screen) dcsPut(b byte) {
 	}
 }
 
-// dcsUnhook is called on exit from DcsPassthrough, dispatching the completed
-// DCS. Data longer than maxDCSLen is dropped unanswered, as its cut prefix is
-// a query the app never sent, such as a shorter XTGETTCAP name.
+// dcsUnhook dispatches a DCS on a non-cancel transition out of DcsPassthrough;
+// CAN and SUB abort without calling it. Data longer than maxDCSLen is dropped
+// unanswered, as its cut prefix is a query the app never sent, such as a
+// shorter XTGETTCAP name.
 func (s *Screen) dcsUnhook() {
 	if !s.dcsOverflow {
 		switch s.dcsFunc {

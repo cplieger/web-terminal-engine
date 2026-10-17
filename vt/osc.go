@@ -64,9 +64,9 @@ func (s *Screen) dispatchOsc() {
 		return
 	}
 
-	// The command is the whole field before the first ';', and only a plain
-	// decimal one dispatches: "2x;t" or a wrapping id must not run OSC 2. An
-	// empty field before ';' is xterm's omitted Ps, OSC 0 (misc.c do_osc).
+	// The command is the field before the first ';'. An empty one before ';' is
+	// xterm's omitted Ps, OSC 0 (misc.c do_osc); any other that is not a plain
+	// decimal below 2^31 runs nothing, so "2x;t" or a wrapping id cannot run OSC 2.
 	cmd, rest, hasSep := bytes.Cut(payload, []byte{';'})
 	id := 0
 	if len(cmd) > 0 || !hasSep {

@@ -5,10 +5,8 @@ import (
 	"testing"
 )
 
-// stringOutcome is what one byte class does to an open OSC, DCS, SOS, PM or
-// APC string. applied is the only outcome whose handler runs; dropped,
-// cancelled and ignored all end the string without one, and payload keeps it
-// open.
+// stringOutcome is what one byte class does to an open string: only applied
+// runs a handler, and only payload keeps the string open.
 type stringOutcome int
 
 const (
@@ -24,8 +22,8 @@ const (
 func TestStringTermination(t *testing.T) {
 	type kind struct {
 		name string
-		open string // introducer plus a payload that applies when it ends
-		over string // introducer plus a payload past any cap
+		open string // introducer plus a payload under its kind's cap, if any
+		over string // introducer plus a payload over its kind's cap, if any
 	}
 	pad := strings.Repeat("a", maxOSCLen+1)
 	rows := []struct {

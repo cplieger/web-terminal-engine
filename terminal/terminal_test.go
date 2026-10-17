@@ -1398,12 +1398,13 @@ func TestHandlePTYData_writesDeviceQueryResponseToPTY(t *testing.T) {
 }
 
 // TestHandleResume_frameOrderByAltState pins the resume frame order: the window
-// frame sets the client's alt flag and the client drops scroll frames while it
-// is set (store.ts applyScroll). On MAIN the window must PRECEDE the replay, as
-// a full repaint at the committed base, so a client with a stale alt flag
-// leaves alt before history lands; on ALT the replay must PRECEDE the window,
-// so a client not yet in alt stores main-screen history before the flip. Both
-// arms check the window frame carries the live alt state (offset-26 bit3).
+// frame sets the client's alt flag and, while it is set, the client drops scroll
+// rows at or above its frozen window base (store.ts applyScroll). On MAIN the
+// window PRECEDES the replay as a full repaint at the committed base, so a
+// client with a stale alt flag leaves alt before history lands; on ALT the
+// replay PRECEDES the window, so a client not yet in alt stores main-screen
+// history before the flip. Both arms check the window frame's alt bit (offset 26
+// bit 3).
 func TestHandleResume_frameOrderByAltState(t *testing.T) {
 	tests := []struct {
 		name        string

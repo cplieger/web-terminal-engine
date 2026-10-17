@@ -183,9 +183,9 @@ describe("LineStore", () => {
     // screen height 62), retained history at the overflow moment (3 rows) is
     // SMALLER than the batch. The batch target must stop at the window base
     // rather than evicting window rows — an evicted window row's index lands
-    // in everEvictedThrough, after which
-    // guard 2 drops every repaint of that row until the base advances (a
-    // permanently blank top row on a stable-base full-screen program).
+    // in everEvictedThrough, after which guard 2 drops every repaint of that
+    // row until the base advances (a permanently blank top row on a
+    // stable-base full-screen program).
     const height = 62;
     const winRows = (base: number): Record<number, string> => {
       const out: Record<number, string> = {};

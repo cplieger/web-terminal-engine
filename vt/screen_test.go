@@ -302,10 +302,10 @@ func TestAltScreenEnterExitPreservesMain(t *testing.T) {
 
 // TestExitAltScreen1049RestoresPen verifies CSI ?1049l restores the main
 // screen's SGR pen: DECRESET 1049 restores the cursor as in DECRC (xterm
-// ctlseqs), and DECRC restores character attributes (see restoreCursor). So a
-// TUI needs no trailing SGR 0 after ?1049l here; underline is the attribute that
-// bug strands. The second assertion pins that a DECSET mode flag is NOT
-// restored: it is session state the application owns.
+// ctlseqs), and DECRC restores character attributes (see restoreCursor). So no
+// trailing SGR 0 is needed after ?1049l to keep an alt-session attribute from
+// leaking. The second assertion pins that a DECSET mode flag is NOT restored:
+// it is session state the application owns.
 func TestExitAltScreen1049RestoresPen(t *testing.T) {
 	s := New(5, 10)
 	s.Write([]byte("\x1b[1m"))     // main-screen pen: bold
@@ -313,7 +313,7 @@ func TestExitAltScreen1049RestoresPen(t *testing.T) {
 	if s.style != (Style{}) {
 		t.Errorf("enter 1049: pen = %+v, want zero (1049 resets SGR on entry)", s.style)
 	}
-	s.Write([]byte("\x1b[4m"))     // underline, the attribute the upstream bug stranded
+	s.Write([]byte("\x1b[4m"))     // underline, set only inside the alt session
 	s.Write([]byte("\x1b[?2004h")) // a mode flag turned on inside the alt session
 	s.Write([]byte("\x1b[?1049l"))
 	if want := (Style{Bold: true}); s.style != want {

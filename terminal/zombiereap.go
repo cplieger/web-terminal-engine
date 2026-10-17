@@ -8,13 +8,13 @@ import (
 )
 
 // Zombie reaping collects exit statuses nobody wait()ed for, freeing PID slots;
-// session reaping (reap.go) ends processes that are still alive. A server that
-// is its container's PID 1 inherits every orphan, and os/exec waits only on its
-// own children, so without this every orphan (language servers, each git a
-// shell forked) stays a zombie. The sweep never waits on a pid os/exec owns
-// (spawnRegistry): taking that status makes cmd.Wait report "no child
-// processes" and turns a clean exit into an unknown one. A periodic sweep, not
-// a SIGCHLD handler: signal.Notify is process-global and os/exec relies on SIGCHLD.
+// session reaping (reap.go) ends live processes. A server that is its
+// container's PID 1 inherits every orphan, and os/exec waits only on its own
+// children, so without this every orphan stays a zombie. The sweep never waits
+// on a pid os/exec owns (spawnRegistry): taking that status makes cmd.Wait
+// report "no child processes". A periodic sweep, not a SIGCHLD handler:
+// signal.Notify is process-global state a library should not take, and a
+// zombie costs nothing for a few seconds.
 
 const (
 	// zombieSweepDefault is the sweep interval when a consumer passes 0. Long

@@ -666,30 +666,21 @@ export class LineStore {
     // Re-check the cap AFTER the window settled: a screen frame can LOWER the
     // retention bound without applying a single line — a height shrink whose
     // rows are byte-identical short-circuits applyLine on the idempotency
-    // guard, and applyLine is otherwise the only enforceCap caller. The R3
-    // adversarial rounds' interleaved property test failed on exactly this
-    // shape (~60% of seeds) until the bound was re-checked per FRAME, not
-    // only per content change.
+    // guard, and applyLine is otherwise the only enforceCap caller.
     this.enforceCap();
   }
 
   /** Apply a decoded scroll/history frame: each line at firstIndex + i. */
   applyScroll(msg: ScrollMessage): void {
     if (this.alt) {
-      // History strictly below the frozen MAIN window is safe to store while
-      // the alternate screen is active: the alt display renders from altRows,
-      // never from the abs store, and lines below win.base can only be
-      // main-screen scrollback — a resume batch's replay, or a post-resume
-      // durable chunk that raced an alt flip (the 2026-08 write-ordering
-      // race's last residual, closed here). They surface at alt exit's store
-      // rebuild. Anything AT or ABOVE the frozen base still violates the
-      // protocol invariant (the server never emits live scroll during alt)
-      // and is dropped rather than corrupting the frozen window region. With
-      // no main window ever seen (a fresh tab attaching straight into an
-      // in-alt session) there is no region to protect, so everything is
-      // accepted exactly as on the main-screen path — the alt-exit full
-      // frame overwrites the window region either way. applyLine's guard
-      // set applies to whatever passes.
+      // In alt, rows below the frozen MAIN window base are main-screen history
+      // (a resume replay, or a durable chunk that raced an alt flip) and are
+      // stored: the alt display renders from altRows, and they surface at alt
+      // exit's rebuild. Rows AT or ABOVE the base break the protocol (no live
+      // scroll during alt) and are dropped to keep the frozen window intact.
+      // With no main window ever seen (attaching straight into alt) there is
+      // nothing to protect, so all rows are accepted; the alt-exit full frame
+      // overwrites the window region either way.
       const base = this.win.height > 0 ? this.win.base : Number.POSITIVE_INFINITY;
       for (let i = 0; i < msg.lines.length; i++) {
         const abs = msg.firstIndex + i;

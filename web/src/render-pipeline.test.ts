@@ -1,7 +1,7 @@
-// Full-pipeline integration: PTY bytes captured from a real session go through
-// the WS binary decoder and the renderer, and the DOM is checked against the
-// expected post-keystroke state. The one difference from the browser's path is
-// that the frames are decoded from base64 rather than arriving over a socket.
+// Full-pipeline integration: hand-built screen frames go through the WS binary
+// decoder and the renderer, and the DOM is checked against the expected
+// post-keystroke state. The one difference from the browser's path is that the
+// frames are built in memory rather than arriving over a socket.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import type { Renderer } from "./render.js";

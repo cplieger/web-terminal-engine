@@ -1,8 +1,7 @@
-// Brick-3 renderer properties (store-backed, absolute-index DOM rows). These
-// pin what the rewrite changed versus the old live-zone model: rows carry
-// data-abs, the window is fixed-height (no trailing-blank trim, the bug-3
-// oscillation fix), history + window render in one absolute-ordered list, and
-// re-delivery never duplicates a row.
+// Store-backed renderer properties (absolute-index DOM rows): rows carry
+// data-abs, the window is fixed-height (no trailing-blank trim, which made the
+// row count oscillate), history + window render in one absolute-ordered list,
+// and re-delivery never duplicates a row.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Renderer } from "./render.js";

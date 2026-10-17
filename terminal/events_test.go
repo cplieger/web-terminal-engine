@@ -11,13 +11,13 @@ import (
 	"time"
 )
 
-// inputClassifier maps the two kiro-cli notification strings the way web-terminal-kiro
-// does, for exercising the latched needs-input/done state machine.
+// inputClassifier maps one needs-input and one done notification string, the
+// shape a consumer's classifier takes, for exercising the latched state machine.
 func inputClassifier(msg string) (string, bool) {
 	switch msg {
-	case "Permission required":
+	case "Approval needed":
 		return StatusInput, true
-	case "Response complete":
+	case "Task finished":
 		return StatusDone, true
 	}
 	return "", false
@@ -58,7 +58,7 @@ func TestComputeStatusLatchesInput(t *testing.T) {
 	tr := &statusTracker{}
 
 	// A prompt followed by a needs-input notification: latched input.
-	h.handlePTYData([]byte("Allow? \x1b]9;Permission required\x07"))
+	h.handlePTYData([]byte("Allow? \x1b]9;Approval needed\x07"))
 	if st := m.computeStatusFromHandler(h, tr); st != StatusInput {
 		t.Fatalf("after notification, status = %q, want %q", st, StatusInput)
 	}
@@ -75,7 +75,7 @@ func TestComputeStatusLatchesInput(t *testing.T) {
 }
 
 // TestComputeStatusDoneSupersedesInput verifies a classified done notification
-// ("Response complete") replaces an input latch with the done state.
+// ("Task finished") replaces an input latch with the done state.
 func TestComputeStatusDoneSupersedesInput(t *testing.T) {
 	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
 	t.Cleanup(func() { shutdownManager(t, m) })
@@ -86,11 +86,11 @@ func TestComputeStatusDoneSupersedesInput(t *testing.T) {
 	h := handlerOf(t, m, id)
 	tr := &statusTracker{}
 
-	h.handlePTYData([]byte("\x1b]9;Permission required\x07"))
+	h.handlePTYData([]byte("\x1b]9;Approval needed\x07"))
 	if st := m.computeStatusFromHandler(h, tr); st != StatusInput {
 		t.Fatalf("precondition: status = %q, want %q", st, StatusInput)
 	}
-	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+	h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 	if st := m.computeStatusFromHandler(h, tr); st != StatusDone {
 		t.Fatalf("done did not supersede input latch; status = %q, want %q", st, StatusDone)
 	}
@@ -119,7 +119,7 @@ func TestComputeStatusWorkingFromProgress(t *testing.T) {
 	}
 }
 
-// TestComputeStatusDoneLatchPersistsThenClears verifies "Response complete"
+// TestComputeStatusDoneLatchPersistsThenClears verifies "Task finished"
 // latches done through the quiet gap, and the next working progress clears it.
 func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
 	m := NewSessionManager(catFactory, WithStatusClassifier(inputClassifier))
@@ -131,7 +131,7 @@ func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
 	h := handlerOf(t, m, id)
 	tr := &statusTracker{}
 
-	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
+	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Task finished\x07"))
 	if st := m.computeStatusFromHandler(h, tr); st != StatusDone {
 		t.Fatalf("after done notification: status = %q, want %q", st, StatusDone)
 	}
@@ -148,8 +148,8 @@ func TestComputeStatusDoneLatchPersistsThenClears(t *testing.T) {
 
 // TestComputeStatusFreshLatchOutranksActiveProgress pins the turn-boundary
 // race fix: when one sweep's snapshot pairs a NEW classified notification with
-// a progress value that still reads active (kiro-cli flushes "Response
-// complete" a chunk ahead of the OSC 9;4;0 progress-off, and a sweep tick
+// a progress value that still reads active (an emitter flushes its done
+// notification a chunk ahead of the OSC 9;4;0 progress-off, and a sweep tick
 // lands in the gap), the fresh latch wins — done/input, not working — and
 // persists once progress clears. The old code consumed the notification and
 // destroyed the just-set latch in the same call, landing every later sweep on
@@ -162,8 +162,8 @@ func TestComputeStatusFreshLatchOutranksActiveProgress(t *testing.T) {
 		msg  string
 		want string
 	}{
-		{name: "turn-end done", msg: "Response complete", want: StatusDone},
-		{name: "needs-input", msg: "Permission required", want: StatusInput},
+		{name: "turn-end done", msg: "Task finished", want: StatusDone},
+		{name: "needs-input", msg: "Approval needed", want: StatusInput},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -197,7 +197,7 @@ func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
 	t.Cleanup(func() { shutdownManager(t, m) })
 	tr := &statusTracker{}
 
-	in := &statusRaw{progress: 3, notifMsg: "Response complete", notifSeq: 1}
+	in := &statusRaw{progress: 3, notifMsg: "Task finished", notifSeq: 1}
 	if st, _ := m.computeStatus(in, tr); st != StatusDone {
 		t.Fatalf("poisoned snapshot: status = %q, want %q", st, StatusDone)
 	}
@@ -211,8 +211,8 @@ func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
 	}
 	// That working phase later ends with no notification replay: idle is
 	// correct (in production the queued turn's own end brings its own
-	// "Response complete" with a new sequence).
-	in = &statusRaw{progress: 0, notifMsg: "Response complete", notifSeq: 1}
+	// "Task finished" with a new sequence).
+	in = &statusRaw{progress: 0, notifMsg: "Task finished", notifSeq: 1}
 	if st, _ := m.computeStatus(in, tr); st != StatusIdle {
 		t.Fatalf("after the working phase ends: status = %q, want %q", st, StatusIdle)
 	}
@@ -220,7 +220,7 @@ func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
 
 // TestComputeStatusNoWorkingFromOutput verifies a program that never reports
 // OSC 9;4 progress stays idle even while producing output: working now comes
-// ONLY from OSC 9;4, so a plain shell under web-terminal-server never flaps to
+// ONLY from OSC 9;4, so a plain shell with no classifier never flaps to
 // working merely because it (or the user typing at the prompt) produced bytes.
 // The reveal gate then keeps such a session's tab dot hidden.
 func TestComputeStatusNoWorkingFromOutput(t *testing.T) {
@@ -309,7 +309,7 @@ func TestListCarriesCommittedStatus(t *testing.T) {
 
 	// A turn completes: progress clears, the done notification latches, and one
 	// sweep records it. The list must then agree with what the stream pushes.
-	handlerOf(t, m, id).handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
+	handlerOf(t, m, id).handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Task finished\x07"))
 	_ = m.diffStatuses()
 	if got := statusInList(); got != StatusDone {
 		t.Fatalf("after swept done notification, List status = %q, want %q", got, StatusDone)
@@ -339,7 +339,7 @@ func TestPointInTimeReadsAgreeAcrossACrash(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 	h := handlerOf(t, m, id)
-	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+	h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 	n := eventFor(t, m.diffStatuses(), id).StatusSeq
 	if _, err := h.ptmx.WriteString("\n"); err != nil {
 		t.Fatalf("write to pty: %v", err)
@@ -453,12 +453,12 @@ func TestEventsHandlerSubscriberCap(t *testing.T) {
 	}
 }
 
-// unwrapOnlyWriter mimics an access-log middleware wrapper (web-terminal-server's
-// statusWriter, web-terminal-kiro's statusRecorder): it exposes the underlying
-// ResponseWriter via Unwrap but does NOT itself implement http.Flusher
-// (embedding the ResponseWriter interface does not promote Flush). It pins that
-// EventsHandler finds the flusher through the Unwrap chain rather than a direct
-// type assertion, which is what makes SSE work behind middleware.
+// unwrapOnlyWriter mimics an access-log middleware wrapper that records the
+// response status: it exposes the underlying ResponseWriter via Unwrap but does
+// NOT itself implement http.Flusher (embedding the ResponseWriter interface
+// does not promote Flush). It pins that EventsHandler finds the flusher through
+// the Unwrap chain rather than a direct type assertion, which is what makes SSE
+// work behind middleware.
 type unwrapOnlyWriter struct {
 	http.ResponseWriter
 }

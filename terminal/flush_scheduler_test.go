@@ -271,7 +271,7 @@ func TestFlushScheduler_heldRedrawFlushesAtDeadline(t *testing.T) {
 	readFrameWithin(t, results, 3*time.Second)
 }
 
-// TestFlushScheduler_resizeReprintHeldUntilSettled drives the full kiro-cli
+// TestFlushScheduler_resizeReprintHeldUntilSettled drives an inline TUI's full
 // post-resize choreography through the real scheduler and a live WebSocket:
 // a size change (SIGWINCH), then ED3 + the transcript reprinted in several
 // small DEC 2026 BSU/ESU brackets. Pre-fix, the first bracket's ESU cleared
@@ -308,7 +308,7 @@ func TestFlushScheduler_resizeReprintHeldUntilSettled(t *testing.T) {
 	// The phone keyboard opens: a size CHANGE arms the settle hold.
 	h.handleResize(&clientState{}, 100, 24)
 
-	// kiro-cli's redraw: ED3, then the transcript in small 2026 brackets with
+	// The TUI's redraw: ED3, then the transcript in small 2026 brackets with
 	// inter-bracket gaps well under redrawSettleQuiet. Each gap is asserted
 	// frame-free: pre-fix the first ESU released the hold and the next
 	// 50ms-cadence pass leaked a mid-reprint frame into exactly these windows.

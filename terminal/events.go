@@ -554,22 +554,14 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) (status
 		return StatusExited, false
 	}
 	latchedNow := m.applyNotification(in, tr)
-	// A progress-reporting program (kiro-cli, Claude Code) drives its status from
-	// its OSC 9;4 progress: an active state (1 value, 3 indeterminate) means the
-	// agent is working, and the error and warning states are states in exactly
-	// the same sense — they persist until the program itself changes them, rather
-	// than being events that fire once.
-	// A progress state supersedes a latch from an EARLIER sweep (a new turn
-	// starting clears the stale done/input dot) — but never one applied in THIS
-	// sweep: at a turn boundary the snapshot can pair the fresh "Response
-	// complete" / "Permission required" notification with a progress value that
-	// still reads active (the notification flushed a chunk ahead of the
-	// progress-off), and clearing the just-set latch here would consume the
-	// notification for good (notifSeen has advanced) — the next sweep then lands
-	// on idle and the tab's done/input dot is silently lost. Honoring the fresh
-	// latch is self-correcting: if the agent truly is still working, the next
-	// sweep's progress state supersedes the now-stale latch — provided it is one
-	// that CONTRADICTS the latch, which is progressSupersedesLatch's job.
+	// An active OSC 9;4 state (1 value, 3 indeterminate) means working; error
+	// and warning persist until the program changes them. A progress state
+	// supersedes a latch from an EARLIER sweep (a new turn clears the stale
+	// done/input dot) but never one applied in THIS sweep: a turn-boundary
+	// snapshot can pair a fresh done or needs-input notification with a progress
+	// value still active (flushed a chunk ahead of progress-off), and clearing the
+	// fresh latch would lose that dot for good, since notifSeen has advanced. The
+	// next sweep's progress supersedes it if progressSupersedesLatch says so.
 	if st, ok := progressStatus(in.progress); ok && !latchedNow &&
 		(tr.latched == "" || progressSupersedesLatch(in.progress)) {
 		tr.latched = ""
@@ -612,15 +604,11 @@ func progressStatus(progress int) (string, bool) {
 // can be resumed by the user. No error condition exists". That is not a rival
 // claim to a needs-input latch, it is the SAME claim with less detail, and it is
 // equally compatible with a finished turn, where nothing is progressing. Treating
-// it as a rival (it was, by symmetry with state 2, until this was measured) hands
-// the tab to the progress channel one sweep — 250ms — after the notification.
-// kiro-cli makes that failure routine rather than theoretical: it sets state 4
-// BECAUSE it is blocked on an approval, and parks state 4 at its context-usage
-// percentage once idle, so the needs-input ring survived a quarter second of a
-// minutes-long wait and the green done dot the same fraction of an idle period —
-// the latter only above its 60% context threshold, which is what made the loss
-// look intermittent. A latch this state cannot clear is not stuck: the moment the
-// program resumes (1 or 3), fails (2), or dies, that supersedes it.
+// it as a rival hands the tab to the progress channel one sweep (250ms) after the
+// notification, and an emitter that sets state 4 while blocked on an approval, or
+// parks it at a usage percentage once idle, would lose the needs-input ring or
+// the done dot that way. A latch this state cannot clear is not stuck: the moment
+// the program resumes (1 or 3), fails (2), or dies, that supersedes it.
 func progressSupersedesLatch(progress int) bool {
 	return progress != 4
 }

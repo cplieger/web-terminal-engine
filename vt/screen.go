@@ -94,7 +94,7 @@ type Screen struct {
 	Width            int
 	// Progress holds the last ConEmu OSC 9;4 progress state: -1 when none has
 	// been seen, else the state (0 off, 1 value, 2 error, 3 indeterminate,
-	// 4 paused). kiro-cli emits it while the agent is working, so the status
+	// 4 paused). A program emits it while it is working, so the status
 	// layer maps an active state (1 or 3) to working. Set only by an OSC 9;4
 	// sequence; a program that never emits one leaves it at -1 (the signal that
 	// the status layer should fall back to output activity).
@@ -459,7 +459,7 @@ func (s *Screen) Resize(rows, cols int) {
 // The grow behaviour is mode-aware, because a full-screen app and a
 // line-oriented shell want opposite things:
 //
-//   - Alt-screen (a TUI like kiro-cli, vim, htop): prepend empty rows at the
+//   - Alt-screen (a TUI like vim or htop): prepend empty rows at the
 //     TOP and move the cursor down with the content, so the existing screen
 //     stays pinned to the bottom until the app's SIGWINCH-driven repaint lands.
 //     Appending BELOW the cursor instead left empty rows visible until the

@@ -88,7 +88,7 @@ func TestSetSessionAlias(t *testing.T) {
 		alias string
 		want  bool
 	}{
-		{name: "kiro_thread_id", id: a, alias: "sess_6f1c2b9e-0d4a-4e7b-9a51-3c2d1e0f9a8b", want: true},
+		{name: "prefixed_uuid", id: a, alias: "sess_6f1c2b9e-0d4a-4e7b-9a51-3c2d1e0f9a8b", want: true},
 		{name: "max_length", id: a, alias: strings.Repeat("x", 64), want: true},
 		{name: "over_max_length", id: a, alias: strings.Repeat("x", 65)},
 		{name: "empty", id: a, alias: ""},

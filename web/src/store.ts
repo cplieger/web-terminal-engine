@@ -437,14 +437,14 @@ export class LineStore {
    * beside `everEvictedThrough` because the two answer different questions and
    * only one of them is a trim.
    *
-   * `everEvictedThrough` means "we dropped this to stay inside a memory budget",
-   * and it drives the "earlier output trimmed" affordance. ED3 is not that: the
-   * app discarded its own scrollback, so a marker would be permanent noise on
-   * kiro-cli (which clears on every resize redraw), which is why ED3 deliberately
-   * leaves it alone. That left NOTHING refusing an erased index, and a page reply
-   * whose data timeout had already released single-flight comes back
-   * UNCORRELATED — through the ordinary scroll path, classified TAIL, so outside
-   * the cache budget and the TTL both. It never leaves.
+   * `everEvictedThrough` means "we dropped this to stay inside a memory
+   * budget" and drives the "earlier output trimmed" affordance. ED3 is not
+   * that: the app discarded its own scrollback, so a marker would be permanent
+   * noise under an inline TUI that clears on every resize redraw, and ED3
+   * leaves it alone. That left NOTHING refusing an erased index, and a page
+   * reply whose data timeout had already released single-flight comes back
+   * UNCORRELATED — through the ordinary scroll path, classified TAIL, so
+   * outside the cache budget and the TTL both. It never leaves.
    *
    * Refusing an erased index is unconditionally safe within an epoch: the server's
    * ring `Clear()` preserves `committed`, so an erased absolute index is never
@@ -546,7 +546,7 @@ export class LineStore {
    * bottom row tells the server "no need to re-send those" about rows whose
    * committed content this client has never seen. The server replays strictly
    * above `haveThrough`, so the provisional copies are never corrected and
-   * surface as scrollback under the new window: measured as a frozen kiro-cli
+   * surface as scrollback under the new window: measured as a TUI's frozen
    * composer box parked above the live region after almost every tab switch.
    *
    * NOT a residency fact and NOT "the highest confirmed row": the index this
@@ -1669,8 +1669,8 @@ export class LineStore {
     return s !== null && abs >= s.lo && abs < s.hi;
   }
 
-  // applyScrollbackCleared handles ED3 (which an inline TUI such as kiro-cli
-  // emits on every resize): drop lines below `base`, leave everEvictedThrough
+  // applyScrollbackCleared handles ED3 (which an inline TUI can emit on every
+  // resize): drop lines below `base`, leave everEvictedThrough
   // alone (a deliberate erase is not a trim), CANCEL the in-flight request
   // (its reply would re-admit the erased rows through the guard-2 exemption),
   // and snap the paging floor to `base` (or the trigger re-fetches them). The

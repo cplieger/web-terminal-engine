@@ -221,7 +221,7 @@ describe("OSC 8 hyperlink rendering", () => {
   });
 
   it("does not anchor whitespace/border cells an OSC 8 link stayed open across", async () => {
-    // Reproduces a link wrapping inside a table cell: kiro-cli keeps the OSC 8
+    // Reproduces a link wrapping inside a table cell: a TUI keeps the OSC 8
     // hyperlink open across the link text, then the trailing cell padding, the
     // right border `│` and the empty adjacent column — every cell shares the same
     // URI. Only the run with real text must become an <a>; the decorative runs

@@ -228,11 +228,11 @@ func TestNewHandler_EmptyCommand(t *testing.T) {
 // TestNewHandler_ENVInjection verifies the advertised terminal identity — TERM,
 // COLORTERM, and TERM_PROGRAM(+_VERSION) — is injected into the spawned process
 // environment at spawn time (not stored in cfg.env). TERM_PROGRAM=iTerm.app
-// (>= 3.6.6) is the identity that unlocks OSC 9;4 progress for kiro-cli + Claude
-// Code and DEC 2026 synchronized output; see childEnv.
+// (>= 3.6.6) is the identity programs gate OSC 9;4 progress and DEC 2026
+// synchronized output on; see childEnv.
 //
 // The version is pinned to the exact string, not merely to the key's presence.
-// 3.6.6 is a floor Claude Code gates OSC 9;4 progress on, so a regression to any
+// 3.6.6 is a floor programs gate OSC 9;4 progress on, so a regression to any
 // lower version silently loses progress reporting while a presence-only check
 // stays green.
 //
@@ -280,7 +280,7 @@ func TestNewHandler_ENVInjection(t *testing.T) {
 			}
 		}
 		t.Errorf("TERM_PROGRAM_VERSION = %q, want exactly TERM_PROGRAM_VERSION=3.6.6: "+
-			"Claude Code gates OSC 9;4 progress on iTerm.app >= 3.6.6, so anything below "+
+			"programs gate OSC 9;4 progress on iTerm.app >= 3.6.6, so anything below "+
 			"that floor loses progress reporting silently", got)
 	}
 

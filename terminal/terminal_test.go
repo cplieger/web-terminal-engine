@@ -642,9 +642,9 @@ func TestApplySize_ptyAndScreenAgreeOnTheAppliedSize(t *testing.T) {
 }
 
 // TestRedrawSettle_ESUDoesNotRelease pins the regression that motivated the
-// settle hold: kiro-cli brackets its post-resize transcript reprint in many
-// small DEC 2026 BSU/ESU chunks, and the first chunk's ESU used to clear the
-// screen-level resize hold (vt.Screen.ReleaseFlush zeroes FlushHoldUntil), so
+// settle hold: an inline TUI can bracket its post-resize transcript reprint in
+// many small DEC 2026 BSU/ESU chunks, and the first chunk's ESU used to clear
+// the screen-level resize hold (vt.Screen.ReleaseFlush zeroes FlushHoldUntil), so
 // every flush pass between brackets streamed a mid-reprint window — visible
 // history churn on every phone keyboard/rotation resize. The handler-level
 // hold must survive the ESU.
@@ -747,7 +747,7 @@ func TestRedrawSettle_capBoundsContinuousOutput(t *testing.T) {
 // end to end on the real handlePTYData -> buildFrame path: while the settle
 // hold is active buildFrame emits nothing and returns the retry deadline; once
 // the redraw goes quiet the next pass emits one frame carrying the settled
-// window and, when the redraw began with ED3 (kiro-cli's reprint signature),
+// window and, when the redraw began with ED3 (an inline TUI's reprint signature),
 // the scrollbackCleared signal — the client swaps old content for new in one
 // atomic repaint instead of watching the reprint stream through.
 func TestRedrawSettle_buildFrameHeldThenSettles(t *testing.T) {

@@ -281,9 +281,9 @@ func TestMinimumContrastOffByDefault(t *testing.T) {
 	}
 }
 
-// TestMinimumContrastLiftsSGR34 is the reported bug, end to end through the
-// public write+render path: kiro-cli colors a link with SGR 34, and the run that
-// reaches the client must be legible on the theme background.
+// TestMinimumContrastLiftsSGR34 runs the public write+render path end to end: a
+// program colors a link with SGR 34, and the run that reaches the client must be
+// legible on the theme background.
 func TestMinimumContrastLiftsSGR34(t *testing.T) {
 	s := New(1, 8, WithMinimumContrast(wcagAA))
 	s.Write([]byte("\x1b[34mlink"))
@@ -426,12 +426,11 @@ func TestMinimumContrastLeavesOSC4QueryAlone(t *testing.T) {
 	}
 }
 
-// TestMinimumContrastLiftsAKiroCLILink replays the exact byte sequence kiro-cli
-// writes for a markdown link, captured from a live PTY session: an OSC 8
-// hyperlink wrapping SGR 34 link text, then the closing OSC 8. This is the
-// reported bug in its real shape, so it pins that the run reaching the client
-// keeps the href AND carries a legible color.
-func TestMinimumContrastLiftsAKiroCLILink(t *testing.T) {
+// TestMinimumContrastLiftsAnOSC8Link replays the byte sequence a TUI writes for
+// a markdown link, captured from a live PTY session: an OSC 8 hyperlink wrapping
+// SGR 34 link text, then the closing OSC 8. It pins that the run reaching the
+// client keeps the href AND carries a legible color.
+func TestMinimumContrastLiftsAnOSC8Link(t *testing.T) {
 	const captured = "see \x1b]8;;https://example.com/x\x07\x1b[34mthe example page\x1b[39m\x1b]8;;\x07 here"
 	s := New(1, 40, WithMinimumContrast(wcagAA))
 	s.Write([]byte(captured))

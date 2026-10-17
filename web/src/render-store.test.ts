@@ -277,11 +277,11 @@ describe("render: viewport-first drain (backlog never starves the window)", () =
 
   it("builds every live-window row in the first frame and fills the backlog newest-first", () => {
     // The starving order: a large history backlog is queued BEFORE the window
-    // rows (kiro-cli's post-resize transcript reprint, a resume replay racing
-    // the screen frame, sustained `cat`). Insertion-order draining built the
-    // oldest 300 history rows first and left the visible window — bar the
-    // force-built cursor row — stale for seconds on a slow device, the
-    // "history churns through the screen on every phone resize" symptom.
+    // rows (an inline TUI's post-resize transcript reprint, a resume replay
+    // racing the screen frame, sustained `cat`). Insertion-order draining built
+    // the oldest 300 history rows first and left the visible window — bar the
+    // force-built cursor row — stale for seconds on a slow device, the "history
+    // churns through the screen on every phone resize" symptom.
     const N = 500; // history backlog, abs 0..499
     render.handleScroll(
       scrollMsg(

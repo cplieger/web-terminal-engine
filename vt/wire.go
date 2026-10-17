@@ -254,13 +254,13 @@ func leadingBlankCells(row []Cell) int {
 // prev as ONE logical line the APPLICATION wrapped itself, or -1 when cur
 // starts its own line.
 //
-// An Ink-style TUI (kiro-cli, the client this engine is built for, is one) lays
-// its own text out: it breaks at the terminal width, re-emits its indent on
-// every continuation, and writes each resulting row as a separate line. The
-// terminal therefore never autowraps and the soft-wrap chain never fires, so a
-// URL such output splits reaches the scanner as unrelated per-row fragments —
-// only the first row matches, with an href truncated at the break, and the rows
-// after it get no link at all. Recognise that shape, conservatively:
+// An Ink-style TUI lays its own text out: it breaks at the terminal width,
+// re-emits its indent on every continuation, and writes each resulting row as a
+// separate line. The terminal therefore never autowraps and the soft-wrap chain
+// never fires, so a URL such output splits reaches the scanner as unrelated
+// per-row fragments — only the first row matches, with an href truncated at the
+// break, and the rows after it get no link at all. Recognise that shape,
+// conservatively:
 //
 //   - prev must be FULL (a glyph in its last column), so the break happened at
 //     the right margin rather than because the line ended there;

@@ -204,9 +204,9 @@ func TestOSC9NotificationLeavesTitleUnchanged(t *testing.T) {
 
 func TestOSC9CapturesNotificationST(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]9;Response complete\x1b\\"))
-	if s.Notification != "Response complete" {
-		t.Fatalf("Notification = %q, want %q", s.Notification, "Response complete")
+	s.Write([]byte("\x1b]9;Task finished\x1b\\"))
+	if s.Notification != "Task finished" {
+		t.Fatalf("Notification = %q, want %q", s.Notification, "Task finished")
 	}
 	if s.NotificationSeq != 1 {
 		t.Fatalf("NotificationSeq = %d, want 1", s.NotificationSeq)
@@ -215,26 +215,26 @@ func TestOSC9CapturesNotificationST(t *testing.T) {
 
 func TestOSC9CapturesNotificationBEL(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]9;Permission required\x07"))
-	if s.Notification != "Permission required" {
-		t.Fatalf("Notification = %q, want %q", s.Notification, "Permission required")
+	s.Write([]byte("\x1b]9;Approval needed\x07"))
+	if s.Notification != "Approval needed" {
+		t.Fatalf("Notification = %q, want %q", s.Notification, "Approval needed")
 	}
 }
 
 // A repeated identical message must still advance the sequence so the status
-// layer detects the new edge (two "Permission required" in a row are two events).
+// layer detects the new edge (two "Approval needed" in a row are two events).
 func TestOSC9SeqAdvancesOnRepeat(t *testing.T) {
 	s := New(24, 80)
-	s.Write([]byte("\x1b]9;Permission required\x07"))
-	s.Write([]byte("\x1b]9;Permission required\x07"))
+	s.Write([]byte("\x1b]9;Approval needed\x07"))
+	s.Write([]byte("\x1b]9;Approval needed\x07"))
 	if s.NotificationSeq != 2 {
 		t.Fatalf("NotificationSeq = %d, want 2", s.NotificationSeq)
 	}
 }
 
 // TestOSC9ConEmuProgress verifies the ConEmu progress subcommand (OSC 9 ; 4 ; st)
-// is captured into Progress, not into Notification. kiro-cli emits it while the
-// agent works, which the status layer maps to a working indicator.
+// is captured into Progress, not into Notification. A program emits it while it
+// works, which the status layer maps to a working indicator.
 func TestOSC9ConEmuProgress(t *testing.T) {
 	s := New(24, 80)
 	if s.Progress != -1 {

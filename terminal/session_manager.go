@@ -220,11 +220,11 @@ func WithManagerOriginPolicy(p *OriginPolicy) ManagerOption {
 }
 
 // WithStatusClassifier maps an OSC 9 notification message to a session status
-// (return ok=false to ignore a message). This keeps the engine generic: web-terminal-kiro
-// maps kiro-cli's "Permission required" to input and "Response complete" to
-// done, while a plain shell server sets no classifier and gets working/idle from
-// output activity only. A classified input status latches (persists while the
-// process waits) until the turn resumes or a done message clears it.
+// (return ok=false to ignore a message). The consumer decides which of its
+// program's messages mean needs-input and which mean done; a server that sets
+// no classifier gets working/idle from progress and output activity only. A
+// classified input status latches (persists while the process waits) until the
+// turn resumes or a done message clears it.
 func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
 	return func(c *managerConfig) { c.classifier = fn }
 }
@@ -929,8 +929,8 @@ func (m *SessionManager) SetSessionAlias(id SessionID, alias string) bool {
 	return true
 }
 
-// maxSessionAliasLen bounds an alias; a kiro-cli session id ("sess_" plus a
-// UUID, 41 characters) is the longest host value in use.
+// maxSessionAliasLen bounds an alias with room for a prefixed UUID ("sess_"
+// plus a UUID is 41 characters).
 const maxSessionAliasLen = 64
 
 func validSessionAlias(s string) bool {

@@ -47,7 +47,7 @@ class FakeEventSource implements EventSourceLike {
 const sample: SessionStatus = {
   id: "abc123",
   status: "idle",
-  title: "kiro-cli",
+  title: "agent",
   createdAt: "2026-07-01T12:00:00Z",
 };
 

@@ -431,18 +431,18 @@ func hardWrapLines(t *testing.T, s *Screen, lines ...string) {
 	}
 }
 
-// TestAutolinkAppHardWrapJoined pins the reported phone bug, measured live in
-// web-terminal-kiro at 41 columns: kiro-cli wraps a long URL itself, re-emitting
+// TestAutolinkAppHardWrapJoined pins a phone bug measured at 41 columns: an
+// Ink-style TUI wraps a long URL itself, re-emitting
 // an 8-column indent on each continuation, so the terminal sees three separate
 // full-width lines. Every row must carry an anchor with the WHOLE href — before
 // the indent-aware join, row 0 got an href truncated at the break
-// ("https://github.com/cplieger/.kiro", which silently opened the repo instead
+// ("https://github.com/example/widget", which silently opened the repo instead
 // of the job) and rows 1 and 2 got no anchor at all, hence no underline.
 func TestAutolinkAppHardWrapJoined(t *testing.T) {
-	const url = "https://github.com/cplieger/.kiro/actions/runs/31094602847/job/92593457519"
+	const url = "https://github.com/example/widget/actions/runs/31094602847/job/92593457519"
 	s := New(6, 41)
 	hardWrapLines(t, s,
-		"        https://github.com/cplieger/.kiro", // 8 + 33 = 41, exactly full
+		"        https://github.com/example/widget", // 8 + 33 = 41, exactly full
 		"        /actions/runs/31094602847/job/925", // 8 + 33 = 41, exactly full
 		"        93457519",
 	)

@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-const permissionRequired = "\x1b]9;Permission required\x07"
+const approvalNeeded = "\x1b]9;Approval needed\x07"
 
 func newLatchManager(t *testing.T) (*SessionManager, SessionID, *Handler) {
 	t.Helper()
@@ -21,9 +21,9 @@ func newLatchManager(t *testing.T) (*SessionManager, SessionID, *Handler) {
 
 func armInputLatch(t *testing.T, m *SessionManager, id SessionID, h *Handler) uint64 {
 	t.Helper()
-	h.handlePTYData([]byte(permissionRequired))
+	h.handlePTYData([]byte(approvalNeeded))
 	if ev := eventFor(t, m.diffStatuses(), id); ev.Status != StatusInput {
-		t.Fatalf("after Permission required, event Status = %q, want %q", ev.Status, StatusInput)
+		t.Fatalf("after Approval needed, event Status = %q, want %q", ev.Status, StatusInput)
 	}
 	status, seq, ok := m.StatusLatch(id)
 	if !ok || status != StatusInput || seq == 0 {
@@ -79,8 +79,8 @@ func TestWithdrawStatusLatchRefusals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	askH.handlePTYData([]byte(permissionRequired))
-	handlerOf(t, m, finished).handlePTYData([]byte("\x1b]9;Response complete\x07"))
+	askH.handlePTYData([]byte(approvalNeeded))
+	handlerOf(t, m, finished).handlePTYData([]byte("\x1b]9;Task finished\x07"))
 	m.diffStatuses()
 	askStatus, askSeq, askOK := m.StatusLatch(asking)
 	if !askOK || askStatus != StatusInput {
@@ -139,7 +139,7 @@ func TestWithdrawStatusLatchRefusesAWantOutsideThePairEvenWhenLatched(t *testing
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	handlerOf(t, m, id).handlePTYData([]byte(permissionRequired))
+	handlerOf(t, m, id).handlePTYData([]byte(approvalNeeded))
 	m.diffStatuses()
 	st, seq, ok := m.StatusLatch(id)
 	if !ok || st != StatusWorking || seq != 1 {
@@ -160,7 +160,7 @@ func TestWithdrawStatusLatchRefusesASeqARelatchSuperseded(t *testing.T) {
 	m, id, h := newLatchManager(t)
 	stale := armInputLatch(t, m, id, h)
 
-	h.handlePTYData([]byte(permissionRequired))
+	h.handlePTYData([]byte(approvalNeeded))
 	if ev := eventFor(t, m.diffStatuses(), id); ev.NotificationSeq != stale+1 || ev.Status != StatusInput {
 		t.Fatalf("second ask: event NotificationSeq = %d Status = %q, want %d / %q", ev.NotificationSeq, ev.Status, stale+1, StatusInput)
 	}
@@ -196,7 +196,7 @@ func TestStatusLatchReportsTrackedSessionsOnly(t *testing.T) {
 		t.Errorf("StatusLatch on a tracked, unlatched session = (%q, %d, %t), want (\"\", 0, true)", st, seq, ok)
 	}
 
-	h.handlePTYData([]byte(permissionRequired))
+	h.handlePTYData([]byte(approvalNeeded))
 	m.diffStatuses()
 	if st, seq, ok := m.StatusLatch(id); st != StatusInput || seq != 1 || !ok {
 		t.Errorf("StatusLatch after the first ask = (%q, %d, %t), want (%q, 1, true)", st, seq, ok, StatusInput)
@@ -224,7 +224,7 @@ func TestWithdrawStatusLatchBetweenSweepPhases(t *testing.T) {
 	}{
 		{name: "nothing in flight", wantStatus: StatusIdle},
 		{
-			name: "a second ask captured by the same sweep", inFlight: permissionRequired,
+			name: "a second ask captured by the same sweep", inFlight: approvalNeeded,
 			wantStatus: StatusInput, wantLatch: StatusInput, wantSeq: 2,
 		},
 	}

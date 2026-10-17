@@ -86,7 +86,7 @@ function mountFake(cb: Parameters<typeof connectStatusStream>[1]) {
 const sample: SessionStatus = {
   id: "abc123",
   status: "input",
-  title: "kiro-cli",
+  title: "agent",
   createdAt: "2026-07-01T12:00:00Z",
   removed: false,
 };
@@ -247,7 +247,7 @@ describe("connectStatusStream", () => {
       const ev: SessionStatus = {
         ...sample,
         status: "idle",
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 7,
         progressValue: -1,
       };
@@ -255,7 +255,7 @@ describe("connectStatusStream", () => {
       fake.emit("message", JSON.stringify(ev));
 
       const got = onStatus.mock.calls[0]![0] as SessionStatus;
-      expect(got.notification).toBe("Response complete");
+      expect(got.notification).toBe("Task finished");
       expect(got.notificationSeq).toBe(7);
       // An event, not a state: the status is whatever the session's state is.
       expect(got.status).toBe("idle");
@@ -271,7 +271,7 @@ describe("connectStatusStream", () => {
       const raw = JSON.stringify({
         id: "abc123",
         status: "throttled",
-        title: "kiro-cli",
+        title: "agent",
         createdAt: "2026-07-01T12:00:00Z",
         progressValue: 40,
         futureField: { nested: true },

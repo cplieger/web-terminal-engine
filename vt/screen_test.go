@@ -307,9 +307,9 @@ func TestAltScreenEnterExitPreservesMain(t *testing.T) {
 // character attributes alongside the position (see restoreCursor), so the pen
 // travels with the cursor.
 //
-// This is the property that makes the engine immune to the class of bug kiro-cli
-// 2.19.1 fixed by writing SGR 0 after ?1049l: nothing here needs that trailing
-// reset. Underline is the attribute that bug stranded, so it is the one used.
+// This is the property that makes the engine immune to the class of bug a TUI
+// works around by writing SGR 0 after ?1049l: nothing here needs that trailing
+// reset. Underline is the attribute that bug strands, so it is the one used.
 //
 // A DECSET mode flag is deliberately NOT in the restore set, and the second
 // assertion pins that asymmetry as intentional rather than a second leak: only

@@ -4,9 +4,9 @@ import "math"
 
 // Minimum-contrast lift.
 //
-// A terminal program picks a palette SLOT, never an RGB value: kiro-cli writes
-// SGR 34 for a link and cannot know what index 4 resolves to here, nor what the
-// client paints behind it. The two emulators closest to this engine's shape
+// A terminal program picks a palette SLOT, never an RGB value: a program that
+// writes SGR 34 for a link cannot know what index 4 resolves to here, nor what
+// the client paints behind it. The two emulators closest to this engine's shape
 // answer that the same way. xterm.js exposes `minimumContrastRatio` (VS Code
 // sets it to 4.5, WCAG AA, by default) and iTerm2 ships a "Minimum Contrast"
 // control whose documentation states the same cause: because ANSI colors are

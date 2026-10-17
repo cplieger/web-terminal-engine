@@ -254,7 +254,7 @@ const (
 	// (~2,500 lines) never reaches it. The cost is paid only as history is
 	// actually produced (the ring grows on demand, see scrollbackRing), at
 	// roughly 345 bytes per retained line: ~34 MB per session at the ceiling,
-	// against the 200-430 MB a kiro-cli process tree already costs.
+	// against the 200-430 MB an agent CLI's process tree already costs.
 	//
 	// Operators override it per deployment with ScrollbackEnvVar; there is no
 	// "unlimited" sentinel, because a sufficiently large number IS unlimited
@@ -439,9 +439,9 @@ func WithOnProcessExit(fn func(error)) Option {
 // state for DEC 1004 focus reporting when keep is true: whenever the process
 // enables focus reporting (CSI ?1004h), the server writes a focus-out (ESC [ O)
 // to its PTY, and it never writes a focus-in. A process that gates behavior on
-// focus (for example kiro-cli, which only emits its OSC 9 turn/permission
-// notifications while it believes it is unfocused) then keeps emitting, so the
-// session manager's status classifier can observe those notifications.
+// focus (for example one that only emits its OSC 9 notifications while it
+// believes it is unfocused) then keeps emitting, so the session manager's
+// status classifier can observe those notifications.
 //
 // keep=false reproduces the no-option default — real focus reporting, which is
 // what a generic terminal wants (vim, etc.) — so a consumer can thread its own
@@ -996,8 +996,8 @@ func (h *Handler) Notification() (msg string, seq uint64) {
 // Progress returns the session's last ConEmu OSC 9;4 progress state: -1 when
 // none has been seen (the process never reported progress), else the state
 // (0 off, 1 value, 2 error, 3 indeterminate, 4 paused). The status stream maps
-// an active state (1 or 3) to working, so a progress-reporting program (kiro-cli
-// while the agent works) drives the working indicator without relying on raw
+// an active state (1 or 3) to working, so a program that reports OSC 9;4
+// progress while it works drives the working indicator without relying on raw
 // output activity. Safe for concurrent use.
 func (h *Handler) Progress() int {
 	h.mu.Lock()
@@ -1296,13 +1296,12 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 }
 
 // childEnv assembles a session's environment. TERM/COLORTERM unlock 256-color
-// and truecolor; TERM_PROGRAM=iTerm.app (>= 3.6.6) is the one identity that
-// unlocks OSC 9;4 progress in both kiro-cli and Claude Code plus DEC 2026
-// synchronized output. h.cfg.env is appended last so WithEnv wins. The reap
-// marker goes FIRST so the reap scan reads a bounded environ prefix, and both
-// sources are stripped of it: os/exec keeps the last value of a repeated key,
-// and an inherited marker (a server started inside a session) would silently
-// disable reaping.
+// and truecolor; TERM_PROGRAM=iTerm.app (>= 3.6.6) is the identity programs
+// gate OSC 9;4 progress and DEC 2026 synchronized output on. h.cfg.env is
+// appended last so WithEnv wins. The reap marker goes FIRST so the reap scan
+// reads a bounded environ prefix, and both sources are stripped of it: os/exec
+// keeps the last value of a repeated key, and an inherited marker (a server
+// started inside a session) would silently disable reaping.
 func (h *Handler) childEnv(reap *sessionReap) []string {
 	inherited := stripReapMarker(os.Environ())
 	consumer := stripReapMarker(h.cfg.env)
@@ -1403,10 +1402,11 @@ func (h *Handler) handlePTYData(data []byte) {
 	}
 	h.screen.Write(data) //nolint:errcheck // screen.Write always returns nil
 	if h.screen.TakeScrollbackCleared() {
-		// ED3 (erase scrollback): the app discarded its saved lines (kiro-cli
-		// does this on every resize redraw). Clear the retained ring to match a
-		// real terminal — Clear preserves committed so absolute indices stay
-		// monotonic — and flag the next frame to tell clients to drop history.
+		// ED3 (erase scrollback): the app discarded its saved lines (an inline
+		// TUI does this on every resize redraw). Clear the retained ring to
+		// match a real terminal — Clear preserves committed so absolute indices
+		// stay monotonic — and flag the next frame to tell clients to drop
+		// history.
 		h.scrollback.Clear()
 		h.scrollbackClearedPending = true
 	}
@@ -1852,7 +1852,7 @@ func durableSubset(clipboardPayload []byte, scrollPayloads [][]byte) [][]byte {
 //     renders) and this goroutine's writeMu acquisition — a full render
 //     plus a full payload encode, i.e. milliseconds under a heavy drain,
 //     not microseconds. The ED3 loss self-heals at the app's next ED3
-//     (kiro-cli re-emits it on every resize redraw); until then that
+//     (an inline TUI re-emits it on every resize redraw); until then that
 //     client over-retains history the server dropped.
 //
 // A nil state is tolerated for frames constructed without a registry
@@ -2627,8 +2627,8 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) {
 // redrawSettleCap from now. Caller holds h.mu.
 //
 // This exists because the screen-level flush hold (vt.Screen.HoldFlush) cannot
-// hide a SIGWINCH redraw: it shares its deadline with DEC 2026, and the
-// child's first CSI ?2026l (ESU) clears it. kiro-cli brackets its post-resize
+// hide a SIGWINCH redraw: it shares its deadline with DEC 2026, and the child's
+// first CSI ?2026l (ESU) clears it. An inline TUI can bracket its post-resize
 // transcript reprint in many small BSU/ESU chunks, so the first chunk released
 // the resize hold milliseconds in, and every subsequent flush pass streamed a
 // mid-reprint window to the clients — on a phone, seconds of history visibly

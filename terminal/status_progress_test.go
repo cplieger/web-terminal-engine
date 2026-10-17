@@ -10,7 +10,7 @@ package terminal
 //     to a warning state, read with iTerm2's semantics because the engine
 //     advertises TERM_PROGRAM=iTerm.app.
 //   - Form B (OSC 9;<message>) is an EVENT. It happens once. A consumer with no
-//     status classifier installed — web-terminal-server's configuration — must
+//     status classifier installed — a plain shell server's configuration — must
 //     still RECEIVE it, because "no classifier" means "I map notifications
 //     myself", not "discard them".
 //
@@ -127,11 +127,11 @@ func TestComputeStatusFreshNotificationOutranksProgressState(t *testing.T) {
 		msg      string
 		want     string
 	}{
-		{name: "done over error state", progress: 2, msg: "Response complete", want: StatusDone},
-		{name: "done over warning state", progress: 4, msg: "Response complete", want: StatusDone},
-		{name: "needs-input over error state", progress: 2, msg: "Permission required", want: StatusInput},
-		{name: "needs-input over warning state", progress: 4, msg: "Permission required", want: StatusInput},
-		{name: "done over active progress", progress: 3, msg: "Response complete", want: StatusDone},
+		{name: "done over error state", progress: 2, msg: "Task finished", want: StatusDone},
+		{name: "done over warning state", progress: 4, msg: "Task finished", want: StatusDone},
+		{name: "needs-input over error state", progress: 2, msg: "Approval needed", want: StatusInput},
+		{name: "needs-input over warning state", progress: 4, msg: "Approval needed", want: StatusInput},
+		{name: "done over active progress", progress: 3, msg: "Task finished", want: StatusDone},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,13 +174,13 @@ func TestComputeStatusNewProgressStateSupersedesStaleLatch(t *testing.T) {
 			tr := &statusTracker{}
 
 			// Sweep 1: the turn ends, done latches.
-			in := &statusRaw{progress: 0, progressValue: -1, notifMsg: "Response complete", notifSeq: 1}
+			in := &statusRaw{progress: 0, progressValue: -1, notifMsg: "Task finished", notifSeq: 1}
 			if st, _ := m.computeStatus(in, tr); st != StatusDone {
 				t.Fatalf("sweep 1: status = %q, want %q", st, StatusDone)
 			}
 			// Sweep 2: a new progress state, no new notification. The latch is
 			// stale now and the program's state wins.
-			in = &statusRaw{progress: tc.progress, progressValue: -1, notifMsg: "Response complete", notifSeq: 1}
+			in = &statusRaw{progress: tc.progress, progressValue: -1, notifMsg: "Task finished", notifSeq: 1}
 			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("sweep 2 with progress %d: status = %q, want %q", tc.progress, st, tc.want)
 			}
@@ -192,11 +192,10 @@ func TestComputeStatusNewProgressStateSupersedesStaleLatch(t *testing.T) {
 }
 
 // TestComputeStatusPausedStateDoesNotStealLatch pins the state-4 exception
-// against the shapes that produced it. kiro-cli sets progress state 4 for two
-// things, and BOTH coexist with a latch it posted itself in the same breath:
-// `4;100` while an approval is pending (the same claim as "Permission required"),
-// and `4;<context-usage>` once idle above 60% (parked alongside "Response
-// complete"). State 4 persists until the program changes it, so a state-4 report
+// against two shapes an emitter can produce, BOTH coexisting with a latch it
+// posted itself in the same breath: `4;100` while an approval is pending (the
+// same claim as "Approval needed"), and `4;<usage>` once idle (parked alongside
+// "Task finished"). State 4 persists until the program changes it, so a state-4 report
 // allowed to clear a latch takes the tab one sweep — 250ms — after the
 // notification and keeps it for the whole wait or the whole idle period.
 //
@@ -212,15 +211,15 @@ func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 		resumed  string
 	}{
 		{
-			name: "approval pending keeps needs-input", msg: "Permission required",
+			name: "approval pending keeps needs-input", msg: "Approval needed",
 			value: 100, want: StatusInput, resumeTo: 3, resumed: StatusWorking,
 		},
 		{
-			name: "parked context usage keeps done", msg: "Response complete",
+			name: "parked context usage keeps done", msg: "Task finished",
 			value: 72, want: StatusDone, resumeTo: 3, resumed: StatusWorking,
 		},
 		{
-			name: "a failure still supersedes", msg: "Response complete",
+			name: "a failure still supersedes", msg: "Task finished",
 			value: 72, want: StatusDone, resumeTo: 2, resumed: StatusFailed,
 		},
 	}
@@ -237,7 +236,7 @@ func TestComputeStatusPausedStateDoesNotStealLatch(t *testing.T) {
 				}
 			}
 			// A climbing percentage is still the same state, so it must not
-			// re-open the question either (kiro-cli's context usage grows).
+			// re-open the question either (a usage percentage grows).
 			in := &statusRaw{progress: 4, progressValue: tc.value + 5, notifMsg: tc.msg, notifSeq: 1}
 			if st, _ := m.computeStatus(in, tr); st != tc.want {
 				t.Errorf("after the percentage moves: status = %q, want %q", st, tc.want)
@@ -268,7 +267,7 @@ func TestComputeStatusPausedStateStandsAloneWithoutLatch(t *testing.T) {
 }
 
 // TestDiffStatusesDeliversNotificationWithoutClassifier is the generic gap. With
-// NO classifier installed (web-terminal-server's configuration) an OSC 9
+// NO classifier installed (a plain shell server's configuration) an OSC 9
 // notification is currently observed and thrown away: applyNotification returns
 // early, nothing latches, and no event is emitted — the message never reaches a
 // subscriber. Per the brief a notification is an EVENT, so the engine's job is to
@@ -286,11 +285,11 @@ func TestDiffStatusesDeliversNotificationWithoutClassifier(t *testing.T) {
 	// Drain the first-sweep baseline (the new session's initial idle event).
 	m.diffStatuses()
 
-	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+	h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 	ev := eventFor(t, m.diffStatuses(), id)
-	if ev.Notification != "Response complete" {
+	if ev.Notification != "Task finished" {
 		t.Errorf("event Notification = %q, want %q (a notification must reach a subscriber "+
-			"even with no classifier)", ev.Notification, "Response complete")
+			"even with no classifier)", ev.Notification, "Task finished")
 	}
 	if ev.NotificationSeq != 1 {
 		t.Errorf("event NotificationSeq = %d, want 1", ev.NotificationSeq)
@@ -302,11 +301,11 @@ func TestDiffStatusesDeliversNotificationWithoutClassifier(t *testing.T) {
 
 	// A repeated message is a second event: the sequence advances, so a consumer
 	// can tell two identical notifications apart.
-	h.handlePTYData([]byte("\x1b]9;Response complete\x07"))
+	h.handlePTYData([]byte("\x1b]9;Task finished\x07"))
 	ev = eventFor(t, m.diffStatuses(), id)
-	if ev.Notification != "Response complete" || ev.NotificationSeq != 2 {
+	if ev.Notification != "Task finished" || ev.NotificationSeq != 2 {
 		t.Errorf("repeat: Notification = %q seq = %d, want %q seq = 2",
-			ev.Notification, ev.NotificationSeq, "Response complete")
+			ev.Notification, ev.NotificationSeq, "Task finished")
 	}
 }
 
@@ -429,7 +428,7 @@ func TestSessionActivityIsOrthogonalToStatus(t *testing.T) {
 
 	// A turn finishes. The done latch is the turn's own answer and outranks
 	// nothing here: both values stand side by side.
-	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Response complete\x07"))
+	h.handlePTYData([]byte("\x1b]9;4;0\x07\x1b]9;Task finished\x07"))
 	ev = eventFor(t, m.diffStatuses(), id)
 	if ev.Status != StatusDone {
 		t.Errorf("after a done notification, event Status = %q, want %q (the secondary state "+

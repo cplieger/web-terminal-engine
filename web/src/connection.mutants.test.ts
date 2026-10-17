@@ -1232,7 +1232,7 @@ describe("connection: an unmanaged connection's defaults", () => {
   it("a consumer's wsPath replaces the default endpoint", () => {
     unmanaged({ wsPath: "/api/shell/ws" }).connect();
 
-    // marotte serves its shell at /api/shell/ws. Ignoring the override sends
+    // A host can serve its shell at /api/shell/ws. Ignoring the override sends
     // every consumer to /ws, where nothing is listening.
     expect(new URL(latest().url).pathname).toBe("/api/shell/ws");
   });

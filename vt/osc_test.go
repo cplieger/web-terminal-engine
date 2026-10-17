@@ -152,6 +152,32 @@ func TestOSCAllDigitPayloadNoSeparator(t *testing.T) {
 	}
 }
 
+// TestOSCMalformedCommandIsIgnored verifies an OSC whose command field is not
+// a plain decimal number runs no handler, even one that wraps to a handled id.
+func TestOSCMalformedCommandIsIgnored(t *testing.T) {
+	cases := []struct{ name, cmd string }{
+		{"wraps_to_osc_8", "18446744073709551624;;"},   // 2^64 + 8
+		{"wraps_to_osc_2", "18446744073709551618;new"}, // 2^64 + 2
+		{"empty", ";new"},
+		{"no_digits", "new"},
+		{"trailing_letter", "2x;new"},
+		{"signed", "+2;new"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(2, 10)
+			s.Write([]byte("\x1b]2;keep\x07\x1b]8;;https://keep.example\x07A"))
+			s.Write([]byte("\x1b]" + tc.cmd + "\x07B"))
+			if s.Title != "keep" {
+				t.Errorf("Title = %q, want %q (unchanged)", s.Title, "keep")
+			}
+			if got := s.Cells[0][1].Hyperlink; got != "https://keep.example" {
+				t.Errorf("Cells[0][1].Hyperlink = %q, want %q (link still open)", got, "https://keep.example")
+			}
+		})
+	}
+}
+
 // TestOSCUnhandledIdLeavesTitle verifies an unhandled OSC id (9) leaves the
 // window title unchanged. Driven through the public parser (ESC ] 9 ; … BEL).
 func TestOSCUnhandledIdLeavesTitle(t *testing.T) {

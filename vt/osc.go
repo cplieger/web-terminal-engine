@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
@@ -63,19 +64,17 @@ func (s *Screen) dispatchOsc() {
 		return
 	}
 
-	// Parse numeric prefix (digits before first ';').
-	var id int
-	i := 0
-	for i < len(payload) && payload[i] >= '0' && payload[i] <= '9' {
-		id = id*10 + int(payload[i]-'0')
-		i++
+	// The command is the whole field before the first ';', and only a plain
+	// decimal one dispatches: "2x;t" or an id past MaxInt must not run OSC 2.
+	cmd, rest, _ := bytes.Cut(payload, []byte{';'})
+	if !isAllDigits(string(cmd)) {
+		return
 	}
-
-	// Skip the ';' separator if present.
-	var data string
-	if i < len(payload) && payload[i] == ';' {
-		data = string(payload[i+1:])
+	id, err := strconv.Atoi(string(cmd))
+	if err != nil {
+		return
 	}
+	data := string(rest)
 
 	switch id {
 	case 0:

@@ -35,7 +35,9 @@ The engine buffers at most 4096 bytes of an OSC payload and 256 bytes of a DECRQ
 
 ## String terminators
 
-An OSC ends with BEL or the 7-bit ST (`ESC \`), and a DCS, SOS, PM or APC string ends with the 7-bit ST. A CAN or SUB byte cancels any of them. The 8-bit ST byte (`0x9C`) does not end a string, because in UTF-8 it is part of characters such as `Ü`, so it stays in the payload.
+BEL ends an OSC. Any ESC ends an OSC, DCS, SOS, PM or APC string and starts a new escape sequence; `ESC \` is the usual 7-bit ST. An OSC or a supported DCS query ended that way still applies, while a CAN or SUB byte cancels the string without applying it. SOS, PM and APC strings are read and ignored.
+
+The 8-bit ST byte (`0x9C`) does not end a string, because in UTF-8 it is part of characters such as `Ü`, so it stays in the payload. A program that ends a string with a raw `0x9C` therefore has its following output taken into the string until the next ESC, BEL, CAN or SUB.
 
 ## The kitty keyboard protocol
 

@@ -350,7 +350,7 @@ func buildOscString() {
 
 func buildSosPmApcString() {
 	s := stSosPmApcString
-	// Consume everything silently until ST (ESC \) or CAN/SUB
+	// Consume everything silently until ESC (ESC \ is the 7-bit ST), CAN or SUB
 	setRange(s, 0x00, 0x17, mkT(actNone, s))
 	stateTable[s][0x19] = mkT(actNone, s)
 	setRange(s, 0x1C, 0x1F, mkT(actNone, s))
@@ -383,7 +383,8 @@ func applyAnywhere() {
 		// C1 controls in non-Ground states. The string states keep their own
 		// 0x80-0xFF rows, 8-bit ST included: a raw C1 byte there is a UTF-8
 		// continuation byte ("Ü" is C3 9C), so only a C0 byte (ESC, CAN, SUB,
-		// and BEL for an OSC) ends a string, as in Ghostty's parse_table.zig.
+		// and BEL for an OSC) ends a string. Ghostty's parse_table.zig does the
+		// same for OSC and DCS.
 		if s != stDcsPassthrough && s != stDcsIgnore && s != stOscString && s != stSosPmApcString {
 			// 0x80-0x8F: execute + Ground
 			setRange(s, 0x80, 0x8F, mkT(actExecute, stGround))

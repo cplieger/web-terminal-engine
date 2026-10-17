@@ -60,19 +60,21 @@ func (s *Screen) dispatchOsc() {
 	payload := s.oscBuf
 	s.oscBuf = s.oscBuf[:0]
 
-	if len(payload) == 0 || s.oscOverflow {
+	if s.oscOverflow {
 		return
 	}
 
 	// The command is the whole field before the first ';', and only a plain
-	// decimal one dispatches: "2x;t" or an id past MaxInt must not run OSC 2.
-	cmd, rest, _ := bytes.Cut(payload, []byte{';'})
-	if !isAllDigits(string(cmd)) {
-		return
-	}
-	id, err := strconv.Atoi(string(cmd))
-	if err != nil {
-		return
+	// decimal one dispatches: "2x;t" or a wrapping id must not run OSC 2. An
+	// empty field before ';' is xterm's omitted Ps, OSC 0 (misc.c do_osc).
+	cmd, rest, hasSep := bytes.Cut(payload, []byte{';'})
+	id := 0
+	if len(cmd) > 0 || !hasSep {
+		n, err := strconv.ParseUint(string(cmd), 10, 31)
+		if err != nil {
+			return
+		}
+		id = int(n)
 	}
 	data := string(rest)
 

@@ -158,7 +158,7 @@ func TestOSCMalformedCommandIsIgnored(t *testing.T) {
 	cases := []struct{ name, cmd string }{
 		{"wraps_to_osc_8", "18446744073709551624;;"},   // 2^64 + 8
 		{"wraps_to_osc_2", "18446744073709551618;new"}, // 2^64 + 2
-		{"empty", ";new"},
+		{"empty_payload", ""},
 		{"no_digits", "new"},
 		{"trailing_letter", "2x;new"},
 		{"signed", "+2;new"},
@@ -175,6 +175,20 @@ func TestOSCMalformedCommandIsIgnored(t *testing.T) {
 				t.Errorf("Cells[0][1].Hyperlink = %q, want %q (link still open)", got, "https://keep.example")
 			}
 		})
+	}
+}
+
+// TestOSCOmittedCommandIsOSC0 verifies an empty command field before ';' is
+// xterm's omitted parameter and sets both titles, as OSC 0 does.
+func TestOSCOmittedCommandIsOSC0(t *testing.T) {
+	s := New(1, 10)
+	s.Write([]byte("\x1b]2;window\x07\x1b]1;icon\x07"))
+	s.Write([]byte("\x1b];new\x07"))
+	if s.Title != "new" {
+		t.Errorf("Title = %q, want %q", s.Title, "new")
+	}
+	if s.iconTitle != "new" {
+		t.Errorf("iconTitle = %q, want %q", s.iconTitle, "new")
 	}
 }
 

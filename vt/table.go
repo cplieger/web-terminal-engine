@@ -327,36 +327,25 @@ func buildDcsIgnore() {
 	setRange(s, 0x80, 0xFF, mkT(actNone, s))
 }
 
+// What ends each string state is pinned by TestStringTermination; CAN, SUB
+// and ESC come from applyAnywhere.
+
 func buildOscString() {
 	s := stOscString
-	// Most bytes: put
 	setRange(s, 0x00, 0x06, mkT(actOscPut, s))
-	// BEL (0x07): terminate OSC → Ground (via exit action osc_end)
 	stateTable[s][0x07] = mkT(actNone, stGround)
 	setRange(s, 0x08, 0x17, mkT(actOscPut, s))
 	stateTable[s][0x19] = mkT(actOscPut, s)
 	setRange(s, 0x1C, 0x1F, mkT(actOscPut, s))
-	// 0x18 (CAN): → Ground
-	stateTable[s][0x18] = mkT(actNone, stGround)
-	// 0x1A (SUB): → Ground
-	stateTable[s][0x1A] = mkT(actNone, stGround)
-	// 0x1B (ESC): → Escape (exit action fires osc_end)
-	stateTable[s][0x1B] = mkT(actNone, stEscape)
-	// Printable
 	setRange(s, 0x20, 0x7F, mkT(actOscPut, s))
-	// High bytes: put (UTF-8 content in OSC payloads)
 	setRange(s, 0x80, 0xFF, mkT(actOscPut, s))
 }
 
 func buildSosPmApcString() {
 	s := stSosPmApcString
-	// Consume everything silently until ESC (ESC \ is the 7-bit ST), CAN or SUB
 	setRange(s, 0x00, 0x17, mkT(actNone, s))
 	stateTable[s][0x19] = mkT(actNone, s)
 	setRange(s, 0x1C, 0x1F, mkT(actNone, s))
-	stateTable[s][0x18] = mkT(actNone, stGround)
-	stateTable[s][0x1A] = mkT(actNone, stGround)
-	stateTable[s][0x1B] = mkT(actNone, stEscape)
 	setRange(s, 0x20, 0x7F, mkT(actNone, s))
 	setRange(s, 0x80, 0xFF, mkT(actNone, s))
 }
@@ -382,8 +371,7 @@ func applyAnywhere() {
 
 		// C1 controls in non-Ground states. The string states keep their own
 		// 0x80-0xFF rows, 8-bit ST included: a raw C1 byte there is a UTF-8
-		// continuation byte ("Ü" is C3 9C), so only a C0 byte (ESC, CAN, SUB,
-		// and BEL for an OSC) ends a string. Ghostty's parse_table.zig does the
+		// continuation byte ("Ü" is C3 9C). Ghostty's parse_table.zig does the
 		// same for OSC and DCS.
 		if s != stDcsPassthrough && s != stDcsIgnore && s != stOscString && s != stSosPmApcString {
 			// 0x80-0x8F: execute + Ground

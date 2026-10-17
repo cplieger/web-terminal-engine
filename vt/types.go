@@ -76,7 +76,7 @@ type Cell struct {
 // ParserState holds the VT500-style state machine state used by the
 // screen's byte-at-a-time parser. Embedded in Screen.
 type ParserState struct {
-	oscBuf  []byte // buffered OSC payload (between ESC ] and the BEL or ESC that ends it)
+	oscBuf  []byte // buffered OSC payload
 	dcsBuf  []byte // buffered DCS data
 	utf8Buf [4]byte
 	// Param accumulation: fixed flat array of numeric values.

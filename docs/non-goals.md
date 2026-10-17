@@ -31,13 +31,20 @@ The [esctest2](https://github.com/ThomasDickey/esctest2) conformance suite check
 
 ## Length limits
 
-The engine buffers at most 4096 bytes of an OSC payload and 256 bytes of a DECRQSS or XTGETTCAP query. A longer sequence is dropped whole rather than applied cut short, and a dropped query gets no reply. An OSC 52 copy of more than about 3 KB of text, or an OSC 8 link of about 4 KB or more, therefore does nothing.
+The engine buffers at most 4096 bytes of an OSC payload and 256 bytes of a DECRQSS or XTGETTCAP query. The over-the-cap column below says what happens to a longer one. An OSC 52 copy of more than about 3 KB of text therefore does nothing, and an OSC 8 link of about 4 KB or more leaves the current link, if any, in place.
 
 ## String terminators
 
-BEL ends an OSC. Any ESC ends an OSC, DCS, SOS, PM or APC string and starts a new escape sequence; `ESC \` is the usual 7-bit ST. An OSC or a supported DCS query ended that way still applies, while a CAN or SUB byte cancels the string without applying it. SOS, PM and APC strings are read and ignored.
+This table says what each byte does to an open string. In it, applied means the string ends and takes effect, and payload means the byte is part of the string, which stays open. Dropped, cancelled and ignored all mean the string ends without effect: dropped for an over-cap string, cancelled for CAN or SUB, and ignored for a string the engine never applies. An ESC that ends a string also starts the next escape sequence.
 
-The 8-bit ST byte (`0x9C`) does not end a string, because in UTF-8 it is part of characters such as `Ü`, so it stays in the payload. A program that ends a string with a raw `0x9C` therefore has its following output taken into the string until the next ESC, BEL, CAN or SUB.
+| String | BEL | `ESC \` (ST) | ESC and another byte | Raw `0x9C` | CAN or SUB | Over the cap |
+| --- | --- | --- | --- | --- | --- | --- |
+| OSC | applied | applied | applied | payload | cancelled | dropped |
+| DECRQSS or XTGETTCAP | payload | applied | applied | payload | cancelled | dropped, no reply |
+| Any other DCS | payload | ignored | ignored | payload | cancelled | ignored, no cap |
+| SOS, PM, APC | payload | ignored | ignored | payload | cancelled | ignored, no cap |
+
+The raw 8-bit ST byte (`0x9C`) is payload because in UTF-8 it is part of characters such as `Ü`.
 
 ## The kitty keyboard protocol
 

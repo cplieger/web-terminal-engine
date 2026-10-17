@@ -139,21 +139,6 @@ func TestOSCAbortedBySUB(t *testing.T) {
 	}
 }
 
-// TestOSCTerminatedByESCAppliesThenCSIRuns verifies an ESC that starts a new
-// sequence ends the OSC through its exit action (osc_end in
-// vt100.net/emu/dec_ansi_parser), so the OSC applies and the CSI runs.
-func TestOSCTerminatedByESCAppliesThenCSIRuns(t *testing.T) {
-	s := New(5, 80)
-	s.Write([]byte("\x1b]8;params;http://example.com")) // no BEL or ST
-	s.Write([]byte("\x1b[1;1HX"))
-	if got := s.Cells[0][0].Ch; got != 'X' {
-		t.Errorf("Cells[0][0].Ch = %q, want 'X' (CSI following an OSC terminated by ESC moved the cursor)", got)
-	}
-	if got := s.Cells[0][0].Hyperlink; got != "http://example.com" {
-		t.Errorf("Cells[0][0].Hyperlink = %q, want %q (ESC dispatched the OSC 8)", got, "http://example.com")
-	}
-}
-
 // TestOSCAllDigitPayloadNoSeparator verifies an all-digit OSC payload with no
 // separator ("2", no ';') is parsed in-bounds, and OSC 2 sets the title to the
 // empty (absent) data. Driven through the public parser (ESC ] 2 BEL) rather

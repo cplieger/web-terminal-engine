@@ -45,7 +45,7 @@ A longer URL links imperfectly rather than not at all. Rows near its start link 
 
 The `keyboard` namespace turns a `KeyboardEvent` into the bytes a PTY expects. `mapKeyboardEvent(ev, modes)` returns either bytes to send or a local action, such as a scroll. `bracketTextForPaste(text, modes)` and `prepareTextForTerminal` do the same for pasted text. Every function that depends on a mode takes the mode state as an argument, and an engine's `modes` satisfies it. The module touches no DOM and sends nothing.
 
-It honors application cursor keys, application keypad, bracketed paste, and the kitty keyboard protocol's disambiguate flag. When an application turns that protocol on, keys arrive as `CSI u` events. [Unsupported VT features](non-goals.md) lists which kitty flags are honored.
+It honors application cursor keys, application keypad, bracketed paste, and the kitty keyboard protocol's disambiguate flag. When an application turns that protocol on, keys that type nothing arrive as kitty escape codes: Escape, the Ctrl and Alt combinations, function keys and the keypad's navigation keys. A key that types a character, an AltGr character included, still arrives as text. [Unsupported VT features](non-goals.md#the-kitty-keyboard-protocol) lists which kitty flags are honored.
 
 ## Mobile key toolbar
 

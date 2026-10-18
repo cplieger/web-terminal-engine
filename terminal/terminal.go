@@ -975,10 +975,10 @@ func (h *Handler) Notification() (msg string, seq uint64) {
 
 // Progress returns the session's last ConEmu OSC 9;4 progress state: -1 when
 // none has been seen (the process never reported progress), else the state
-// (0 off, 1 value, 2 error, 3 indeterminate, 4 paused). The status stream maps
-// an active state (1 or 3) to working, so a program that reports OSC 9;4
-// progress while it works drives the working indicator without relying on raw
-// output activity. Safe for concurrent use.
+// (0 off, 1 value, 2 error, 3 indeterminate, 4 paused). While the program has
+// sent no OSC 7501 report since the last RIS, the status stream maps an active
+// state (1 or 3) to working, so OSC 9;4 progress drives the working indicator
+// without relying on raw output activity. Safe for concurrent use.
 func (h *Handler) Progress() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -987,12 +987,12 @@ func (h *Handler) Progress() int {
 
 // ProgressValue returns the percentage carried by the session's last OSC 9;4
 // progress sequence: -1 when absent or unknown (no sequence seen, or a state
-// that carries no percentage), else 0-100. A consumer pairs it with Progress to
-// render a determinate bar; -1 is not 0%. Safe for concurrent use.
+// that carries no percentage), else 0-100; -1 is not 0%. It omits an OSC 7501
+// report's progress, which the status stream's progressValue, the value a
+// determinate bar draws, prefers. Safe for concurrent use.
 //
-// The engine's own status sweep does not call this: it reads the same field
-// through statusSnapshot, which batches every status input under one lock. Use
-// this when you want the value on its own.
+// The engine's own status sweep reads the same field through statusSnapshot,
+// which batches every status input under one lock.
 func (h *Handler) ProgressValue() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1031,26 +1031,24 @@ func (h *Handler) ScrollbackBounds() (committed, oldest uint64) {
 // as a struct rather than a result list so the sweep can grow another status
 // input without either growing a longer tuple or taking the lock twice.
 type screenStatus struct {
-	notifMsg string // the last OSC 9 notification message
-	title    string // the OSC 0/2 window title
-	notifSeq uint64 // increments per captured notification (a repeat is still new)
-	progress int    // OSC 9;4 state: -1 none, 0 clear, 1 value, 2 error, 3 indeterminate, 4 warning
+	notifMsg string           // the last OSC 9 notification message
+	title    string           // the OSC 0/2 window title
+	program  vt.ProgramStatus // the folded OSC 7501 status
+	notifSeq uint64           // rises per captured notification (a repeat is still new)
+	// programSeq rises per accepted OSC 7501 report, on notifSeq's counter.
+	programSeq uint64
+	progress   int // OSC 9;4 state: -1 none, 0 clear, 1 value, 2 error, 3 indeterminate, 4 warning
 	// progressValue is the OSC 9;4 percentage: -1 absent/unknown, else 0-100.
 	progressValue int
+	// programSeen is whether an OSC 7501 report arrived since the last RIS.
+	programSeen bool
 }
 
-// statusSnapshot returns the status-relevant screen state — the OSC 9;4
-// progress state and its percentage, the last OSC 9 notification message and
-// its sequence, and the OSC 0/2 window title — under a SINGLE lock
-// acquisition, so the status sweep's per-session snapshot is internally
-// consistent. Reading the same fields through the individual getters
-// (Progress, ProgressValue, Notification, Title) takes the lock once per call,
-// and a PTY chunk parsed between two of those calls can pair a stale active
-// progress with a fresh turn-end notification — the inconsistent pairing
-// computeStatus must not see (its fresh-latch precedence guards the state
-// machine; this getter removes the torn read). Every field a sweep reads
-// belongs in here for that reason, the percentage included: a bar at 40% next
-// to a state that has already moved on is the same defect in visible form.
+// statusSnapshot returns every status input the sweep reads (OSC 9;4 state
+// and percentage, OSC 9 notification and sequence, OSC 7501 status, title)
+// under ONE lock. Reading them through the individual getters can pair a stale
+// active progress with a fresh turn-end notification, or a bar with a state
+// that has moved on, a torn read computeStatus must never see.
 func (h *Handler) statusSnapshot() screenStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1060,6 +1058,9 @@ func (h *Handler) statusSnapshot() screenStatus {
 		notifSeq:      h.screen.NotificationSeq,
 		progress:      h.screen.Progress,
 		progressValue: h.screen.ProgressValue,
+		program:       h.screen.ProgramStatus(),
+		programSeq:    h.screen.ProgramReportSeq(),
+		programSeen:   h.screen.ProgramReported(),
 	}
 }
 
@@ -1223,6 +1224,9 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 			// Broadcast process exit so attached WS clients close with
 			// statusProcessExited (4001) rather than a normal closure.
 			close(h.procExitCh)
+			// After the close, and statusRaw.read snapshots before exitOutcome,
+			// so a sweep that reads the dropped records also reads the exit.
+			h.markProgramExited()
 			cancel() // stop readLoop/flushLoop on child exit
 			// Free the PTY master fd immediately on natural exit; otherwise an
 			// exited-but-undeleted session holds it until Close/reap (reaper
@@ -1315,6 +1319,14 @@ func startSessionPTY(cmd *exec.Cmd, cols, rows int) (*os.File, error) {
 		spawnRegister(cmd.Process.Pid)
 	}
 	return ptmx, err
+}
+
+// markProgramExited tells the screen the process exited (vt.Screen.ProgramExited
+// owns what that drops).
+func (h *Handler) markProgramExited() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.screen.ProgramExited()
 }
 
 // exitDrainBound caps how long the process monitor waits, after the child is

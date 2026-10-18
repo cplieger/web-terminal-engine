@@ -79,30 +79,66 @@ Sessions end when the server stops. [Restoring sessions](session-restore.md) cov
 
 ## Status, activity and titles
 
-Each session carries a status the server derives:
+Each session carries a status the server derives, and exactly one row of the table applies to a session at a time. "The record the status comes from" is the `OSC 7501` record [Program status](#program-status-osc-7501) folds the status from, which exists only once the program has sent a report since the last hard reset (RIS). A notification is latched as [Notifications](#notifications) describes. `TestStatusTableRowsAreExclusive` in `terminal/status_program_test.go` checks each row's condition against the server's derivation and that no two rows hold at once.
 
-| Status | Meaning |
+| Status | Condition |
 | --- | --- |
-| `working` | The program reports progress with `OSC 9;4` state 1 or 3. |
-| `failed` | The program reports `OSC 9;4` state 2, an error. |
-| `warning` | The program reports `OSC 9;4` state 4. |
-| `idle` | The program reports no progress state, and no notification is latched. |
-| `input` | A notification said the program waits for the user. |
-| `done` | A notification said the turn finished. |
 | `exited` | The process ended normally, or the server ended it. |
-| `crashed` | The process ended with a non-zero status or a signal. |
+| `crashed` | The process ended with a non-zero status or a signal, and the server did not end it. |
+| The latched status | The process runs and a notification is latched: the status is whatever the classifier you install with `WithStatusClassifier` returned for it, such as `input` or `done`. |
+| `working` | The process runs, no notification is latched, and the record the status comes from is `working`, or the program has sent no `OSC 7501` report since the last hard reset (RIS) and its `OSC 9;4` state is 1 or 3. |
+| `failed` | The process runs, no notification is latched, and the record the status comes from is `error`, or the program has sent no `OSC 7501` report since the last hard reset (RIS) and its `OSC 9;4` state is 2. |
+| `warning` | The process runs, no notification is latched, the program has sent no `OSC 7501` report since the last hard reset (RIS), and its `OSC 9;4` state is 4. |
+| `input` | The process runs, no notification is latched, and the record the status comes from is `blocked`. |
+| `done` | The process runs, no notification is latched, and the record the status comes from is `done`. |
+| `idle` | No other row applies and no notification is latched: the program's `OSC 7501` records leave no record the status comes from, or the record the status comes from is `idle`, or it has sent no `OSC 7501` report since the last hard reset (RIS) and its `OSC 9;4` progress is cleared (state 0) or was never sent. |
 
 `OSC 9;4` progress is read with iTerm2's state meanings. A session the server closed itself, through `Close`, the idle reaper or a shutdown, ends as `exited`. That way a routine restart never reports a failure.
 
-`input` and `done` come from an OSC 9 notification passed through the classifier you install with `WithStatusClassifier`. Such a latch holds until a later progress state contradicts it. The active states 1 and 3 and the error state 2 contradict it. The paused state 4 does not, because it starts no work and reports no failure.
+### Program status (OSC 7501)
 
-Some programs notify when a wait starts and stay silent when it ends. A consumer that sees the end from its own sources reads the latch with `(*SessionManager).StatusLatch(id)`. It returns the latched status, the notification sequence that set it, and whether the session is tracked. `WithdrawStatusLatch(id, want, seq)` clears it as a compare-and-swap. It refuses an unknown session, a `want` other than `input` or `done`, a latch that no longer equals `want`, and a latch a newer notification set after `seq`. A slow poller can therefore never erase a fresh request. The next sweep recomputes the status from progress alone.
+The engine implements the [Program Status Protocol](https://www.superlogical.com/rex/docs/build/program-status), revision 0.4. Once a program sends an `OSC 7501` report, that report decides the status and `OSC 9;4` no longer does, as the protocol asks. The engine keeps drawing the `OSC 9;4` percentage in `progressValue`, though, unless the report carries its own `progress`. A hard reset (RIS) forgets every report and hands the status back to `OSC 9;4`. `reportsActivity` stays true.
+
+The engine keeps up to 64 records per session, one per `id`. The status comes from the root record, the one with no `id`. A `blocked` record wins over it, because a worker waiting for the user is what the status exists to show: a `blocked` root first, otherwise the most recently reported `blocked` child. With no root record and nothing blocked, the status is `idle`. Which reports make a new occurrence of the status is stated once, under `statusSeq` in [Status event fields](#status-event-fields).
+
+A report with no state or an unknown one is ignored whole, and so is one in which any pair breaks one of the protocol's limits or has a `msg` or `title` that is not base64 or decodes to a control character. Each pair meets the first of these rules that applies: a key over 16 bytes discards the report, even with no `=`; any other pair with no `=` is skipped; a value over its key's limit discards the report; an `id` pair, even one with a byte outside the protocol's value set, becomes the report's `id`, and the report is ignored unless its last `id` pair holds a well-formed id, so a malformed `id` never sends it to the root record; any other value outside the value set is skipped; a `msg` or `title` that is not base64 of text without control characters, within its decoded size, discards the report; an unknown key is skipped. A skipped pair leaves the value an earlier pair gave that key, a repeated key keeps its last value, and an unrecognised `kind`, `progress` or `app` counts as absent. The engine validates `msg` and `title` but does not store them. A program that asks with `OSC 7501 ; ?` gets the reply `OSC 7501 ; ? : states=idle,working,done,blocked,error : kinds=permission,question,auth`. Nothing from a report is ever written back.
+
+#### Record lifecycle
+
+Each row is an event and each column the state of the record it reaches. A cell gives the record's next state, and "new" marks a new occurrence of the status it shows: `statusSeq` rises, so the status reads as unread again. A record the status does not show, such as a child that is not `blocked`, makes no new occurrence. The last column is `reportsActivity`, which never falls back to false. The section of revision 0.4 each event comes from is in brackets.
+
+| Event | absent | `working` | `blocked` | `done` | `error` | `idle` | `reportsActivity` |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| A report for this record's `id` [Records and ids] | the reported state, new unless it is `idle` | the reported state, new unless it is `working` again | the reported state, new unless it is `blocked` with the same `kind` again | the reported state, new unless it is `done` again | the reported state, new unless it is `error` again | the reported state, new unless it is `idle` again | true |
+| `clear` for this `id`, an ancestor of it, or the root [States] | absent | absent, new | absent, new | absent, new | absent, new | absent | true |
+| `clear` for any other `id`, such as `a` beside `ab/c` [States] | absent | `working` | `blocked` | `done` | `error` | `idle` | true |
+| A hard reset (RIS), which also hands the status back to `OSC 9;4` [Records and ids] | absent | absent, new | absent, new | absent, new | absent, new | absent | unchanged |
+| A soft reset (DECSTR), or a switch between the primary and alternate screen [Records and ids] | absent | `working` | `blocked` | `done` | `error` | `idle` | unchanged |
+| A shell prompt, `OSC 133 ; A` with or without parameters [States] | absent | absent, new | absent, new | `done` | `error` | `idle` | unchanged |
+| Any other `OSC 133` mark | absent | `working` | `blocked` | `done` | `error` | `idle` | unchanged |
+| The process exits [States] | absent | absent, new | absent, new | `done` | `error` | `idle` | unchanged |
+| A `working` or `blocked` report for this `id` after the process exited [States] | absent | absent, new | absent, new | absent, new | absent, new | absent | true |
+| A report for a 65th `id` while this record is the least recently reported [Limits] | not applicable | absent, new | absent, new | absent, new | absent, new | absent | true |
+| A report for a 65th `id` while an older record exists [Limits] | not applicable | `working` | `blocked` | `done` | `error` | `idle` | true |
+| A report that breaks a limit or a rule above, such as a 4097-byte sequence or a malformed pair whose key is over 16 bytes [Limits] | absent | `working` | `blocked` | `done` | `error` | `idle` | unchanged |
+
+A session whose program left a `done` record and returned to the shell therefore still reports `done`, while one it left `blocked` no longer reports `input`. `TestProgramRecordLifecycle` in `terminal/status_program_lifecycle_test.go` checks every cell, and `TestOSC7501RecordSurvival` in `vt/osc7501_test.go` checks which records a prompt, an exit, a hard reset and a newer report leave at the root and below it.
+
+### Notifications
+
+`input` and `done` also come from an OSC 9 notification passed through the classifier you install with `WithStatusClassifier`. The engine latches whatever status the classifier returns, so a classifier can also set `working`, `failed`, `warning` or any other value, even after an `OSC 7501` report. For a program that has sent no `OSC 7501` report since the last hard reset (RIS), such a latch holds until a later progress state contradicts it. The active states 1 and 3 and the error state 2 contradict it. The paused state 4 does not, because it starts no work and reports no failure.
+
+For a program that speaks `OSC 7501`, the newer signal wins. A notification the classifier maps after the newest status change sets the status until the next status change, which clears the latch. A status change is a report that changes which record the status comes from, or its state or kind, a clear that leaves no record included. A report that repeats the status, a progress update included, keeps the latch. Use it when a program announces a wait over OSC 9 that its `OSC 7501` report does not show.
+
+Some programs notify when a wait starts and stay silent when it ends. A consumer that sees the end from its own sources reads the latch with `(*SessionManager).StatusLatch(id)`. It returns the latched status, the notification sequence that set it, and whether the session is tracked. `WithdrawStatusLatch(id, want, seq)` clears it as a compare-and-swap. It refuses an unknown session, a `want` other than `input` or `done`, a latch that no longer equals `want`, and a latch a newer notification set after `seq`. A slow poller can therefore never erase a fresh request. The next sweep recomputes the status from the program's own reports alone.
+
+### Status event fields
 
 Each status event also carries:
 
-- `progressValue`, the `OSC 9;4` percentage, or -1 when the program reported none. -1 is not 0%.
+- `progressValue`, the `progress` of the `OSC 7501` report when it carries one, else the `OSC 9;4` percentage, or -1 when the program reported none. -1 is not 0%.
 - `notification` and `notificationSeq` for a fresh OSC 9 message, so a consumer with no classifier still receives it.
-- `statusSeq`, which numbers the occurrence of `status`. It rises by one each time the status changes or a fresh classified notification latches it again, so a second `done` in a row is a new occurrence.
+- `statusSeq` numbers the occurrence of the session's status. A sweep raises it by one when it emits a changed status, a status a classified notification latched since the last sweep, or an input, done or failed status after an OSC 7501 report since then created a record, changed one's state or kind, or cleared one, and so changed which record the status came from, or its state or kind, at that report. A report keeping a record's state and kind raises it only by changing the status. It never falls for one id; 0, absent on the wire, means nothing numbered yet. This text is the Go doc of `SessionInfo.StatusSeq`, and `TestStatusSeqDocIsQuotedWordForWord` fails when a copy drifts from it.
 - `seenSeq`, the highest `statusSeq` any reader acknowledged. A status that calls for attention, such as `done` or `input`, is unread while `statusSeq` is above `seenSeq`.
 
 Both numbers never fall for one session, and both are absent until the first sweep numbers something. The session list carries them too.

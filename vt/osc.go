@@ -111,6 +111,13 @@ func (s *Screen) dispatchOsc() {
 		s.handleOscPaletteReset(data)
 	case 105:
 		s.handleSpecialColorReset(data)
+	case 133:
+		// Only mark A, a shell prompt starting, acts: it ends OSC 7501 work.
+		if mark, _, _ := strings.Cut(data, ";"); mark == "A" {
+			s.program.apply(&programChange{event: programEventPrompt})
+		}
+	case 7501:
+		s.handleOsc7501(data)
 	case 110, 111, 112, 113, 114, 115, 116, 117, 118, 119:
 		// OSC 11x resets OSC 1x (slot id-100) by dropping its stored override.
 		if s.dynColors != nil {
@@ -154,7 +161,13 @@ func (s *Screen) handleOsc9(data string) {
 		return
 	}
 	s.Notification = msg
-	s.NotificationSeq++
+	s.NotificationSeq = s.nextStatusSeq()
+}
+
+// nextStatusSeq draws the next number of the counter NotificationSeq and
+// ProgramReportSeq share.
+func (s *Screen) nextStatusSeq() uint64 {
+	return max(s.NotificationSeq, s.program.seq) + 1
 }
 
 // OSC 9;4 progress states, and the marker for an absent percentage. State 1

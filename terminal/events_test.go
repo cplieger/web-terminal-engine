@@ -214,11 +214,11 @@ func TestComputeStatusStaleLatchStillClearedByWorking(t *testing.T) {
 	}
 }
 
-// TestComputeStatusNoWorkingFromOutput verifies a program that never reports
-// OSC 9;4 progress stays idle even while producing output: working now comes
-// ONLY from OSC 9;4, so a plain shell with no classifier never flaps to
-// working merely because it (or the user typing at the prompt) produced bytes.
-// The reveal gate then keeps such a session's tab dot hidden.
+// TestComputeStatusNoWorkingFromOutput verifies a program that reports neither
+// OSC 7501 status nor OSC 9;4 progress stays idle even while producing output:
+// working comes only from those reports, so a plain shell with no classifier
+// never flaps to working because it (or the user typing at the prompt)
+// produced bytes. The reveal gate then keeps such a session's tab dot hidden.
 func TestComputeStatusNoWorkingFromOutput(t *testing.T) {
 	m := NewSessionManager(catFactory) // no classifier: a generic shell
 	t.Cleanup(func() { shutdownManager(t, m) })
@@ -231,14 +231,16 @@ func TestComputeStatusNoWorkingFromOutput(t *testing.T) {
 
 	h.handlePTYData([]byte("some output"))
 	if st := m.computeStatusFromHandler(h, tr); st != StatusIdle {
-		t.Fatalf("output with no OSC 9;4 progress: status = %q, want %q (no output-activity fallback)", st, StatusIdle)
+		t.Fatalf("output with no status report: status = %q, want %q (no output-activity fallback)", st, StatusIdle)
 	}
 }
 
 // TestReportsActivitySticky verifies the reportsActivity flag the client uses to
-// reveal the per-tab activity dot: false until an OSC 9;4 signal appears, then
-// sticky true even after the progress is cleared (Progress stays >= 0), so the
-// dot stays revealed while the session idles rather than flickering away.
+// reveal the per-tab activity dot, here through OSC 9;4: false until the
+// program reports progress, then sticky true even after the progress is
+// cleared, so the dot stays revealed while the session idles rather than
+// flickering away. OSC 7501 status and a classified OSC 9 notification set it
+// too.
 func TestReportsActivitySticky(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
@@ -816,7 +818,7 @@ func (s *activitySource) read(id SessionID) SessionActivity {
 }
 
 // trackerOf returns a session's tracker, so a test can assert on state the
-// public surface deliberately does not expose (the needs-input/done latch).
+// public surface deliberately does not expose (the notification latch).
 func trackerOf(t *testing.T, m *SessionManager, id SessionID) *statusTracker {
 	t.Helper()
 	m.mu.Lock()

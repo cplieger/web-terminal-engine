@@ -7,6 +7,11 @@
 
 import { nextBackoffDelay } from "./reconnect.js";
 
+/** KnownStatus is a status the server derives itself, one per Go terminal.Status*
+ *  constant. */
+export type KnownStatus =
+  "working" | "idle" | "input" | "done" | "exited" | "crashed" | "failed" | "warning";
+
 /** SessionInfo is one session's wire shape: the JSON object the session REST
  *  API (GET/POST /api/sessions) returns per session, kept in lockstep with the Go
  *  terminal.SessionInfo by hand.
@@ -16,21 +21,14 @@ import { nextBackoffDelay } from "./reconnect.js";
  *  a CLIENT-DERIVED automatic title a client asked the server to remember. */
 export interface SessionInfo {
   readonly id: string;
-  /** the session's current status. "working"/"idle"/"exited"/"crashed" are
-   *  derived by the server; "input"/"done" are latched from a classified OSC 9
-   *  notification; "failed" is OSC 9;4 progress state 2 and "warning" is state 4
-   *  (iTerm2 semantics), both of which PERSIST until the program changes the
-   *  progress state. "exited" and "crashed" split the session's end: "exited" is
-   *  an ordinary one (status 0, or any exit the server itself caused — a closed
-   *  session, the idle reaper, a server shutdown), "crashed" is a non-zero exit
-   *  status or a terminating signal the program was not asked for, so a routine
-   *  restart never renders as a failure. Neither is a progress state: they
-   *  outrank everything, and nothing clears them. A consumer must tolerate an
-   *  UNKNOWN status string from a newer server: the stream is parsed, not
-   *  validated, and an unrecognised value is forwarded rather than dropped
-   *  (forward compatibility across the wire floor). */
-  readonly status:
-    "working" | "idle" | "input" | "done" | "exited" | "crashed" | "failed" | "warning";
+  /** the session's current status. The server derives a KnownStatus from the
+   *  program's OSC 7501 report, or from OSC 9;4 progress while it has sent none
+   *  since a hard reset (RIS); "exited" and "crashed" mark the process's end
+   *  and nothing clears them. A classified OSC 9 notification latches whatever
+   *  string the server's classifier returns, and a newer server may add values,
+   *  so a consumer must handle any other string: the stream forwards it
+   *  unchanged. The engine's docs/sessions.md gives every mapping. */
+  readonly status: KnownStatus | (string & {});
   readonly title: string;
   /** the session's short public name, safe to put in a URL: 1 to 64 characters
    *  of `[A-Za-z0-9_-]`, unique among live sessions, and NOT a capability
@@ -72,11 +70,11 @@ export interface SessionInfo {
    *  view: a list built from that hybrid still names the live set exactly, so the
    *  server accepts it and it becomes the arrangement every device sees. */
   readonly order?: number;
-  /** true once the session has emitted a genuine activity signal — OSC 9;4
-   *  progress or a classified OSC 9 notification.
-   *  Sticky for the session's life. Consumers reveal the per-tab activity dot
-   *  only when this is set; a program that emits no OSC 9 signal (a plain shell)
-   *  keeps its tab dot hidden. */
+  /** true once the session has emitted a genuine activity signal — an OSC 7501
+   *  report, OSC 9;4 progress or a classified OSC 9 notification.
+   *  Sticky for the session's life, a hard reset (RIS) included. Consumers
+   *  reveal the per-tab activity dot only when this is set; a program that
+   *  emits none of the three (a plain shell) keeps its tab dot hidden. */
   readonly reportsActivity?: boolean;
   /** the session's SECONDARY activity: a host-reported background activity that
    *  OUTLIVES the turn, carried beside `status` and never merged into it. The
@@ -84,18 +82,19 @@ export interface SessionInfo {
    *  (stopped and resumable, nobody is being asked) and `"input"` (a background
    *  task is blocked on the user); absent or an empty string means no secondary
    *  activity, and a consumer must tolerate an UNKNOWN value from a newer server
-   *  by rendering nothing for it.
-   *
-   *  Typed `string`, deliberately NOT a union like `status`: that union's own doc
-   *  already admits it must tolerate values outside itself, which forces a cast at
-   *  every forward-compatible site. Absent from a server that reports none. */
+   *  by rendering nothing for it. Absent from a server that reports none. */
   readonly activity?: string;
   /** how many sources produced `activity`: >= 1 whenever `activity` is non-empty,
    *  0 when it is empty or the host does not count them. */
   readonly activityCount?: number;
-  /** numbers the occurrence of `status`: it rises by one each time the status
-   *  changes or a fresh notification re-latches it, and never falls for one id.
-   *  Absent (or 0) means nothing numbered yet, including from an older server. */
+  /** numbers the occurrence of the session's status. A sweep raises it by one
+   *  when it emits a changed status, a status a classified notification latched
+   *  since the last sweep, or an input, done or failed status after an OSC 7501
+   *  report since then created a record, changed one's state or kind, or
+   *  cleared one, and so changed which record the status came from, or its
+   *  state or kind, at that report. A report keeping a record's state and kind
+   *  raises it only by changing the status. It never falls for one id; 0,
+   *  absent on the wire, means nothing numbered yet. */
   readonly statusSeq?: number;
   /** the highest `statusSeq` any reader acknowledged through
    *  `PUT /api/sessions/{id}/seen`. Never falls for one id and never exceeds
@@ -110,9 +109,10 @@ export interface SessionInfo {
 export interface SessionStatus extends SessionInfo {
   /** true when the session is gone (closed or reaped); the consumer drops it. */
   readonly removed?: boolean;
-  /** the OSC 9;4 percentage: -1 when absent or unknown (no sequence seen, or a
-   *  state that carries none — clear/indeterminate), else 0-100. Paired with
-   *  `status` to render a determinate bar. */
+  /** the session's percentage: the OSC 7501 report's `progress` when it
+   *  carries one, else the OSC 9;4 percentage. -1 when absent or unknown (no
+   *  sequence seen, or a state that carries none — clear/indeterminate), else
+   *  0-100. Paired with `status` to render a determinate bar. */
   readonly progressValue?: number;
   /** the OSC 9 notification message, delivered to EVERY subscriber whether or
    *  not the server has a status classifier installed. A notification is an

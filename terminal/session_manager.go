@@ -92,7 +92,7 @@ type SessionInfo struct {
 	// so a UI can tell that a pin EXISTS (to offer the automatic name again)
 	// rather than only seeing its effect.
 	PinnedTitle string `json:"pinnedTitle"`
-	Status      string `json:"status"`
+	Status      string `json:"status"` // a Status* value, or any status WithStatusClassifier returned
 	// Activity is the session's SECONDARY activity state ("" when none), carried
 	// beside Status and never merged into it. See SessionActivity.
 	Activity string `json:"activity"`
@@ -118,9 +118,14 @@ type SessionInfo struct {
 	// ActivityCount is how many sources produced Activity: >= 1 whenever Activity
 	// is non-empty, 0 when it is empty or the host does not count.
 	ActivityCount int `json:"activityCount"`
-	// StatusSeq numbers the occurrence of the Status beside it: it rises by one
-	// each time the status changes or a fresh notification re-latches it, and
-	// never falls for one id. 0 (absent on the wire) means nothing numbered yet.
+	// StatusSeq numbers the occurrence of the session's status. A sweep raises it
+	// by one when it emits a changed status, a status a classified notification
+	// latched since the last sweep, or an input, done or failed status after an
+	// OSC 7501 report since then created a record, changed one's state or kind, or
+	// cleared one, and so changed which record the status came from, or its state
+	// or kind, at that report. A report keeping a record's state and kind raises
+	// it only by changing the status. It never falls for one id; 0, absent on the
+	// wire, means nothing numbered yet.
 	StatusSeq uint64 `json:"statusSeq,omitempty"`
 	// SeenSeq is the highest StatusSeq any reader acknowledged through
 	// PUT /api/sessions/{id}/seen. It never falls for one id and never exceeds
@@ -130,15 +135,18 @@ type SessionInfo struct {
 	ReportsActivity bool   `json:"reportsActivity"`
 }
 
-// Session status values. The manager derives every one of them from two inputs —
-// process liveness and OSC 9;4 progress — plus the needs-input/done latch a
-// consumer's classifier sets from an OSC 9 notification. Raw output activity is
-// deliberately NOT an input; computeStatus (events.go) states why.
+// Session status values. The manager derives them from process liveness and
+// the program's own report: OSC 7501 program status once the program sends
+// one, until a RIS; OSC 9;4 progress otherwise. Each value's comment names its
+// built-in protocol mapping; a consumer's classifier may latch any status
+// string, one of these or not, from an OSC 9 notification
+// (WithStatusClassifier). Raw output activity is deliberately NOT an input;
+// computeStatus (events.go) states why.
 const (
-	StatusWorking = "working" // OSC 9;4 progress reports active (state 1 or 3), and nothing else
-	StatusIdle    = "idle"    // at rest: no progress state and no latch (also the new-session default)
-	StatusInput   = "input"   // blocked awaiting user action (latched from a notification)
-	StatusDone    = "done"    // a turn completed (latched from a notification; cleared by any progress state but 4)
+	StatusWorking = "working" // OSC 7501 working, or OSC 9;4 progress active (state 1 or 3)
+	StatusIdle    = "idle"    // at rest: OSC 7501 idle or no record, or no progress state and no latch (also the new-session default)
+	StatusInput   = "input"   // blocked awaiting user action: OSC 7501 blocked, or latched from a notification
+	StatusDone    = "done"    // a turn completed: OSC 7501 done, or latched from a notification
 	StatusExited  = "exited"  // the process has exited
 	// StatusCrashed is a session whose process exited BADLY: a non-zero exit
 	// status, or a terminating signal it was not asked for. StatusExited is
@@ -147,12 +155,13 @@ const (
 	// reads as a failure. crashedExit owns the exact boundary and states why
 	// each case falls where it does.
 	StatusCrashed = "crashed"
-	// StatusFailed is OSC 9;4 progress state 2: the program reported an error
-	// state (with a percentage, or indeterminate when pr is omitted). Like every
-	// progress state it PERSISTS until the program changes it — it is a state,
-	// not an event, so no timeout and no output activity clears it.
+	// StatusFailed is OSC 7501 error, or OSC 9;4 progress state 2: the program
+	// reported an error state (with a percentage, or indeterminate when pr is
+	// omitted). It PERSISTS until the program changes it — it is a state, not
+	// an event, so no timeout and no output activity clears it.
 	StatusFailed = "failed"
-	// StatusWarning is OSC 9;4 progress state 4. The two sources that define
+	// StatusWarning is OSC 9;4 progress state 4; after an OSC 7501 report,
+	// OSC 9;4 does not set it again until the next RIS. The two sources that define
 	// these sequences disagree on state 4: iTerm2 calls it a warning at pr
 	// percent, ConEmu calls it paused. The engine follows iTerm2, because it
 	// advertises TERM_PROGRAM=iTerm.app — that identity is what makes a client
@@ -216,12 +225,13 @@ func WithManagerOriginPolicy(p *OriginPolicy) ManagerOption {
 }
 
 // WithStatusClassifier maps an OSC 9 notification message to a session status
-// (return ok=false to ignore a message). The consumer decides which of its
-// program's messages mean needs-input and which mean done; a server that sets
-// no classifier gets its status from OSC 9;4 progress and process liveness
-// only, with no needs-input or done latch. A classified input status latches
-// (persists while the process waits) until the turn resumes or a done message
-// clears it.
+// (ok=false ignores it), typically input or done, though any status it returns
+// latches as given. Without one, status comes from the program's OSC 7501 or
+// OSC 9;4 reports and process liveness only. A classified status latches
+// until the program supersedes it: while it has sent no OSC 7501 report since
+// the last RIS, an OSC 9;4 state 1, 2 or 3; otherwise an OSC 7501 report that
+// changes its status (vt.ProgramStatus.Seq rises), never one that repeats it.
+// A newer classified notification replaces it.
 func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
 	return func(c *managerConfig) { c.classifier = fn }
 }
@@ -1017,9 +1027,9 @@ func (m *SessionManager) StatusLatch(id SessionID) (status string, seq uint64, o
 // want AND was set by notification sequence seq. It refuses (false) an unknown
 // session, an empty or different latch, a want that is not StatusInput or
 // StatusDone, and a latch a newer notification has re-set since seq. It never
-// touches the OSC 9;4 progress state: the next sweep recomputes the status from
-// progress alone (idle, or warning/failed/working if the program reports one)
-// and emits it on the status stream.
+// touches the program's own reports: the next sweep recomputes the status from
+// OSC 7501 or OSC 9;4 alone (idle, or whatever the program reports) and emits
+// it on the status stream.
 func (m *SessionManager) WithdrawStatusLatch(id SessionID, want string, seq uint64) bool {
 	if want != StatusInput && want != StatusDone {
 		return false

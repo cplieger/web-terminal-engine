@@ -9,8 +9,10 @@
 // Supported OSC sequences: the window and icon titles (OSC 0, 1 and 2), the
 // palette and special colors (OSC 4, 5, 104 and 105), hyperlinks (OSC 8),
 // desktop notifications and ConEmu progress (OSC 9), the dynamic colors
-// answered from the configured theme (OSC 10 to 19 and 110 to 119) and the
-// clipboard (OSC 52). Other OSC numbers, such as 7, 133 and 777, are read and
+// answered from the configured theme (OSC 10 to 19 and 110 to 119), the
+// clipboard (OSC 52) and program status (OSC 7501, [Screen.ProgramStatus]).
+// Of OSC 133, only the prompt-start mark A acts: it ends the unfinished
+// OSC 7501 records. Other OSC numbers, such as 7 and 777, are read and
 // ignored. The OSC 52 read-back and the DECRQCRA checksum answer only when
 // [Screen.AllowScreenReport] is on, because both write into the program's
 // input. The features left out on purpose are listed in docs/non-goals.md.
@@ -33,6 +35,9 @@ type Screen struct {
 	paletteOverride map[uint8]int32
 	dynColors       map[int]int32
 	specialColors   map[int]int32
+	// program belongs to the terminal, not to a screen buffer: of the resets,
+	// only RIS reaches it.
+	program         programStatus
 	decModeState    map[int]bool
 	savedModeValues map[int]bool
 	Title           string
@@ -94,9 +99,8 @@ type Screen struct {
 	Width            int
 	// Progress holds the last ConEmu OSC 9;4 progress state: -1 when none has
 	// been seen, else the state (0 off, 1 value, 2 error, 3 indeterminate,
-	// 4 paused). The status layer maps an active state (1 or 3) to working.
-	// Set only by an OSC 9;4 sequence; a program that never emits one leaves
-	// it at -1.
+	// 4 paused). Set only by an OSC 9;4 sequence; a program that never emits
+	// one leaves it at -1.
 	Progress int
 	// ProgressValue holds the percentage carried by the last OSC 9;4 progress
 	// sequence: -1 when absent or unknown (no sequence seen yet, a state that
@@ -106,9 +110,10 @@ type Screen struct {
 	// state 2 may carry it. -1 is deliberately distinct from 0: a session that
 	// has reported no percentage is not a session at 0%.
 	ProgressValue int
-	// NotificationSeq increments each time a new OSC 9 notification is captured,
+	// NotificationSeq rises each time a new OSC 9 notification is captured,
 	// so a reader (the status layer) detects a fresh notification even when the
-	// message text repeats. Starts at 0 (no notification seen).
+	// message text repeats. Starts at 0 (no notification seen). It shares its
+	// counter with ProgramReportSeq.
 	NotificationSeq uint64
 	// minContrast is the minimum WCAG contrast ratio enforced between a run's
 	// text and its background (contrast.go). 1 disables the floor and is the

@@ -339,10 +339,10 @@ function anyModifier(ev: KeyboardEvent): boolean {
 }
 
 /**
- * The kitty "unicode-key-code": the UNSHIFTED (lower-case / base-layout)
- * codepoint of the key. Letters and digits are read from ev.code (the physical
- * key), so a composed Alt/Option character on macOS still maps to its base key;
- * other single-character keys fall back to the case-folded ev.key.
+ * The kitty "unicode-key-code", read as the UNSHIFTED US-layout codepoint of
+ * the physical key: letters, digits and KITTY_CODE_BASE's punctuation come from
+ * ev.code, so a composed Option character or a shifted symbol maps to its base
+ * key; any other single-character key falls back to the case-folded ev.key.
  */
 function kittyKeyCodepoint(ev: KeyboardEvent): number {
   const code = ev.code;
@@ -431,6 +431,12 @@ function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
     if (ev.metaKey && !ev.ctrlKey && !ev.altKey) {
       return { kind: "ignore" };
     }
+    // A desktop AltGr character arrives with ctrlKey and altKey clear, so it stays
+    // text: on Windows, Chromium and Firefox swap Ctrl+Alt for AltGraph whenever
+    // the chord types a character (https://chromestatus.com/feature/5059438092222464,
+    // https://searchfox.org/mozilla-central/source/widget/windows/KeyboardLayout.cpp).
+    // AltGraph must not exempt a key here: Firefox sets it on every macOS Option
+    // chord (widget/cocoa/nsCocoaUtils.mm), and Ctrl+Option+a is 97;7u.
     if (ev.ctrlKey || ev.altKey || ev.metaKey) {
       const cp = kittyKeyCodepoint(ev);
       if (cp > 0) {
@@ -479,15 +485,6 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
       }
     }
   }
-
-  // Browser-reserved meta combos (Cmd+R, Cmd+T, Cmd+Q, Cmd+W on Mac;
-  // Ctrl+R, Ctrl+T, Ctrl+W with no Shift on others). Let the browser
-  // handle them. Heuristic: only take Ctrl+letter when Shift is NOT
-  // held AND the letter is one of the ones xterm consumes (a-z),
-  // skipping the few that browsers commonly reserve.
-  // (Ctrl+R, Ctrl+T and Ctrl+W still go to the PTY: readline binds them to
-  // reverse search, transpose and word rubout, and full-screen programs bind
-  // them too. On macOS, Cmd reaches the browser's own combos.)
 
   // Shift+PageUp / Shift+PageDown — local scrollback navigation
   // (matches xterm.js KeyboardResultType.PAGE_UP/PAGE_DOWN).
@@ -590,7 +587,9 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
     return { kind: "ignore" }; // let `input` event handle plain space
   }
 
-  // Single printable character with modifiers.
+  // Single printable character with modifiers. Neither branch takes Meta, so
+  // the browser keeps Cmd+R/T/W/C/V; Ctrl+R/T/W go to the PTY, where readline
+  // binds them.
   if (ev.key.length === 1) {
     const ch = ev.key;
 

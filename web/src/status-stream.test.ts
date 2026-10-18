@@ -267,10 +267,12 @@ describe("connectStatusStream", () => {
       // A server one release ahead adds a status this client has never heard of.
       // The stream is parsed, not validated: dropping the frame would lose the
       // session's title and removal signal too, so the value is forwarded as-is
-      // and the consumer falls back on its own default rendering.
+      // and the consumer falls back on its own default rendering. The typed
+      // binding fails typecheck if SessionInfo.status closes to KnownStatus.
+      const unknownStatus: SessionStatus["status"] = "throttled";
       const raw = JSON.stringify({
         id: "abc123",
-        status: "throttled",
+        status: unknownStatus,
         title: "agent",
         createdAt: "2026-07-01T12:00:00Z",
         progressValue: 40,
@@ -283,7 +285,7 @@ describe("connectStatusStream", () => {
 
       expect(onStatus).toHaveBeenCalledTimes(1);
       const got = onStatus.mock.calls[0]![0] as SessionStatus;
-      expect(got.status).toBe("throttled");
+      expect(got.status).toBe(unknownStatus);
       expect(got.id).toBe("abc123");
       expect(got.progressValue).toBe(40);
     });

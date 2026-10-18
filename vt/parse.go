@@ -409,6 +409,7 @@ func (s *Screen) dispatchEsc(b byte) {
 		// xterm, so this lives in the RIS handler rather than softReset.
 		s.titleSetHex = false
 		s.titleQueryHex = false
+		s.program.apply(&programChange{event: programEventReset})
 	}
 }
 

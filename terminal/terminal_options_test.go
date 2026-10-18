@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
@@ -370,9 +371,10 @@ func (h commandCaptureHandler) Handle(_ context.Context, r slog.Record) error {
 func (h commandCaptureHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h commandCaptureHandler) WithGroup(string) slog.Handler      { return h }
 
-// startAndCollectRecords starts a real short-lived process under a capturing
-// logger built from the given options and returns every record emitted through
-// process start.
+// startAndCollectRecords runs a real short-lived process under a capturing
+// logger built from the given options and returns every record the session
+// emitted. It waits for the teardown, because the process monitor logs the
+// exit concurrently with the caller.
 func startAndCollectRecords(t *testing.T, opts ...Option) []slog.Record {
 	t.Helper()
 	var records []slog.Record
@@ -382,7 +384,11 @@ func startAndCollectRecords(t *testing.T, opts ...Option) []slog.Record {
 	if err := h.ensureStarted(24, 80); err != nil {
 		t.Fatalf("ensureStarted: %v", err)
 	}
-	defer h.Close()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	if err := h.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
 	return records
 }
 

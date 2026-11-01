@@ -38,7 +38,7 @@ REGIONAL_INDICATORS = set(range(0x1F1E6, 0x1F1FF + 1))
 
 def fetch(url: str) -> str:
     with urllib.request.urlopen(url) as resp:
-        return resp.read().decode("utf-8")
+        return resp.read().decode()
 
 
 def parse_props(text: str, wanted: set[str]) -> set[int]:
@@ -125,12 +125,12 @@ def main() -> None:
         + END
     )
 
-    src = WIDTH_GO.read_text(encoding="utf-8")
+    src = WIDTH_GO.read_text()
     pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END), re.DOTALL)
     if not pattern.search(src):
         sys.exit(f"markers not found in {WIDTH_GO}")
-    WIDTH_GO.write_text(pattern.sub(lambda _: region, src, count=1), encoding="utf-8")
-    VERSION_GO.write_text(version_go, encoding="utf-8")
+    WIDTH_GO.write_text(pattern.sub(lambda _: region, src, count=1))
+    VERSION_GO.write_text(version_go)
     print(
         f"wrote {WIDTH_GO.name}: wideRanges={len(wide)} intervals, "
         f"emojiRanges={len(emoji)} intervals (UCD {UNICODE_VERSION})"

@@ -7,7 +7,7 @@
 // (widget/cocoa/nsCocoaUtils.mm). Kitty spec, "Disambiguate escape codes": text
 // keys stay text, ctrl and alt chords move to CSI u.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { mapKeyboardEvent, type KeyboardModes, type KeyboardResult } from "./keyboard.js";
 
 const ESC = "\x1b";
@@ -92,6 +92,7 @@ describe("a Ctrl+Alt chord stays CSI u, with or without AltGraph", () => {
 describe("macOS Option stays Alt, with or without Firefox's AltGraph", () => {
   for (const modifierAltGraph of [false, true]) {
     it(`Option+a types "\u00E5"; AltGraph ${String(modifierAltGraph)}`, () => {
+      vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh)" });
       const init = { key: "\u00E5", code: "KeyA", altKey: true, modifierAltGraph };
       expect(map(init, DISAMBIGUATE)).toEqual({ kind: "send", bytes: `${ESC}[97;3u` });
       expect(map(init, LEGACY)).toEqual({ kind: "send", bytes: `${ESC}\u00E5` });

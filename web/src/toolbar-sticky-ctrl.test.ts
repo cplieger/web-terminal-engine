@@ -101,4 +101,32 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
 
     ctrl.dispose();
   });
+
+  it("encodes one astral-plane character as CSI-u under kitty disambiguate", () => {
+    modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
+    const fixture = makeToolbar();
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
+
+    ctrl.setCtrlArmed(true);
+    expect(ctrl.applyStickyCtrl("\u{1E922}")).toBe("\x1b[125218;5u");
+    expect(ctrl.isCtrlArmed()).toBe(false);
+
+    ctrl.setCtrlArmed(true);
+    expect(ctrl.applyStickyCtrl("\u{1E922}a")).toBe("\u{1E922}a");
+    ctrl.setCtrlArmed(true);
+    expect(ctrl.applyStickyCtrl("ab")).toBe("ab");
+
+    ctrl.dispose();
+  });
+
+  it("passes one astral-plane character through in legacy mode, which has no Ctrl byte for it", () => {
+    const fixture = makeToolbar();
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
+    ctrl.setCtrlArmed(true);
+
+    expect(ctrl.applyStickyCtrl("\u{1E922}")).toBe("\u{1E922}");
+    expect(ctrl.isCtrlArmed()).toBe(false);
+
+    ctrl.dispose();
+  });
 });

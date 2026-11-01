@@ -1,13 +1,9 @@
 // The kitty protocol's "unicode-key-code" rule: the codepoint of the key's
-// UNSHIFTED (base-layout) value, so Ctrl+Shift+A and Ctrl+A both report 'a' and
-// a composed Alt/Option character reports the physical key it came from
-// (https://sw.kovidgoyal.net/kitty/keyboard-protocol/, "Key codes"). Modifier
-// digit = 1 + bitmask, 1:Shift 2:Alt 4:Ctrl 8:Meta. Beyond keyboard.test.ts's
-// shifted symbols and lower-case letters: the UPPER-case range, the empty-string
-// input (the toolbar's sticky-Ctrl path length-checks before calling), the
-// ev.code-derived paths, and the ev.key fallback for a key with no code.
+// unshifted value (https://sw.kovidgoyal.net/kitty/keyboard-protocol/#key-codes),
+// so on US QWERTY Ctrl+Shift+A and Ctrl+A both report 'a'. Modifier digit =
+// 1 + bitmask, 1:Shift 2:Alt 4:Ctrl 8:Meta.
 
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, vi } from "vitest";
 import { kittyCtrlCharSeq, mapKeyboardEvent, type KeyboardResult } from "./keyboard.js";
 import { createModeState, POWER_ON_MODES } from "./modes.js";
 
@@ -47,26 +43,28 @@ describe("kittyCtrlCharSeq: the upper-case letter range", () => {
   });
 });
 
-describe("kitty unicode-key-code: derived from the physical key", () => {
-  it("reports the base key of a composed Alt character, not the composed glyph", () => {
-    // macOS Option+e then e produces "é" with ev.code still "KeyE". The app must
-    // see 'e' (101), which is what makes Alt combos usable on a composing layout.
+describe("kitty unicode-key-code: the unshifted key", () => {
+  it("reports the base key of a composed Option character, not the composed glyph", () => {
+    // A layout where Option+E types "é" directly reports KeyE: the app sees 'e'
+    // (101), which is what makes Alt combos usable on a composing layout.
+    vi.stubGlobal("navigator", { platform: "MacIntel", userAgent: "Mozilla/5.0 (Macintosh)" });
     expect(underKitty({ key: "é", code: "KeyE", altKey: true })).toEqual({
       kind: "send",
       bytes: `${ESC}[101;3u`,
     });
   });
 
-  it("reports a punctuation key's unshifted codepoint from its ev.code", () => {
-    // "Minus" and "Period" are read from the physical-key table, not from the
-    // produced character, so a shifted or remapped layout still reports the base.
-    expect(underKitty({ key: "-", code: "Minus", ctrlKey: true })).toEqual({
+  it("reports an unshifted punctuation key's own character, not its US position", () => {
+    // Dvorak's Quote key types "-" and its BracketLeft key types "/": with no
+    // Shift, ev.key is the active layout's unshifted character, which the spec
+    // names as the key code.
+    expect(underKitty({ key: "-", code: "Quote", ctrlKey: true })).toEqual({
       kind: "send",
       bytes: `${ESC}[45;5u`,
     });
-    expect(underKitty({ key: ".", code: "Period", ctrlKey: true })).toEqual({
+    expect(underKitty({ key: "/", code: "BracketLeft", ctrlKey: true })).toEqual({
       kind: "send",
-      bytes: `${ESC}[46;5u`,
+      bytes: `${ESC}[47;5u`,
     });
   });
 

@@ -47,9 +47,31 @@ The `keyboard` namespace turns a `KeyboardEvent` into the bytes a PTY expects. `
 
 It honors application cursor keys, application keypad, bracketed paste, and the kitty keyboard protocol's disambiguate flag. When an application turns that protocol on, keys that type nothing arrive as kitty escape codes: Escape, the Ctrl and Alt combinations, function keys and the keypad's navigation keys. A key that types a character, an AltGr character included, still arrives as text. [Unsupported VT features](non-goals.md#the-kitty-keyboard-protocol) lists which kitty flags are honored.
 
+A Ctrl or Alt combination reports the character the key types on the user's layout without Shift, as the protocol's key codes require. Ctrl+A on AZERTY arrives as Ctrl+A and Ctrl+C on Dvorak as Ctrl+C, as in legacy mode. The browser reports only what a key types under the modifiers held, so some combinations report where the key sits on a US keyboard instead:
+
+- With Shift held on a layout other than US QWERTY. Dvorak Ctrl+Shift+C arrives as Ctrl+Shift+I, and AZERTY Ctrl+Shift+A as Ctrl+Shift+Q.
+- With an Alt that composes a character: Option on macOS and iOS, Alt on Android, and AltGr. AZERTY Option+A arrives as Alt+Q. Android Alt composes on only some keys and the page cannot tell which, so on Android every Alt chord on a non-US layout reports the US position. Android Dvorak Alt+C arrives as Alt+I, while Ctrl+C without Alt arrives as Ctrl+C. An Android tablet in Chrome's desktop mode reports itself as Linux, so the engine treats Alt on any Linux browser with a touchscreen the same way, a touchscreen Linux laptop included.
+- On a letter key that types a non-Latin letter or mark, which reports the key's Latin letter, so Russian Ctrl+С arrives as Ctrl+C. Programs bind the Latin letter, and the protocol's field for it is the report-alternate-keys flag, which the engine does not honor.
+
+A non-Latin letter on another key arrives as itself, so Russian Ctrl+Ю reports `ю`. Punctuation on a letter key reports itself, so Greek Ctrl+Q arrives as Ctrl+;. A key that types two characters, such as the lam-alef ligature on Arabic 101's B key, sends nothing under Ctrl or Alt.
+
+Without Shift or a composing Alt, two keys report the same code when they type the same lowercased character, such as `IntlBackslash` and `Backslash` on layouts where both type `\`. A key that reports its Latin letter or its US position can also share a code with a key that types that character. A layout that puts Cyrillic `с` on the C key and Latin `c` on the X key sends Ctrl+C from both.
+
+Under Shift or a composing Alt, the keys outside the US letter, digit and punctuation keys, such as Space, `IntlBackslash`, `IntlRo` and `IntlYen`, report the character they type, lowercased. Option+Space reports the no-break space, Option+¥ on a Mac JIS keyboard reports `\`, and Ctrl+Shift on such a key typing `Ä` reports `ä`. A character whose lowercase is two characters reports itself, so such a key typing `İ` reports `İ`.
+
+On Russian and several other layouts Shift+`IntlBackslash` types `/`, so Ctrl+Shift on `IntlBackslash` and on `Slash` both arrive as Ctrl+Shift+/, a known limitation.
+
+A Windows layout that defines a printable character on a key's Ctrl level reports that character. Persian, Khmer, Sinhala Wij 9 and Thai Kedmanee do so on some digit and punctuation keys. A key level, base, Shift or Ctrl, that types a non-printable character reports the key's US position in a Ctrl or Alt chord. Hebrew's U+200E and U+200F on the two bracket keys' Ctrl level are such characters. Space types U+200B on its Lao Ctrl level and its Khmer base level, and U+200C on its Persian Shift level, so Space reports 32. On a key outside the US letter, digit, punctuation and Space keys, such a chord sends nothing.
+
+Caps Lock changes no code where the capital it types lowercases back to the same letter. Where Caps Lock makes a key type another character, the code follows the character the key types with Caps Lock on:
+
+- On Windows layouts whose Caps Lock acts as Shift on digit and punctuation keys, such a key reports its shifted character. French AZERTY Ctrl+& reports `1`, and Ctrl+ù reports `%`.
+- Hebrew Caps Lock makes some punctuation keys type Latin letters, which report as those letters: Ctrl on the `/` key reports `q`.
+- On Turkish and Azerbaijani layouts, the dotted and dotless i keys change. Caps Lock with `ı` types `I`, which lowercases to `i`, and with `i` types `İ`, which has no one-character lowercase and reports itself.
+
 ## Mobile key toolbar
 
-The `toolbar` namespace is the engine's one DOM widget. `bindMobileToolbar({ toolbar, send, modes, ids? })` wires an existing container's Ctrl, arrow, Tab, Enter and Esc buttons to a send function. Ctrl is sticky. The arrows read the mode state, so a toolbar key sends the same bytes as the physical key. It returns a `MobileToolbarController`, and `DEFAULT_TOOLBAR_IDS` names the default button ids.
+The `toolbar` namespace is the engine's one DOM widget. `bindMobileToolbar({ toolbar, send, modes, ids? })` wires an existing container's Ctrl, arrow, Tab, Enter and Esc buttons to a send function. Ctrl is sticky. The arrows read the mode state, so a toolbar arrow sends the same bytes as the physical key. It returns a `MobileToolbarController`, and `DEFAULT_TOOLBAR_IDS` names the default button ids.
 
 ## Mouse
 

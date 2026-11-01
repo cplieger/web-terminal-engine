@@ -36,7 +36,8 @@
     "vitest": "5.0.5"
   },
   "overrides": {
-    "qs": "^6.15.2"
+    "qs": "^6.15.2",
+    "minimatch": "^11.0.1"
   },
   "description": "Browser terminal engine: VT500 screen buffer, DOM renderer, and binary wire protocol",
   "license": "MPL-2.0",

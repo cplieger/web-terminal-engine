@@ -33,15 +33,11 @@ func hasDirective(header, want string) bool {
 }
 
 // shutdownManager tears a manager down and fails the test if any teardown did
-// not finish inside the budget. Most callers use it from t.Cleanup, which is why
-// it builds its own context instead of taking t.Context(): t.Context is already
-// cancelled by the time cleanups run, so a wait against it would report an
-// expiry on every single test.
-//
-// The budget is deliberately generous against the real ceiling (cmd.WaitDelay
-// bounds the child reap at 5s, and the containment and marker ladders each spend
-// up to three containGrace windows), so a failure here means teardown genuinely
-// hung rather than that the runner was loaded.
+// not finish inside the budget. It builds its own context because t.Context is
+// already cancelled when cleanups run, so a wait against it would expire on
+// every test. The budget is generous against cmd.WaitDelay's 5s and the ladder
+// bound sessionReap.teardownOnce states, so a failure means teardown hung rather
+// than that the runner was loaded.
 func shutdownManager(t *testing.T, m *SessionManager) {
 	t.Helper()
 	const budget = 20 * time.Second
@@ -278,12 +274,12 @@ func TestSessionManager_ConcurrentCreateCloseList(t *testing.T) {
 
 // TestSessionManagerSetSessionTitle verifies the client-fallback title: on a
 // known id SetSessionTitle stores the fallback so List() reports it while the
-// OSC title is empty (a fresh session's handler.Title() is empty), an OSC title
-// then wins over the fallback (OSC-first precedence), and an unknown id returns
-// false.
+// OSC title is empty (a fresh session has none), a swept OSC title then wins
+// over the fallback (OSC-first precedence), and an unknown id returns false.
 func TestSessionManagerSetSessionTitle(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep() // List serves the OSC title the last sweep emitted
 	id, err := m.Create()
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -329,6 +325,7 @@ func TestSessionManagerSetSessionTitle(t *testing.T) {
 	// OSC-first: an OSC window title (set via OSC 2, which needs no PTY reply)
 	// wins over the stored client fallback.
 	handlerOf(t, m, id).handlePTYData([]byte("\x1b]2;osc label\x07"))
+	_ = m.diffStatuses()
 	if got := titleOf(); got != "osc label" {
 		t.Fatalf("List Title with OSC title set = %q, want %q (OSC wins)", got, "osc label")
 	}

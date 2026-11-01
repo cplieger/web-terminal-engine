@@ -251,30 +251,12 @@ func leadingBlankCells(row []Cell) int {
 }
 
 // hardWrapIndent reports the continuation indent when row cur continues row
-// prev as ONE logical line the APPLICATION wrapped itself, or -1 when cur
-// starts its own line.
-//
-// An Ink-style TUI (kiro-cli, the client this engine is built for, is one) lays
-// its own text out: it breaks at the terminal width, re-emits its indent on
-// every continuation, and writes each resulting row as a separate line. The
-// terminal therefore never autowraps and the soft-wrap chain never fires, so a
-// URL such output splits reaches the scanner as unrelated per-row fragments —
-// only the first row matches, with an href truncated at the break, and the rows
-// after it get no link at all. Recognise that shape, conservatively:
-//
-//   - prev must be FULL (a glyph in its last column), so the break happened at
-//     the right margin rather than because the line ended there;
-//   - both rows must open with the same non-empty blank run. Equality is what
-//     makes it a continuation indent rather than a coincidence, and requiring it
-//     non-empty keeps two ordinary full-width lines (a table, `ls` output) from
-//     joining, since an unindented pair is indistinguishable from them;
-//   - cur must carry a glyph after that indent (implied: the blank run is
-//     shorter than the row).
-//
-// A pair that passes still changes nothing unless a URL match actually crosses
-// the boundary, so a false positive costs a wrong href only where a URL ends
-// exactly at the right margin above an equally-indented line — which today
-// already yields an href truncated at that same column.
+// prev as one logical line the application wrapped itself (it broke at the
+// width and re-emitted its indent, so no soft-wrap chain links the rows), or -1
+// when cur starts its own line. prev must be full to its last column, and both
+// rows must open with the same non-empty blank run followed by a glyph: an
+// unindented full-width pair is indistinguishable from a table or `ls` output.
+// A pair that passes changes nothing unless a URL match crosses the boundary.
 func hardWrapIndent(prev, cur []Cell) int {
 	if len(prev) == 0 || len(prev) != len(cur) {
 		return -1

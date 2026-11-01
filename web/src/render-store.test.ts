@@ -1,8 +1,7 @@
-// Brick-3 renderer properties (store-backed, absolute-index DOM rows). These
-// pin what the rewrite changed versus the old live-zone model: rows carry
-// data-abs, the window is fixed-height (no trailing-blank trim, the bug-3
-// oscillation fix), history + window render in one absolute-ordered list, and
-// re-delivery never duplicates a row.
+// Store-backed renderer properties (absolute-index DOM rows): rows carry
+// data-abs, the window is fixed-height (no trailing-blank trim, which made the
+// row count oscillate), history + window render in one absolute-ordered list,
+// and re-delivery never duplicates a row.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Renderer } from "./render.js";
@@ -125,7 +124,7 @@ describe("render (store-backed, brick 3)", () => {
     expect(outputEl.children[2]?.firstElementChild).toBe(span2);
   });
 
-  it("updates a row in place when its content changes (Ink redraw)", async () => {
+  it("updates a row in place when its content changes (a program redraw)", async () => {
     render.handleScreen(screenMsg(0, [row("spin -")], [0]));
     await tick();
     const firstEl = outputEl.children[0];
@@ -214,9 +213,9 @@ describe("render (store-backed, brick 3)", () => {
   });
 
   it("renders a burst larger than the per-frame budget across multiple frames", async () => {
-    // A /chat session restore (or `cat bigfile`) dumps thousands of lines in
-    // one wire frame. The store ingests them at once; the renderer must drain
-    // them in budgeted batches without losing or duplicating any.
+    // A session's transcript replay (or `cat bigfile`) dumps thousands of
+    // lines in one wire frame. The store ingests them at once; the renderer
+    // must drain them in budgeted batches without losing or duplicating any.
     const N = 700; // > MAX_ROWS_PER_FRAME (300)
     const texts = Array.from({ length: N }, (_, i) => `burst ${i}`);
     render.handleScroll(scrollMsg(0, texts));
@@ -277,11 +276,11 @@ describe("render: viewport-first drain (backlog never starves the window)", () =
 
   it("builds every live-window row in the first frame and fills the backlog newest-first", () => {
     // The starving order: a large history backlog is queued BEFORE the window
-    // rows (kiro-cli's post-resize transcript reprint, a resume replay racing
-    // the screen frame, sustained `cat`). Insertion-order draining built the
-    // oldest 300 history rows first and left the visible window — bar the
-    // force-built cursor row — stale for seconds on a slow device, the
-    // "history churns through the screen on every phone resize" symptom.
+    // rows (an inline TUI's post-resize transcript reprint, a resume replay
+    // racing the screen frame, sustained `cat`). Insertion-order draining built
+    // the oldest 300 history rows first and left the visible window — bar the
+    // force-built cursor row — stale for seconds on a slow device, the "history
+    // churns through the screen on every phone resize" symptom.
     const N = 500; // history backlog, abs 0..499
     render.handleScroll(
       scrollMsg(

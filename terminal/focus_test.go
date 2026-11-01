@@ -90,7 +90,7 @@ func TestFocusReport_derivation(t *testing.T) {
 
 	t.Run("keepUnfocused answers focus-out even for a focused client", func(t *testing.T) {
 		// The consumer's declaration is one clause of the derivation, and it wins:
-		// a focus-gated notifier (kiro-cli's OSC 9) keeps emitting.
+		// a notifier that gates its OSC 9 on focus keeps emitting.
 		h := reportingHandler(t, WithKeepUnfocused(true))
 		state := h.registry.Add(&websocket.Conn{})
 		h.registry.SetClientFocus(state, true)

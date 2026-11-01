@@ -2,7 +2,8 @@ package vt
 
 // VT500 flat state-transition table: [14 states][256 bytes] → packed action+nextState.
 // Based on Paul Williams' canonical parser (vt100.net/emu/dec_ansi_parser)
-// with modern extensions: colon=subparam, C1 suppressed in Ground under UTF-8.
+// with modern extensions: colon=subparam, C1 suppressed in Ground and string
+// payloads under UTF-8.
 
 // action enumerates parser actions.
 type action uint8
@@ -79,7 +80,6 @@ func init() {
 	buildOscString()
 	buildSosPmApcString()
 
-	// Apply anywhere transitions to all states EXCEPT Ground for C1 (0x80-0x9F)
 	applyAnywhere()
 
 	// Verify completeness
@@ -327,42 +327,32 @@ func buildDcsIgnore() {
 	setRange(s, 0x80, 0xFF, mkT(actNone, s))
 }
 
+// What ends each string state is pinned by TestStringTermination; CAN, SUB
+// and ESC come from applyAnywhere.
+
 func buildOscString() {
 	s := stOscString
-	// Most bytes: put
 	setRange(s, 0x00, 0x06, mkT(actOscPut, s))
-	// BEL (0x07): terminate OSC → Ground (via exit action osc_end)
 	stateTable[s][0x07] = mkT(actNone, stGround)
 	setRange(s, 0x08, 0x17, mkT(actOscPut, s))
 	stateTable[s][0x19] = mkT(actOscPut, s)
 	setRange(s, 0x1C, 0x1F, mkT(actOscPut, s))
-	// 0x18 (CAN): → Ground
-	stateTable[s][0x18] = mkT(actNone, stGround)
-	// 0x1A (SUB): → Ground
-	stateTable[s][0x1A] = mkT(actNone, stGround)
-	// 0x1B (ESC): → Escape (exit action fires osc_end)
-	stateTable[s][0x1B] = mkT(actNone, stEscape)
-	// Printable
 	setRange(s, 0x20, 0x7F, mkT(actOscPut, s))
-	// High bytes: put (UTF-8 content in OSC payloads)
 	setRange(s, 0x80, 0xFF, mkT(actOscPut, s))
 }
 
 func buildSosPmApcString() {
 	s := stSosPmApcString
-	// Consume everything silently until ST (ESC \) or CAN/SUB
 	setRange(s, 0x00, 0x17, mkT(actNone, s))
 	stateTable[s][0x19] = mkT(actNone, s)
 	setRange(s, 0x1C, 0x1F, mkT(actNone, s))
-	stateTable[s][0x18] = mkT(actNone, stGround)
-	stateTable[s][0x1A] = mkT(actNone, stGround)
-	stateTable[s][0x1B] = mkT(actNone, stEscape)
 	setRange(s, 0x20, 0x7F, mkT(actNone, s))
 	setRange(s, 0x80, 0xFF, mkT(actNone, s))
 }
 
 // applyAnywhere applies the "anywhere" transitions for CAN, SUB, ESC, and C1.
-// C1 (0x80-0x9F) anywhere transitions are NOT applied to Ground (UTF-8 mode).
+// C1 (0x80-0x9F) anywhere transitions are NOT applied to Ground or the string
+// states (UTF-8 mode).
 func applyAnywhere() {
 	for si := range numStates {
 		s := si
@@ -379,9 +369,12 @@ func applyAnywhere() {
 			continue // suppress C1 anywhere in Ground (UTF-8 mode)
 		}
 
-		// C1 controls in non-Ground states
-		// 0x80-0x8F: execute + Ground
-		if s != stDcsPassthrough && s != stOscString && s != stSosPmApcString {
+		// C1 controls in non-Ground states. The string states keep their own
+		// 0x80-0xFF rows, 8-bit ST included: a raw C1 byte there is a UTF-8
+		// continuation byte ("Ü" is C3 9C). Ghostty's parse_table.zig does the
+		// same for OSC and DCS.
+		if s != stDcsPassthrough && s != stDcsIgnore && s != stOscString && s != stSosPmApcString {
+			// 0x80-0x8F: execute + Ground
 			setRange(s, 0x80, 0x8F, mkT(actExecute, stGround))
 			// 0x90 (DCS): → DcsEntry
 			stateTable[s][0x90] = mkT(actNone, stDcsEntry)
@@ -403,19 +396,6 @@ func applyAnywhere() {
 			stateTable[s][0x9E] = mkT(actNone, stSosPmApcString)
 			// 0x9F (APC): → SosPmApcString
 			stateTable[s][0x9F] = mkT(actNone, stSosPmApcString)
-		}
-
-		// For DcsPassthrough: 0x9C (ST) causes unhook (exit action) + Ground
-		if s == stDcsPassthrough {
-			stateTable[s][0x9C] = mkT(actNone, stGround)
-		}
-		// For OscString: 0x9C (ST) causes osc_end (exit action) + Ground
-		if s == stOscString {
-			stateTable[s][0x9C] = mkT(actNone, stGround)
-		}
-		// For SosPmApcString: 0x9C (ST) → Ground
-		if s == stSosPmApcString {
-			stateTable[s][0x9C] = mkT(actNone, stGround)
 		}
 	}
 }

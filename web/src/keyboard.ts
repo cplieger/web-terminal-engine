@@ -1,9 +1,11 @@
 // Keyboard event → terminal byte sequence mapping, mirroring xterm.js's
-// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline, Ink
-// and the host application get the keys they expect. Modifier digit per the
+// evaluateKeyboardEvent (src/common/input/Keyboard.ts) so vim, readline and
+// full-screen programs get the keys they expect. Modifier digit per the
 // xterm/VT520 convention: 1=Shift, 2=Alt, 4=Ctrl, 8=Meta, summed then +1 for
 // CSI 1;{n}{letter}. DECCKM and DECKPAM come from the injected mode state,
 // which the server's modes frame keeps current.
+
+import { isOneCodePoint } from "./code-point.js";
 
 /** Result of mapping a keyboard event. */
 export type KeyboardResult =
@@ -162,9 +164,9 @@ const KEYPAD_SS3: Record<string, string | undefined> = {
 
 // -- Kitty keyboard protocol (progressive enhancement) ----------------------
 // Under an active kitty flag, keys that do NOT produce text are encoded per the
-// kitty protocol so an app that enabled it (Codex via crossterm) gets
-// unambiguous key events. Only the disambiguate flag (0x1) is honored; the
-// server masks off 0x2/0x4/0x8/0x10, so the CSI ?u query reports only 0x1.
+// kitty protocol so an app that enabled it gets unambiguous key events. Only
+// the disambiguate flag (0x1) is honored; the server masks off
+// 0x2/0x4/0x8/0x10, so the CSI ?u query reports only 0x1.
 // Text-producing keys still flow through the hidden textarea as text (this
 // encoder returns "ignore" for them), per the spec and the IME model.
 
@@ -224,11 +226,8 @@ const KITTY_FN_HIGH: Record<string, number | undefined> = {
   F24: 57387,
 };
 
-// US-layout base (unshifted) codepoints for the non-alphanumeric physical keys,
-// keyed by ev.code. Used so a ctrl/alt+shift+symbol event reports the UNSHIFTED
-// key code the spec mandates (e.g. Ctrl+Shift+; is CSI 59;6u using ';'=59, not
-// ':'=58). Letters/digits are handled separately from ev.code; other keys fall
-// back to the case-folded ev.key.
+// US-layout unshifted codepoints of the punctuation keys by ev.code, for the
+// chords kittyKeyCodepoint reads by position: Ctrl+Shift+; is 59;6u, not 58;6u.
 const KITTY_CODE_BASE: Record<string, number | undefined> = {
   Semicolon: 59, // ;
   Equal: 61, // =
@@ -243,12 +242,9 @@ const KITTY_CODE_BASE: Record<string, number | undefined> = {
   Quote: 39, // '
 };
 
-// US-layout shifted character -> unshifted base codepoint, for input paths
-// that only have the produced CHARACTER (the mobile toolbar's sticky-Ctrl),
-// not a KeyboardEvent with ev.code. The character-level twin of
-// KITTY_CODE_BASE: Ctrl+':' must encode as CSI 59;6u (unshifted ';' + the
-// shift modifier), matching what the physical-keyboard path derives from
-// ev.code — not 58;5u from the shifted glyph.
+// US-layout shifted character -> unshifted codepoint, KITTY_CODE_BASE's twin for
+// input with only the character (toolbar sticky Ctrl): Ctrl+':' is 59;6u, as a US
+// keyboard's Ctrl+Shift+; is, not 58;5u.
 const KITTY_SHIFTED_CHAR_BASE: Record<string, number | undefined> = {
   ":": 59, // ;
   "<": 44, // ,
@@ -278,8 +274,8 @@ const KITTY_SHIFTED_CHAR_BASE: Record<string, number | undefined> = {
  * using the spec's unshifted-key rule: a shifted glyph (':', 'A', '{') maps to
  * its US-layout base codepoint with the shift bit added to the modifier
  * (Ctrl+':' -> 59;6u), an unshifted one encodes directly (Ctrl+'s' -> 115;5u).
- * Shared by every path that has only the character (sticky-Ctrl toolbar),
- * keeping it byte-identical with the physical-keyboard encoder.
+ * Shared by every path that has only the character (sticky-Ctrl toolbar); its
+ * bytes equal the physical-keyboard encoder's for the same chord on a US layout.
  */
 export function kittyCtrlCharSeq(ch: string): string | null {
   let cp = KITTY_SHIFTED_CHAR_BASE[ch];
@@ -339,12 +335,82 @@ function anyModifier(ev: KeyboardEvent): boolean {
 }
 
 /**
- * The kitty "unicode-key-code": the UNSHIFTED (lower-case / base-layout)
- * codepoint of the key. Letters and digits are read from ev.code (the physical
- * key), so a composed Alt/Option character on macOS still maps to its base key;
- * other single-character keys fall back to the case-folded ev.key.
+ * The kitty key code (https://sw.kovidgoyal.net/kitty/keyboard-protocol/#key-codes).
+ * With no Shift and no composing Alt, ev.key's keyCharacter, a printable Windows
+ * Ctrl-level character included, unless layoutKeyCodepoint declines it (a
+ * non-Latin letter or mark on a letter key folds to that key's Latin letter). Otherwise,
+ * by policy, physicalKeyCodepoint's reading of the physical key.
  */
 function kittyKeyCodepoint(ev: KeyboardEvent): number {
+  if (!ev.shiftKey && !altComposes(ev)) {
+    const cp = layoutKeyCodepoint(ev.key, ev.code);
+    if (cp !== undefined) {
+      return cp;
+    }
+  }
+  return physicalKeyCodepoint(ev);
+}
+
+/**
+ * No event field marks composition, so the platform decides: Option composes on
+ * Apple, and Android Alt on keys the page cannot list
+ * (https://android.googlesource.com/platform/frameworks/base/+/refs/heads/main/data/keyboards/Generic.kcm).
+ * An Android tablet in Chrome's desktop mode says "X11; Linux" with touch
+ * (https://developer.chrome.com/blog/desktop-mode). Firefox sets AltGraph on
+ * every macOS Option chord (https://searchfox.org/mozilla-central/source/widget/cocoa/nsCocoaUtils.mm).
+ */
+function altComposes(ev: KeyboardEvent): boolean {
+  if (ev.getModifierState("AltGraph")) {
+    return true;
+  }
+  if (!ev.altKey) {
+    return false;
+  }
+  const nav = (globalThis as { readonly navigator?: Navigator }).navigator;
+  const ua = nav?.userAgent ?? "";
+  return /Mac|Android/.test(ua) || (ua.includes("Linux") && (nav?.maxTouchPoints ?? 0) > 0);
+}
+
+// Keeps every key code printable: never a C0, C1 or format character.
+const KEY_CHARACTER = /^[\p{L}\p{M}\p{N}\p{P}\p{S}\p{Zs}]$/u;
+
+/**
+ * ev.key lowercased, or ev.key itself when its lowercase is not one KEY_CHARACTER
+ * (Turkish "İ" lowercases to i plus a combining dot); undefined when neither is.
+ */
+function keyCharacter(key: string): string | undefined {
+  const lower = key.toLowerCase();
+  if (KEY_CHARACTER.test(lower)) {
+    return lower;
+  }
+  return KEY_CHARACTER.test(key) ? key : undefined;
+}
+
+/**
+ * ev.key's keyCharacter as a key code ("İ" reports itself: its US position makes
+ * Turkish-F Caps Lock+Ctrl+i ctrl+s). Undefined where the physical key answers: a key with
+ * no keyCharacter (Windows Hebrew Ctrl+[ types U+200E, https://kbdlayout.info/kbdheb),
+ * and a non-Latin letter or mark on a letter key, folded to its Latin letter so Russian
+ * Ctrl+С is ctrl+c for apps that never ask for the base-layout key (flag 0x4, masked).
+ */
+function layoutKeyCodepoint(key: string, code: string): number | undefined {
+  const ch = keyCharacter(key);
+  if (ch === undefined) {
+    return undefined;
+  }
+  if (/^Key[A-Z]$/.test(code) && /^[\p{L}\p{M}]$/u.test(ch) && !/\p{Script=Latin}/u.test(ch)) {
+    return undefined;
+  }
+  return ch.codePointAt(0);
+}
+
+/**
+ * The unshifted US-layout codepoint of a Key*, Digit* or KITTY_CODE_BASE code. Any
+ * other code (Space, Intl*, empty) reports its ev.key's keyCharacter, which may be
+ * the shifted or composed one; with none, Space reports 32 and any other code 0
+ * (the chord is ignored).
+ */
+function physicalKeyCodepoint(ev: KeyboardEvent): number {
   const code = ev.code;
   if (code.length === 4 && code.startsWith("Key")) {
     return code.charCodeAt(3) + 32; // "KeyA".."KeyZ" -> 'a'..'z'
@@ -354,10 +420,9 @@ function kittyKeyCodepoint(ev: KeyboardEvent): number {
   }
   const base = KITTY_CODE_BASE[code];
   if (base !== undefined) {
-    return base; // symbol key -> unshifted base codepoint (spec: use the un-shifted key)
+    return base;
   }
-  const k = ev.key;
-  return k.length === 1 ? (k.toLowerCase().codePointAt(0) ?? 0) : 0;
+  return keyCharacter(ev.key)?.codePointAt(0) ?? (code === "Space" ? 32 : 0);
 }
 
 /**
@@ -370,13 +435,9 @@ function kittyKeyCodepoint(ev: KeyboardEvent): number {
 function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
   const key = ev.key;
 
-  // Keypad NON-TEXT keys (NumLock-off navigation + NumpadEnter) get dedicated
-  // KP_* codes so an app can distinguish them from the main keys. Detected by
-  // ev.code (Numpad*); the specific code is chosen by ev.key. Text keypad keys
-  // (NumLock-on digits/operators) are NOT intercepted — they fall through to the
-  // printable path below (text when unmodified; the ASCII-codepoint CSI-u form
-  // when a ctrl/alt/meta modifier suppresses the text), because KP_ digit codes
-  // are a report-all (0x8) feature we don't honor.
+  // Keypad navigation keys and NumpadEnter get KP_* codes. NumLock-on digits and
+  // operators fall through to the printable path: KP_ digit codes belong to the
+  // report-all flag (0x8), which is not honored.
   if (ev.code.startsWith("Numpad")) {
     const kp = KITTY_KEYPAD[key];
     if (kp !== undefined) {
@@ -417,20 +478,20 @@ function encodeKittyDisambiguate(ev: KeyboardEvent): KeyboardResult {
     return { kind: "send", bytes: anyModifier(ev) ? kittyUSeq(27, ev) : plainEscapeSeq(true) };
   }
 
-  // Single-character keys: text stays text (deferred to the textarea) UNLESS a
-  // ctrl/alt/meta modifier is held, in which case the legacy encoding is
-  // ambiguous (Ctrl+I == Tab, Alt+x == ESC x, …) so we send the CSI-u form with
-  // the unshifted codepoint.
-  if (key.length === 1) {
-    // Meta/Cmd-ONLY combos stay with the browser even under kitty
-    // disambiguate, mirroring the legacy path's deliberate carve-out: Cmd+C /
-    // Cmd+V / Cmd+R are browser/OS chrome, and the protocol's reference
-    // implementation (the kitty terminal itself) likewise consumes
-    // emulator-owned shortcuts rather than reporting them to the app. Without
-    // this, enabling the protocol silently broke copy-on-macOS.
+  // A single character stays text unless Ctrl, Alt or Meta is held, where the
+  // legacy encoding is ambiguous (Ctrl+I == Tab, Alt+x == ESC x): CSI u then.
+  if (isOneCodePoint(key)) {
+    // Meta/Cmd-ONLY combos stay with the browser even under kitty disambiguate,
+    // as in legacy mode: Cmd+C, Cmd+V and Cmd+R are browser and OS chrome.
     if (ev.metaKey && !ev.ctrlKey && !ev.altKey) {
       return { kind: "ignore" };
     }
+    // A desktop AltGr character arrives with ctrlKey and altKey clear, so it stays
+    // text: on Windows, Chromium and Firefox swap Ctrl+Alt for AltGraph whenever
+    // the chord types a character (https://chromestatus.com/feature/5059438092222464,
+    // https://searchfox.org/mozilla-central/source/widget/windows/KeyboardLayout.cpp).
+    // AltGraph must not exempt a key here: Firefox sets it on every macOS Option
+    // chord (see altComposes), and Ctrl+Option+a is 97;7u.
     if (ev.ctrlKey || ev.altKey || ev.metaKey) {
       const cp = kittyKeyCodepoint(ev);
       if (cp > 0) {
@@ -479,15 +540,6 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
       }
     }
   }
-
-  // Browser-reserved meta combos (Cmd+R, Cmd+T, Cmd+Q, Cmd+W on Mac;
-  // Ctrl+R, Ctrl+T, Ctrl+W with no Shift on others). Let the browser
-  // handle them. Heuristic: only take Ctrl+letter when Shift is NOT
-  // held AND the letter is one of the ones xterm consumes (a-z),
-  // skipping the few that browsers commonly reserve.
-  // (We deliberately pass Ctrl+R / Ctrl+T / Ctrl+W through to the PTY
-  // — the host application's Ctrl+T transcript view depends on it. Users on macOS
-  // who want browser-reserved combos can use Cmd instead.)
 
   // Shift+PageUp / Shift+PageDown — local scrollback navigation
   // (matches xterm.js KeyboardResultType.PAGE_UP/PAGE_DOWN).
@@ -590,7 +642,9 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
     return { kind: "ignore" }; // let `input` event handle plain space
   }
 
-  // Single printable character with modifiers.
+  // Single printable character with modifiers. Neither branch takes Meta, so
+  // the browser keeps Cmd+R/T/W/C/V; Ctrl+R/T/W go to the PTY, where readline
+  // binds them.
   if (ev.key.length === 1) {
     const ch = ev.key;
 

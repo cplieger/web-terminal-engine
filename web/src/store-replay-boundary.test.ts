@@ -1,16 +1,9 @@
-// The resume replay boundary: what a client claims to already hold.
-//
-// The rule under test is that a row is claimable only once the SERVER has
-// committed it at that absolute index. A row from a screen frame is not: it lands
-// at `base + y`, which is a screen position the app repaints in place, so what the
-// store holds there is the last thing drawn. Claiming it tells the server "no need
-// to re-send", the server replays strictly above the claim, and the drawn copy is
-// never corrected. It then surfaces as scrollback beneath the new window, which is
-// how a frozen composer box ends up parked above the live region after a reattach.
-//
-// Every case here fails against the pre-fix store for the intended reason, except
-// the two marked as invariants, which are labelled as such rather than counted as
-// evidence.
+// The resume replay boundary: a row is claimable only once the server has
+// committed it at that absolute index. A screen-frame row at `base + y` is a
+// position the app repaints, so claiming it means the server, which replays
+// strictly above the claim, never corrects the drawn copy; it surfaces as
+// scrollback, a frozen input box above the live region after a reattach. Every
+// case except the two labelled invariants fails if provisional rows are claimed.
 
 import { describe, it, expect } from "vitest";
 import { LineStore } from "./store.js";

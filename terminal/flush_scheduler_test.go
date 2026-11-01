@@ -271,15 +271,13 @@ func TestFlushScheduler_heldRedrawFlushesAtDeadline(t *testing.T) {
 	readFrameWithin(t, results, 3*time.Second)
 }
 
-// TestFlushScheduler_resizeReprintHeldUntilSettled drives the full kiro-cli
+// TestFlushScheduler_resizeReprintHeldUntilSettled drives an inline TUI's full
 // post-resize choreography through the real scheduler and a live WebSocket:
 // a size change (SIGWINCH), then ED3 + the transcript reprinted in several
-// small DEC 2026 BSU/ESU brackets. Pre-fix, the first bracket's ESU cleared
-// the screen-level resize hold, so every inter-bracket flush pass streamed a
-// mid-reprint window — the "whole history visibly churns through the screen"
-// glitch on every phone keyboard/rotation resize. The settle hold must keep
-// the wire QUIET across the whole reprint and deliver the settled result as
-// one post-quiet batch.
+// small DEC 2026 BSU/ESU brackets. A bracket's ESU must not clear the resize
+// hold: the settle hold keeps the wire QUIET across the whole reprint and
+// delivers the settled result as one post-quiet batch, so no mid-reprint
+// window streams on a phone keyboard or rotation resize.
 func TestFlushScheduler_resizeReprintHeldUntilSettled(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	t.Cleanup(h.Close)
@@ -308,10 +306,10 @@ func TestFlushScheduler_resizeReprintHeldUntilSettled(t *testing.T) {
 	// The phone keyboard opens: a size CHANGE arms the settle hold.
 	h.handleResize(&clientState{}, 100, 24)
 
-	// kiro-cli's redraw: ED3, then the transcript in small 2026 brackets with
+	// The TUI's redraw: ED3, then the transcript in small 2026 brackets with
 	// inter-bracket gaps well under redrawSettleQuiet. Each gap is asserted
-	// frame-free: pre-fix the first ESU released the hold and the next
-	// 50ms-cadence pass leaked a mid-reprint frame into exactly these windows.
+	// frame-free: an ESU that released the hold would let the next
+	// 50ms-cadence pass leak a mid-reprint frame into exactly these windows.
 	h.handlePTYData([]byte("\x1b[3J"))
 	for range 3 {
 		h.handlePTYData([]byte("\x1b[?2026h" + "reprint chunk\r\n" + "\x1b[?2026l"))
@@ -326,16 +324,13 @@ func TestFlushScheduler_resizeReprintHeldUntilSettled(t *testing.T) {
 	}
 }
 
-// TestFlushScheduler_reprintLongerThanCapCoalesces drives the case the settle
-// hold's cap used to handle badly: a redraw that keeps writing PAST
-// redrawSettleCap. Releasing there streamed the rest of the reprint a partial
-// screen at a time (the churn the hold exists to prevent), so a lapse now lets
-// ONE full repaint through and re-arms instead. The scheduler-level assertion is
-// that the wire carries few frames across a multi-cap reprint rather than one per
-// flushInterval.
-//
-// Uses real time because the point is the scheduler's own timers. The budget is
-// derived from the constants, so changing them cannot silently make this vacuous.
+// TestFlushScheduler_reprintLongerThanCapCoalesces drives a redraw that keeps
+// writing PAST redrawSettleCap. Releasing there would stream the rest of the
+// reprint a partial screen at a time (the churn the hold exists to prevent), so
+// a lapse lets ONE full repaint through and re-arms: the wire carries few
+// frames across a multi-cap reprint, not one per flushInterval. Real time,
+// because the subject is the scheduler's own timers; the budget derives from
+// the constants, so changing them cannot make this vacuous.
 func TestFlushScheduler_reprintLongerThanCapCoalesces(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	t.Cleanup(h.Close)
@@ -381,11 +376,10 @@ func TestFlushScheduler_reprintLongerThanCapCoalesces(t *testing.T) {
 	// message would conflate the two and assert the wrong thing.
 	screens := readUntilQuietCounting(t, results, redrawSettleQuiet+500*time.Millisecond, wireMsgScreen)
 
-	// Pre-fix the cap lapsed once and every flushInterval pass after it shipped a
-	// mid-reprint screen, so this window carried tens of them. Coalescing ships
-	// about one per cap interval plus the settled one. The bound asserts an order
-	// of magnitude rather than an exact count, so scheduling jitter cannot make it
-	// flaky, while still failing decisively against the old release-and-stream.
+	// A release-and-stream lapse ships a mid-reprint screen on every
+	// flushInterval pass, tens in this window. Coalescing ships about one per cap
+	// interval plus the settled one. The bound asserts an order of magnitude
+	// rather than an exact count, so scheduling jitter cannot make it flaky.
 	maxScreens := int(reprintFor/redrawSettleCap) + 3
 	if screens > maxScreens {
 		t.Errorf("reprint of %v carried %d screen frames, want <= %d: the hold released mid-redraw instead of coalescing",

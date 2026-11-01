@@ -86,7 +86,7 @@ function mountFake(cb: Parameters<typeof connectStatusStream>[1]) {
 const sample: SessionStatus = {
   id: "abc123",
   status: "input",
-  title: "kiro-cli",
+  title: "agent",
   createdAt: "2026-07-01T12:00:00Z",
   removed: false,
 };
@@ -247,7 +247,7 @@ describe("connectStatusStream", () => {
       const ev: SessionStatus = {
         ...sample,
         status: "idle",
-        notification: "Response complete",
+        notification: "Task finished",
         notificationSeq: 7,
         progressValue: -1,
       };
@@ -255,7 +255,7 @@ describe("connectStatusStream", () => {
       fake.emit("message", JSON.stringify(ev));
 
       const got = onStatus.mock.calls[0]![0] as SessionStatus;
-      expect(got.notification).toBe("Response complete");
+      expect(got.notification).toBe("Task finished");
       expect(got.notificationSeq).toBe(7);
       // An event, not a state: the status is whatever the session's state is.
       expect(got.status).toBe("idle");
@@ -267,11 +267,13 @@ describe("connectStatusStream", () => {
       // A server one release ahead adds a status this client has never heard of.
       // The stream is parsed, not validated: dropping the frame would lose the
       // session's title and removal signal too, so the value is forwarded as-is
-      // and the consumer falls back on its own default rendering.
+      // and the consumer falls back on its own default rendering. The typed
+      // binding fails typecheck if SessionInfo.status closes to KnownStatus.
+      const unknownStatus: SessionStatus["status"] = "throttled";
       const raw = JSON.stringify({
         id: "abc123",
-        status: "throttled",
-        title: "kiro-cli",
+        status: unknownStatus,
+        title: "agent",
         createdAt: "2026-07-01T12:00:00Z",
         progressValue: 40,
         futureField: { nested: true },
@@ -283,7 +285,7 @@ describe("connectStatusStream", () => {
 
       expect(onStatus).toHaveBeenCalledTimes(1);
       const got = onStatus.mock.calls[0]![0] as SessionStatus;
-      expect(got.status).toBe("throttled");
+      expect(got.status).toBe(unknownStatus);
       expect(got.id).toBe("abc123");
       expect(got.progressValue).toBe(40);
     });
@@ -343,10 +345,10 @@ describe("connectStatusStream", () => {
   it("carries the session alias through the parse", () => {
     const onStatus = vi.fn();
     const { fake } = mountFake({ onStatus });
-    fake.emit("message", JSON.stringify({ ...sample, alias: "sess_thread" }));
+    fake.emit("message", JSON.stringify({ ...sample, alias: "host_alias" }));
 
     const got = onStatus.mock.calls[0]![0] as SessionStatus;
-    expect(got.alias).toBe("sess_thread");
+    expect(got.alias).toBe("host_alias");
   });
 
   // The session-end split. The server reports "exited" for an ordinary end —

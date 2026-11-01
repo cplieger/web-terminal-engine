@@ -226,13 +226,12 @@ describe("render: the reading position holds when history is evicted above it", 
   });
 
   it("re-anchors on the nearest surviving row when the anchor row is inside an evicted batch", async () => {
-    // R1 adversarial finding (claude): batched eviction can remove the ANCHOR
-    // ROW itself — a reader parked within a batch of the buffer top loses the
-    // anchored element while rows they had not read yet survive below it. The
-    // old bail-out ("mass trim") skipped correction entirely, so on Safari the
-    // view jumped past up to batch-1 lines of surviving, unread content. The
-    // anchor now carries the absolute index and re-resolves to the first
-    // surviving row at or after it.
+    // Batched eviction can remove the ANCHOR ROW itself — a reader parked
+    // within a batch of the buffer top loses the anchored element while rows
+    // they had not read yet survive below it. Skipping correction on such a
+    // mass trim makes the view on Safari jump past up to batch-1 lines of
+    // surviving, unread content, so the anchor carries the absolute index and
+    // re-resolves to the first surviving row at or after it.
     await fillToCap();
     // After the fill the oldest retained row is abs 6 (two 3-row batches
     // evicted 0..5 during the fill). Park the reader ON abs 8 — inside the

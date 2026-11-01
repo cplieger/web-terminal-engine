@@ -66,15 +66,11 @@ import (
 type SessionID string
 
 // SessionInfo is the public description of one session, returned by List and
-// carried on the status stream.
-//
-// Three of its fields are title-shaped; they are not interchangeable:
-//   - Title is the RESOLVED display title (effectiveTitle) — what a consumer
-//     renders unless it has a reason not to.
-//   - PinnedTitle is the USER's name, set and cleared only by a human action.
-//   - ClientTitle is a CLIENT-DERIVED automatic title: a guess a client
-//     computed and asked the server to remember (today, the agent UI's latched
-//     first submitted line). Client-supplied, but not user-authored.
+// carried on the status stream. Its three title fields are not interchangeable:
+//   - Title is the resolved display title (effectiveTitle), what a consumer renders.
+//   - PinnedTitle is the user's name, set and cleared only by a human action.
+//   - ClientTitle is an automatic title a client computed and asked the server to
+//     remember (for example a session's first submitted line); not user-authored.
 type SessionInfo struct {
 	CreatedAt time.Time `json:"createdAt"`
 	ID        SessionID `json:"id"`    // marshals as a plain string; the wire shape is unchanged
@@ -96,7 +92,7 @@ type SessionInfo struct {
 	// so a UI can tell that a pin EXISTS (to offer the automatic name again)
 	// rather than only seeing its effect.
 	PinnedTitle string `json:"pinnedTitle"`
-	Status      string `json:"status"`
+	Status      string `json:"status"` // a Status* value, or any status WithStatusClassifier returned
 	// Activity is the session's SECONDARY activity state ("" when none), carried
 	// beside Status and never merged into it. See SessionActivity.
 	Activity string `json:"activity"`
@@ -121,19 +117,36 @@ type SessionInfo struct {
 	Order int `json:"order"`
 	// ActivityCount is how many sources produced Activity: >= 1 whenever Activity
 	// is non-empty, 0 when it is empty or the host does not count.
-	ActivityCount   int  `json:"activityCount"`
-	ReportsActivity bool `json:"reportsActivity"`
+	ActivityCount int `json:"activityCount"`
+	// StatusSeq numbers the occurrence of the session's status. A sweep raises it
+	// by one when it emits a changed status, a status a classified notification
+	// latched since the last sweep, or an input, done or failed status after an
+	// OSC 7501 report since then created a record, changed one's state or kind, or
+	// cleared one, and so changed which record the status came from, or its state
+	// or kind, at that report. A report keeping a record's state and kind raises
+	// it only by changing the status. It never falls for one id; 0, absent on the
+	// wire, means nothing numbered yet.
+	StatusSeq uint64 `json:"statusSeq,omitempty"`
+	// SeenSeq is the highest StatusSeq any reader acknowledged through
+	// PUT /api/sessions/{id}/seen. It never falls for one id and never exceeds
+	// StatusSeq; a status that calls for attention is unread while
+	// StatusSeq > SeenSeq.
+	SeenSeq         uint64 `json:"seenSeq,omitempty"`
+	ReportsActivity bool   `json:"reportsActivity"`
 }
 
-// Session status values. The manager derives every one of them from two inputs —
-// process liveness and OSC 9;4 progress — plus the needs-input/done latch a
-// consumer's classifier sets from an OSC 9 notification. Raw output activity is
-// deliberately NOT an input; computeStatus (events.go) states why.
+// Session status values. The manager derives them from process liveness and
+// the program's own report: OSC 7501 program status once the program sends
+// one, until a RIS; OSC 9;4 progress otherwise. Each value's comment names its
+// built-in protocol mapping; a consumer's classifier may latch any status
+// string, one of these or not, from an OSC 9 notification
+// (WithStatusClassifier). Raw output activity is deliberately NOT an input;
+// computeStatus (events.go) states why.
 const (
-	StatusWorking = "working" // OSC 9;4 progress reports active (state 1 or 3), and nothing else
-	StatusIdle    = "idle"    // at rest: no progress state and no latch (also the new-session default)
-	StatusInput   = "input"   // blocked awaiting user action (latched from a notification)
-	StatusDone    = "done"    // a turn completed (latched from a notification; cleared by any progress state but 4)
+	StatusWorking = "working" // OSC 7501 working, or OSC 9;4 progress active (state 1 or 3)
+	StatusIdle    = "idle"    // at rest: OSC 7501 idle or no record, or no progress state and no latch (also the new-session default)
+	StatusInput   = "input"   // blocked awaiting user action: OSC 7501 blocked, or latched from a notification
+	StatusDone    = "done"    // a turn completed: OSC 7501 done, or latched from a notification
 	StatusExited  = "exited"  // the process has exited
 	// StatusCrashed is a session whose process exited BADLY: a non-zero exit
 	// status, or a terminating signal it was not asked for. StatusExited is
@@ -142,12 +155,13 @@ const (
 	// reads as a failure. crashedExit owns the exact boundary and states why
 	// each case falls where it does.
 	StatusCrashed = "crashed"
-	// StatusFailed is OSC 9;4 progress state 2: the program reported an error
-	// state (with a percentage, or indeterminate when pr is omitted). Like every
-	// progress state it PERSISTS until the program changes it — it is a state,
-	// not an event, so no timeout and no output activity clears it.
+	// StatusFailed is OSC 7501 error, or OSC 9;4 progress state 2: the program
+	// reported an error state (with a percentage, or indeterminate when pr is
+	// omitted). It PERSISTS until the program changes it — it is a state, not
+	// an event, so no timeout and no output activity clears it.
 	StatusFailed = "failed"
-	// StatusWarning is OSC 9;4 progress state 4. The two sources that define
+	// StatusWarning is OSC 9;4 progress state 4; after an OSC 7501 report,
+	// OSC 9;4 does not set it again until the next RIS. The two sources that define
 	// these sequences disagree on state 4: iTerm2 calls it a warning at pr
 	// percent, ConEmu calls it paused. The engine follows iTerm2, because it
 	// advertises TERM_PROGRAM=iTerm.app — that identity is what makes a client
@@ -211,22 +225,24 @@ func WithManagerOriginPolicy(p *OriginPolicy) ManagerOption {
 }
 
 // WithStatusClassifier maps an OSC 9 notification message to a session status
-// (return ok=false to ignore a message). This keeps the engine generic: web-terminal-kiro
-// maps kiro-cli's "Permission required" to input and "Response complete" to
-// done, while a plain shell server sets no classifier and gets working/idle from
-// output activity only. A classified input status latches (persists while the
-// process waits) until the turn resumes or a done message clears it.
+// (ok=false ignores it), typically input or done, though any status it returns
+// latches as given. Without one, status comes from the program's OSC 7501 or
+// OSC 9;4 reports and process liveness only. A classified status latches
+// until the program supersedes it: while it has sent no OSC 7501 report since
+// the last RIS, an OSC 9;4 state 1, 2 or 3; otherwise an OSC 7501 report that
+// changes its status (vt.ProgramStatus.Seq rises), never one that repeats it.
+// A newer classified notification replaces it.
 func WithStatusClassifier(fn func(notification string) (status string, ok bool)) ManagerOption {
 	return func(c *managerConfig) { c.classifier = fn }
 }
 
 // WithSessionActivity supplies a per-session SECONDARY activity state, carried
 // to clients beside Status and never merged into it. The engine PULLS: fn is
-// called once per session on each status sweep, on each List (GET
-// /api/sessions), and on each new SSE subscriber's initial sync — different
-// goroutines, so it must be SAFE FOR CONCURRENT USE, must not block and must not
-// perform I/O. Return the zero SessionActivity for a session with none; unset
-// (the default) leaves every session's activity empty.
+// called once per session on each status sweep, and List and a new SSE
+// subscriber's initial sync carry the value the last sweep read. fn must be
+// SAFE FOR CONCURRENT USE with the host's own writers, must not block and must
+// not perform I/O. Return the zero SessionActivity for a session with none;
+// unset (the default) leaves every session's activity empty.
 func WithSessionActivity(fn func(id SessionID) SessionActivity) ManagerOption {
 	return func(c *managerConfig) { c.activity = fn }
 }
@@ -264,21 +280,10 @@ type titleSources struct {
 
 // effectiveTitle combines a session's title sources in precedence order:
 // explicit beats inferred. The user's pinned name wins outright; then the live
-// OSC window title, when the program set one; then a client-derived title a
-// client asked us to remember; then the server's own inference (foreground
-// process / cwd / command).
-//
-// The last two rungs DO compete for one shipping consumer, so their order is a
-// live decision rather than a future one: the generic preset pushes no client
-// title, but an agent host that pushes one through SetSessionTitle competes with
-// auto directly, because the program it runs may set no OSC title at all. The
-// earlier note here claimed the agent's program always sets one; measured, it
-// does not, which leaves the osc rung permanently empty for that consumer.
-//
-// Pure by design: the OSC title comes from a handler getter (h.mu) and the other
-// three from manager state (m.mu), and every caller (List, snapshot,
-// diffStatuses) reads them under their own locks — never one lock nested in the
-// other.
+// OSC window title; then a client-derived title; then the server's own
+// inference. The last two compete for real: a host can push a client title
+// for a program that may set no OSC title at all. Pure, so no caller nests the
+// sweep's handler lock (the OSC title) inside m.mu (the stored titles).
 func effectiveTitle(src *titleSources) string {
 	if src.pinned != "" {
 		return src.pinned
@@ -319,7 +324,7 @@ type SessionManager struct {
 	// keys of sessions, maintained at the four sites that change the set (create
 	// appends, Close removes, the reaper and Shutdown clear). A slice rather than
 	// a position per session: a reorder writes one value and a close leaves no
-	// gap. Not persisted, because it does not outlive the PTY children it orders.
+	// gap. Held in memory; CaptureSessionSet exports it.
 	order         []SessionID
 	layout        PaneLayout
 	wg            sync.WaitGroup
@@ -327,6 +332,17 @@ type SessionManager struct {
 	subsMu        sync.Mutex
 	idleWindow    time.Duration
 	activeClients int
+	// orderGen and layoutGen count successful CLIENT writes (SetSessionOrder,
+	// SetPaneLayout) and nothing else: RestoreSessionSet compares them to tell
+	// an arrangement a client chose during the restore, which wins, from its own.
+	orderGen  uint64
+	layoutGen uint64
+	// closed is set by Shutdown in the block that empties the set; createWith
+	// refuses after it so no process starts into a manager nothing tears down.
+	closed bool
+	// restoring is true while RestoreSessionSet runs; create and the layout read
+	// answer 503 meanwhile.
+	restoring bool
 }
 
 // NewSessionManager returns a manager that builds each session's handler with
@@ -381,30 +397,60 @@ func NewSessionManager(factory func(id SessionID) *Handler, opts ...ManagerOptio
 }
 
 // Create starts a new session (eagerly spawning its process at a default size)
-// and returns its id.
+// and returns its id. After Shutdown it returns ErrManagerClosed.
 func (m *SessionManager) Create() (SessionID, error) {
-	info, err := m.create()
+	info, err := m.createWith(CreateSpec{})
 	return info.ID, err
 }
 
-// create is Create plus the SessionInfo describing what it stored, so
-// handleCreate can echo the values every later enumeration reports for this
-// session instead of re-deriving them.
-//
-// Both fields it carries beyond the id are ones a client sorts by, and both were
-// wrong when re-derived. A second time.Now() gave the newest tab a createdAt
-// matching neither List nor the status stream. A zero Order claimed position 0,
-// the FRONT of the strip, for the session just appended to the back — so a client
-// that trusted the 201 put its new tab first and then watched it jump when the
-// next status event corrected it.
-func (m *SessionManager) create() (SessionInfo, error) {
+// ErrManagerClosed is returned by Create and CreateWith once Shutdown has run.
+var ErrManagerClosed = errors.New("terminal: session manager is shut down")
+
+// CreateSpec is CreateWith's per-session input. The zero value creates exactly
+// what Create does.
+type CreateSpec struct {
+	// Build replaces the manager's factory for this one session; nil uses the
+	// factory. Called with the manager lock held: it must not call back into
+	// the manager.
+	Build func(id SessionID) *Handler
+	// Alias is applied when it is valid and no live session holds it; otherwise
+	// a fresh alias is minted. The returned SessionInfo.Alias says which.
+	Alias string
+	// PinnedTitle is sanitized like SetSessionPinnedTitle; "" pins nothing.
+	PinnedTitle string
+}
+
+// CreateWith creates one session from spec. The alias and pinned title are in
+// place before the session is first listed or streamed. After Shutdown it
+// returns ErrManagerClosed and starts nothing.
+func (m *SessionManager) CreateWith(spec CreateSpec) (SessionInfo, error) {
+	return m.createWith(spec)
+}
+
+// createStartedHook runs between StartEager and the insert; a test seam for a
+// Shutdown that lands while a create forks. A no-op in production.
+var createStartedHook = func() {}
+
+// createWith returns the SessionInfo describing what it stored, so handleCreate
+// echoes the createdAt and Order every later enumeration reports. Both are sort
+// keys: a re-derived createdAt matched neither List nor the stream, and a zero
+// Order put the newest tab at the FRONT of a strip until the next status event.
+func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	m.mu.Lock()
+	if m.closed {
+		m.mu.Unlock()
+		return SessionInfo{}, ErrManagerClosed
+	}
 	id, err := newSessionID()
 	if err != nil {
 		m.mu.Unlock()
 		return SessionInfo{}, err
 	}
-	h := m.factory(id)
+	build := spec.Build
+	if build == nil {
+		build = m.factory
+	}
+	h := build(id)
 	m.mu.Unlock()
 
 	// Eager start outside the lock: spawning a process should not block other
@@ -413,20 +459,33 @@ func (m *SessionManager) create() (SessionInfo, error) {
 	if err := h.StartEager(); err != nil {
 		return SessionInfo{}, err
 	}
+	createStartedHook()
 
 	now := time.Now()
 	m.mu.Lock()
+	// Shutdown may have run while the process forked; its victim list did not
+	// include this handler, so it is closed here or nothing ever would.
+	if m.closed {
+		m.mu.Unlock()
+		h.Close()
+		return SessionInfo{}, ErrManagerClosed
+	}
 	// Refresh the idle clock so the reaper cannot reap a session created while the
 	// manager is idle (activeClients == 0) before its first client attaches. Same
 	// reading as createdAt: they describe one event, and two calls to time.Now()
 	// only invite a reader to wonder which is authoritative.
 	m.idleSince = now
+	alias := spec.Alias
+	if !validSessionAlias(alias) || m.aliasHeldLocked(alias) {
+		alias = m.mintAliasLocked()
+	}
+	pinned := sanitizeTitle(spec.PinnedTitle, maxPinnedTitleRunes)
 	// autoTitle starts at the command basename (the ladder's last rung): the
 	// sweep refines it to a foreground-process or cwd name, but a List served
-	// before the first sweep must still name the session.
-	alias := m.mintAliasLocked()
+	// before the first sweep must still name the session. The alias and pin are
+	// written in this same block so no reader sees the session without them.
 	m.sessions[id] = &session{
-		id: id, alias: alias, handler: h, createdAt: now, autoTitle: h.commandBase(),
+		id: id, alias: alias, pinnedTitle: pinned, handler: h, createdAt: now, autoTitle: h.commandBase(),
 	}
 	// Newest session last, which is where a new tab belongs. A client that has
 	// arranged its tabs keeps that arrangement; only the new id moves.
@@ -442,7 +501,10 @@ func (m *SessionManager) create() (SessionInfo, error) {
 	m.logger.Info("session: created", "session", LogID(id), "sessions", n)
 	// A freshly eager-started session is idle until it produces output; the
 	// status stream corrects that within a tick if the process died instantly.
-	return SessionInfo{ID: id, Alias: alias, Status: StatusIdle, CreatedAt: now, Order: order}, nil
+	return SessionInfo{
+		ID: id, Alias: alias, PinnedTitle: pinned, Title: pinned,
+		Status: StatusIdle, CreatedAt: now, Order: order,
+	}, nil
 }
 
 // logIDPrefixBytes is how much of a session token may reach a log: 8 bytes of
@@ -585,6 +647,7 @@ func (m *SessionManager) SetSessionOrder(ids []SessionID) bool {
 	// Cloned: the caller's slice is a decoded request body, and keeping it would
 	// let a later write through that same slice reorder the manager's state.
 	m.order = slices.Clone(ids)
+	m.orderGen++
 	return true
 }
 
@@ -628,14 +691,6 @@ func (l *PaneLayout) shown(side PaneSide) *SessionID {
 		return l.Right
 	}
 	return l.Left
-}
-
-func (l *PaneLayout) show(side PaneSide, id SessionID) {
-	if side == PaneRight {
-		l.Right = &id
-		return
-	}
-	l.Left = &id
 }
 
 func (l *PaneLayout) invalidShape() string {
@@ -704,6 +759,7 @@ func (m *SessionManager) SetPaneLayout(l PaneLayout) (verdict LayoutVerdict, rea
 		l.Handle = 0.5
 	}
 	m.layout = clonePaneLayout(l)
+	m.layoutGen++
 	return LayoutOK, ""
 }
 
@@ -717,8 +773,9 @@ func (m *SessionManager) PaneLayout() PaneLayout {
 }
 
 // dropFromLayoutLocked empties the panes showing id, moves Selected to a shown
-// pane and refills an emptied record from the order: an interim record, valid
-// until the client's next write replaces it. Caller holds m.mu.
+// pane and refills an emptied record from the order (normalizeSetLayout's
+// rules): an interim record, valid until the client's next write replaces it.
+// Caller holds m.mu.
 func (m *SessionManager) dropFromLayoutLocked(id SessionID) {
 	l := &m.layout
 	if l.Left != nil && *l.Left == id {
@@ -727,17 +784,7 @@ func (m *SessionManager) dropFromLayoutLocked(id SessionID) {
 	if l.Right != nil && *l.Right == id {
 		l.Right = nil
 	}
-	if l.shown(l.Selected) == nil && l.shown(l.Selected.other()) != nil {
-		l.Selected = l.Selected.other()
-	}
-	if l.Left != nil || l.Right != nil {
-		return
-	}
-	if len(m.order) == 0 {
-		m.layout = defaultPaneLayout()
-		return
-	}
-	l.show(l.Selected, m.order[0])
+	m.layout = normalizePaneLayout(m.layout, m.order)
 }
 
 // sessionActivity reads the WithSessionActivity source for id, or the zero value
@@ -754,61 +801,59 @@ func (m *SessionManager) sessionActivity(id SessionID) SessionActivity {
 // List returns all sessions in compareSessionOrder: the shared display order,
 // then oldest first, then id.
 //
-// Two-phase like diffStatuses: manager state (session set, client titles,
-// tracker state) is captured under m.mu, then the handler getters (Title /
-// Exited / Progress — each takes that handler's h.mu) run after m.mu is
-// released, so one wedged handler stalls only this call, never every manager
-// path.
+// One m.mu hold over the record the last sweep emitted (see committedOf), with
+// no handler getter, so a wedged handler cannot stall it.
 func (m *SessionManager) List() []SessionInfo {
+	return m.listSnapshot(nil, nil)
+}
+
+// listSnapshot is List; a non-nil layout receives the pane layout read under
+// the same m.mu hold as the session set, so the two describe one state. A
+// non-nil cleanExit receives one entry per returned session, in the returned
+// order: whether its process has exited cleanly, read live after m.mu is
+// released.
+func (m *SessionManager) listSnapshot(layout *PaneLayout, cleanExit *[]bool) []SessionInfo {
 	type listItem struct {
-		handler    *Handler
-		lastStatus string
-		autoTitle  string
-		info       SessionInfo
-		rank       int
-		latched    bool
+		handler   *Handler
+		info      SessionInfo
+		rank      int
+		cleanExit bool
 	}
 	m.mu.Lock()
 	rank := m.rankLocked()
 	ordered := len(m.order)
 	items := make([]listItem, 0, len(m.sessions))
 	for _, s := range m.sessions {
-		it := listItem{
+		rec := committedOf(m.trackers[s.id])
+		items = append(items, listItem{
 			info: SessionInfo{
 				ID: s.id, Alias: s.alias, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
-				CreatedAt: s.createdAt,
+				CreatedAt: s.createdAt, Status: rec.status,
+				Title: effectiveTitle(&titleSources{
+					pinned: s.pinnedTitle, osc: rec.oscTitle,
+					client: s.clientTitle, auto: s.autoTitle,
+				}),
+				ReportsActivity: rec.reports, Activity: rec.activity, ActivityCount: rec.activityCount,
+				StatusSeq: rec.statusSeq, SeenSeq: rec.seenSeq,
 			},
 			// Held beside the info rather than in info.Order: the published field is
 			// the DENSE index assigned below, and one field carrying two meanings
 			// across a sort is how a future edit publishes raw ranks by accident.
 			// snapshot keeps the same split.
-			rank:      rankOf(rank, s.id, ordered),
-			handler:   s.handler,
-			autoTitle: s.autoTitle,
-		}
-		if tr := m.trackers[s.id]; tr != nil {
-			it.lastStatus = tr.lastStatus
-			it.latched = tr.latched != ""
-		}
-		items = append(items, it)
+			rank:    rankOf(rank, s.id, ordered),
+			handler: s.handler,
+		})
+	}
+	if layout != nil {
+		*layout = clonePaneLayout(m.layout)
 	}
 	m.mu.Unlock()
 
-	for i := range items {
-		it := &items[i]
-		it.info.Status = refinedStatus(it.lastStatus, it.handler)
-		it.info.Title = effectiveTitle(&titleSources{
-			pinned: it.info.PinnedTitle, osc: it.handler.Title(),
-			client: it.info.ClientTitle, auto: it.autoTitle,
-		})
-		// reportsActivity mirrors the status stream: sticky once any OSC 9;4
-		// progress has been seen (Progress() >= 0), or a notification latched.
-		// The secondary activity below is deliberately NOT an input here: folding
-		// it in would reveal the PRIMARY dot for a background task.
-		it.info.ReportsActivity = it.handler.Progress() >= 0 || it.latched
-		act := m.sessionActivity(it.info.ID)
-		it.info.Activity = act.State
-		it.info.ActivityCount = act.Count
+	if cleanExit != nil {
+		for i := range items {
+			exited, crashed := items[i].handler.exitOutcome()
+			items[i].cleanExit = exited && !crashed
+		}
 	}
 	slices.SortFunc(items, func(a, b listItem) int {
 		return compareSessionOrder(
@@ -823,9 +868,15 @@ func (m *SessionManager) List() []SessionInfo {
 	// violation, hence unreachable — but a wire contract should not rest on that)
 	// both claim the same position.
 	out := make([]SessionInfo, 0, len(items))
+	if cleanExit != nil {
+		*cleanExit = make([]bool, 0, len(items))
+	}
 	for i := range items {
 		items[i].info.Order = i
 		out = append(out, items[i].info)
+		if cleanExit != nil {
+			*cleanExit = append(*cleanExit, items[i].cleanExit)
+		}
 	}
 	return out
 }
@@ -885,8 +936,8 @@ func (m *SessionManager) SetSessionAlias(id SessionID, alias string) bool {
 	return true
 }
 
-// maxSessionAliasLen bounds an alias; a kiro-cli session id ("sess_" plus a
-// UUID, 41 characters) is the longest host value in use.
+// maxSessionAliasLen bounds an alias; 64 leaves room for a UUID plus a short
+// prefix.
 const maxSessionAliasLen = 64
 
 func validSessionAlias(s string) bool {
@@ -919,8 +970,8 @@ func (m *SessionManager) aliasHeldLocked(alias string) bool {
 var aliasEncoding = base32.NewEncoding("abcdefghijklmnopqrstuvwxyz234567").WithPadding(base32.NoPadding)
 
 // mintAliasLocked returns a random alias no live session holds. Random rather
-// than a counter because sessions do not survive a restart: a counter would
-// hand an old URL's name to a different tab.
+// than a counter: a counter would hand an old URL's name to a different tab in
+// a set that was not restored.
 func (m *SessionManager) mintAliasLocked() string {
 	for {
 		var b [5]byte
@@ -976,9 +1027,9 @@ func (m *SessionManager) StatusLatch(id SessionID) (status string, seq uint64, o
 // want AND was set by notification sequence seq. It refuses (false) an unknown
 // session, an empty or different latch, a want that is not StatusInput or
 // StatusDone, and a latch a newer notification has re-set since seq. It never
-// touches the OSC 9;4 progress state: the next sweep recomputes the status from
-// progress alone (idle, or warning/failed/working if the program reports one)
-// and emits it on the status stream.
+// touches the program's own reports: the next sweep recomputes the status from
+// OSC 7501 or OSC 9;4 alone (idle, or whatever the program reports) and emits
+// it on the status stream.
 func (m *SessionManager) WithdrawStatusLatch(id SessionID, want string, seq uint64) bool {
 	if want != StatusInput && want != StatusDone {
 		return false
@@ -998,14 +1049,9 @@ func (m *SessionManager) WithdrawStatusLatch(id SessionID, want string, seq uint
 // the budget expired with teardowns outstanding, naming how many, and nil when
 // everything finished.
 //
-// A manager is SINGLE-USE. Shutdown cancels the status sweep and the idle reaper
-// and nothing restarts them, so a manager reused afterwards serves sessions with
-// no status stream and no idle reaping. Build a new one instead.
-//
-// Sessions are signalled first and waited on second, deliberately. Each teardown
-// can spend several containGrace windows, so closing and waiting one session at a
-// time would make the total scale with the tab count; signalling all of them
-// first overlaps those windows inside one budget.
+// A manager is SINGLE-USE: nothing restarts its loops, and every later Create
+// or CreateWith returns ErrManagerClosed. Sessions are all signalled before any
+// is waited on, so their containGrace windows overlap inside one budget.
 func (m *SessionManager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	if m.reaperCancel != nil {
@@ -1023,6 +1069,7 @@ func (m *SessionManager) Shutdown(ctx context.Context) error {
 	m.sessions = make(map[SessionID]*session)
 	m.order = nil
 	m.layout = defaultPaneLayout()
+	m.closed = true
 	loopsDone := m.loopsDone
 	m.mu.Unlock()
 	for _, s := range victims {
@@ -1065,19 +1112,14 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 		}
 		m.mu.Unlock()
 		if !ok {
-			// Unknown session: accept the upgrade and close with the
-			// DEFINITIVE application code (4004), which the client reads and
-			// routes to its ended state — a pre-upgrade 404 is unreadable
-			// from browser JS (an opaque code-1006 failure) and condemned
-			// clients to an endless reconnect loop against a session that
-			// will never exist. The upgrade goes through acceptWS so this path
-			// applies the SAME origin policy as a live session's socket
-			// (WithManagerOriginPolicy); it used to hardcode nil options, which
-			// silently ignored a configured allowlist here and answered a
-			// legitimately-embedded client 403 instead of the readable 4004.
-			// A non-WebSocket GET gets Accept's own 426 — the same answer the
-			// known-session path gives, so a plain probe can no longer
-			// distinguish session existence (the old 404-vs-426 oracle).
+			// Unknown session: accept the upgrade and close with the readable
+			// application code 4004, which the client routes to its ended
+			// state; a pre-upgrade 404 reaches browser JS as an opaque 1006 and
+			// loops reconnects. acceptWS applies the SAME origin policy as a
+			// live session's socket (WithManagerOriginPolicy), so an embedded
+			// client from an allowed origin gets 4004, not 403. A non-WebSocket
+			// GET gets Accept's own 426, as on the known-session path, so a
+			// probe cannot tell whether a session exists.
 			ws, err := acceptWS(w, r, m.originPolicy)
 			if err != nil {
 				return // acceptWS or Accept already wrote the response (403/426)
@@ -1090,30 +1132,14 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 	})
 }
 
-// RESTHandler serves the session REST API: POST SessionsPath (create),
-// GET SessionsPath (list), PUT /api/sessions/order (set the shared display
-// order), GET + PUT /api/sessions/layout (read / set the shared pane layout),
-// DELETE /api/sessions/{id} (close),
-// PUT /api/sessions/{id}/title (set the client-derived automatic title), and
-// PUT + DELETE /api/sessions/{id}/pinned-title (set / clear the user's name).
-//
-// The order and layout routes are literal segments where the others take an
-// {id}, which ServeMux prefers over a wildcard, and no session id can collide
-// with them (ids are hex).
-// Its internal patterns are absolute, so it only functions on the SessionsPath +
-// SessionsSubtreePath mounts — MountSessionRoutes / MountAPI perform them
-// (the route-set contract lives there); exported so consumer tests can stub it.
-//
-// Every response the returned handler produces states Cache-Control: no-store
-// unless the header is already set (see withNoStore). The wrapper sits upstream
-// of the mux rather than in the handlers so it also covers the responses the mux
-// SYNTHESIZES — a 404 for an unserved path, a 405 for a method a path does not
-// serve, a path-cleaning redirect — which are exactly the responses no handler
-// is invoked to write, and which land on paths carrying a session id. Wrapping
-// here rather than only at the mount also means a consumer that mounts this
-// handler itself, without MountSessionRoutes, still gets the policy; the create
-// gate is the one thing this site cannot reach, which is why MountSessionRoutes
-// wraps again outside it.
+// RESTHandler serves the session REST API: create, list, close, the shared
+// order and layout, the client and pinned titles, and PUT
+// /api/sessions/{id}/seen (raise the session's seen floor). Its patterns are
+// absolute, so it works only on the SessionsPath and SessionsSubtreePath
+// mounts, which MountSessionRoutes and MountAPI perform and whose docs own the
+// route set. Every response, those the inner mux synthesizes included, states
+// Cache-Control: no-store unless already set (see withNoStore). Exported so
+// consumer tests can stub it.
 func (m *SessionManager) RESTHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/sessions", m.handleCreate)
@@ -1125,17 +1151,40 @@ func (m *SessionManager) RESTHandler() http.Handler {
 	mux.HandleFunc("PUT /api/sessions/{id}/title", m.handleSetTitle)
 	mux.HandleFunc("PUT /api/sessions/{id}/pinned-title", m.handleSetPinnedTitle)
 	mux.HandleFunc("DELETE /api/sessions/{id}/pinned-title", m.handleClearPinnedTitle)
+	mux.HandleFunc("PUT /api/sessions/{id}/seen", m.handleSetSeen)
 	return withNoStore(mux)
 }
 
 func (m *SessionManager) handleCreate(w http.ResponseWriter, _ *http.Request) {
-	info, err := m.create()
+	if m.refuseWhileRestoring(w) {
+		return
+	}
+	info, err := m.createWith(CreateSpec{})
+	if errors.Is(err, ErrManagerClosed) {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
+		return
+	}
 	if err != nil {
 		m.logger.Error("session: create failed", "error", err)
 		http.Error(w, "create failed", http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusCreated, info)
+}
+
+// refuseWhileRestoring answers 503 RestoringMessage with Retry-After: 1 while
+// RestoreSessionSet runs, and reports whether it did. The body's "error" field
+// is what web-terminal-ui shows on its loading overlay.
+func (m *SessionManager) refuseWhileRestoring(w http.ResponseWriter) bool {
+	m.mu.Lock()
+	restoring := m.restoring
+	m.mu.Unlock()
+	if !restoring {
+		return false
+	}
+	w.Header().Set("Retry-After", "1")
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": RestoringMessage})
+	return true
 }
 
 func (m *SessionManager) handleList(w http.ResponseWriter, _ *http.Request) {
@@ -1168,6 +1217,9 @@ func (m *SessionManager) handleSetOrder(w http.ResponseWriter, r *http.Request) 
 }
 
 func (m *SessionManager) handleGetLayout(w http.ResponseWriter, _ *http.Request) {
+	if m.refuseWhileRestoring(w) {
+		return
+	}
 	writeJSON(w, http.StatusOK, m.PaneLayout())
 }
 
@@ -1244,6 +1296,67 @@ func (m *SessionManager) handleClearPinnedTitle(w http.ResponseWriter, r *http.R
 		return
 	}
 	http.Error(w, "unknown session", http.StatusNotFound)
+}
+
+// handleSetSeen serves PUT /api/sessions/{id}/seen {"seq": N}: 204 once
+// markSessionSeen applied it (an older or future N is clamped, not refused, so
+// the floor reaches N only for an N the session has numbered), 404 on an
+// unknown id, 400 on a body decodeSeenBody refuses.
+func (m *SessionManager) handleSetSeen(w http.ResponseWriter, r *http.Request) {
+	seq, ok := decodeSeenBody(w, r)
+	if !ok {
+		return
+	}
+	if m.markSessionSeen(SessionID(r.PathValue("id")), seq) {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Error(w, "unknown session", http.StatusNotFound)
+}
+
+// markSessionSeen raises id's seen floor to seq, capped at the latest
+// occurrence so a forged or future number cannot cover one that has not
+// happened, and never lowered, so a lagging reader cannot hide a newer cue. It
+// returns false for an unknown session; a session no sweep has tracked yet
+// has nothing to cover and returns true unchanged.
+func (m *SessionManager) markSessionSeen(id SessionID, seq uint64) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.sessions[id]; !ok {
+		return false
+	}
+	if tr := m.trackers[id]; tr != nil {
+		tr.seenSeq = max(tr.seenSeq, min(seq, tr.statusSeq))
+	}
+	return true
+}
+
+// maxSeenBodyBytes bounds the seen body, which carries one integer.
+const maxSeenBodyBytes = 256
+
+// decodeSeenBody reads the seq out of a PUT /api/sessions/{id}/seen body,
+// answering 400 itself when it cannot. seq must be present and an unsigned
+// integer (encoding/json refuses a sign, a fraction, an exponent and a string
+// for uint64), and trailing data is refused as in decodeOrderBody.
+func decodeSeenBody(w http.ResponseWriter, r *http.Request) (uint64, bool) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxSeenBodyBytes)
+	var body struct {
+		Seq *uint64 `json:"seq"`
+	}
+	dec := json.NewDecoder(r.Body)
+	if err := dec.Decode(&body); err != nil {
+		http.Error(w, "invalid body", http.StatusBadRequest)
+		return 0, false
+	}
+	if body.Seq == nil {
+		http.Error(w, "body must carry a seq", http.StatusBadRequest)
+		return 0, false
+	}
+	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
+		http.Error(w, "unexpected data after the body", http.StatusBadRequest)
+		return 0, false
+	}
+	return *body.Seq, true
 }
 
 // decodeTitleBody reads the shared {"title": "..."} envelope both title routes
@@ -1433,30 +1546,6 @@ func (m *SessionManager) maybeReap() {
 	}
 }
 
-// refinedStatus computes a session's status for a point-in-time read (List and
-// the SSE snapshot) from the sweep's last computed status: that value carries
-// the working/done/input refinement, so GET /api/sessions agrees with what the
-// status stream pushes. Both sources MUST agree — a reloading client paints its
-// activity dots from whichever answers last, and when List still reported the
-// coarse liveness status a reload visibly downgraded a latched done/input dot
-// back to idle until the next real transition. Process exit is checked live and
-// always wins (it is definitive, while lastStatus can lag a sweep tick behind),
-// and it carries the same exited-vs-crashed split the sweep applies, so the two
-// sources cannot disagree about HOW a session ended either; an empty lastStatus
-// (created within the current sweep tick) is the new-session default, idle.
-func refinedStatus(lastStatus string, h *Handler) string {
-	if exited, crashed := h.exitOutcome(); exited {
-		if crashed {
-			return StatusCrashed
-		}
-		return StatusExited
-	}
-	if lastStatus != "" {
-		return lastStatus
-	}
-	return StatusIdle
-}
-
 // newSessionID returns a 128-bit crypto-random hex id, used as both the routing
 // id (/ws?session=<id>) and the resume id.
 func newSessionID() (SessionID, error) {
@@ -1467,29 +1556,13 @@ func newSessionID() (SessionID, error) {
 	return SessionID(hex.EncodeToString(b[:])), nil
 }
 
-// writeJSON writes a session-surface JSON response. Its only callers are the
-// responses that carry session ids in full — handleCreate (201, the new id),
-// handleList (200, every live id) and handleGetLayout (200, the shown ids) —
-// which is why no-store is set here rather than left to each consumer.
-//
-// A session id IS a capability: it is the credential /ws attaches and resumes
-// with, which is why this package refuses to log one whole (see LogID). A 200/201
-// JSON body with no Cache-Control is heuristically cacheable under RFC 9111, so
-// without this header the same value the engine will not put in a log file can be
-// written to a browser's disk cache or held by an intermediary. Consumers were
-// closing that gap unevenly — web-terminal-kiro wrapped the surface in its own
-// no-store middleware, web-terminal-server set no cache directive at all — and a
-// credential's cache policy belongs to whoever issues the credential, so the
-// default lives here. A consumer may still add a broader policy of its own (kiro
-// covers its /api/tools and /api/health routes the same way); setting the same
-// header twice is idempotent.
-//
-// This is the surface's one UNCONDITIONAL setter, and the difference from
-// withNoStore is deliberate: that wrapper yields to a Cache-Control an outer
-// consumer already set, because the responses it covers carry no credential and
-// only their URL is sensitive. These bodies CONTAIN session ids, so their
-// prohibition is not the consumer's to relax, and the value is written whatever
-// an outer stack asked for.
+// writeJSON writes a session-surface JSON response: the bodies that carry
+// session ids in full (create, list, the layout read) and their 503 refusals.
+// A session id is the /ws credential (see LogID), and a 2xx JSON body without
+// Cache-Control is heuristically cacheable under RFC 9111, so no-store is set
+// here and UNCONDITIONALLY: unlike withNoStore, which yields to an outer policy
+// because its responses carry no credential, this prohibition is not the
+// consumer's to relax.
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	h := w.Header()
 	h.Set("Content-Type", "application/json")

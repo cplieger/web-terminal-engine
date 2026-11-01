@@ -9,10 +9,10 @@ import (
 
 // TestED3ClearsScrollbackRing verifies that ED3 (CSI 3 J) emitted by the child
 // clears the server's scrollback ring and raises the client-signal flag, while
-// preserving committed so absolute indices stay monotonic. Inline TUIs
-// (kiro-cli) emit ED3 on every resize redraw to discard the previous frame;
-// without honoring it the old frames pile up in the ring and are replayed to
-// clients, producing the resize-duplication bug.
+// preserving committed so absolute indices stay monotonic. Inline TUIs can emit
+// ED3 on every resize redraw to discard the previous frame; without honoring it
+// the old frames pile up in the ring and are replayed to clients, producing the
+// resize-duplication bug.
 func TestED3ClearsScrollbackRing(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"})
 

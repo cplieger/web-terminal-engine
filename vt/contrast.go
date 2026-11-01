@@ -2,22 +2,13 @@ package vt
 
 import "math"
 
-// Minimum-contrast lift.
-//
-// A terminal program picks a palette SLOT, never an RGB value: kiro-cli writes
-// SGR 34 for a link and cannot know what index 4 resolves to here, nor what the
-// client paints behind it. The two emulators closest to this engine's shape
-// answer that the same way. xterm.js exposes `minimumContrastRatio` (VS Code
-// sets it to 4.5, WCAG AA, by default) and iTerm2 ships a "Minimum Contrast"
-// control whose documentation states the same cause: because ANSI colors are
-// configurable, apps cannot avoid the collision. Both shift the TEXT color
-// toward white or black, and neither touches the background. WithMinimumContrast
-// is this engine's equivalent.
-//
-// The lift runs in makeRunWithURL, on a run's resolved (fg, bg) pair. It is
-// deliberately NOT in colorToWire, which also answers OSC 4 palette queries
-// (osc.go): a query must report the palette entry the application set, not the
-// value the renderer painted over it.
+// Minimum-contrast lift. A program picks a palette slot, never an RGB value, so
+// it cannot know what SGR 34 resolves to here or what the client paints behind
+// it. xterm.js (`minimumContrastRatio`, 4.5 in VS Code) and iTerm2 ("Minimum
+// Contrast") shift the text color toward white or black and leave the
+// background; WithMinimumContrast is the equivalent. The lift runs in
+// makeRunWithURL, not colorToWire: colorToWire also answers OSC 4 queries
+// (osc.go), which must report the palette entry the application set.
 
 // contrastSearchSteps bounds the blend search. Each step halves the interval,
 // so 8 steps resolve the blend factor to better than 1/256 — finer than an

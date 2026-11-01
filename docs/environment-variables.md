@@ -2,7 +2,7 @@
 
 This page lists the setting names that servers built on this engine share. It is for a developer building a server on the engine who wants its settings to match the ones operators already know.
 
-The engine reads no environment itself. Your server parses its own configuration and passes options in. Servers that answer the same question still use the same name, so an operator who runs one already knows the others. [web-terminal-server](https://github.com/cplieger/web-terminal-server) and [web-terminal-kiro](https://github.com/cplieger/web-terminal-kiro) both read these names.
+The engine reads no environment itself. Your server parses its own configuration and passes options in. Servers that answer the same question still use the same name, so an operator who runs one already knows the others.
 
 | Variable | What the server does with it |
 | --- | --- |

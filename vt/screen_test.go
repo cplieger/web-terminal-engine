@@ -301,20 +301,11 @@ func TestAltScreenEnterExitPreservesMain(t *testing.T) {
 }
 
 // TestExitAltScreen1049RestoresPen verifies CSI ?1049l restores the main
-// screen's SGR pen, so an attribute set inside the alt session cannot leak into
-// the rendition the parent shell draws with. DECRESET 1049 is "Use Normal Screen
-// Buffer and restore cursor as in DECRC" (xterm ctlseqs), and DECRC restores
-// character attributes alongside the position (see restoreCursor), so the pen
-// travels with the cursor.
-//
-// This is the property that makes the engine immune to the class of bug kiro-cli
-// 2.19.1 fixed by writing SGR 0 after ?1049l: nothing here needs that trailing
-// reset. Underline is the attribute that bug stranded, so it is the one used.
-//
-// A DECSET mode flag is deliberately NOT in the restore set, and the second
-// assertion pins that asymmetry as intentional rather than a second leak: only
-// the cursor's own DECRC state is saved and restored here, while a mode flag is
-// session state the application owns and turns off itself.
+// screen's SGR pen: DECRESET 1049 restores the cursor as in DECRC (xterm
+// ctlseqs), and DECRC restores character attributes (see restoreCursor). So no
+// trailing SGR 0 is needed after ?1049l to keep an alt-session attribute from
+// leaking. The second assertion pins that a DECSET mode flag is NOT restored:
+// it is session state the application owns.
 func TestExitAltScreen1049RestoresPen(t *testing.T) {
 	s := New(5, 10)
 	s.Write([]byte("\x1b[1m"))     // main-screen pen: bold
@@ -322,7 +313,7 @@ func TestExitAltScreen1049RestoresPen(t *testing.T) {
 	if s.style != (Style{}) {
 		t.Errorf("enter 1049: pen = %+v, want zero (1049 resets SGR on entry)", s.style)
 	}
-	s.Write([]byte("\x1b[4m"))     // underline, the attribute the upstream bug stranded
+	s.Write([]byte("\x1b[4m"))     // underline, set only inside the alt session
 	s.Write([]byte("\x1b[?2004h")) // a mode flag turned on inside the alt session
 	s.Write([]byte("\x1b[?1049l"))
 	if want := (Style{Bold: true}); s.style != want {
@@ -615,8 +606,8 @@ func TestScreenWriteAllocationCountIsIndependentOfChunking(t *testing.T) {
 // buffer allows (maxOSCLen, 4 KiB), so a count that grew with it would be an
 // amplification vector reachable by anything that can print.
 //
-// The lengths span 4 bytes to 4000, a thousandfold, and the assertion is an
-// equality against the count measured at the shortest payload rather than a
+// Each builder takes a length n from 4 to 4000, a thousandfold, and the
+// assertion is an equality against the count measured at n=64 rather than a
 // threshold picked to pass. TakeResponse and TakeClipboard are called inside the
 // closure because the consumer drains both every frame; without that the queues
 // grow and the measurement drifts.
@@ -632,17 +623,23 @@ func TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength(t *testi
 			return "\x1b]52;c;" + strings.Repeat("aGVsbG8h", n/8+1) + "\x07"
 		},
 		"dcs_decrqss_query": func(n int) string {
-			return "\x1bP$q" + strings.Repeat("m", n) + "\x1b\\"
+			// A query past maxDCSLen is dropped unanswered; dcs_over_cap measures that.
+			return "\x1bP$q" + strings.Repeat("m", min(n, maxDCSLen)) + "\x1b\\"
+		},
+		"dcs_over_cap": func(n int) string {
+			return "\x1bP$q" + strings.Repeat("m", maxDCSLen+n) + "\x1b\\"
+		},
+		"osc_over_cap": func(n int) string {
+			return "\x1b]52;c;" + strings.Repeat("A", maxOSCLen+n) + "\x07"
 		},
 		"csi_parameter_list": func(n int) string {
 			return "\x1b[" + strings.Repeat("1;", n) + "1mx\r"
 		},
 	}
-	// 64 rather than 4 is the shortest measured length for the comparison: a
-	// handful of bytes can sit under a size class the allocator rounds up to, so
-	// the first step is a step in the ALLOCATOR and not in this package (the DCS
-	// reply measured 1 at 4 bytes and 2 from 64 bytes up, then stayed flat to
-	// 4000). The 4-byte case is still measured and logged, just not the baseline.
+	// n=64 rather than 4 is the baseline: a handful of bytes can sit under a
+	// size class the allocator rounds up to, so the first step is a step in the
+	// ALLOCATOR and not in this package (dcs_decrqss_query measured 1 at n=4 and
+	// 2 from n=64 up). n=4 is still measured and logged, just not the baseline.
 	lengths := []int{4, 64, 1024, 4000}
 
 	for name, build := range sequences {
@@ -661,15 +658,15 @@ func TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength(t *testi
 				}
 				counts[i] = testing.AllocsPerRun(allocRuns, body)
 			}
-			// counts[1] is the 64-byte reading; every longer payload must match
-			// it exactly.
+			// counts[1] is the n=64 reading; every larger n must match it
+			// exactly.
 			for i, got := range counts[1:] {
 				if got != counts[1] {
-					t.Errorf("Screen.Write(%s, %d-byte payload) allocated %v times per run, want %v (its count at a 64-byte payload): the cost of a captured sequence must not track a length the program on the other end of the PTY chooses",
+					t.Errorf("Screen.Write(%s, n=%d) allocated %v times per run, want %v (its count at n=64): the cost of a captured sequence must not track a length the program on the other end of the PTY chooses",
 						name, lengths[i+1], got, counts[1])
 				}
 			}
-			t.Logf("%s: a constant %v allocations from a 64-byte to a 4000-byte payload (%v at 4 bytes)", name, counts[1], counts[0])
+			t.Logf("%s: a constant %v allocations from n=64 to n=4000 (%v at n=4)", name, counts[1], counts[0])
 		})
 	}
 }

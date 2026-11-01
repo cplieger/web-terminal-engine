@@ -19,6 +19,7 @@
   "mutator": {
     "excludedMutations": ["StringLiteral"]
   },
+  "inPlace": true,
   "ignorePatterns": ["node_modules", "reports", "coverage", "dist", "e2e"],
   "ignoreStatic": true,
   "reporters": ["html", "progress", "clear-text"],

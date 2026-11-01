@@ -1,25 +1,18 @@
-// Spec-first conformance vectors for the kitty keyboard DISAMBIGUATE flag (0x1).
+// Kitty disambiguate-flag (0x1) vectors whose expectations come from the spec's
+// tables (https://sw.kovidgoyal.net/kitty/keyboard-protocol/) or, where `spec`
+// starts with DEVIATION, from a stated product contract; never from the encoder.
+// kitty-encoder.test.ts consumes them; e2e/keyboard-kitty.e2e.test.ts exercises
+// a representative subset with browser-generated events.
 //
-// These are transcribed from the OFFICIAL spec's normative tables
-// (https://sw.kovidgoyal.net/kitty/keyboard-protocol/) as the SOURCE OF TRUTH —
-// authored FROM THE SPEC, not from our encoder — so the implementation is
-// asserted against what the protocol mandates rather than against itself. Each
-// vector cites the spec section it enforces. Consumed by kitty-encoder.test.ts
-// (Vitest Browser Mode) and mirrored by e2e/keyboard-kitty.e2e.test.ts
-// (Playwright, against a served page).
-//
-// `kitty` is the expected result with the disambiguate flag active; `legacy` is
-// the expected result with the flag OFF and is given only where our legacy
-// encoding is well-defined and a meaningful regression guard (many keys encode
-// identically in both modes; some legacy edge cases are pre-existing and out of
-// this feature's scope, so their `legacy` is omitted rather than asserted).
+// `kitty` expects the flag on and `legacy` the flag off; `legacy` is omitted
+// where the legacy encoding is not a meaningful regression guard.
 
 // Local to this file: KittyVector below is the exported surface, and every
 // producer of an Expect (`send`, `ignore`) lives here too.
 type Expect = { kind: "send"; bytes: string } | { kind: "ignore" };
 
 export interface KittyVector {
-  /** What this asserts + the spec table/section it is derived from. */
+  /** What this asserts and the spec section it comes from, or DEVIATION and the spec's value. */
   spec: string;
   key: string;
   code?: string;
@@ -37,8 +30,7 @@ const ignore: Expect = { kind: "ignore" };
 const ESC = "\x1b";
 
 export const KITTY_SPEC_VECTORS: KittyVector[] = [
-  // --- Escape (Functional key codes: ESCAPE = 27 u). The headline fix: a lone
-  // Esc byte is indistinguishable from the start of an escape sequence. ---
+  // --- Escape (Functional key codes: ESCAPE = 27 u). ---
   {
     spec: "Functional keys: ESCAPE 27u",
     key: "Escape",
@@ -52,12 +44,9 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
     kitty: send(`${ESC}[27;2u`),
   },
 
-  // --- Text keys under Disambiguate. Plain/shift printables stay TEXT (the spec:
-  // text-producing keys are sent as UTF-8; "Lock modifiers are not reported for
-  // text producing keys"), so the encoder defers to the hidden textarea. Only
-  // ctrl / alt / ctrl+alt / shift+alt / ctrl+shift move to CSI-u, using the
-  // UNSHIFTED key code. Values cross-checked against the spec "Example
-  // encodings" table (ctrl+shift column is given there explicitly). ---
+  // --- Text keys: plain and Shift printables stay text (spec: text-producing keys
+  // are sent as UTF-8); ctrl, alt and their combinations move to CSI-u with the
+  // unshifted key code, as in the spec's "Example encodings" table. ---
   {
     spec: "Legacy text keys: plain letter stays text",
     key: "a",
@@ -129,13 +118,9 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
     kitty: send(`${ESC}[59;6u`),
   },
   {
-    // DELIBERATE PRODUCT DEVIATION from the spec table (which would send
-    // 97;9u): meta/Cmd-ONLY printable combos are browser/OS chrome (Cmd+C,
-    // Cmd+V, Cmd+R) and stay with the browser, exactly as the legacy path
-    // carves them out — and as the kitty terminal itself consumes its own
-    // emulator shortcuts instead of reporting them. Reporting these ate
-    // copy-on-macOS inside kitty apps (judgement finding, fixed 2026-07).
-    // Meta combined with ctrl/alt still reports (vector below).
+    // DELIBERATE PRODUCT DEVIATION from the spec table (97;9u): Meta/Cmd-only
+    // printable combos (Cmd+C, Cmd+V, Cmd+R) stay with the browser, as in legacy
+    // mode. Meta with ctrl or alt still reports (vector below).
     spec: "DEVIATION (browser chrome): meta(super)+a alone is NOT reported -> ignore (spec table: 97;9u)",
     key: "a",
     code: "KeyA",
@@ -202,10 +187,8 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
     legacy: send("\x08"),
   },
 
-  // --- Functional keys with a letter trailer (arrows, Home, End, F1/F2/F4).
-  // Under kitty these are CSI 1;{mod}{letter} (CSI form even for F1-F4, whose
-  // legacy form is SS3). Unmodified arrows/Home/End encode identically to legacy
-  // (no DECCKM). ---
+  // --- Functional keys with a letter trailer (arrows, Home, End, F1/F2/F4): CSI
+  // 1;{mod}{letter}, the CSI form even for F1-F4, whose legacy form is SS3. ---
   {
     spec: "Functional: Up = CSI A",
     key: "ArrowUp",
@@ -269,10 +252,9 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
   },
   { spec: "Functional: F12 = CSI 24~", key: "F12", kitty: send(`${ESC}[24~`) },
 
-  // --- F13-F24 (Functional key definitions: F13 57376 .. F24 57387, CSI u
-  // form). Legacy covers F13-F20 via xterm's extended tilde codes (25-34, 27
-  // and 30 skipped); F21-F24 have NO legacy encoding (xterm stops at F20) and
-  // must stay silent there — under kitty all twelve report. ---
+  // --- F13-F24 (Functional key definitions: F13 57376 .. F24 57387, CSI u).
+  // Legacy covers F13-F20 with xterm's tilde codes 25-34 (27 and 30 skipped);
+  // F21-F24 have no legacy encoding and stay silent there. ---
   {
     spec: "Functional: F13 = CSI 57376 u (legacy xterm tilde 25~)",
     key: "F13",
@@ -311,11 +293,9 @@ export const KITTY_SPEC_VECTORS: KittyVector[] = [
     kitty: send(`${ESC}[57387;2u`),
   },
 
-  // --- Keypad (Functional key codes KP_* 57414-57427). Under 0x1 only the
-  // NON-TEXT keypad keys (NumLock-off navigation + NumpadEnter) get dedicated
-  // KP_ codes; NumLock-on digits stay TEXT (KP_ digit codes 57399-57416 are a
-  // report-all 0x8 feature). ev.code identifies the physical keypad key; ev.key
-  // its current function. Legacy reports them as their non-keypad equivalents. ---
+  // --- Keypad (Functional key codes KP_* 57414-57427): under 0x1 only NumLock-off
+  // navigation and NumpadEnter get KP_ codes; NumLock-on digits stay text, since
+  // KP_ digit codes belong to report-all (0x8). ---
   {
     spec: "Keypad: KP_UP 57419u (Numpad8, NumLock off) vs legacy CSI A",
     key: "ArrowUp",

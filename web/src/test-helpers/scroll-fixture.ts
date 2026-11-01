@@ -229,8 +229,8 @@ export function installRowGeometry(opts: {
   // reading position is GONE, which is the property this design exists to work
   // around. A getter that clamps for display while retaining the old number
   // silently restores the position when the content grows back — modelling a
-  // container that never loses a position, i.e. exactly the fiction that let the
-  // tab-switch bug through review.
+  // container that never loses a position, the fiction that hides the
+  // tab-switch bug.
   const settle = (): number => {
     top = Math.max(0, Math.min(top, maxTop()));
     return top;

@@ -190,6 +190,43 @@ describe("scroll: the zero-delta content shift", () => {
   });
 });
 
+describe("scroll: a container that refuses the scroll listener", () => {
+  it("propagates the failure and releases the handler it registered", () => {
+    // The factory's documented promise is that it throws holding nothing. A
+    // registration that registered and THEN failed is the case that costs
+    // something: the listener would stay live on the caller's container,
+    // driving a controller no caller ever received, and the container's own
+    // follow state would be decided by an instance nobody can dispose.
+    const el = document.createElement("div");
+    const realAdd = el.addEventListener.bind(el);
+    const added: EventListenerOrEventListenerObject[] = [];
+    el.addEventListener = ((
+      type: string,
+      fn: EventListenerOrEventListenerObject,
+      opts?: AddEventListenerOptions,
+    ) => {
+      realAdd(type, fn, opts);
+      added.push(fn);
+      throw new Error("listener refused");
+    }) as typeof el.addEventListener;
+    const realRemove = el.removeEventListener.bind(el);
+    const removed: EventListenerOrEventListenerObject[] = [];
+    el.removeEventListener = ((
+      type: string,
+      fn: EventListenerOrEventListenerObject,
+      opts?: EventListenerOptions,
+    ) => {
+      realRemove(type, fn, opts);
+      removed.push(fn);
+    }) as typeof el.removeEventListener;
+
+    expect(() => createScrollController({ scrollEl: el })).toThrow("listener refused");
+
+    expect(added).toHaveLength(1);
+    expect(removed).toEqual(added); // the same handler, released again
+  });
+});
+
 describe("scroll: a disposed controller", () => {
   it("ignores restoreView entirely, including the follow state", () => {
     // The renderer calls restoreView from bind, which a consumer's teardown

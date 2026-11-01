@@ -242,23 +242,12 @@ const (
 	// control logs; every real control type is under 16 bytes.
 	maxLoggedControlTypeBytes = 32
 
-	// defaultScrollbackCapacity is the number of scrollback lines the server
-	// retains for replay and for demand-paged history requests. It is the
-	// reachable depth of a session's history: how far back a user can scroll.
-	//
-	// 100000 is sized from real workloads rather than from another terminal's
-	// default. The largest agent session measured on a live box (2026-08, 193
-	// sessions on disk) rendered an estimated 53,000-73,000 terminal lines, and
-	// the p99 session ~61,000 — so a smaller ceiling truncates exactly the long
-	// sessions whose history is worth scrolling, while the median session
-	// (~2,500 lines) never reaches it. The cost is paid only as history is
-	// actually produced (the ring grows on demand, see scrollbackRing), at
-	// roughly 345 bytes per retained line: ~34 MB per session at the ceiling,
-	// against the 200-430 MB a kiro-cli process tree already costs.
-	//
-	// Operators override it per deployment with ScrollbackEnvVar; there is no
-	// "unlimited" sentinel, because a sufficiently large number IS unlimited
-	// once the ring stopped preallocating. 0 disables scrollback entirely.
+	// defaultScrollbackCapacity is the retained history depth, in lines, for
+	// replay and demand-paged history. Sized from measured long sessions (p99
+	// about 61,000 rendered lines, median about 2,500), so only long histories
+	// reach it. The ring grows on demand at about 345 bytes per line, about 34 MB
+	// at the ceiling. ScrollbackEnvVar overrides it: a large number is the
+	// "unlimited" setting, and 0 disables scrollback.
 	defaultScrollbackCapacity = 100_000
 )
 
@@ -285,9 +274,7 @@ const DefaultScrollbackCapacity = defaultScrollbackCapacity
 // Exported because it is a cliff, not a preference: at or above it the client
 // can fetch any history the bounded resume replay withheld; below it the replay
 // carries the whole ring, so there is nothing withheld and nothing to fetch.
-// Configuring into the gap that used to exist between this and the replay bound
-// lost history outright. Prefer ClampScrollbackCapacity over comparing against
-// this yourself.
+// Prefer ClampScrollbackCapacity over comparing against this yourself.
 const MinPagingCapacity = paginationMinRing
 
 // ClampScrollbackCapacity turns an operator-supplied retained-history depth into
@@ -435,20 +422,13 @@ func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
 
-// WithKeepUnfocused makes the server hold the child process in the "unfocused"
-// state for DEC 1004 focus reporting when keep is true: whenever the process
-// enables focus reporting (CSI ?1004h), the server writes a focus-out (ESC [ O)
-// to its PTY, and it never writes a focus-in. A process that gates behavior on
-// focus (for example kiro-cli, which only emits its OSC 9 turn/permission
-// notifications while it believes it is unfocused) then keeps emitting, so the
-// session manager's status classifier can observe those notifications.
-//
-// keep=false reproduces the no-option default — real focus reporting, which is
-// what a generic terminal wants (vim, etc.) — so a consumer can thread its own
-// flag instead of conditionally appending the option. Later options win: the
-// last WithKeepUnfocused in the option list decides. The hold is one clause of
-// the server's DEC 1004 derivation, which also reads the attachment state and
-// every attached client's reported focus.
+// WithKeepUnfocused holds the child, when keep is true, in the "unfocused" DEC
+// 1004 state: whenever it enables focus reporting (CSI ?1004h) the server writes
+// a focus-out (ESC [ O) to its PTY and never a focus-in, so a program that only
+// emits OSC 9 notifications while unfocused keeps emitting them for the status
+// classifier. keep=false is the default, real focus reporting. The last
+// WithKeepUnfocused in the option list wins. The hold is one clause of the
+// server's DEC 1004 derivation, beside attachment state and each client's focus.
 func WithKeepUnfocused(keep bool) Option {
 	return func(c *handlerConfig) { c.keepUnfocused = keep }
 }
@@ -667,9 +647,10 @@ type Handler struct {
 	// goroutines needs h.mu or an atomic, including anything added to Close.
 	// (It is also reassigned to nil on the start-failure path below.)
 	contain *sessionCgroup
-	// reap is this session's marker reap domain, nil when the consumer opted
-	// out. Read under exactly the same rules as contain above: written here
-	// before the monitor goroutine is created, read only by that goroutine.
+	// reap is this session's marker reap domain, nil until a spawn starts, after
+	// a failed spawn, or when its marker could not be minted. Read under exactly the same rules as
+	// contain above: written before the monitor goroutine is created, read only
+	// by that goroutine.
 	reap       *sessionReap
 	procExitCh chan struct{}
 	// done closes once EVERY goroutine this handler started has returned: the PTY
@@ -841,22 +822,12 @@ func (h *Handler) Close() {
 
 // Shutdown ends the session and waits for its teardown to finish, bounded by
 // ctx. It returns ctx.Err() if the budget expires first and nil once every
-// goroutine the handler started has returned.
-//
-// This is the form for a caller that is about to stop the process. Close alone
-// leaves the cgroup teardown, the /proc sweep and the client notification in
-// flight, and a process that exits underneath them loses whatever had not
-// finished. Under a container that is absorbed by the runtime tearing the
-// container down; outside one, or across an in-process restart, it is not.
-//
-// The wait is worth more than its own success: an expiry is the only signal that
-// a teardown exceeded its budget, which is otherwise silent. Log it. There is no
-// useful branch to take, because the caller is stopping either way.
-//
-// Timing to size ctx against: cmd.WaitDelay bounds the child's reap at 5s, and
-// the containment and marker-domain ladders each spend up to three containGrace
-// windows plus a /proc scan. A grace shorter than that is a deliberate choice to
-// hear about the overrun rather than to wait it out.
+// goroutine the handler started has returned. Call it, not Close, before the
+// process exits: Close leaves the cgroup teardown, the /proc sweep and the
+// client notification in flight. An expiry is the only sign a teardown overran,
+// so log it. Size ctx for the child's reap, at most 5s, plus the escape
+// teardown: about a second for a tree that must be killed, under ten for one
+// that keeps forking or cannot act on SIGKILL.
 func (h *Handler) Shutdown(ctx context.Context) error {
 	h.Close()
 	return h.wait(ctx)
@@ -1004,10 +975,10 @@ func (h *Handler) Notification() (msg string, seq uint64) {
 
 // Progress returns the session's last ConEmu OSC 9;4 progress state: -1 when
 // none has been seen (the process never reported progress), else the state
-// (0 off, 1 value, 2 error, 3 indeterminate, 4 paused). The status stream maps
-// an active state (1 or 3) to working, so a progress-reporting program (kiro-cli
-// while the agent works) drives the working indicator without relying on raw
-// output activity. Safe for concurrent use.
+// (0 off, 1 value, 2 error, 3 indeterminate, 4 paused). While the program has
+// sent no OSC 7501 report since the last RIS, the status stream maps an active
+// state (1 or 3) to working, so OSC 9;4 progress drives the working indicator
+// without relying on raw output activity. Safe for concurrent use.
 func (h *Handler) Progress() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1016,12 +987,12 @@ func (h *Handler) Progress() int {
 
 // ProgressValue returns the percentage carried by the session's last OSC 9;4
 // progress sequence: -1 when absent or unknown (no sequence seen, or a state
-// that carries no percentage), else 0-100. A consumer pairs it with Progress to
-// render a determinate bar; -1 is not 0%. Safe for concurrent use.
+// that carries no percentage), else 0-100; -1 is not 0%. It omits an OSC 7501
+// report's progress, which the status stream's progressValue, the value a
+// determinate bar draws, prefers. Safe for concurrent use.
 //
-// The engine's own status sweep does not call this: it reads the same field
-// through statusSnapshot, which batches every status input under one lock. Use
-// this when you want the value on its own.
+// The engine's own status sweep reads the same field through statusSnapshot,
+// which batches every status input under one lock.
 func (h *Handler) ProgressValue() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1060,26 +1031,24 @@ func (h *Handler) ScrollbackBounds() (committed, oldest uint64) {
 // as a struct rather than a result list so the sweep can grow another status
 // input without either growing a longer tuple or taking the lock twice.
 type screenStatus struct {
-	notifMsg string // the last OSC 9 notification message
-	title    string // the OSC 0/2 window title
-	notifSeq uint64 // increments per captured notification (a repeat is still new)
-	progress int    // OSC 9;4 state: -1 none, 0 clear, 1 value, 2 error, 3 indeterminate, 4 warning
+	notifMsg string           // the last OSC 9 notification message
+	title    string           // the OSC 0/2 window title
+	program  vt.ProgramStatus // the folded OSC 7501 status
+	notifSeq uint64           // rises per captured notification (a repeat is still new)
+	// programSeq rises per accepted OSC 7501 report, on notifSeq's counter.
+	programSeq uint64
+	progress   int // OSC 9;4 state: -1 none, 0 clear, 1 value, 2 error, 3 indeterminate, 4 warning
 	// progressValue is the OSC 9;4 percentage: -1 absent/unknown, else 0-100.
 	progressValue int
+	// programSeen is whether an OSC 7501 report arrived since the last RIS.
+	programSeen bool
 }
 
-// statusSnapshot returns the status-relevant screen state — the OSC 9;4
-// progress state and its percentage, the last OSC 9 notification message and
-// its sequence, and the OSC 0/2 window title — under a SINGLE lock
-// acquisition, so the status sweep's per-session snapshot is internally
-// consistent. Reading the same fields through the individual getters
-// (Progress, ProgressValue, Notification, Title) takes the lock once per call,
-// and a PTY chunk parsed between two of those calls can pair a stale active
-// progress with a fresh turn-end notification — the inconsistent pairing
-// computeStatus must not see (its fresh-latch precedence guards the state
-// machine; this getter removes the torn read). Every field a sweep reads
-// belongs in here for that reason, the percentage included: a bar at 40% next
-// to a state that has already moved on is the same defect in visible form.
+// statusSnapshot returns every status input the sweep reads (OSC 9;4 state
+// and percentage, OSC 9 notification and sequence, OSC 7501 status, title)
+// under ONE lock. Reading them through the individual getters can pair a stale
+// active progress with a fresh turn-end notification, or a bar with a state
+// that has moved on, a torn read computeStatus must never see.
 func (h *Handler) statusSnapshot() screenStatus {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1089,6 +1058,9 @@ func (h *Handler) statusSnapshot() screenStatus {
 		notifSeq:      h.screen.NotificationSeq,
 		progress:      h.screen.Progress,
 		progressValue: h.screen.ProgressValue,
+		program:       h.screen.ProgramStatus(),
+		programSeq:    h.screen.ProgramReportSeq(),
+		programSeen:   h.screen.ProgramReported(),
 	}
 }
 
@@ -1252,6 +1224,9 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 			// Broadcast process exit so attached WS clients close with
 			// statusProcessExited (4001) rather than a normal closure.
 			close(h.procExitCh)
+			// After the close, and statusRaw.read snapshots before exitOutcome,
+			// so a sweep that reads the dropped records also reads the exit.
+			h.markProgramExited()
 			cancel() // stop readLoop/flushLoop on child exit
 			// Free the PTY master fd immediately on natural exit; otherwise an
 			// exited-but-undeleted session holds it until Close/reap (reaper
@@ -1304,14 +1279,14 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	return nil
 }
 
-// childEnv assembles a session's environment. TERM/COLORTERM unlock 256-color
-// and truecolor; TERM_PROGRAM=iTerm.app (>= 3.6.6) is the one identity that
-// unlocks OSC 9;4 progress in both kiro-cli and Claude Code plus DEC 2026
-// synchronized output. h.cfg.env is appended last so WithEnv wins. The reap
-// marker goes FIRST so the reap scan reads a bounded environ prefix, and both
-// sources are stripped of it: os/exec keeps the last value of a repeated key,
-// and an inherited marker (a server started inside a session) would silently
-// disable reaping.
+// childEnv assembles a session's environment. TERM/COLORTERM advertise 256-color
+// and truecolor; TERM_PROGRAM=iTerm.app at version 3.6.6 advertises an iTerm2
+// identity, whose OSC 9;4 progress and DEC 2026 synchronized output the engine
+// implements. h.cfg.env is appended last so WithEnv wins. The reap marker goes
+// FIRST so the reap scan reads a bounded environ prefix, and both sources are
+// stripped of it: os/exec keeps the last value of a repeated key, and an
+// inherited marker (a server started inside a session) would silently disable
+// reaping.
 func (h *Handler) childEnv(reap *sessionReap) []string {
 	inherited := stripReapMarker(os.Environ())
 	consumer := stripReapMarker(h.cfg.env)
@@ -1344,6 +1319,14 @@ func startSessionPTY(cmd *exec.Cmd, cols, rows int) (*os.File, error) {
 		spawnRegister(cmd.Process.Pid)
 	}
 	return ptmx, err
+}
+
+// markProgramExited tells the screen the process exited (vt.Screen.ProgramExited
+// owns what that drops).
+func (h *Handler) markProgramExited() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.screen.ProgramExited()
 }
 
 // exitDrainBound caps how long the process monitor waits, after the child is
@@ -1412,10 +1395,11 @@ func (h *Handler) handlePTYData(data []byte) {
 	}
 	h.screen.Write(data) //nolint:errcheck // screen.Write always returns nil
 	if h.screen.TakeScrollbackCleared() {
-		// ED3 (erase scrollback): the app discarded its saved lines (kiro-cli
-		// does this on every resize redraw). Clear the retained ring to match a
-		// real terminal — Clear preserves committed so absolute indices stay
-		// monotonic — and flag the next frame to tell clients to drop history.
+		// ED3 (erase scrollback): the app discarded its saved lines (an inline
+		// TUI does this on every resize redraw). Clear the retained ring to
+		// match a real terminal — Clear preserves committed so absolute indices
+		// stay monotonic — and flag the next frame to tell clients to drop
+		// history.
 		h.scrollback.Clear()
 		h.scrollbackClearedPending = true
 	}
@@ -1814,70 +1798,29 @@ func durableSubset(clipboardPayload []byte, scrollPayloads [][]byte) [][]byte {
 	return append(durable, scrollPayloads...)
 }
 
-// writeClientPayloads writes one dispatch pass's payload sequence to one
-// client, under the resume gate, and reports whether anything was written:
-//
-//   - The socket's writeMu is acquired BLOCKING: a resume batch in flight
-//     delays this sequence rather than dropping it, because the frame's
-//     payloads are not regenerable — buildFrame has already committed its
-//     scrollLines to the ring and consumed the one-shots (scrollbackCleared,
-//     clipboard, bell), so a skipped frame would be a permanent scrollback
-//     hole for the resuming client (its post-batch haveThrough jumps past
-//     the missing lines, and resume replays only above haveThrough). The
-//     cost is bounded: the batch's own writes run under a 10s budget, a
-//     healthy batch is milliseconds, and only the resuming client's
-//     goroutine waits — but the pass's wg.Wait does inherit that bound on
-//     top of its own 5s write budget (the pre-existing wedged-client
-//     exposure, same class, larger constant; see dispatchFrame's comment).
-//
-//   - A frame whose resume generation no longer matches was built BEFORE
-//     the batch's screen snapshot, so its STATE payloads (screen, modes,
-//     title) are dropped: writing them after the batch would regress the
-//     client to pre-snapshot state the batch already superseded. Its
-//     DURABLE payloads (scroll chunks, clipboard) are still written,
-//     because the batch does not re-deliver them: the frame's scroll lines
-//     sit at or below the snapshot's committed index while the resuming
-//     client's haveThrough — its own window bottom — already spans their
-//     indices, so the batch's LinesFrom(haveThrough+1) replay starts PAST
-//     them (and under ring-cap pressure they may already be evicted from
-//     the ring entirely); dropping them would be a permanent scrollback
-//     hole. The clipboard payload is a consumed one-shot (OSC 52) no later
-//     frame will carry again. Writing scroll after the batch is safe:
-//     chunks carry absolute indices and the client applies them
-//     idempotently. Two residuals, accepted and bounded:
-//
-//     1. The client's alt gate now accepts
-//     history strictly below its frozen main win.base (store.ts
-//     applyScroll), so a client the batch flipped into alt STORES the
-//     durable chunk instead of dropping it — the lines surface at alt
-//     exit's store rebuild. Only a client bundle predating that fix still
-//     drops there, losing exactly what pre-split code lost; wire-compatible
-//     both ways.
-//
-//     2. Bell and the ED3 scrollbackCleared flag ride the dropped screen
-//     payload and are lost for the resuming client alone, when its resume
-//     acquires the write lock inside the window between this frame's
-//     registry.Snapshot() (buildFrame's first statement, before any row
-//     renders) and this goroutine's writeMu acquisition — a full render
-//     plus a full payload encode, i.e. milliseconds under a heavy drain,
-//     not microseconds. The ED3 loss self-heals at the app's next ED3
-//     (kiro-cli re-emits it on every resize redraw); until then that
-//     client over-retains history the server dropped.
-//
-// A nil state is tolerated for frames constructed without a registry
-// snapshot (tests); buildFrame always populates writers, so production
-// frames never take the ungated path.
-//
-// Returns the ack value actually stamped on the written payloads (the
-// captured ack, or the restamped one on a strip) and whether anything was
-// written — so the caller's delivered bookkeeping records what the wire
-// carried, never a pre-resume value a strip replaced.
+// writeClientPayloads writes one dispatch pass's payloads to one client under
+// the resume gate. It returns the ack actually stamped on the written payloads
+// (restamped on a strip) and whether anything was written, so the caller's
+// delivered bookkeeping records what the wire carried. A nil state (test
+// frames built without a registry snapshot) is written ungated.
 func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen uint64, payloads, durable [][]byte) (uint64, bool) {
 	stripped := false
 	if st != nil {
+		// BLOCKING: a resume batch in flight delays this frame rather than
+		// dropping it. buildFrame already committed its scroll lines to the ring
+		// and consumed the one-shots, and resume replays only above haveThrough,
+		// so a skipped frame is a permanent scrollback hole. The batch's writes
+		// run under a 10s budget, which this pass's wg.Wait inherits.
 		st.writeMu.Lock()
 		defer st.writeMu.Unlock()
 		if st.resumeGen.Load() != gen {
+			// Built before the batch's snapshot: drop the state payloads (screen,
+			// modes, title), which would regress the client, and keep the durable
+			// ones. The batch replays above haveThrough, which already spans these
+			// scroll lines, and the clipboard is a one-shot; absolute indices make a
+			// late scroll chunk idempotent. Bell and the ED3 flag ride the dropped
+			// screen payload and are lost for this client alone; ED3 heals at the
+			// app's next ED3.
 			payloads = durable
 			stripped = true
 		}
@@ -2487,7 +2430,7 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	h.builder.Reset()
 	// Commit any pending drain to history at its absolute index before
 	// computing the replay, so lines that scrolled while the client was
-	// away are retained (the old code discarded them here).
+	// away are retained.
 	drained, wrapped := drainScrollback(h.screen)
 	// Match Build's guard: drain that straddles an alt-screen transition belongs to the
 	// buffer just left and must not enter main history.
@@ -2633,17 +2576,11 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) {
 
 // armRedrawSettle starts the redraw-settle hold: flushes stay suppressed until
 // the child's redraw output has been quiet for redrawSettleQuiet, capped at
-// redrawSettleCap from now. Caller holds h.mu.
-//
-// This exists because the screen-level flush hold (vt.Screen.HoldFlush) cannot
-// hide a SIGWINCH redraw: it shares its deadline with DEC 2026, and the
-// child's first CSI ?2026l (ESU) clears it. kiro-cli brackets its post-resize
-// transcript reprint in many small BSU/ESU chunks, so the first chunk released
-// the resize hold milliseconds in, and every subsequent flush pass streamed a
-// mid-reprint window to the clients — on a phone, seconds of history visibly
-// churning through the screen after each keyboard/rotation resize. The settle
-// hold is handler-level state the child's escape sequences cannot touch: the
-// redraw is over when the child goes quiet, not when it closes a bracket.
+// redrawSettleCap from now. Caller holds h.mu. vt.Screen.HoldFlush cannot hide
+// a SIGWINCH redraw: it shares DEC 2026's deadline, so the first CSI ?2026l of
+// an inline TUI's chunked reprint releases it and clients see the reprint churn.
+// This hold is handler state escape sequences cannot touch: the redraw ends when
+// the child goes quiet, not when it closes a bracket.
 func (h *Handler) armRedrawSettle(now time.Time) {
 	h.redrawSettleUntil = now.Add(redrawSettleCap)
 	// The arm itself counts as activity so the hold lasts at least

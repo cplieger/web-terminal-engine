@@ -7,36 +7,14 @@ import (
 	"time"
 )
 
-// Zombie reaping is a separate question from session reaping, and conflating the
-// two is how it stayed unfixed. Session reaping ends processes that are still
-// ALIVE after their session closed (see reap.go). Zombie reaping collects an
-// exit status nobody called wait() for; it cannot touch a live process and it
-// frees no memory. What it frees is a PID slot and a kernel task struct.
-//
-// Why the engine has to own it: a server that runs as its container's PID 1
-// inherits every orphan in the container by re-parenting, and Go's os/exec waits
-// only on the children IT created. So every process whose own parent died —
-// which for an agent shell means every language server, every git it forked, the
-// lot — becomes a permanent zombie parked on the server. Measured on the
-// container this was written for: 17,323 zombies (12,508 git, 3,155 gopls)
-// against 88 live processes, all with the server as their parent, none of them
-// reachable by any consumer's own wait().
-//
-// The dangerous version of this feature is a bare wait(-1) loop. os/exec owns
-// the head pid of every session and its exit status IS the engine's exit
-// contract (ExitError, the exited/crashed split, onProcessExit). A generic
-// reaper that got there first would make cmd.Wait return "no child processes"
-// and silently turn every clean exit into an unknown one. So the sweep below
-// never waits on a pid the engine spawned, and the registry that decides is
-// written under a lock the spawn path holds across the fork itself — which is
-// what closes the window where a child could be born, exit, and be stolen before
-// anyone registered it.
-//
-// Deliberately a periodic sweep rather than a SIGCHLD handler: signal.Notify is
-// process-global state, SIGCHLD is what the Go runtime itself uses to drive
-// os/exec, and a zombie costs nothing for a few seconds. A library should not
-// reach for a process-wide signal disposition to solve a bounded hygiene
-// problem.
+// Zombie reaping collects exit statuses nobody wait()ed for, freeing PID slots;
+// session reaping (reap.go) ends live processes. A server that is its
+// container's PID 1 inherits every orphan, and os/exec waits only on its own
+// children, so without this every orphan stays a zombie. The sweep never waits
+// on a pid os/exec owns (spawnRegistry): taking that status makes cmd.Wait
+// report "no child processes". A periodic sweep, not a SIGCHLD handler:
+// signal.Notify is process-global state a library should not take, and a
+// zombie costs only a PID slot until the next sweep.
 
 const (
 	// zombieSweepDefault is the sweep interval when a consumer passes 0. Long

@@ -1,10 +1,4 @@
-// On-screen mobile keyboard toolbar: a DOM widget (button lookup, ARIA
-// painting, a listener registry, sticky-Ctrl state) wiring touch buttons to a
-// terminal send sink. The wire encodings live in keyboard.ts; this module
-// consumes its logical-key homes (plainCursorKeySeq, plainEscapeSeq,
-// kittyCtrlCharSeq, ctrlByteFor) so the toolbar cannot drift from the
-// physical-key path, which toolbar.test.ts pins byte-for-byte.
-
+import { isOneCodePoint } from "./code-point.js";
 import {
   ctrlByteFor,
   type KeyboardModes,
@@ -69,7 +63,7 @@ export interface BindMobileToolbarOptions {
   readonly ids?: MobileToolbarIds;
   /**
    * Fired whenever the sticky-Ctrl state changes (toolbar press,
-   * `setCtrlArmed`, or auto-disarm after applying a Ctrl byte).
+   * `setCtrlArmed`, or the auto-disarm on armed input).
    */
   readonly onCtrlChange?: (armed: boolean) => void;
 }
@@ -77,11 +71,11 @@ export interface BindMobileToolbarOptions {
 /** Returned from `bindMobileToolbar`; manages sticky-Ctrl state and tear-down. */
 export interface MobileToolbarController {
   /**
-   * Apply sticky-Ctrl to a piece of input text. Not armed: `text` unchanged.
-   * Armed and one character: the matching Ctrl byte (`ctrlByteFor`), or the
-   * character when none exists. Armed and longer (paste, IME commit): `text`
-   * unchanged, since Ctrl over a multi-character string would garble it.
-   * Every armed call disarms.
+   * Apply sticky-Ctrl to input text. Not armed: `text` unchanged. Armed and one
+   * character (one code point): its CSI u form under kitty disambiguate
+   * (`kittyCtrlCharSeq`), else its Ctrl byte (`ctrlByteFor`), or the character
+   * when none exists. Armed and longer (paste, IME commit): `text` unchanged,
+   * since Ctrl over a multi-character string would garble it. Every armed call disarms.
    */
   applyStickyCtrl(text: string): string;
   /** Programmatically arm/disarm Ctrl. Updates the toolbar button visuals (`.armed` class + `aria-pressed`) + fires `onCtrlChange`. */
@@ -218,12 +212,11 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
     if (!armed) {
       return text;
     }
-    if (text.length === 1) {
+    if (isOneCodePoint(text)) {
       setCtrlArmed(false);
-      // Under kitty disambiguate, Ctrl+char is the CSI-u form with the
-      // spec's UNSHIFTED codepoint (shift folded into the modifier),
-      // byte-identical with the physical-keyboard path: Ctrl+':' is 59;6u
-      // from both, never 58;5u.
+      // Matches a physical Ctrl chord for an unshifted Latin character; a shifted
+      // or non-Latin one can differ off a US layout, since toolbar input has no
+      // KeyboardEvent.code and kittyCtrlCharSeq reads the character alone.
       if (kittyDisambiguateActive(opts.modes)) {
         const seq = kittyCtrlCharSeq(text);
         if (seq !== null) {

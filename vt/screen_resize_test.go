@@ -45,7 +45,7 @@ func TestResizeGrowsAtBottomNormalScreen(t *testing.T) {
 }
 
 // TestResizeGrowsAtTopAltScreen verifies that growing the height while in the
-// ALT screen (a full-screen TUI like kiro-cli) prepends the new rows at the TOP
+// ALT screen (a full-screen TUI) prepends the new rows at the TOP
 // and moves the cursor down with the content, so the existing screen stays
 // pinned to the bottom until the app's SIGWINCH-driven redraw lands. This is
 // the "black gap between content and the input bar after an iPhone → iPad

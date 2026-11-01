@@ -19,19 +19,12 @@ import (
 )
 
 // These tests pin the resume/live-flush write-ordering contract (the
-// reconnect-during-output race, R4 adversarial finding): handleResume's
-// snapshot+batch and dispatchFrame's per-client payload loop are serialized by
-// clientState.writeMu; a frame built before a resume snapshot is stripped by
-// the resumeGen check to its durable payloads (scroll chunks and clipboard,
-// which the batch does not re-deliver) rather than written whole after the
-// batch; and the batch takes a builder reset with its snapshot so the first
-// frame built after it is a full repaint that supersedes anything stripped.
-//
-// Harness note: the client conn is read by ONE long-lived pump goroutine per
-// test and every assertion consumes from its channel. A short-context Read
-// directly on the conn cannot be used for "nothing arrives" checks — a
-// coder/websocket Read whose context expires CLOSES the connection, poisoning
-// every later assertion on the same socket.
+// reconnect-during-output race): clientState.writeMu serializes handleResume's
+// snapshot+batch with dispatchFrame's per-client payload loop; a frame built
+// before a resume snapshot is stripped by the resumeGen check to its durable
+// payloads (scroll chunks and clipboard, which the batch does not re-deliver);
+// and the batch resets the builder with its snapshot, so the next frame built is
+// a full repaint that supersedes anything stripped.
 
 // wsPair returns a connected server-side and client-side WebSocket pair, so a
 // test can drive Handler internals against the server conn and observe what a
@@ -67,8 +60,10 @@ func wsPair(t *testing.T) (sws, cws *websocket.Conn, cleanup func()) {
 }
 
 // framePump drains binary frames from the client conn into a buffered channel
-// for the test's whole life. The buffer is far larger than any frame count
-// these tests produce, so the pump never blocks and never drops.
+// for the test's whole life; the buffer is far larger than any frame count
+// these tests produce, so it never blocks or drops. Every assertion reads from
+// it because a coder/websocket Read whose context expires CLOSES the conn, so a
+// short-context Read on the conn cannot check that nothing arrives.
 func framePump(t *testing.T, cws *websocket.Conn) <-chan []byte {
 	t.Helper()
 	frames := make(chan []byte, 8192)
@@ -311,10 +306,9 @@ func (p *dispatchProbe) staleFrame() *flushFrame {
 // payloads (screen/modes/title) after the batch — they would regress the
 // client to pre-snapshot state the batch superseded — while its DURABLE
 // payloads must still be written, because the batch's replay starts above the
-// client's haveThrough and does not re-deliver the frame's scroll lines (RACE
-// round-2 finding, claude+gpt — under ring-cap pressure they may not even be
-// in the ring anymore), and the clipboard is a consumed one-shot no later
-// frame will carry.
+// client's haveThrough and does not re-deliver the frame's scroll lines (under
+// ring-cap pressure they may not even be in the ring anymore), and the
+// clipboard is a consumed one-shot no later frame will carry.
 func TestDispatchFrame_StaleFrameDropsStateKeepsDurable(t *testing.T) {
 	t.Run("stale frame delivers durables in order, drops state", func(t *testing.T) {
 		// Order is asserted strictly: first the frame's clipboard, then its
@@ -475,6 +469,7 @@ func TestDispatchFrame_StaleFrameDropsStateKeepsDurable(t *testing.T) {
 func dialOwnHandler(t *testing.T, cmd []string) (*Handler, *websocket.Conn, func()) {
 	t.Helper()
 	h := NewHandler(cmd, WithWorkDir("/"), WithLogger(nil))
+	shutdownOnCleanup(t, h)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
 	srv := httptest.NewServer(mux)
@@ -619,27 +614,19 @@ func wireFrameMaxCounter(b []byte) (maxCounter int, full bool) {
 var tickCounterRe = regexp.MustCompile(`T(\d+)`)
 
 func TestResumeBatch_AtomicOnTheSocketUnderLiveOutput(t *testing.T) {
-	// The gpt-R4-shaped ordering contract, observed from the client, in the
-	// backpressured shape the fable RACE review proved necessary: a loopback
-	// reader gives the batch a sub-ms write window that no 50ms flush pass
-	// ever lands in, so the un-backpressured version of this test passed
-	// against the PRE-FIX code. Each round therefore sends the resume and
-	// then STOPS READING under an unthrottled emitter — kernel socket
-	// buffers fill, the batch's writes block mid-sequence, and live flushes
-	// get a real window to misorder. Two oracles, both from the probe that
-	// caught the revert:
-	//   I1 — between the resumeAck and the batch's window frame, only
-	//        modes/title (and tolerated transport acks) may appear;
-	//   I4 — no FULL screen frame may ever carry a max T<n> counter BELOW
-	//        the highest already delivered (a stale batch window written
-	//        after newer live content: the regression the race caused).
-	h, ws, cleanup := dialOwnHandler(t,
-		[]string{"/bin/sh", "-c", "i=0; while :; do i=$((i+1)); echo T$i; done"})
+	// Each round sends a resume and stops reading under an unthrottled
+	// emitter, so the batch's writes block mid-sequence and live flushes get
+	// a real window to misorder; a loopback reader drains too fast to open
+	// one. Oracles: I1, between the resumeAck and the batch's window frame
+	// only modes/title (and transport acks) may appear; I4, no FULL screen
+	// frame may carry a max T<n> below the highest already delivered.
+	//
+	// The emitter is bounded so one that outlives the test still ends.
+	_, ws, cleanup := dialOwnHandler(t,
+		[]string{"/bin/sh", "-c", `i=0; while [ "$i" -lt 2000000 ]; do i=$((i+1)); echo T$i; done`})
 	defer cleanup()
-	_ = h
-	// Huge scroll bursts under an unthrottled emitter exceed the client
-	// library's default 32KB read limit, which CLOSES the conn (the 0.15s
-	// instant-death failure shape; fable's probe hit it first).
+	// Scroll bursts exceed coder/websocket's default 32KB read limit, which
+	// closes the conn.
 	ws.SetReadLimit(1 << 26)
 	sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 24})
 
@@ -765,17 +752,12 @@ func TestResumeBatch_AtomicOnTheSocketUnderLiveOutput(t *testing.T) {
 }
 
 func TestResumeBatch_DeterministicBlockAdvanceRelease(t *testing.T) {
-	// The gpt-prescribed contract test, made deterministic by the
-	// testResumeBatchHold seam: block a REAL resume batch after its writes
-	// (snapshot C delivered, write lock still held), COMMIT new history to
-	// the scrollback ring while it is held (a live pass builds and must
-	// block in dispatch), then release and assert from the client's stream
-	// that (1) nothing interleaved into the held batch, (2) the lines
-	// committed during the hold arrive as SCROLL frames after it — the
-	// payload class the resume replay can never re-deliver, so this pins
-	// delay-not-drop where it matters — and (3) a FULL repaint follows (the
-	// builder reset taken with the snapshot is consumed by the deferred
-	// pass).
+	// The testResumeBatchHold seam blocks a REAL resume batch after its writes
+	// (snapshot C delivered, write lock held) while new history commits to the
+	// ring and a live pass blocks in dispatch. After release the client's stream
+	// shows (1) nothing interleaved into the batch, (2) the lines committed during
+	// the hold as SCROLL frames after it, the class resume never re-delivers, so
+	// delay-not-drop is pinned, and (3) a FULL repaint from the deferred reset.
 	hold := make(chan struct{})
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -910,10 +892,9 @@ drain:
 }
 
 func TestResume_SnapshotResetForcesFullPostBatchFrame(t *testing.T) {
-	// Pins that handleResume itself takes the builder reset (fable round-3
-	// F1: the line moved into the snapshot's h.mu section had no test — the
-	// gate test resets the builder by hand, and the seam test's whole-window
-	// burst makes any diff full vacuously). Oracle: on a QUIESCENT handler,
+	// Pins that handleResume itself takes the builder reset (the gate test
+	// resets the builder by hand, and the seam test's whole-window burst
+	// makes any diff full vacuously). Oracle: on a QUIESCENT handler,
 	// a resume is followed by a second FULL screen frame — the flush pass
 	// handleResume's markDirty wakes, building against the reset cache, so
 	// every window row re-emits with no new PTY output. Without the reset

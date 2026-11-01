@@ -9,8 +9,10 @@
 // Supported OSC sequences: the window and icon titles (OSC 0, 1 and 2), the
 // palette and special colors (OSC 4, 5, 104 and 105), hyperlinks (OSC 8),
 // desktop notifications and ConEmu progress (OSC 9), the dynamic colors
-// answered from the configured theme (OSC 10 to 19 and 110 to 119) and the
-// clipboard (OSC 52). Other OSC numbers, such as 7, 133 and 777, are read and
+// answered from the configured theme (OSC 10 to 19 and 110 to 119), the
+// clipboard (OSC 52) and program status (OSC 7501, [Screen.ProgramStatus]).
+// Of OSC 133, only the prompt-start mark A acts: it ends the unfinished
+// OSC 7501 records. Other OSC numbers, such as 7 and 777, are read and
 // ignored. The OSC 52 read-back and the DECRQCRA checksum answer only when
 // [Screen.AllowScreenReport] is on, because both write into the program's
 // input. The features left out on purpose are listed in docs/non-goals.md.
@@ -33,6 +35,9 @@ type Screen struct {
 	paletteOverride map[uint8]int32
 	dynColors       map[int]int32
 	specialColors   map[int]int32
+	// program belongs to the terminal, not to a screen buffer: of the resets,
+	// only RIS reaches it.
+	program         programStatus
 	decModeState    map[int]bool
 	savedModeValues map[int]bool
 	Title           string
@@ -94,10 +99,8 @@ type Screen struct {
 	Width            int
 	// Progress holds the last ConEmu OSC 9;4 progress state: -1 when none has
 	// been seen, else the state (0 off, 1 value, 2 error, 3 indeterminate,
-	// 4 paused). kiro-cli emits it while the agent is working, so the status
-	// layer maps an active state (1 or 3) to working. Set only by an OSC 9;4
-	// sequence; a program that never emits one leaves it at -1 (the signal that
-	// the status layer should fall back to output activity).
+	// 4 paused). Set only by an OSC 9;4 sequence; a program that never emits
+	// one leaves it at -1.
 	Progress int
 	// ProgressValue holds the percentage carried by the last OSC 9;4 progress
 	// sequence: -1 when absent or unknown (no sequence seen yet, a state that
@@ -107,9 +110,10 @@ type Screen struct {
 	// state 2 may carry it. -1 is deliberately distinct from 0: a session that
 	// has reported no percentage is not a session at 0%.
 	ProgressValue int
-	// NotificationSeq increments each time a new OSC 9 notification is captured,
+	// NotificationSeq rises each time a new OSC 9 notification is captured,
 	// so a reader (the status layer) detects a fresh notification even when the
-	// message text repeats. Starts at 0 (no notification seen).
+	// message text repeats. Starts at 0 (no notification seen). It shares its
+	// counter with ProgramReportSeq.
 	NotificationSeq uint64
 	// minContrast is the minimum WCAG contrast ratio enforced between a run's
 	// text and its background (contrast.go). 1 disables the floor and is the
@@ -426,7 +430,7 @@ func (s *Screen) CursorPos() (row, col int) {
 }
 
 // Resize adjusts the screen dimensions, preserving existing content where
-// possible. When dimensions actually change, cells are cleared so the host application's
+// possible. When dimensions actually change, cells are cleared so the application's
 // SIGWINCH redraw starts from a clean slate; on a no-op resize (e.g. client
 // reconnect at the same size), content is preserved. Each dimension is floored
 // at 1 and capped at 1000.
@@ -456,28 +460,13 @@ func (s *Screen) Resize(rows, cols int) {
 }
 
 // resizeHeight adjusts the buffer to the new row count, preserving content.
-// The grow behaviour is mode-aware, because a full-screen app and a
-// line-oriented shell want opposite things:
-//
-//   - Alt-screen (a TUI like kiro-cli, vim, htop): prepend empty rows at the
-//     TOP and move the cursor down with the content, so the existing screen
-//     stays pinned to the bottom until the app's SIGWINCH-driven repaint lands.
-//     Appending BELOW the cursor instead left empty rows visible until the
-//     repaint — the "black gap between content and the input bar" seen on an
-//     iPhone → iPad device switch. Combined with the client's trim of trailing
-//     empty rows in render.ts, this keeps that gap impossible.
-//
-//   - Normal screen (a shell like bash/sh): append empty rows at the BOTTOM and
-//     leave the cursor on its row, so existing output stays anchored at the TOP
-//     the way xterm/iTerm/Terminal.app show a shell. A shell does not repaint
-//     its scrollback on SIGWINCH, so prepending at the top would strand the
-//     prompt in the middle of the screen with a band of blank rows above it
-//     (the reported "shell shows in the middle of the page" bug): the PTY
-//     starts at defaultRows and the first client resize grows it, so the very
-//     first prompt would otherwise land mid-screen. The client trims the
-//     trailing rows we add here, so there is no bottom gap in this mode either.
-//
-// Shrinking drops rows from the bottom in both modes.
+// Growth is mode-aware. On the alt screen (vim, htop) empty rows go on TOP and
+// the cursor moves down with the content, so the screen stays pinned to the
+// bottom until the app's SIGWINCH repaint lands; appending below would show a
+// blank gap above the input bar. On the normal screen (a shell) rows go at the
+// BOTTOM, cursor unmoved: a shell does not repaint on SIGWINCH, so prepending
+// would strand its prompt mid-screen. The client trims trailing empty rows
+// (render.ts) in both modes. Shrinking drops rows from the bottom.
 func (s *Screen) resizeHeight(rows int) {
 	if rows > s.Height {
 		grow := rows - s.Height

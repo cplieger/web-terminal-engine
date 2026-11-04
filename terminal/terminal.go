@@ -1080,8 +1080,8 @@ func (h *Handler) statusSnapshot() screenStatus {
 // StartEager starts the child process now at a default size, rather than lazily
 // on the first client message. A session manager calls this at Create time so a
 // new session's process (and its activity signal) exist from creation; the first
-// client attach still sends the real resize. Idempotent. It returns an error
-// once Close has run.
+// client attach still sends the real resize. Idempotent. On a handler closed
+// before its first start it returns an error.
 func (h *Handler) StartEager() error {
 	return h.ensureStarted(0, 0)
 }
@@ -1138,7 +1138,7 @@ func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resum
 	ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
 }
 
-// errHandlerClosed is ensureStarted's refusal on a handler Close has run on.
+// errHandlerClosed is ensureStarted's refusal to start a child once Close has run.
 var errHandlerClosed = errors.New("terminal: session closed")
 
 // logStartFailure logs a client-triggered start that failed. A refusal after
@@ -2123,7 +2123,7 @@ type controlDisposition struct {
 	parsed bool // payload was valid control JSON
 	known  bool // c.Type was a recognized control type
 	armsV4 bool // a resume declaring protocolVersion >= typedFramingMinVersion
-	closed bool // the connection was closed, or superseded and closing
+	closed bool // the connection was closed, or must end
 }
 
 // resumeControl is handleControl's resume case: the wire-version gate, the
@@ -2300,7 +2300,7 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 		return h.resumeControl(ws, state, &c, d, onResumeServed)
 	case ctlTypeResize:
 		d.known = true
-		h.handleResize(state, c.Cols, c.Rows)
+		d.closed = h.handleResize(state, c.Cols, c.Rows)
 	case ctlTypePing:
 		d.known = true
 		h.handlePing(ws)
@@ -2589,19 +2589,22 @@ func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 // (last-writer-wins: the most recent resize from any attached client sets the
 // size) and records the clamped size on that client's socket, so a later
 // disconnect can heal the screen to the smallest size the remaining clients
-// need (see maybeHealSize).
-func (h *Handler) handleResize(state *clientState, cols, rows int) {
+// need (see maybeHealSize). It reports whether the start was refused because
+// Close has run: no process exit will close that client's socket, so the
+// caller must end it.
+func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool) {
 	cols, rows = clampResize(cols, rows)
 	// Start the child process on first resize so it knows the correct dimensions
 	// from the start (avoids initial paint at wrong size).
 	if !h.started.Load() {
 		if err := h.ensureStarted(cols, rows); err != nil {
 			h.logStartFailure(err)
-			return
+			return errors.Is(err, errHandlerClosed)
 		}
 	}
 	h.registry.RecordSize(state, cols, rows)
 	h.applySize(cols, rows, "resize received")
+	return false
 }
 
 // armRedrawSettle starts the redraw-settle hold: flushes stay suppressed until

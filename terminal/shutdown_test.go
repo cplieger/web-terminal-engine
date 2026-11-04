@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // heldExitHandler returns a handler whose onProcessExit callback parks until the
@@ -282,5 +284,35 @@ func TestStartAfterShutdown_spawnsNothing(t *testing.T) {
 				t.Errorf("start after Shutdown logged an error:\n%s", out)
 			}
 		})
+	}
+}
+
+// TestResizeAfterShutdown_endsTheSocket covers a client attached to a handler
+// shut down before its first child: no process exit will ever close its socket,
+// so the refused start must.
+func TestResizeAfterShutdown_endsTheSocket(t *testing.T) {
+	h, wsURL := fenceHandler(t, []string{"/bin/sleep", "30"})
+	ctx, cancel := context.WithTimeout(t.Context(), waitPatience)
+	defer cancel()
+	if err := h.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown on an unstarted handler = %v, want nil", err)
+	}
+	ws := dialWS(t, wsURL)
+	resize := append([]byte{0x00}, `{"type":"resize","cols":80,"rows":24}`...)
+	if err := ws.Write(ctx, websocket.MessageBinary, resize); err != nil {
+		t.Fatalf("writing the resize: %v", err)
+	}
+	for {
+		_, _, err := ws.Read(ctx)
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("socket still open after %v; a resize refused after Shutdown must end it", waitPatience)
+		}
+		if got := websocket.CloseStatus(err); got != websocket.StatusNormalClosure {
+			t.Errorf("Read after a refused resize: close status %v (err %v), want %v", got, err, websocket.StatusNormalClosure)
+		}
+		return
 	}
 }

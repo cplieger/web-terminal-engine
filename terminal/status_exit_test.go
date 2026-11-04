@@ -99,7 +99,10 @@ func TestExitOutcomeClassification(t *testing.T) {
 		{name: "non-zero exit", command: []string{"/bin/sh", "-c", "exit 3"}, want: StatusCrashed},
 		{name: "highest non-zero exit", command: []string{"/bin/sh", "-c", "exit 255"}, want: StatusCrashed},
 		{name: "killed by SIGKILL", command: []string{"/bin/sh", "-c", "kill -9 $$"}, want: StatusCrashed},
-		{name: "killed by SIGSEGV", command: []string{"/bin/sh", "-c", "kill -SEGV $$"}, want: StatusCrashed},
+		// Not a core-dumping signal: a host piping cores to a collector such as
+		// systemd-coredump holds the dying child in the dump, past waitExited's
+		// budget under load.
+		{name: "killed by SIGTERM", command: []string{"/bin/sh", "-c", "kill -TERM $$"}, want: StatusCrashed},
 		// A hangup is the terminal going away, not the program failing.
 		{name: "killed by SIGHUP", command: []string{"/bin/sh", "-c", "kill -HUP $$"}, want: StatusExited},
 	}

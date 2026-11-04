@@ -719,6 +719,9 @@ type Handler struct {
 	// because the redraw-settle cap lapsed while the child was still writing
 	// (see redrawHoldUntil). Consumed by buildFrame. Guarded by h.mu.
 	redrawCoalesceNow bool
+	// ptyClosed latches once closePTYLocked closed the PTY master. Guarded by
+	// h.mu.
+	ptyClosed bool
 	// autoTitleWarned makes the automatic-title probe's failure note once-per-
 	// session rather than once-per-sweep (see probeAutoTitle). Guarded by h.mu.
 	autoTitleWarned bool
@@ -809,15 +812,25 @@ func (h *Handler) Close() {
 	// triggers, and therefore ahead of the cmd.Wait() return the monitor
 	// classifies.
 	h.shutdownRequested.Store(true)
-	if h.healTimer != nil {
-		h.healTimer.Stop()
-	}
 	if h.cancel != nil {
 		h.cancel()
 	}
-	if h.ptmx != nil {
-		_ = h.ptmx.Close() // best-effort during shutdown
+	h.closePTYLocked()
+}
+
+// closePTYLocked closes the PTY master once and stops the size heal; from then
+// on applySize and maybeHealSize do nothing. Caller holds h.mu. h.ptmx keeps
+// its value: readLoop and the input paths read it without the lock, so a nil
+// store here would race them.
+func (h *Handler) closePTYLocked() {
+	if h.healTimer != nil {
+		h.healTimer.Stop()
 	}
+	if h.ptmx == nil || h.ptyClosed {
+		return
+	}
+	_ = h.ptmx.Close() // best-effort during teardown
+	h.ptyClosed = true
 }
 
 // Shutdown ends the session and waits for its teardown to finish, bounded by
@@ -1230,11 +1243,9 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 			cancel() // stop readLoop/flushLoop on child exit
 			// Free the PTY master fd immediately on natural exit; otherwise an
 			// exited-but-undeleted session holds it until Close/reap (reaper
-			// is off by default). A later Close's second ptmx.Close is a no-op.
+			// is off by default).
 			h.mu.Lock()
-			if h.ptmx != nil {
-				_ = h.ptmx.Close() // #nosec G104 -- best-effort; child already exited
-			}
+			h.closePTYLocked()
 			h.mu.Unlock()
 			if r := recover(); r != nil {
 				h.cfg.logger.Error("terminal: onProcessExit callback panicked", "panic", r)
@@ -2649,7 +2660,7 @@ func (h *Handler) redrawHoldUntil(now time.Time) time.Time {
 func (h *Handler) applySize(cols, rows int, reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.started.Load() || h.ptmx == nil {
+	if !h.started.Load() || h.ptmx == nil || h.ptyClosed {
 		return
 	}
 	// Clamp again so applySize is safe regardless of caller (the heal path
@@ -2699,7 +2710,10 @@ func (h *Handler) maybeHealSize(dCols, dRows int) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.started.Load() || dCols != h.screen.Width || dRows != h.screen.Height {
+	if !h.started.Load() || h.ptyClosed {
+		return
+	}
+	if dCols != h.screen.Width || dRows != h.screen.Height {
 		return // the departed client was not holding the current size
 	}
 	if h.healTimer != nil {

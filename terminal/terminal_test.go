@@ -13,7 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -1572,6 +1574,140 @@ func TestMaybeHealSize_onlyArmsForTheBindingClient(t *testing.T) {
 	if !armed {
 		t.Errorf("maybeHealSize(40x20) did not arm a heal, but the departed client held the current 40x20 screen")
 	}
+}
+
+// lockedBuffer is a log sink the heal timer's goroutine and the test can share.
+type lockedBuffer struct {
+	b  bytes.Buffer
+	mu sync.Mutex
+}
+
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// healAfterCloseFixture is a started handler on a real, child-less PTY master
+// whose 40x20 screen is held by "phone", with a 120x40 "desk" also attached. No
+// reader or flush loop runs, so it fits a synctest bubble, and the zero-value
+// conns are never written to.
+func healAfterCloseFixture(t *testing.T) (h *Handler, logs *lockedBuffer, phoneConn *websocket.Conn, desk *clientState) {
+	t.Helper()
+	logs = &lockedBuffer{}
+	h = NewHandler([]string{"/bin/cat"}, WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("Setup: pty.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = slave.Close()
+		_ = master.Close()
+	})
+	h.ptmx = master
+	h.cancel = func() {}
+	h.started.Store(true)
+
+	phoneConn = &websocket.Conn{}
+	phone := h.registry.Add(phoneConn)
+	desk = h.registry.Add(&websocket.Conn{})
+	h.handleResize(phone, 40, 20)
+	h.registry.RecordSize(desk, 120, 40)
+	return h, logs, phoneConn, desk
+}
+
+// assertNoSizeChangeAfterClose fails t if a size change reached the closed PTY:
+// a heal or resize logged, or the screen left 40x20.
+func assertNoSizeChangeAfterClose(t *testing.T, h *Handler, logs *lockedBuffer) {
+	t.Helper()
+	if out := logs.String(); strings.Contains(out, "size healed") || strings.Contains(out, "not applied") {
+		t.Errorf("a size change ran against the closed PTY; log:\n%s", out)
+	}
+	h.mu.Lock()
+	w, ht := h.screen.Width, h.screen.Height
+	h.mu.Unlock()
+	if w != 40 || ht != 20 {
+		t.Errorf("screen = %dx%d after Close, want 40x20 unchanged", w, ht)
+	}
+}
+
+// TestSizeHeal_closedPTY pins that no size change reaches a session's PTY once
+// it is closed, by Close or by the child exiting: Setsize on the closed master
+// fails, and its Warn on the consumer's logger would blame a session that ended
+// on purpose.
+func TestSizeHeal_closedPTY(t *testing.T) {
+	t.Run("binding client departs before Close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			h, logs, phoneConn, _ := healAfterCloseFixture(t)
+			h.maybeHealSize(h.registry.Remove(phoneConn))
+			h.Close()
+			synctest.Sleep(healDebounce + time.Millisecond)
+			assertNoSizeChangeAfterClose(t, h, logs)
+		})
+	})
+
+	t.Run("binding client departs after Close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			h, logs, phoneConn, _ := healAfterCloseFixture(t)
+			h.Close()
+			h.maybeHealSize(h.registry.Remove(phoneConn))
+			synctest.Sleep(healDebounce + time.Millisecond)
+			assertNoSizeChangeAfterClose(t, h, logs)
+		})
+	})
+
+	// A timer that fired before Close stopped it runs healSize once Close
+	// releases h.mu.
+	t.Run("heal already fired when Close ran", func(t *testing.T) {
+		h, logs, phoneConn, _ := healAfterCloseFixture(t)
+		h.registry.Remove(phoneConn)
+		h.Close()
+		h.healSize()
+		assertNoSizeChangeAfterClose(t, h, logs)
+	})
+
+	t.Run("client resizes after Close", func(t *testing.T) {
+		h, logs, _, desk := healAfterCloseFixture(t)
+		h.Close()
+		h.handleResize(desk, 100, 30)
+		assertNoSizeChangeAfterClose(t, h, logs)
+	})
+
+	t.Run("child exited", func(t *testing.T) {
+		logs := &lockedBuffer{}
+		h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"),
+			WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+		shutdownOnCleanup(t, h)
+		if err := h.ensureStarted(40, 20); err != nil {
+			t.Fatalf("ensureStarted(40, 20): %v", err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), waitPatience)
+		defer cancel()
+		if err := h.wait(ctx); err != nil {
+			t.Fatalf("child did not exit and tear down within %v: %v", waitPatience, err)
+		}
+		// Registered after the teardown, so no flush loop is left to write to it.
+		h.registry.RecordSize(h.registry.Add(&websocket.Conn{}), 120, 40)
+
+		h.healSize()
+		h.maybeHealSize(40, 20)
+		h.mu.Lock()
+		armed := h.healTimer != nil
+		if armed {
+			h.healTimer.Stop()
+		}
+		h.mu.Unlock()
+		if armed {
+			t.Errorf("maybeHealSize armed a heal on a session whose child had exited")
+		}
+		assertNoSizeChangeAfterClose(t, h, logs)
+	})
 }
 
 // TestHandleResume_ledgerLostFlag pins the resumeAck ledger-loss signal: the

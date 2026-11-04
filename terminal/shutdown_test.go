@@ -3,6 +3,7 @@ package terminal
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -238,5 +239,48 @@ func TestManagerShutdownIsIdempotent(t *testing.T) {
 	defer cancel()
 	if err := m.Shutdown(ctx); err != nil {
 		t.Errorf("second Shutdown(ctx) = %v, want nil", err)
+	}
+}
+
+// TestStartAfterShutdown_spawnsNothing covers a handler shut down before its
+// first child: a later start path must spawn nothing, since Shutdown has
+// already reported every goroutine returned.
+func TestStartAfterShutdown_spawnsNothing(t *testing.T) {
+	// Unregistered client states: no flush loop writes to them.
+	starts := map[string]func(h *Handler) error{
+		"StartEager": (*Handler).StartEager,
+		"resize": func(h *Handler) error {
+			h.handleResize(&clientState{}, 80, 24)
+			return nil
+		},
+		"binary input": func(h *Handler) error {
+			h.handleBinaryFrame(nil, &clientState{}, []byte("x"), false, true, nil)
+			return nil
+		},
+	}
+	for name, start := range starts {
+		t.Run(name, func(t *testing.T) {
+			logs := &lockedBuffer{}
+			h := NewHandler([]string{"/bin/sleep", "30"}, WithWorkDir("/"),
+				WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+			ctx, cancel := context.WithTimeout(t.Context(), waitPatience)
+			defer cancel()
+			if err := h.Shutdown(ctx); err != nil {
+				t.Fatalf("Shutdown on an unstarted handler = %v, want nil", err)
+			}
+			// Kills the child a failing run spawned.
+			shutdownOnCleanup(t, h)
+
+			err := start(h)
+			if name == "StartEager" && err == nil {
+				t.Errorf("StartEager after Shutdown = nil, want an error")
+			}
+			if h.started.Load() {
+				t.Errorf("a child started after Shutdown returned")
+			}
+			if out := logs.String(); strings.Contains(out, "process start failed") {
+				t.Errorf("start after Shutdown logged an error:\n%s", out)
+			}
+		})
 	}
 }

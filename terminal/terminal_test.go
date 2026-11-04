@@ -324,7 +324,6 @@ func TestClose_callsCancel(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"})
 	called := false
 	h.cancel = func() { called = true }
-	h.started.Store(true) // Close returns early unless started
 
 	h.Close()
 

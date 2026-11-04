@@ -1080,7 +1080,8 @@ func (h *Handler) statusSnapshot() screenStatus {
 // StartEager starts the child process now at a default size, rather than lazily
 // on the first client message. A session manager calls this at Create time so a
 // new session's process (and its activity signal) exist from creation; the first
-// client attach still sends the real resize. Idempotent.
+// client attach still sends the real resize. Idempotent. It returns an error
+// once Close has run.
 func (h *Handler) StartEager() error {
 	return h.ensureStarted(0, 0)
 }
@@ -1137,6 +1138,19 @@ func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resum
 	ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
 }
 
+// errHandlerClosed is ensureStarted's refusal on a handler Close has run on.
+var errHandlerClosed = errors.New("terminal: session closed")
+
+// logStartFailure logs a client-triggered start that failed. A refusal after
+// Close is the expected end of a session, not a failure.
+func (h *Handler) logStartFailure(err error) {
+	if errors.Is(err, errHandlerClosed) {
+		h.cfg.logger.Debug("terminal: start refused after close")
+		return
+	}
+	h.cfg.logger.Error("terminal: process start failed", "error", err)
+}
+
 // ensureStarted spawns the process if not already running, sized at
 // the given dimensions. cols/rows ≤ 0 fall back to defaults so callers
 // who don't yet know the client size can still start the process.
@@ -1147,6 +1161,11 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	defer h.mu.Unlock()
 	if h.started.Load() {
 		return nil
+	}
+	// Shutdown may already have returned, so a child started now would outlive
+	// it. Close stores the latch under h.mu, which orders this check against it.
+	if h.shutdownRequested.Load() {
+		return errHandlerClosed
 	}
 	if len(h.command) == 0 {
 		return errors.New("terminal: empty command")
@@ -2031,7 +2050,7 @@ func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg 
 	// with ensureStarted's write. cols/rows of 0 select defaults.
 	if !h.started.Load() {
 		if err := h.ensureStarted(0, 0); err != nil {
-			h.cfg.logger.Error("terminal: process start failed", "error", err)
+			h.logStartFailure(err)
 			return armed, false
 		}
 	}
@@ -2577,7 +2596,7 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) {
 	// from the start (avoids initial paint at wrong size).
 	if !h.started.Load() {
 		if err := h.ensureStarted(cols, rows); err != nil {
-			h.cfg.logger.Error("terminal: process start failed", "error", err)
+			h.logStartFailure(err)
 			return
 		}
 	}

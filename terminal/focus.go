@@ -24,12 +24,9 @@ const (
 // focusReportLocked derives the DEC 1004 answer from clientFocused (does any
 // attached client report its widget focused), the session's own focus-reporting
 // mode, and the WithKeepUnfocused declaration, returning the sequence to write or
-// nil when nothing changed. The caller holds h.mu, reads clientFocused under it,
-// and writes outside it.
-//
-// A 1004 disable forgets the reported state, so the next enable re-reports the
-// CURRENT one rather than staying silent because it matches what the previous
-// enable was told. That is xterm.js's _reportFocus behaviour.
+// nil when nothing changed. The caller holds h.mu and writes outside it. A 1004
+// disable forgets the reported state, so the next enable re-reports the
+// current one, as xterm.js's _reportFocus does.
 func (h *Handler) focusReportLocked(clientFocused bool) []byte {
 	if !h.screen.FocusReporting {
 		h.focusTold = focusUnknown

@@ -784,16 +784,9 @@ func TestRedrawSettle_buildFrameHeldThenSettles(t *testing.T) {
 	}
 }
 
-// TestRedrawSettle_capLapseCoalescesThenDisarms pins the lapse ladder, which is
-// what stops a redraw LONGER than the cap from streaming its remainder. A cap
-// lapse while the child is still writing must not fall back to per-flush
-// streaming (the churn the hold exists to prevent); it must let one FULL repaint
-// through and re-arm, a bounded number of times, and only then give up so a
-// genuinely streaming program is not throttled forever.
-//
-// Driven through redrawHoldUntil's explicit `now` rather than sleeps: the cap is
-// a whole second, and a real-time version of this test would be both slow and
-// flaky under load.
+// TestRedrawSettle_capLapseCoalescesThenDisarms pins that a cap lapse lets one
+// full repaint through and re-arms, a bounded number of times, then disarms. It
+// drives redrawHoldUntil's explicit now instead of sleeping a second per lapse.
 func TestRedrawSettle_capLapseCoalescesThenDisarms(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
 	defer h.Close()
@@ -1162,15 +1155,9 @@ func TestHandleResume_commitsScrolledLinesToHistory(t *testing.T) {
 	}
 }
 
-// TestHandleResume_altStraddleDrainNotCommitted pins the alt-straddle guard in
-// handleResume (the !altTransitionPending term, the resume-side twin of Build's
-// guard): drain that straddles an alt-screen transition must NOT be committed to
-// main history on resume. TestHandleResume_commitsScrolledLinesToHistory covers
-// only the no-transition path (fresh builder => altTransitionPending false =>
-// commit). The two cases below share identical pending drain on the main screen
-// and differ ONLY in the builder's last-observed alt state, so the flipped commit
-// outcome proves the guard (not an empty drain) does the gating; a mutant dropping
-// the !altTransitionPending term commits alt lines as main history and is caught.
+// TestHandleResume_altStraddleDrainNotCommitted pins handleResume's
+// !altTransitionPending guard: the two cases share identical drain and differ
+// only in the builder's last alt state, so the flipped outcome proves the guard.
 func TestHandleResume_altStraddleDrainNotCommitted(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -1875,15 +1862,9 @@ func readUntilClose(t *testing.T, ws *websocket.Conn, timeout time.Duration) web
 	}
 }
 
-// TestTypedFraming_latchSequence pins the v4 happy path end to end, including
-// a sentinel-shaped payload: after bootstrap (binary resume, arms) +
-// text upgrade (latches), a binary frame that IS a byte-exact v3 control frame
-// (0x00 + {"type":"ping"}) must reach the PTY as literal input — the latch
-// retired the sentinel, so nothing is consumed as control anymore. Delivery is
-// proven three ways: the echo carries the JSON, NO
-// pong frame is ever sent (a sentinel mis-parse would have answered the ping),
-// and the session ledger advances by EXACTLY len(payload) — every byte,
-// leading NUL included, counted as input.
+// TestTypedFraming_latchSequence pins that after the v4 latch a byte-exact v3
+// ping control reaches the PTY as input: the echo carries it, no pong is sent,
+// and the ledger advances by exactly len(payload), leading NUL included.
 func TestTypedFraming_latchSequence(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithWorkDir("/"))
 	shutdownOnCleanup(t, h)

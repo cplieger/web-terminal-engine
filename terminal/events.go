@@ -50,29 +50,10 @@ const (
 // title. Removed=true signals the session is gone (closed or reaped) so the
 // client drops the tab.
 type statusEvent struct {
-	// Order is the session's position in the shared display order (see
-	// SessionInfo.Order). Carried on every status event for a LIVE session, so a
-	// reorder made by another client reaches this one, which is the read side of
-	// tab-order sync.
-	//
-	// A pointer, and omitted on a Removed event, because the session has left the
-	// order and has no position to report. A plain int could only say 0 there, and
-	// 0 is a real position at the FRONT of the strip: a consumer that reads fields
-	// before it checks Removed would be told the closing session just became the
-	// first tab. Present-and-zero and absent are different answers, so the wire
-	// has to be able to express both.
-	//
-	// This is the RAW rank, not a renumbered index. The two enumerations (List and
-	// snapshot) restate each position as its index in the sequence they serve,
-	// because a client builds a whole strip from them; a change set has no sequence
-	// to index into, so it cannot. The consequence is the window a client must
-	// respect: one reorder arrives as one event per moved session, so until the
-	// whole tick is applied two sessions can hold the same position. Apply the
-	// tick, then sort, and never derive an order you write back from a partly
-	// applied view (see SetSessionOrder).
-	//
-	// First in the struct so the GC's pointer-scan range does not have to reach
-	// past the scalar tail to find it (govet fieldalignment).
+	// Order is the live session's raw rank in the shared display order, absent
+	// on a Removed event because 0 is the front tab. One reorder arrives as one
+	// event per moved session, so two sessions can share a rank mid-tick: apply
+	// the whole tick, then sort. It leads the struct for govet fieldalignment.
 	Order     *int      `json:"order,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
 	ID        SessionID `json:"id"` // marshals as a plain string; the wire shape is unchanged
@@ -96,20 +77,10 @@ type statusEvent struct {
 	// input to ReportsActivity, which stays the PRIMARY dot's reveal gate. A change
 	// in this value alone emits an event, like ProgressValue below.
 	Activity string `json:"activity"`
-	// Notification is the OSC 9 notification message captured for this session,
-	// carried on the event so a consumer with NO status classifier still RECEIVES
-	// it: "no classifier" means "I map notifications myself", not "discard them".
-	// A notification is an EVENT, not a state — the engine latches nothing for it,
-	// and it is carried only on the sweep that first observes it, never replayed.
-	// NotificationSeq is vt.Screen.NotificationSeq, so a consumer detects a fresh
-	// notification even when the text repeats.
-	//
-	// The text is untrusted program output. It is already sanitised by the vt
-	// layer (control, bidi and line-terminator runes dropped, length clamped —
-	// see vt.sanitizeNotification) and it travels to a client that already
-	// receives the session's full terminal stream over the WebSocket, so carrying
-	// it here is not a new exposure. A consumer still escapes it for whatever
-	// surface it renders it on, exactly as it does the terminal stream.
+	// Notification is an OSC 9 message, carried once on the sweep that first sees
+	// it and never replayed, classifier or not. NotificationSeq tells a repeat of
+	// the same text apart. The text is untrusted program output, sanitized by vt;
+	// escape it for the surface that renders it.
 	Notification    string `json:"notification,omitempty"`
 	NotificationSeq uint64 `json:"notificationSeq,omitempty"`
 	// StatusSeq numbers the Status beside it (see SessionInfo.StatusSeq) and
@@ -225,34 +196,16 @@ func committedOf(tr *statusTracker) committedRecord {
 }
 
 // autoTitleConfirm is how long a foreground process must hold the terminal
-// before its name is adopted as the session's automatic title. A command that
-// lives 30ms (ls, git status) must never flash into a tab label.
-//
-// It is elapsed time, not a sample count: "the same pgid on two consecutive
-// sweeps" would be only statusSweepInterval apart and therefore phase-sensitive,
-// adopting a 260ms command or missing a 400ms one depending on where the ticks
-// landed. Adoption therefore lands within one sweep past this window, whatever
-// statusSweepInterval happens to be — do not restate the arithmetic in terms of a
-// particular tick count, which rots the moment the interval changes.
-//
-// 500ms is chosen, not inherited. tmux's NAME_INTERVAL is also 500ms but is a
-// different mechanism — a rate limit on how often it recomputes a window name,
-// which is why tmux CAN briefly show a short-lived command. This is a
-// confirmation window, which cannot.
+// before its name becomes the automatic title, so `ls` never flashes into a
+// tab. It is elapsed time, not a sweep count, which would make adoption depend
+// on where the ticks land.
 const autoTitleConfirm = 500 * time.Millisecond
 
 // confirmAutoTitle folds one sweep's probe into the session's confirmed
 // server-derived title. The sweep is the ONLY writer of session.autoTitle, so
-// List and snapshot read a single confirmed value instead of each probing procfs
-// and disagreeing with the live stream. Called from diffStatuses phase 3, with
-// m.mu held (it writes session and tracker state).
-//
-// The asymmetry is deliberate. Adopting a running process is debounced by
-// autoTitleConfirm; RESTING (the process finished, so the shell is in the
-// foreground again) is immediate, because a stale name is worse than a brief
-// correct one. While a candidate is inside its confirmation window the previous
-// title is HELD rather than reset to the cwd, so `vim` giving way to `less` does
-// not detour through the directory name.
+// List and snapshot agree with the stream. Caller holds m.mu. Adoption waits
+// autoTitleConfirm but resting is immediate, and a pending candidate holds the
+// previous title, so `vim` giving way to `less` skips the cwd.
 func (*SessionManager) confirmAutoTitle(s *session, in *statusRaw, tr *statusTracker) {
 	p := in.autoProbe
 	if !p.ok {
@@ -314,17 +267,9 @@ type statusRaw struct {
 	// callback. Its staleness is bounded by one sweep and self-correcting, since
 	// nothing the manager does can invalidate it behind the tracker's back.
 	activity SessionActivity
-	// autoProbe is the foreground-process probe result for this sweep: the
-	// candidate pgid plus the name/cwd it resolves to. Read in phase 2 (procfs +
-	// one ioctl, no locks held) and folded into the confirmation window in
-	// phase 3. Zero when no probe ran this sweep: an OSC-titled session (the
-	// automatic title is the LAST rung, so it must not pay for procfs reads) or an
-	// exited one.
-	//
-	// Placed after the strings and before the scalars deliberately: its own
-	// trailing non-pointer tail (pgid, ok) then falls outside the struct's
-	// pointer-scan range (govet fieldalignment). Adding a field here without
-	// keeping pointer-bearing types ahead of scalar ones re-trips that linter.
+	// autoProbe is read lock-free in phase 2 and zero when no probe ran (an
+	// OSC-titled or exited session). Its place before the scalars is govet
+	// fieldalignment's.
 	autoProbe autoTitleProbe
 	notifSeq  uint64
 	// programSeq is vt.Screen.ProgramReportSeq, on notifSeq's counter.
@@ -427,15 +372,9 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 	// Phase 3: tracker state machine + change detection under m.mu.
 	var events []statusEvent
 	m.mu.Lock()
-	// The display order is read HERE, not in phase 1, and that placement is the
-	// whole point. It is manager-owned state, so a Close or a SetSessionOrder
-	// during phase 2 (which runs lock-free, and can block on a wedged handler
-	// getter) invalidates anything phase 1 captured. Emitting a position from that
-	// stale snapshot pushes clients an arrangement the server has already replaced
-	// — silently, because the tracker then records the stale value as delivered and
-	// the next sweep sees no change to correct. Reading it under this lock, in the
-	// same section that decides what to emit, is what makes an emitted position
-	// current by construction.
+	// Read here, not in phase 1: a SetSessionOrder during lock-free phase 2
+	// would otherwise emit a stale rank that the tracker records as delivered
+	// and never corrects.
 	rank := m.rankLocked()
 	ordered := len(m.order)
 	for i := range items {
@@ -570,14 +509,9 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) (status
 	if in.programSeen {
 		return programStatusOf(in, tr, latchedNow, programAdvanced)
 	}
-	// An active OSC 9;4 state (1 value, 3 indeterminate) means working; error
-	// and warning persist until the program changes them. A progress state
-	// supersedes a latch from an EARLIER sweep (a new turn clears the stale
-	// done/input dot) but never one applied in THIS sweep: a turn-boundary
-	// snapshot can pair a fresh classified notification with a progress
-	// value still active (flushed a chunk ahead of progress-off), and clearing the
-	// fresh latch would lose that dot for good, since notifSeen has advanced. The
-	// next sweep's progress supersedes it if progressSupersedesLatch says so.
+	// Progress clears a latch from an earlier sweep, never this one's: a
+	// turn-boundary snapshot can pair a fresh notification with progress not
+	// yet turned off, and notifSeen has already advanced past it.
 	if st, ok := progressStatus(in.progress); ok && !latchedNow &&
 		(tr.latched == "" || progressSupersedesLatch(in.progress)) {
 		tr.latched = ""
@@ -743,14 +677,8 @@ func (m *SessionManager) snapshot() []statusEvent {
 		})
 	}
 	m.mu.Unlock()
-	// Same order List serves, for the same reason it sorts at all: this is an
-	// ENUMERATION of the session set, and a client building a tab strip from it
-	// reads the sequence as the strip's order. Phase 1 ranged m.sessions, so
-	// without this the stream pushed a fresh random order on every connect.
-	//
-	// diffStatuses is deliberately NOT sorted this way: it returns a CHANGE SET,
-	// its removed events carry a zero createdAt, and a per-tick burst of
-	// independent state updates has no enumeration order to get right.
+	// Sorted like List, since a client reads this enumeration as its tab order;
+	// a diffStatuses change set has no such order.
 	slices.SortFunc(out, func(a, b snapItem) int {
 		return compareSessionOrder(
 			sessionOrder{createdAt: a.ev.CreatedAt, id: a.ev.ID, rank: a.rank},
@@ -838,12 +766,8 @@ func supportsFlush(w http.ResponseWriter) bool {
 
 // writeSSEHeaders sets the SSE response headers and the 200 status.
 //
-// no-cache is the conventional SSE directive but it only forces revalidation — it
-// still permits a cache to STORE the response, and every event on this stream
-// carries a full session id (statusEvent.ID), the same capability token the REST
-// responses now refuse to let a cache keep. no-store is therefore carried
-// alongside it: the conventional token stays for any middlebox that sniffs for it,
-// and the stronger prohibition is the one that matches what the body contains.
+// no-store joins the conventional no-cache, which still lets a cache store the
+// stream, and every event carries a session id.
 func writeSSEHeaders(w http.ResponseWriter) {
 	h := w.Header()
 	h.Set("Content-Type", "text/event-stream")

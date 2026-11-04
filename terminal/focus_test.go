@@ -1,24 +1,9 @@
 package terminal
 
-// SPEC-FIRST focus-reporting tests.
-//
-// The two sequences and their meaning come from xterm's own specification, not
-// from focus.go: DEC private mode 1004 ("Send FocusIn/FocusOut events") makes the
-// terminal send CSI I when it gains focus and CSI O when it loses it.
-//   https://invisible-island.net/xterm/ctlseqs/ctlseqs.html
-//
-// Two derivation rules are taken from named reference implementations, because
-// the spec says what a terminal reports and not how a multi-viewer terminal
-// decides what its focus IS:
-//
-//   - Any focused attached client focuses the session. tmux's
-//     window_pane_update_focus (window.c) derives a pane's focus from the pane
-//     being active plus SOME attached client carrying CLIENT_FOCUSED, so one
-//     focused viewer among several is focus-in.
-//   - Enabling 1004 reports the CURRENT state, not only later transitions.
-//     xterm.js's _reportFocus does exactly that when an application sets the
-//     mode, so an application that enables 1004 while already focused is told so
-//     rather than being left to infer it from silence.
+// Spec-first focus tests: DEC 1004 sends CSI I on focus-in and CSI O on
+// focus-out (https://invisible-island.net/xterm/ctlseqs/ctlseqs.html). Any
+// focused client focuses the session, as tmux's window_pane_update_focus does,
+// and enabling 1004 reports the current state, as xterm.js's _reportFocus does.
 
 import (
 	"bytes"

@@ -9,39 +9,24 @@ import (
 	"time"
 )
 
-// Session reaping ends a PTY child that escapes the engine's signal-scoped
-// boundaries: a setsid() process leaves its process group and session, so
-// neither kill(-pgid) nor the PTY-close SIGHUP reaches it. Each session's child
-// gets an unguessable environment marker, which execve copies to every
-// descendant through setsid() and re-parenting, so the session is a /proc scan.
-// env -i escapes it (Containment is the stronger opt-in boundary), as does a
-// tree out-forking reapKillRounds SIGKILL rescans or a task held in an
-// uninterruptible wait past them.
+// Session reaping ends descendants that setsid() out of reach of kill(-pgid)
+// and the PTY-close SIGHUP. Each session's tree inherits an unguessable
+// environment marker, found by a /proc scan. env -i escapes it; Containment
+// is the stronger boundary.
 
 const (
-	// reapMarkerEnv names the variable every session's process tree inherits;
-	// the scan matches the full KEY=VALUE pair with a random value, so WithEnv
-	// cannot usefully shadow it. It keeps the WT_ prefix the operator knobs
-	// dropped because it is injected into the child's flat environment, where
-	// the prefix disambiguates.
+	// reapMarkerEnv keeps a WT_ prefix because it lands in the child's flat
+	// environment.
 	reapMarkerEnv = "WT_SESSION_REAP"
 
-	// reapMarkerBytes sizes the random marker value. 16 bytes is far past
-	// collision relevance for a per-session token and keeps the whole pair
-	// inside the first procfs read (see reapEnvMaxBytes).
+	// reapMarkerBytes keeps the pair inside the first reapEnvMaxBytes read.
 	reapMarkerBytes = 16
 
-	// reapPoll is the liveness poll interval inside a settle window. Bounded by
-	// containGrace, so at most containGrace/reapPoll cheap per-pid checks —
-	// never a full scan, which is why the settle window costs microseconds
-	// rather than another 81ms pass.
+	// reapPoll is the per-pid liveness poll inside a settle window.
 	reapPoll = 20 * time.Millisecond
 
-	// reapKillRounds caps the SIGKILL rescans. A forker dies in the round that
-	// first scans it and its children in the next, so a single forker's tree
-	// empties in three; a tree still populated after this many is out-forking every
-	// scan, which only Containment's cgroup.kill can end, or holds a task in an
-	// uninterruptible wait that no signal ends sooner.
+	// reapKillRounds caps the SIGKILL rescans; one forker's tree empties in
+	// three, and only cgroup.kill ends a tree that out-forks every scan.
 	reapKillRounds = 8
 )
 
@@ -55,19 +40,8 @@ type sessionReap struct {
 	once   sync.Once
 }
 
-// newSessionReap mints a reap domain for one session, or returns nil when the
-// marker could not be generated.
-//
-// A failed marker is a nil domain rather than a fabricated one: a predictable
-// or empty marker would either match nothing or, worse, match another session's
-// tree, and no reaping is strictly better than reaping the wrong processes.
-//
-// The domain borrows its LOG LABEL from containmentID, which is the only session
-// identity a bare Handler has (WithContainment sets it, and a nil Containment
-// still sets the id — so a consumer that wants labelled reap lines without
-// cgroups passes WithContainment(nil, id), which is exactly what a consumer on a
-// host without a writable cgroup root already does). An unlabelled session logs
-// an empty one rather than inventing a name.
+// newSessionReap mints a reap domain for one session, or nil when no random
+// marker could be made: a predictable one could match another session's tree.
 func (h *Handler) newSessionReap() *sessionReap {
 	buf := make([]byte, reapMarkerBytes)
 	if _, err := rand.Read(buf); err != nil {
@@ -85,9 +59,8 @@ func (h *Handler) newSessionReap() *sessionReap {
 // envPair returns the marker assignment to prepend to the child environment, or
 // "" for a nil domain so the caller needs no branch.
 //
-// Prepended rather than appended, deliberately: it puts the pair at the front of
-// /proc/<pid>/environ, which is what lets the scan read a bounded prefix instead
-// of a whole ARG_MAX environment for every pid on the host.
+// Prepending puts it at the front of /proc/<pid>/environ, so the scan reads a
+// bounded prefix.
 func (s *sessionReap) envPair() string {
 	if s == nil {
 		return ""
@@ -95,22 +68,11 @@ func (s *sessionReap) envPair() string {
 	return reapMarkerEnv + "=" + s.marker
 }
 
-// stripReapMarker drops any assignment to the marker key from an environment
-// slice.
-//
-// This is not tidiness, it is what makes the marker authoritative. os/exec
-// deduplicates the environment it passes to execve and keeps the LAST value for
-// a repeated key, so any assignment appended after the engine's own prepended
-// marker replaces it outright. The session's tree would then carry a marker the
-// engine never minted, the scan would match nothing, and reaping would be
-// silently off for that session.
-//
-// The spawn path applies it to BOTH sources it composes (childEnv): a consumer's
-// WithEnv, and the process's own inherited environment. The inherited one matters
-// more, because it is the source the engine does not control: a server started
-// from inside one of these sessions inherits that session's live marker. Two
-// tests pin the pair — TestReapMarkerSurvivesADuplicateKeyFromWithEnv and
-// TestReapMarkerSurvivesAnInheritedMarker; without either strip, one fails.
+// stripReapMarker drops any assignment to the marker key from env. os/exec
+// keeps the last value of a repeated key, so a later assignment would
+// replace the engine's marker and silently disable reaping. childEnv strips
+// both WithEnv and the inherited environment, which carries a live marker for
+// a server started inside a session.
 func stripReapMarker(env []string) []string {
 	prefix := reapMarkerEnv + "="
 	out := env[:0:0]
@@ -132,22 +94,16 @@ func (s *sessionReap) teardown() {
 	s.once.Do(s.teardownOnce)
 }
 
-// teardownOnce is the escalation ladder: settle, SIGTERM, settle, SIGKILL. It
-// mirrors sessionCgroup.teardownOnce, WARN field names included, so logs never
-// say which boundary reclaimed a session; each settle window polls the known
-// members because a marker domain has no cgroup.events to wait on. A clean tree
-// costs one scan and no log line. The worst case is two containGrace windows
-// plus reapKillRounds rounds of one window each, and every step's scan can
-// itself spend containGrace on a pid mid-execve.
+// teardownOnce is the escalation ladder: settle, SIGTERM, settle, SIGKILL. Its
+// WARN fields match sessionCgroup.teardownOnce, so logs read alike for both
+// boundaries. A clean tree costs one scan and no log line.
 func (s *sessionReap) teardownOnce() {
 	members := reapFindByMarker(s.marker)
 	if len(members) == 0 {
 		return
 	}
-	// cmd.Wait returning means the HEAD was reaped, not that the tree finished.
-	// Give the ordinary exit path its window, then scan again whether or not the
-	// first list drained: a survivor can fork during the window, and its child
-	// is owed SIGTERM too.
+	// cmd.Wait reaped only the head. Rescan after the window even if the list
+	// drained: a survivor may have forked a child owed SIGTERM.
 	s.waitGone(members, containGrace)
 	if members = reapFindByMarker(s.marker); len(members) == 0 {
 		return
@@ -167,9 +123,7 @@ func (s *sessionReap) teardownOnce() {
 	s.waitGone(members, containGrace)
 	forced := s.killUntilGone(reapKill)
 
-	// Fires only when something had to be reclaimed. term_reclaimed and
-	// kill_forced separate a tree that honoured SIGTERM from one that had to be
-	// killed.
+	// Logged only when something was reclaimed.
 	s.log.Warn("terminal: session reap reclaimed escaped processes",
 		"session", LogID(s.id),
 		"survivors", survivors,
@@ -180,11 +134,9 @@ func (s *sessionReap) teardownOnce() {
 
 // killUntilGone SIGKILLs every member through kill and rescans until a scan
 // finds the domain empty, for at most reapKillRounds rounds, and returns every
-// pid it found alive. One scan is a snapshot, so a member forking between the
-// scan and its own kill leaves a child no single pass reaches. A failed send is
-// retried next round; an accepted one is not resent, but it is not an exit
-// either (a task in an uninterruptible wait acts on it only when the wait ends),
-// so only an empty scan returns early. Logs what it could not end.
+// pid it found alive. A member can fork between scan and kill, and an accepted
+// signal is not an exit, so only an empty scan returns early. Logs what it
+// could not end.
 func (s *sessionReap) killUntilGone(kill func(pid int) bool) (forced map[int]struct{}) {
 	forced = map[int]struct{}{}
 	sent := map[int]struct{}{}

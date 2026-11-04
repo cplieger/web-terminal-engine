@@ -12,15 +12,9 @@ import (
 // wsPingInterval bounds how fast a dead client is noticed.
 const wsPingInterval = 2 * time.Second
 
-// pingLoop periodically pings the WS to detect dead clients. The pong
-// RTT is fed into a Jacobson/Karels RTO tracker (see pingstat.go) so
-// the timeout adapts to the connection's actual round-trip time. Calls
-// cancel() when the model decides the connection is genuinely dead.
-//
-// Adaptive timeouts are essential on flaky high-latency links (e.g. a
-// VPN-relayed mobile connection) where a fixed deadline either
-// false-disconnects on transient spikes or waits too long when the
-// peer truly drops.
+// pingLoop pings the WS and feeds each pong RTT to pingStat, so the timeout
+// adapts to the link instead of false-disconnecting on latency spikes. It calls
+// cancel when the model declares the connection dead.
 func pingLoop(ctx context.Context, cancel context.CancelFunc, ws *websocket.Conn, logger *slog.Logger) {
 	t := time.NewTicker(wsPingInterval)
 	defer t.Stop()

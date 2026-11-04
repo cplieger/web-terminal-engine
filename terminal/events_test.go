@@ -716,14 +716,8 @@ func TestDiffStatusesWedgedHandlerDoesNotStallManager(t *testing.T) {
 // TestReportsActivityAgreesAcrossReadPaths pins the activity flag on every
 // surface a client can read it from — the status diff the stream pushes, the
 // snapshot a fresh stream opens with, and the session list a reload GETs — and
-// pins the distinction the flag rests on: a CLEARED progress (OSC 9;4;0) is a
-// signal that arrived, while the absent value means none ever did. Only the
-// second is "no activity".
-//
-// The three surfaces have to agree because a client mixes them: it repaints the
-// tab dots from List on reload and from the snapshot on stream open, then
-// follows the diff. One surface reading the flag differently makes the dot
-// appear or disappear on reload rather than when something happened.
+// pins that a cleared progress (OSC 9;4;0) counts as activity while an absent
+// value does not. A client mixes the three surfaces, so they must agree.
 func TestReportsActivityAgreesAcrossReadPaths(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })

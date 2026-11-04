@@ -350,72 +350,14 @@ func TestExitAltScreen47SharesPen(t *testing.T) {
 	}
 }
 
-// --- Allocation contracts ---------------------------------------------------
-//
-// Screen.Write is on the path of every byte a session's program produces, and
-// RenderRowWire (wire_test.go) is on the path of every rendered frame, so a
-// per-byte or per-cell allocation in either is paid at output rate. Until these
-// landed, nothing in the repo asserted a cost.
-//
-// Why an assertion rather than the chart. This repo contributes two series to
-// the weekly benchmark tracker, BenchmarkScreenWrite (4472 B/op, 10 allocs/op)
-// and BenchmarkRenderRowWire (592 B/op, 11 allocs/op), and unlike the other
-// enrolled repos neither is at zero. The tracker compares a series against its
-// own previous run and alerts above a ratio, so 10 allocs/op becoming 14 is a
-// ratio of 1.4 and stays silent, and 11 becoming 16 is 1.45 and stays silent.
-// A 40% allocation regression on a terminal emulator's hot path is therefore
-// invisible to the chart, permanently. Because nothing here sits at zero, there
-// is no infinite ratio to trip the alert either — this repo is the clearest case
-// of the class the tracker cannot see, and a contract is the only mechanism that
-// catches it. Hence bounds, not zeros, wherever a path legitimately allocates.
-//
-// What the measurement found, so the next reader does not re-derive it:
-//
-//   - Screen.Write is allocation-FREE, exactly, for every byte class ordinary
-//     program output consists of: printable ASCII, multi-byte UTF-8, wide CJK,
-//     combining marks, malformed UTF-8, SGR, and CSI cursor addressing. The
-//     parser keeps its state in fixed-size arrays on the Screen and put() writes
-//     into a grid New already allocated, so the count is 0 at 41 bytes and still
-//     0 at 272 KB — including a repaint that touches all 40,000 cells of a
-//     100x400 grid.
-//   - The sequences that CAPTURE a payload do allocate: OSC 0 title, OSC 8
-//     hyperlink, OSC 4 palette, OSC 52 clipboard, DCS query replies. Their count
-//     is a small constant per SEQUENCE and independent of the payload's LENGTH,
-//     which is the amplification property worth gating, because the program on
-//     the other end of the PTY picks that length.
-//   - A scrolled line costs exactly ONE allocation at every screen width — the
-//     blank row scrollUpOnce mints (csi.go). Rows are NOT recycled, so the
-//     contract is one-per-line rather than zero; what it pins is that the cost
-//     is per ROW and never per cell.
-//   - Carrying a scrolled row into scrollback costs about 8 to 11 allocations
-//     per line (its wire runs and the builders that produce them), growing only
-//     logarithmically with the row width.
-//
-// Two mechanics decide whether a number here means anything at all:
-//
-//   - A Screen is STATEFUL and testing.AllocsPerRun runs its closure hundreds of
-//     times, so a closure that writes into the same screen without returning it
-//     to where it started measures something different on every iteration: it
-//     fills the grid, scrolls it, and appends to Drained, which grows without
-//     bound until a consumer drains it. Measured while writing this file: a
-//     probe payload containing one VT byte left 895,977 drained rows behind and
-//     reported a per-line number that meant nothing. Each contract below
-//     therefore picks one of two shapes deliberately and says which. A FIXED
-//     POINT, where the payload returns cursor and grid to the state they started
-//     in so the thousandth call measures what the first did — that is what the
-//     trailing carriage return and the leading CUP in these frames are for. Or a
-//     STEADY STATE, warmed outside the measurement and drained inside it, which
-//     is what the production flush loop does on every frame anyway. A fresh
-//     screen per call is not available: the reset would have to happen inside
-//     the measured closure and would dominate it.
-//   - AllocsPerRun divides with integer division, so a true average of 0.9
-//     reports as 0. Warm-up has to reach the steady state BEFORE the measurement
-//     starts, or one early cheap iteration floors the whole result. The
-//     scroll-region contract below warms 40 line feeds for exactly this reason.
-//
-// None of these use t.Parallel: AllocsPerRun pins GOMAXPROCS to 1 and counts
-// allocations process-wide, so a parallel sibling's allocations land in the
-// measurement.
+// Allocation contracts: Screen.Write runs per byte of output, and the benchmark
+// tracker's ratio alert misses a moderate regression in a series not at zero.
+// Write is allocation-free for ordinary output; a payload-capturing sequence
+// costs a constant independent of payload length; a scrolled line costs one
+// row. Each closure is a fixed point or a drained steady state, since a Screen
+// is stateful and AllocsPerRun repeats it; warm up first, as AllocsPerRun's
+// integer division floors a partly cheap run. No t.Parallel: AllocsPerRun
+// counts process-wide.
 
 // allocRuns is the AllocsPerRun sample count for the write contracts. High
 // enough that a per-byte regression is unmissable, low enough that the 272 KB
@@ -439,27 +381,10 @@ func allocRepaintFrame(rows, cols int) string {
 	return b.String()
 }
 
-// TestScreenWriteIsAllocationFreeAtEveryInputSize is the core contract in this
-// file: the cost of writing N bytes into the screen must not track N.
-//
-// This is the regression that would cost real memory on a busy terminal and
-// that the chart cannot see. A terminal engine's write path runs on every byte
-// a program emits, so an allocation charged per byte, per rune, or per cell
-// turns a chatty build log into allocation pressure proportional to output
-// volume — while BenchmarkScreenWrite, which writes one fixed ~1 KB frame,
-// would move from 10 allocs/op to a number the tracker's ratio still tolerates.
-//
-// Every frame here ends with a carriage return, so writing it repeatedly is a
-// fixed point: the cursor returns to column 0 of row 0, the same cells are
-// overwritten, nothing wraps, nothing scrolls, and Drained stays empty (asserted
-// per case, so a fixture that drifts into scrolling fails instead of quietly
-// charting the scroll path). That is a real shape rather than a contrivance — a
-// spinner or a progress bar redrawing one line is exactly it — and the frame
-// that repaints EVERY cell is the next test.
-//
-// The sizes span 41 bytes to 272 KB, three orders of magnitude, which is far
-// more than enough that a per-byte allocation cannot hide: at one allocation per
-// byte the largest case would report a quarter of a million.
+// TestScreenWriteIsAllocationFreeAtEveryInputSize pins that writing N bytes
+// costs no allocation at any N from 41 bytes to 272 KB. Each frame ends in a
+// carriage return, a fixed point; an empty Drained is asserted so a fixture
+// that drifts into scrolling fails.
 func TestScreenWriteIsAllocationFreeAtEveryInputSize(t *testing.T) {
 	// Each frame is one line of at most 60 columns plus a carriage return, so
 	// none of them wraps on an 80-column screen.
@@ -508,15 +433,8 @@ func TestScreenWriteIsAllocationFreeAtEveryInputSize(t *testing.T) {
 	}
 }
 
-// TestScreenWriteIsAllocationFreeRepaintingEveryCell answers the objection the
-// test above invites: its frames redraw one row, so they touch 40 cells however
-// many bytes they carry, and a cost charged per CELL rather than per byte would
-// survive it.
-//
-// These frames address every row absolutely and fill it, so one frame writes
-// every cell in the grid — 1,920 on the default screen and 40,000 on the
-// 100x400 case, which is wider and taller than any real client. Repeating a
-// frame is still a fixed point because it opens with CUP home.
+// TestScreenWriteIsAllocationFreeRepaintingEveryCell catches a per-cell cost:
+// each frame opens with CUP home and fills every cell, up to 40,000 at 100x400.
 func TestScreenWriteIsAllocationFreeRepaintingEveryCell(t *testing.T) {
 	grids := map[string]struct {
 		rows, cols, reps int
@@ -592,25 +510,10 @@ func TestScreenWriteAllocationCountIsIndependentOfChunking(t *testing.T) {
 	}
 }
 
-// TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength covers the
-// classes that are NOT allocation-free, and pins the property that matters for
-// them.
-//
-// A sequence that captures a payload has to materialise it: OSC 0 keeps the
-// title, OSC 8 keeps the URI on every cell it stamps, OSC 4 records a palette
-// override, OSC 52 queues a clipboard write, and a DCS query queues a reply for
-// the application. Each costs a small constant, and the constant is what a
-// consumer pays per sequence. What must not happen is the count tracking the
-// payload's LENGTH, because that length is chosen by the program on the other
-// end of the PTY: a title or a clipboard payload can be as long as the OSC
-// buffer allows (maxOSCLen, 4 KiB), so a count that grew with it would be an
-// amplification vector reachable by anything that can print.
-//
-// Each builder takes a length n from 4 to 4000, a thousandfold, and the
-// assertion is an equality against the count measured at n=64 rather than a
-// threshold picked to pass. TakeResponse and TakeClipboard are called inside the
-// closure because the consumer drains both every frame; without that the queues
-// grow and the measurement drifts.
+// TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength pins that a
+// payload-capturing sequence (OSC 0, 8, 4, 52, a DCS query) costs the same
+// count at any length from 4 to 4000, since the program chooses that length.
+// The closure drains the queues each call, as the consumer does.
 func TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength(t *testing.T) {
 	sequences := map[string]func(n int) string{
 		"osc0_window_title": func(n int) string {
@@ -707,27 +610,10 @@ func TestScreenWriteNoOpIsAllocationFree(t *testing.T) {
 	}
 }
 
-// TestScrollAllocationCostIsOneRowPerLineAtEveryWidth pins what a scrolled line
-// costs, and it is one of the two places the expected property did NOT hold:
-// rows are not recycled. scrollUpOnce (csi.go) shifts the surviving rows down by
-// one slice element each and mints a FRESH blank row with makeRow, so a scroll
-// allocates once per scrolled line rather than never.
-//
-// One allocation per line is still the contract worth holding, because it says
-// the cost is charged per ROW and never per cell: the count is identical at 40,
-// 80 and 400 columns, so a 400-column screen scrolls for the same number of
-// allocations as a 40-column one (more bytes, same count). A rewrite that
-// rebuilt each row cell by cell, or that copied cell ranges instead of moving
-// row slices, would show up here as a count proportional to the width while
-// BenchmarkScreenWrite barely moved.
-//
-// The fixture sets a scroll region starting at row 2 (DECSTBM), which keeps
-// scrollUpOnce off the scrollback path — a full-screen scroll also drains, and
-// draining is the next contract. Warming with 40 line feeds parks the cursor at
-// the bottom margin BEFORE the measurement, so every measured call scrolls
-// exactly as many times as the payload has line feeds; without that warm-up the
-// early calls do not scroll at all and AllocsPerRun's integer division floors
-// the result to something lower and meaningless.
+// TestScrollAllocationCostIsOneRowPerLineAtEveryWidth pins one allocation per
+// scrolled line, scrollUpOnce's fresh blank row, at every width. A DECSTBM
+// region from row 2 keeps it off the drain path, and 40 warm-up line feeds park
+// the cursor at the margin so every measured line feed scrolls.
 func TestScrollAllocationCostIsOneRowPerLineAtEveryWidth(t *testing.T) {
 	widths := []int{40, 80, 400}
 	lineCounts := []int{1, 8, 64, 512}
@@ -763,23 +649,10 @@ func TestScrollAllocationCostIsOneRowPerLineAtEveryWidth(t *testing.T) {
 	}
 }
 
-// TestScrollbackDrainAllocationCostIsBoundedPerScrolledLine pins the full-screen
-// scroll, which is the one a shell actually produces: scrollUpOnce drains row 0
-// into Drained first (screen.go drainTopRow), converting it to wire runs and
-// scanning it for URLs, and the consumer's flush loop takes the result with
-// DrainScrollback on the next frame.
-//
-// The closure therefore writes AND drains, because that pair is the production
-// steady state. Draining inside the measurement is what makes the number mean
-// something: Drained is unbounded until a consumer empties it, so a closure that
-// only writes measures a screen whose retained history grows on every one of
-// AllocsPerRun's iterations.
-//
-// Two properties, both bounds rather than equalities because the per-line cost
-// legitimately includes strings.Builder growth, which steps with the row width:
-// the per-line cost is a small constant (measured 8.02 at 40 columns rising to
-// 11.02 at 400), and it does not grow with the number of lines scrolled in one
-// write, which is what would happen if the drain became quadratic in the batch.
+// TestScrollbackDrainAllocationCostIsBoundedPerScrolledLine pins the
+// full-screen scroll a shell produces, writing and draining as the flush loop
+// does. The per-line cost is a small bound (measured 8 to 11 by width) that
+// does not grow with lines per write.
 func TestScrollbackDrainAllocationCostIsBoundedPerScrolledLine(t *testing.T) {
 	// Deliberately generous: the point is that the number is a small constant
 	// per line, not that it is any particular value.

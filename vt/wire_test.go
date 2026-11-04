@@ -336,48 +336,11 @@ func TestTrailingBlankTrimOnDrainedRows(t *testing.T) {
 	}
 }
 
-// --- Allocation contracts ---------------------------------------------------
-//
-// RenderRowWire runs once per changed row per frame, so its cost is paid at
-// frame rate times screen height. It is the second of this repo's two tracked
-// benchmark series (592 B/op, 11 allocs/op) and, like the first, it is not at
-// zero, so the tracker's ratio alert cannot see a moderate regression in it;
-// screen_test.go's contract header has the arithmetic.
-//
-// Unlike Screen.Write this function cannot be allocation-free: each WireRun
-// carries its own text as a string, so a row's runs have to be built. The
-// contract is therefore about WHICH quantity the count is allowed to track. It
-// may track the number of RUNS, because a run is the unit the wire format is
-// made of. It must not track the number of COLUMNS, because that is the number a
-// client chooses by dragging a window edge, and a per-column allocation would
-// make a wide terminal quadratically more expensive to render than a narrow one.
-//
-// What the measurement found:
-//
-//   - A row that coalesces into a bounded number of runs costs a bounded number
-//     of allocations at any width: plain ASCII measured 10 at 40 columns and 15
-//     at 1000, a per-column rate of 0.005. The growth is strings.Builder
-//     doubling, not per-cell work.
-//   - A row whose every cell carries a different style produces one run per cell
-//     by definition, and costs about 1.01 allocations per run. That is the
-//     inherent price of the wire format, and pinning the RATE is what says the
-//     cost is charged per run and not per cell.
-//   - Combining marks never reach a cell: put() drops a width-0 rune (screen.go),
-//     so "e" + U+0301 occupies one cell holding "e". There is consequently no
-//     combining-mark content class at this layer — it collapses into plain ASCII,
-//     and the fixture below is kept only to record that.
-//   - The autolink path is the one class whose count is not exactly reproducible.
-//     It reaches regexp.FindAllStringIndex, whose machine state comes from a
-//     sync.Pool that every GC empties, and it measured 22 without the race
-//     detector against 25 with it, drifting by 1 between runs at 400 columns. Its
-//     bounds below therefore carry real headroom, and no equality is asserted on
-//     it anywhere.
-//
-// RenderRowWire is a pure read — it derives runs from the grid and never stores
-// into cells — so unlike the write contracts these need no fixed point or steady
-// state: the thousandth call sees exactly what the first did. The tests assert
-// that rather than assume it. No t.Parallel, for the reason given in
-// screen_test.go.
+// Allocation contracts: RenderRowWire runs per changed row per frame. Its count
+// may track runs, the wire format's unit, but never columns, which a client
+// sets. The autolink path's count varies with regexp's sync.Pool and -race, so
+// its bounds carry headroom. It is a pure read, so no fixed point is needed;
+// screen_test.go's header covers the rest.
 
 // allocRowFill repeats seed until it yields exactly n runes, so a row fixture
 // can be built to an exact column budget and nothing wraps onto the row below.
@@ -431,21 +394,9 @@ func allocRowScreen(width int, text string) *Screen {
 	return s
 }
 
-// TestRenderRowWireAllocationCountDoesNotScaleWithRowWidth is the core wire
-// contract: rendering a row must cost a bounded number of allocations regardless
-// of how wide the row is.
-//
-// Width is the axis a client controls, and it moves by an order of magnitude
-// between a phone in portrait and a maximised desktop window. An allocation
-// charged per column would make the wide case cost 25 times the narrow one here
-// while BenchmarkRenderRowWire, pinned at 80 columns, moved by nothing at all —
-// exactly the blind spot these contracts exist for.
-//
-// The assertion is a per-column RATE rather than an equality, because the count
-// does legitimately grow: strings.Builder doubles its buffer, so a wider row
-// costs a few more allocations than a narrow one. The bound separates that from
-// per-column work by three orders of magnitude — a per-column allocation would
-// measure a rate of 1.0 against a limit of 0.05.
+// TestRenderRowWireAllocationCountDoesNotScaleWithRowWidth bounds the per-column
+// allocation rate at 0.05: strings.Builder doubling adds a few, while per-column
+// work would measure 1.0.
 func TestRenderRowWireAllocationCountDoesNotScaleWithRowWidth(t *testing.T) {
 	// A per-column allocation rate this far below 1 cannot be per-column work.
 	// Measured worst case across these classes is 0.0083 (wide_cjk).
@@ -494,21 +445,9 @@ func TestRenderRowWireAllocationCountDoesNotScaleWithRowWidth(t *testing.T) {
 	}
 }
 
-// TestRenderRowWireAllocationCountIsChargedPerRunNotPerColumn covers the classes
-// the test above excludes: a row whose every cell carries a different style
-// cannot coalesce, so it produces one run per column and its count MUST grow
-// with the width. Asserting flatness there would be asserting a bug.
-//
-// The property that still holds is the one worth gating, and it is the same shape
-// keyenc uses for its escaping path: the cost is bounded PER RUN. Measured as a
-// slope between two widths so the row's fixed cost cancels out, which is what
-// distinguishes "one allocation for each run the wire format contains" from "two
-// allocations for each run", the shape a stray per-run string conversion would
-// produce.
-//
-// These are real inputs, not contrivances: a syntax-highlighted diff, a
-// truecolour progress bar and an `ls` listing that hyperlinks every filename all
-// alternate style per cell or per word.
+// TestRenderRowWireAllocationCountIsChargedPerRunNotPerColumn bounds the cost
+// per run for rows that cannot coalesce, measured as a slope between two widths
+// so the fixed cost cancels and two allocations per run would show.
 func TestRenderRowWireAllocationCountIsChargedPerRunNotPerColumn(t *testing.T) {
 	// One allocation per run is the wire format's own cost (each WireRun carries
 	// its own string); 2 leaves room for a size-class step without tolerating a
@@ -571,19 +510,9 @@ func TestRenderRowWireAllocationCountIsChargedPerRunNotPerColumn(t *testing.T) {
 	}
 }
 
-// TestRenderRowWireAllocationCountByContentClass records what each content class
-// costs at the default 80 columns and holds each to its own bound, because the
-// classes differ by an order of magnitude and one number could not describe them:
-// a blank row costs 3 allocations, an ASCII row 11, and a row whose every cell
-// is separately coloured 90.
-//
-// This is the table a reader wants when the width and per-run contracts above
-// both pass and a chart still moved. Each bound is the measured count plus
-// headroom rather than an equality, for one measured reason: the autolink class
-// reaches a regexp whose machine comes from a sync.Pool, and it measured 22
-// without the race detector and 25 with it. A bound that tracked the measurement
-// exactly would be red on every -race run, so the whole table is bounded
-// consistently and the exact numbers are logged instead.
+// TestRenderRowWireAllocationCountByContentClass bounds each content class at 80
+// columns (blank 3, ASCII 11, per-cell color 90) with headroom, since autolink
+// varies under -race; exact counts are logged.
 func TestRenderRowWireAllocationCountByContentClass(t *testing.T) {
 	const width = 80
 

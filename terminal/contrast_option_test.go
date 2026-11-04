@@ -2,16 +2,9 @@ package terminal
 
 import "testing"
 
-// The minimum-contrast floor is configured on the Handler but enforced by the
-// screen, so the only thing that can break between them is the plumb-through in
-// NewHandler. Assert it behaviourally, through the screen's own wire output,
-// rather than by reaching for vt's unexported field.
-//
-// SGR 34 is the case that motivated the option: a program picks palette slot 4
-// and cannot know what RGB the terminal resolves it to. The engine's default for
-// that slot clears 4.5:1 on black only just, so a floor of 4.5 must nudge it —
-// which is precisely why this asserts "changed" rather than a literal RGB, and
-// why the paired default case asserts the raw entry survives untouched.
+// The floor is enforced by the screen, so this checks NewHandler's plumbing
+// through wire output. Slot 4 (SGR 34) sits just under 4.5:1 on black, so the
+// floor must change it, while the default case leaves it raw.
 func TestWithMinimumContrastReachesTheScreen(t *testing.T) {
 	t.Parallel()
 

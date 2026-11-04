@@ -2,15 +2,9 @@
 
 package terminal
 
-// Non-Linux stubs for the marker reap domain. The boundary is a /proc scan for
-// an inherited environment variable, and no other platform exposes another
-// process's environment through the filesystem, so the domain finds nothing and
-// every step of the ladder degrades to a no-op.
-//
-// The marker is still injected into the child environment on these platforms:
-// it is inert, costs one variable, and keeps the spawn path identical across
-// builds rather than platform-forked at the one place a divergence would be
-// hardest to test.
+// Off Linux the reap domain finds nothing, since no /proc exposes another
+// process's environment. The marker is still injected, keeping the spawn path
+// identical across builds.
 
 // reapFindByMarker finds nothing off Linux, which makes teardownOnce return
 // after its first pass without signalling or logging.

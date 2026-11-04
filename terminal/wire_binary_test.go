@@ -135,17 +135,9 @@ func TestClampU16_boundaryValues(t *testing.T) {
 }
 
 // TestEncodeModesMsg_eachFlagSetsItsBit asserts that each DEC-mode flag sets
-// exactly its own bit in the modes frame's flags byte (index 9), independently.
-// The existing callers only ever set bracketed/mouseSGR/reverseVideo, so the
-// appCursorKeys/focusReporting/appKeypad branches were unexercised and a mutant
-// dropping any `flags |= modeFlagX` survived.
-//
-// want values are the bit positions documented in the wire layout (wire_binary.go
-// encodeModesMsg: bit0 bracketed, bit1 appCursor, bit2 mouseSGR, bit3 focus,
-// bit4 appKeypad, bit5 reverseVideo) written as literals rather than the encoder's
-// modeFlagX constants, so a regression that changes a constant's value (which the
-// cross-language TS decoder would then mis-read) is caught here too, not only by
-// the byte-exact golden fixture.
+// exactly its own bit of the flags byte (index 9). want is written as literal
+// bits, not modeFlag constants, so a changed constant the TS decoder would
+// misread fails here too.
 func TestEncodeModesMsg_eachFlagSetsItsBit(t *testing.T) {
 	cases := []struct {
 		name string

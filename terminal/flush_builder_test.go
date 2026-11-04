@@ -13,20 +13,9 @@ import (
 // about the frame contents, not its fan-out.
 var noClients = map[*websocket.Conn]uint64{}
 
-// TestBuild_CursorOnlyMoveAddsRowToChanged drives the bug from the
-// "cursor visually doesn't move on left/right arrow or space-over-space"
-// report:
-//
-//   - First Build is a full repaint (all rows in changed) — establishes
-//     the prev cache.
-//   - Second Build with no PTY input at all: must return nil.
-//   - Third Build after CSI D (cursor back): row content unchanged but
-//     cursor moved, so the cursor row must appear in changed so the
-//     wire frame carries its payload and the client can repaint the
-//     inline cursor span at the new column. Without this fix the
-//     server emits a non-nil frame but flushLoop drops the screen
-//     payload (it gates on len(changed) > 0) and the client never
-//     sees the move.
+// TestBuild_CursorOnlyMoveAddsRowToChanged pins that a cursor move with no
+// content change puts the cursor row in changed: the screen payload needs a
+// changed row, or the client never sees the move.
 func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 	screen := vt.New(10, 40)
 	// Establish some content so the cursor is on a row that has runs.

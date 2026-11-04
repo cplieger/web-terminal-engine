@@ -33,19 +33,9 @@ func exitedHandler(t *testing.T, command ...string) *Handler {
 // waitExited blocks until the child has been reaped, failing the test if it
 // never is.
 //
-// Waits on the channel the process monitor closes rather than polling Exited(),
-// for two reasons. It returns the instant the monitor latches, so a generous
-// budget costs the happy path nothing — which matters because none of these
-// tests assert anything about how FAST a reap is, only that the outcome is final
-// before they classify it. And the old 5s poll was an arbitrary number that
-// failed the suite for slowness it never meant to measure: it fired once under
-// full-suite load, where a machine running the scheduler tests' real-time sleeps
-// alongside dozens of child processes can starve this monitor goroutine well
-// past 5s without anything being wrong.
-//
-// The failure message diagnoses instead of just reporting the timeout: it says
-// whether the child is still running, already a zombie (so the exit happened and
-// only the monitor is behind), or gone entirely.
+// It waits on the monitor's channel, so a generous budget costs nothing on
+// success; full-suite load can starve the monitor for seconds. On timeout it
+// reports whether the child runs, is a zombie, or is gone.
 func waitExited(t *testing.T, h *Handler) {
 	t.Helper()
 	const budget = 30 * time.Second

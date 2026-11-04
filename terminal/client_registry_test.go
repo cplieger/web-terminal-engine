@@ -53,14 +53,9 @@ func TestResolveSession_retainsRecentSession(t *testing.T) {
 // default for the test's duration and returns the buffer. Callers must be
 // serial (no t.Parallel): the default logger is a process global.
 //
-// slog.SetDefault also points the standard log package at the installed
-// handler, and it skips that redirect when the logger being installed carries
-// slog's own default handler. Reinstalling the previous logger therefore does
-// not undo the redirect, so the writer and flags are saved and restored
-// explicitly. slog goes back first: reinstalling a previous handler that is not
-// slog's default re-runs the redirect and would overwrite a log restore done
-// before it. The cleanup is t.Cleanup rather than defer so it also runs when a
-// subtest of the caller fails.
+// slog.SetDefault also redirects package log, and reinstalling the old logger
+// does not undo that, so log's writer and flags are restored explicitly, after
+// slog, whose reinstall would otherwise redo the redirect.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	buf := &bytes.Buffer{}

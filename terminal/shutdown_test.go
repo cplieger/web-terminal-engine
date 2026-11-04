@@ -199,7 +199,7 @@ func TestManagerShutdownNamesTheOutstandingCount(t *testing.T) {
 // TestShutdownReportsSuccessAfterCompletion pins the answer a finished teardown
 // must give when the caller's budget has ALSO expired: success, every time.
 //
-// This is the fatal-path shape (webhttp's teardown hook runs mgr.Shutdown, then
+// This is the fatal-path shape (httpserver's teardown hook runs mgr.Shutdown, then
 // the error branch above it runs it again, often with the same spent context). A
 // bare two-case select would satisfy it about half the time, so the loop is the
 // assertion: 30 iterations put the odds of a broken implementation passing at
@@ -225,7 +225,7 @@ func TestShutdownReportsSuccessAfterCompletion(t *testing.T) {
 }
 
 // TestManagerShutdownIsIdempotent covers the double-call an app hits on its fatal
-// path: webhttp's teardown hook runs mgr.Shutdown, and the error branch above it
+// path: httpserver's teardown hook runs mgr.Shutdown, and the error branch above it
 // runs it again. The second call has no sessions and no live loops, so it must
 // report success rather than an expiry against an already-closed wait.
 func TestManagerShutdownIsIdempotent(t *testing.T) {

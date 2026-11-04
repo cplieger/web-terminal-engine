@@ -37,7 +37,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 	"github.com/creack/pty"
 )
@@ -2289,7 +2289,7 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 		d.known = true
 	default:
 		h.cfg.logger.Debug("terminal: unrecognized control type",
-			"type", runesafe.SanitizeSingleLineBounded(c.Type, maxLoggedControlTypeBytes))
+			"type", textsafe.SanitizeSingleLineBounded(c.Type, maxLoggedControlTypeBytes))
 	}
 	return d
 }

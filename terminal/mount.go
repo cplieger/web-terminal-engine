@@ -96,8 +96,8 @@ type mountConfig struct {
 // is INJECTED rather than built in because throttle policy (tuning, the 429
 // body, whether to gate at all) is the consumer's decision and the engine
 // takes no HTTP-middleware dependency; pass a middleware that scopes itself to
-// the create request — e.g. webhttp.SessionCreateRateLimit(SessionsPath),
-// whose predicate gates POST SessionsPath and passes GET/DELETE/PUT through.
+// the create request, such as a rate limiter whose predicate gates POST
+// SessionsPath and passes GET/DELETE/PUT through.
 // The gate wraps the REST handler on BOTH its mounts (SessionsPath and
 // SessionsSubtreePath) and never wraps the WebSocket or events handlers. A nil
 // mw is ignored (no gate).
@@ -150,7 +150,7 @@ func MountSessionRoutes(mux *http.ServeMux, h SessionHandlers, opts ...MountOpti
 	if c.createGate != nil {
 		rest = c.createGate(rest)
 	}
-	// Outside the gate, deliberately. A gate refusal (webhttp's 429) is written
+	// Outside the gate, deliberately. A gate refusal (httpserver's 429) is written
 	// BY the gate and never reaches the REST handler, so RESTHandler's own
 	// withNoStore cannot cover it — and a refusal lands on the same token-bearing
 	// paths as everything else, with the same cache-key exposure. Wrapping the

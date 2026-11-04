@@ -786,25 +786,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.handleWS(w, r)
 }
 
-// Close ends the session and returns immediately, without waiting for the
-// teardown it starts. Safe to call even if the process was never started, and
-// safe to call more than once.
-//
-// It kills the child (SIGKILL, via the cancelled context) and closes the PTY.
-// Everything after that runs on the process monitor's goroutine and outlives
-// this call: reaping the child, ending the containment cgroup, sweeping the
-// marker domain for escapees, and telling attached clients the process is gone.
-// Use Shutdown when the caller must know that work finished.
-//
-// This is the form for a caller that must not block: SessionManager.Close serves
-// an HTTP DELETE, and the idle reaper runs on a ticker. Neither can afford the
-// several seconds a teardown may legitimately take, and neither needs to,
-// because the server keeps running and the monitor completes on its own.
-//
-// It latches "the server ended this session", which the exit classification
-// reads: a child the server kills (SIGKILL via the cancelled context, or SIGHUP
-// from the PTY closing) exited because it was told to, and reporting that as a
-// crash would paint every routine restart red. See crashedExit.
+// Close ends the session and returns without waiting for the teardown it
+// starts. It is safe before any start and safe to repeat, and every later start
+// is refused. It kills the child (SIGKILL via the cancelled context) and closes
+// the PTY; reaping the child, ending the containment cgroup, sweeping escapees
+// and telling clients the process is gone continue on the process monitor's
+// goroutine. Call Shutdown to wait for that work. The child's exit then counts
+// as server-initiated, never as a crash (see crashedExit).
 func (h *Handler) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -2074,7 +2062,8 @@ func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg 
 // control channel, it can never become PTY input, and anything that is not a
 // valid control on an armed connection closes the connection rather than
 // risking framing-state poison. Returns the updated (armed, latched) state and
-// closed=true when it has closed the connection.
+// closed=true when the read loop must end: the connection is then either closed
+// by this call or left open for the caller's deferred close.
 func (h *Handler) handleTextControl(ws *websocket.Conn, state *clientState, msg []byte, armed, latched bool, onResumeServed func()) (newArmed, newLatched, closed bool) {
 	if !utf8.Valid(msg) {
 		// RFC 6455 §5.6 requires valid UTF-8 in text messages and

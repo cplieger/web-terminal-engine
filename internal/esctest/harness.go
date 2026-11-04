@@ -2,9 +2,10 @@
 // (github.com/ThomasDickey/esctest2, George Nachman's esctest with Thomas
 // Dickey's fixes) against the engine's vt.Screen.
 //
-// esctest2 is GPL-2.0 and the engine MPL-2.0, which MPL-2.0 §3.3 forbids
-// combining this way, so it is never vendored: scripts/esctest.sh fetches it,
-// ESCTEST2_DIR locates it, and it runs as a subprocess over a PTY, never linked.
+// esctest2 is GPL-2.0 and the engine MPL-2.0; MPL-2.0 §3.3 lets MPL code enter
+// a GPL work, not the reverse, so it is never vendored: scripts/esctest.sh
+// fetches it, ESCTEST2_DIR locates it, and it runs as a subprocess over a PTY,
+// never linked.
 //
 // Run feeds the child's stdout to vt.Screen and writes the screen's query
 // answers back to its stdin, validating the VT state machine with no browser.

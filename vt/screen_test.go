@@ -350,12 +350,11 @@ func TestExitAltScreen47SharesPen(t *testing.T) {
 	}
 }
 
-// Allocation contracts: Screen.Write runs per byte of output, and the benchmark
-// tracker's ratio alert misses a moderate regression in a series not at zero.
-// Write is allocation-free for ordinary output; a payload-capturing sequence
-// costs a constant independent of payload length; a scrolled line costs one
-// row. Each closure is a fixed point or a drained steady state, since a Screen
-// is stateful and AllocsPerRun repeats it; warm up first, as AllocsPerRun's
+// Allocation contracts for Screen.Write, which runs per byte of output. Write
+// is allocation-free for ordinary output; a payload-capturing sequence costs a
+// constant independent of payload length; a scrolled line costs one row. Each
+// closure is a fixed point or a drained steady state, since a Screen is
+// stateful and AllocsPerRun repeats it; warm up first, as AllocsPerRun's
 // integer division floors a partly cheap run. No t.Parallel: AllocsPerRun
 // counts process-wide.
 

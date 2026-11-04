@@ -44,10 +44,11 @@ const (
 	// After a size change, armRedrawSettle holds flushes until the child's
 	// redraw has been quiet for redrawSettleQuiet, which must exceed a DEC 2026
 	// batch's inter-chunk gaps. Lapsing redrawSettleCap lets one full repaint
-	// through and re-arms, at most redrawSettleMaxRearms times, so a long redraw
-	// never streams partial screens and a child that streams forever (`tail -f`)
-	// is not throttled forever. Never drain vt.Screen on a held pass: only
-	// flushFrameBuilder.Build turns drained lines into a frame clients receive.
+	// through and re-arms, at most redrawSettleMaxRearms times, so a redraw
+	// longer than the cap still shows whole screens, and once the budget is
+	// spent output streams normally (`tail -f`). Never drain vt.Screen on a
+	// held pass: only flushFrameBuilder.Build turns drained lines into a frame
+	// clients receive.
 	redrawSettleQuiet     = 150 * time.Millisecond
 	redrawSettleCap       = time.Second
 	redrawSettleMaxRearms = 3
@@ -321,24 +322,30 @@ type clientState struct {
 	// ws is set once by clientRegistry.Add, so a superseding resume can close it.
 	ws      *websocket.Conn
 	session atomic.Pointer[sessionState]
-	// The three token buckets (resume, history, ephemeralInput) are owned by
-	// the socket's serial read loop, so they take no lock. Their time.Time
-	// halves lead the struct for fieldalignment.
-	resumeLast    time.Time
-	historyLast   time.Time
+	// resumeLast/resumeTokens are resumeControl's token bucket. The three
+	// buckets are owned by the socket's serial read loop, so they take no lock;
+	// their time.Time halves lead the struct for fieldalignment.
+	resumeLast time.Time
+	// historyLast/historyTokens are takeHistoryToken's bucket.
+	historyLast time.Time
+	// ephemeralLast/ephemeralTokens are takeEphemeralToken's bucket.
 	ephemeralLast time.Time
 	// lastAckSent is the last inputAck written to this socket, by dispatchFrame,
 	// the ackOnly sweep or handleResume; the sweep compares it to the ledger's
-	// count so input into a silent app is still acknowledged.
+	// count so input into a silent app is still acknowledged. Atomic because
+	// handleResume and flushLoop both write it.
 	lastAckSent atomic.Uint64
-	// cols/rows/focused are guarded by clientRegistry.mu and feed MinLiveSize
-	// and AnyClientFocused.
-	cols            int
-	rows            int
-	resumeTokens    float64
-	historyTokens   float64
+	// cols/rows are guarded by clientRegistry.mu and feed MinLiveSize.
+	cols int
+	rows int
+	// resumeTokens is resumeLast's fill.
+	resumeTokens float64
+	// historyTokens is historyLast's fill.
+	historyTokens float64
+	// ephemeralTokens is ephemeralLast's fill.
 	ephemeralTokens float64
-	focused         bool
+	// focused is guarded by clientRegistry.mu and feeds AnyClientFocused.
+	focused bool
 	// fenced is set under the ledger's mu once a resume moved ownership to
 	// another socket, and never cleared: this socket's input is dropped.
 	fenced atomic.Bool
@@ -1521,8 +1528,9 @@ func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen ui
 	if stripped {
 		// The captured ack predates the resume and, after a ledger-loss resume,
 		// can exceed the client's reset outbox, falsely trimming unacked input.
-		// Under writeMu lastAckSent is exactly the latest resumeAck, which the
-		// client's monotone applyAck treats as a no-op.
+		// Under writeMu lastAckSent is exactly the latest resumeAck (no resume
+		// runs while it is held, and flushLoop never sweeps during a dispatch),
+		// which the client's monotone applyAck treats as a no-op.
 		ack = st.lastAckSent.Load()
 	}
 	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

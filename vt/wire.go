@@ -475,8 +475,8 @@ func (s *Screen) colorToWire(c Color) int32 {
 }
 
 // basic16RGB resolves palette indices 0-15 to RGB with kitty's default palette
-// (kitty/options/definition.py), chosen against the same pure black
-// background; the VGA table's blue reads at 1.58:1 there.
+// (kitty/options/definition.py), whose default background is pure black like
+// the client's; the VGA table's blue reads at 1.58:1 there.
 func basic16RGB(idx uint8) int32 {
 	pal := [16]int32{
 		0x000000, 0xcc0403, 0x19cb00, 0xcecb00,

@@ -436,9 +436,10 @@ func (s *Screen) Resize(rows, cols int) {
 }
 
 // resizeHeight adjusts the buffer to the new row count, preserving content.
-// On the alt screen, growth adds rows on top and moves the cursor down until
-// the app repaints; on the main screen it adds them below, since a shell never
-// repaints its prompt. Shrinking drops rows from the bottom.
+// On the alt screen, growth adds rows on top and moves the cursor with the
+// content until the app's SIGWINCH repaint; on the main screen it adds them
+// below, since a shell does not repaint on resize. Shrinking drops rows from
+// the bottom.
 func (s *Screen) resizeHeight(rows int) {
 	if rows > s.Height {
 		grow := rows - s.Height

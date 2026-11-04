@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // decodeTitle applies the XTSMTITLE set-mode to an incoming OSC 0/1/2 title
@@ -246,7 +246,7 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// sanitizeNotification drops every rune of runesafe's unsafe classes — C0
+// sanitizeNotification drops every rune of textsafe's unsafe classes — C0
 // controls (newlines included) + DEL, C1 controls, Bidi_Control (Trojan-Source
 // reordering), and U+2028/U+2029 (JS line terminators) — from an OSC 9 message
 // and clamps it to maxNotificationLen runes, so the stored text is safe to
@@ -258,7 +258,7 @@ func sanitizeNotification(data string) string {
 		if n >= maxNotificationLen {
 			break
 		}
-		if runesafe.IsUnsafeSingleLine(r) {
+		if textsafe.IsUnsafeSingleLine(r) {
 			continue
 		}
 		b.WriteRune(r)

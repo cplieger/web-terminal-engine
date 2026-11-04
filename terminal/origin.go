@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/coder/websocket"
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // OriginPolicy is the set of browser origins allowed to open a terminal
@@ -33,7 +33,7 @@ var errNotAnOrigin = errors.New("not a complete http(s) origin")
 
 // NewOriginPolicy validates an operator-supplied origin allowlist and returns
 // the policy plus the entries it dropped, so a caller can warn about a typo
-// without failing startup (the drop-and-report shape webhttp's ParseHostList and
+// without failing startup (the drop-and-report shape httpserver's ParseHostList and
 // ParseCIDRs use).
 //
 // Each entry must be a complete origin — scheme, host, optional port, and
@@ -58,7 +58,7 @@ var errNotAnOrigin = errors.New("not a complete http(s) origin")
 //
 // An all-invalid list yields an INACTIVE policy — same-origin only. That is the
 // fail-closed direction for this type, and it is deliberately the opposite of
-// webhttp's HostPolicy, where an all-invalid list becomes an active deny-all: a
+// httpserver's HostPolicy, where an all-invalid list becomes an active deny-all: a
 // Host allowlist is a GATE, so an empty one must refuse everything, while an
 // origin allowlist only ever WIDENS the same-origin floor, so an empty one must
 // widen nothing.
@@ -216,5 +216,5 @@ const maxLoggedOriginBytes = 128
 // class stripping is for a sink that does not quote, such as slog's JSONHandler,
 // which emits C1 raw.
 func logSafeHeader(v string) string {
-	return runesafe.SanitizeSingleLineBounded(v, maxLoggedOriginBytes)
+	return textsafe.SanitizeSingleLineBounded(v, maxLoggedOriginBytes)
 }

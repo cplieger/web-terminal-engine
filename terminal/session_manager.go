@@ -33,7 +33,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // SessionID identifies one session: the value Create mints (128-bit
@@ -515,19 +515,19 @@ const logIDPrefixBytes = 8
 // LogID returns a short, correlation-safe prefix of a session id for logs: at
 // most the first 8 bytes, cut on a rune boundary, plus an ellipsis when cut. A
 // client-supplied id is arbitrary bytes (see SessionID), so the prefix goes
-// through runesafe.SanitizeSingleLine and is always one valid UTF-8 line; a
+// through textsafe.SanitizeSingleLine and is always one valid UTF-8 line; a
 // minted hex id passes unchanged. The full id is a capability token (CWE-532 if
 // logged whole): every consumer that logs a session id passes it through here
 // rather than re-deriving the cut, and should pin the logged value in a test.
 func LogID(id SessionID) string {
 	if len(id) <= logIDPrefixBytes {
-		return runesafe.SanitizeSingleLine(string(id))
+		return textsafe.SanitizeSingleLine(string(id))
 	}
 	cut := logIDPrefixBytes
 	for cut > 0 && !utf8.RuneStart(id[cut]) {
 		cut--
 	}
-	return runesafe.SanitizeSingleLine(string(id[:cut])) + "\u2026"
+	return textsafe.SanitizeSingleLine(string(id[:cut])) + "\u2026"
 }
 
 // sessionOrder is one session's sort key for an enumeration: its position in the

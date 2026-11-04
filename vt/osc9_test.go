@@ -397,7 +397,7 @@ func TestOSC9NotificationSanitizedThroughParser(t *testing.T) {
 		t.Run(term.name, func(t *testing.T) {
 			s := New(24, 80)
 			// Tab, DEL, a Bidi_Control override and a JS line terminator: all in
-			// runesafe's unsafe classes, all dropped. (ESC and BEL cannot appear
+			// textsafe's unsafe classes, all dropped. (ESC and BEL cannot appear
 			// inside the payload — they terminate the sequence.)
 			s.Write(osc9("do\tne\x7f\u202eok\u2028!", term.seq))
 			if s.Notification != "doneok!" {

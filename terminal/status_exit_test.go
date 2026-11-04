@@ -99,7 +99,9 @@ func TestExitOutcomeClassification(t *testing.T) {
 		{name: "non-zero exit", command: []string{"/bin/sh", "-c", "exit 3"}, want: StatusCrashed},
 		{name: "highest non-zero exit", command: []string{"/bin/sh", "-c", "exit 255"}, want: StatusCrashed},
 		{name: "killed by SIGKILL", command: []string{"/bin/sh", "-c", "kill -9 $$"}, want: StatusCrashed},
-		{name: "killed by SIGSEGV", command: []string{"/bin/sh", "-c", "kill -SEGV $$"}, want: StatusCrashed},
+		// Not a core-dumping signal: a piped core_pattern ignores RLIMIT_CORE
+		// (core(5)), so a dump holds the dying child past waitExited's budget.
+		{name: "killed by SIGTERM", command: []string{"/bin/sh", "-c", "kill -TERM $$"}, want: StatusCrashed},
 		// A hangup is the terminal going away, not the program failing.
 		{name: "killed by SIGHUP", command: []string{"/bin/sh", "-c", "kill -HUP $$"}, want: StatusExited},
 	}

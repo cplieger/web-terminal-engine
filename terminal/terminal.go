@@ -719,6 +719,9 @@ type Handler struct {
 	// because the redraw-settle cap lapsed while the child was still writing
 	// (see redrawHoldUntil). Consumed by buildFrame. Guarded by h.mu.
 	redrawCoalesceNow bool
+	// ptyClosed latches once closePTYLocked closed the PTY master. Guarded by
+	// h.mu.
+	ptyClosed bool
 	// autoTitleWarned makes the automatic-title probe's failure note once-per-
 	// session rather than once-per-sweep (see probeAutoTitle). Guarded by h.mu.
 	autoTitleWarned bool
@@ -809,15 +812,25 @@ func (h *Handler) Close() {
 	// triggers, and therefore ahead of the cmd.Wait() return the monitor
 	// classifies.
 	h.shutdownRequested.Store(true)
-	if h.healTimer != nil {
-		h.healTimer.Stop()
-	}
 	if h.cancel != nil {
 		h.cancel()
 	}
-	if h.ptmx != nil {
-		_ = h.ptmx.Close() // best-effort during shutdown
+	h.closePTYLocked()
+}
+
+// closePTYLocked closes the PTY master once and stops the size heal; from then
+// on applySize and maybeHealSize do nothing. Caller holds h.mu. h.ptmx keeps
+// its value: readLoop and the input paths read it without the lock, so a nil
+// store here would race them.
+func (h *Handler) closePTYLocked() {
+	if h.healTimer != nil {
+		h.healTimer.Stop()
 	}
+	if h.ptmx == nil || h.ptyClosed {
+		return
+	}
+	_ = h.ptmx.Close() // best-effort during teardown
+	h.ptyClosed = true
 }
 
 // Shutdown ends the session and waits for its teardown to finish, bounded by
@@ -1067,7 +1080,8 @@ func (h *Handler) statusSnapshot() screenStatus {
 // StartEager starts the child process now at a default size, rather than lazily
 // on the first client message. A session manager calls this at Create time so a
 // new session's process (and its activity signal) exist from creation; the first
-// client attach still sends the real resize. Idempotent.
+// client attach still sends the real resize. Idempotent. On a handler closed
+// before its first start it returns an error.
 func (h *Handler) StartEager() error {
 	return h.ensureStarted(0, 0)
 }
@@ -1124,6 +1138,19 @@ func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resum
 	ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
 }
 
+// errHandlerClosed is ensureStarted's refusal to start a child once Close has run.
+var errHandlerClosed = errors.New("terminal: session closed")
+
+// logStartFailure logs a client-triggered start that failed. A refusal after
+// Close is the expected end of a session, not a failure.
+func (h *Handler) logStartFailure(err error) {
+	if errors.Is(err, errHandlerClosed) {
+		h.cfg.logger.Debug("terminal: start refused after close")
+		return
+	}
+	h.cfg.logger.Error("terminal: process start failed", "error", err)
+}
+
 // ensureStarted spawns the process if not already running, sized at
 // the given dimensions. cols/rows ≤ 0 fall back to defaults so callers
 // who don't yet know the client size can still start the process.
@@ -1134,6 +1161,11 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	defer h.mu.Unlock()
 	if h.started.Load() {
 		return nil
+	}
+	// Shutdown may already have returned, so a child started now would outlive
+	// it. Close stores the latch under h.mu, which orders this check against it.
+	if h.shutdownRequested.Load() {
+		return errHandlerClosed
 	}
 	if len(h.command) == 0 {
 		return errors.New("terminal: empty command")
@@ -1230,11 +1262,9 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 			cancel() // stop readLoop/flushLoop on child exit
 			// Free the PTY master fd immediately on natural exit; otherwise an
 			// exited-but-undeleted session holds it until Close/reap (reaper
-			// is off by default). A later Close's second ptmx.Close is a no-op.
+			// is off by default).
 			h.mu.Lock()
-			if h.ptmx != nil {
-				_ = h.ptmx.Close() // #nosec G104 -- best-effort; child already exited
-			}
+			h.closePTYLocked()
 			h.mu.Unlock()
 			if r := recover(); r != nil {
 				h.cfg.logger.Error("terminal: onProcessExit callback panicked", "panic", r)
@@ -2020,7 +2050,7 @@ func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg 
 	// with ensureStarted's write. cols/rows of 0 select defaults.
 	if !h.started.Load() {
 		if err := h.ensureStarted(0, 0); err != nil {
-			h.cfg.logger.Error("terminal: process start failed", "error", err)
+			h.logStartFailure(err)
 			return armed, false
 		}
 	}
@@ -2093,7 +2123,7 @@ type controlDisposition struct {
 	parsed bool // payload was valid control JSON
 	known  bool // c.Type was a recognized control type
 	armsV4 bool // a resume declaring protocolVersion >= typedFramingMinVersion
-	closed bool // the connection was closed, or superseded and closing
+	closed bool // the connection was closed, or must end
 }
 
 // resumeControl is handleControl's resume case: the wire-version gate, the
@@ -2270,7 +2300,7 @@ func (h *Handler) handleControl(ws *websocket.Conn, state *clientState, payload 
 		return h.resumeControl(ws, state, &c, d, onResumeServed)
 	case ctlTypeResize:
 		d.known = true
-		h.handleResize(state, c.Cols, c.Rows)
+		d.closed = h.handleResize(state, c.Cols, c.Rows)
 	case ctlTypePing:
 		d.known = true
 		h.handlePing(ws)
@@ -2559,19 +2589,22 @@ func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 // (last-writer-wins: the most recent resize from any attached client sets the
 // size) and records the clamped size on that client's socket, so a later
 // disconnect can heal the screen to the smallest size the remaining clients
-// need (see maybeHealSize).
-func (h *Handler) handleResize(state *clientState, cols, rows int) {
+// need (see maybeHealSize). It reports whether the start was refused because
+// Close has run: no process exit will close that client's socket, so the
+// caller must end it.
+func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool) {
 	cols, rows = clampResize(cols, rows)
 	// Start the child process on first resize so it knows the correct dimensions
 	// from the start (avoids initial paint at wrong size).
 	if !h.started.Load() {
 		if err := h.ensureStarted(cols, rows); err != nil {
-			h.cfg.logger.Error("terminal: process start failed", "error", err)
-			return
+			h.logStartFailure(err)
+			return errors.Is(err, errHandlerClosed)
 		}
 	}
 	h.registry.RecordSize(state, cols, rows)
 	h.applySize(cols, rows, "resize received")
+	return false
 }
 
 // armRedrawSettle starts the redraw-settle hold: flushes stay suppressed until
@@ -2649,7 +2682,7 @@ func (h *Handler) redrawHoldUntil(now time.Time) time.Time {
 func (h *Handler) applySize(cols, rows int, reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.started.Load() || h.ptmx == nil {
+	if !h.started.Load() || h.ptmx == nil || h.ptyClosed {
 		return
 	}
 	// Clamp again so applySize is safe regardless of caller (the heal path
@@ -2699,7 +2732,10 @@ func (h *Handler) maybeHealSize(dCols, dRows int) {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.started.Load() || dCols != h.screen.Width || dRows != h.screen.Height {
+	if !h.started.Load() || h.ptyClosed {
+		return
+	}
+	if dCols != h.screen.Width || dRows != h.screen.Height {
 		return // the departed client was not holding the current size
 	}
 	if h.healTimer != nil {

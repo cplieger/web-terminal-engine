@@ -1,16 +1,8 @@
 package terminal
 
-// Order tests for the shared display order and the two enumerations that serve
-// it. Three properties, and they fail in different ways:
-//
-//   - Both enumerations report ONE order, and it is a function of manager state
-//     rather than of the map iteration that built it. A consumer builds its tab
-//     strip from whichever enumeration reaches it first, so a per-call order is a
-//     per-load strip.
-//   - m.order stays exactly the keys of m.sessions. A position only means
-//     something while that holds, and four sites maintain it.
-//   - A reorder reaches every OTHER client. The write touches no handler and no
-//     title, so the sweep's position check is the only thing that emits it.
+// Order tests: List and snapshot report one order from manager state, never
+// map iteration; m.order stays exactly the keys of m.sessions; and a reorder
+// reaches every other client, through the sweep's position check alone.
 
 import (
 	"bufio"
@@ -248,17 +240,9 @@ func (m *SessionManager) orderSnapshot() []SessionID {
 	return slices.Clone(m.order)
 }
 
-// TestListAndSnapshotAgreeOnOrderEveryCall is the regression guard for the
-// cross-device tab-order bug. snapshot() ranged m.sessions and returned
-// unsorted, so the status stream pushed a different order on every connect (Go
-// randomizes map iteration) while List sorted. A client adopting tabs in arrival
-// order therefore drew a different strip on every load, and the two enumerations
-// disagreed with each other by construction.
-//
-// Run against a REORDERED set, so the assertion is the shared order rather than
-// creation order, which map iteration could match by luck. Repeated because one
-// call of an unsorted enumeration can match any order by luck; the chance of that
-// holding across every repeat is negligible.
+// TestListAndSnapshotAgreeOnOrderEveryCall pins both enumerations to the shared
+// order on a reordered set, repeated so an unsorted map range cannot match by
+// luck.
 func TestListAndSnapshotAgreeOnOrderEveryCall(t *testing.T) {
 	const (
 		sessions = 5
@@ -384,16 +368,9 @@ func TestReorderBroadcastsToOtherClients(t *testing.T) {
 	}
 }
 
-// TestEventsHandlerInitialSyncIsOrdered pins the property END TO END, over real
-// SSE frames: the wire order a client actually reads is the enumeration order,
-// not whatever the map produced. The in-process test above cannot catch a future
-// writer that re-orders frames between snapshot() and the socket.
-//
-// This one's ordering check is statistical rather than certain — an unsorted
-// enumeration matches the sorted order once in sessions! attempts, so it takes
-// repeated connects to be confident. Its deterministic value is the wire shape
-// (one decodable frame per session, in enumeration order); the sibling test
-// above is the guard against a randomized order.
+// TestEventsHandlerInitialSyncIsOrdered pins the order over real SSE frames,
+// catching a reorder between snapshot() and the socket. The order check is
+// statistical; the wire shape check is deterministic.
 func TestEventsHandlerInitialSyncIsOrdered(t *testing.T) {
 	const (
 		sessions = 6
@@ -653,18 +630,8 @@ func newSSEDataReader(t *testing.T, body io.Reader, want int) io.Reader {
 	return strings.NewReader(buf.String())
 }
 
-// TestShutdownClearsTheOrder is the fourth maintenance site, and the one the
-// invariant test above cannot reach: it asserts under the lock rather than
-// through a public reader, because every public reader is empty after Shutdown
-// whether or not the order was cleared. Without it, deleting `m.order = nil` from
-// Shutdown is a silent mutant.
-//
-// It used to prove the same mutant a second way, by creating a session after
-// Shutdown and asserting it ranked at position 0 rather than behind the dead ids.
-// That witness is gone with the reuse it depended on: Shutdown cancels the status
-// sweep and the idle reaper and restarts neither, so a manager is single-use and a
-// post-Shutdown Create is not a shape the API offers. The snapshot below kills the
-// mutant on its own.
+// TestShutdownClearsTheOrder asserts under the lock, since every public reader
+// is empty after Shutdown whether or not m.order was cleared.
 func TestShutdownClearsTheOrder(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	first, err := m.Create()
@@ -685,17 +652,8 @@ func TestShutdownClearsTheOrder(t *testing.T) {
 	}
 }
 
-// TestSweepReadsTheOrderAfterPhaseTwo is the regression guard for the sweep's
-// lock split. Phase 2 runs lock-free and can block on a wedged handler getter, so
-// the display order can change while a sweep is in flight. Reading the order in
-// phase 1 meant the sweep emitted a position the server had ALREADY replaced, and
-// silently: the tracker recorded the stale value as delivered, so the next sweep
-// saw no change and never corrected it. Clients were left on an arrangement no
-// longer in force.
-//
-// Driven through the testDiffPhaseHold seam, which holds one real sweep open at
-// exactly that instant, so this is deterministic rather than a race the test hopes
-// to hit.
+// TestSweepReadsTheOrderAfterPhaseTwo reorders during a sweep's lock-free
+// phase 2, held open by testDiffPhaseHold, and pins that the new rank is emitted.
 func TestSweepReadsTheOrderAfterPhaseTwo(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })

@@ -1,22 +1,9 @@
 package vt
 
-// OSC 9 conformance tests, written against the OSC 9 spec brief (the restatement
-// of the ConEmu "ConEmu specific OSC" table and iTerm2's "Post a notification" /
-// "Progress Bar" sections). Where the brief and this package disagree, the brief
-// wins and the test is expected to fail until the parser is fixed.
-//
-// Two forms share the OSC 9 id:
-//
-//	Form A  ESC ] 9 ; 4 ; st [; pr] TERM   progress reporting (a STATE)
-//	Form B  ESC ] 9 ; <message> TERM       desktop notification (an EVENT)
-//
-// State 4 is read with iTerm2's semantics (warning at pr percent), not ConEmu's
-// (paused), because the engine advertises TERM_PROGRAM=iTerm.app — that identity
-// is what makes a client emit these sequences at all — and iTerm2's definition is
-// the more specified of the two.
-//
-// Every behavioural case below runs with BOTH terminators, ST (ESC \) and BEL,
-// because both sources define an OSC sequence as ending with either.
+// OSC 9 conformance tests, written against ConEmu's OSC table and iTerm2's
+// notification and progress docs: OSC 9;4;st[;pr] is a progress state and
+// OSC 9;<message> a notification event. State 4 follows iTerm2 (warning), as
+// StatusWarning does. Every case runs with both ST and BEL terminators.
 
 import (
 	"strings"

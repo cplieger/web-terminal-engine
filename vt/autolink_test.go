@@ -184,18 +184,9 @@ func TestAutolinkAnchorStopsAtTheURLOnAWrappedRow(t *testing.T) {
 
 // TestAutolinkScanWindowFollowsTheRenderedRow pins the bound on the URL scan: at
 // most maxAutolinkRows rows of a wrap chain are joined, and the window is the
-// rows NEAREST the one being rendered, so on a chain longer than the window
-// different rows see different amounts of the URL. The fixture is a chain of
-// five 20-column rows — a prefix line that wraps, then a 65-char URL across the
-// remaining four — so the early rows' window still holds the prefix and stops
-// short of the URL's tail, while the later rows' window has slid off the prefix
-// and holds the whole URL. The bound is what keeps per-row rendering work
-// constant; four rows cover any real URL at phone widths.
-//
-// Row 3 also pins the tie: it sits equidistant from both ends of the five-row
-// chain, and the window keeps the OLDER end there (the URL's scheme lives at the
-// chain's start, and a window without it yields no anchor at all — boundChain),
-// so its href is the truncated one rather than the full URL.
+// rows nearest the rendered one. On five 20-column rows (a wrapping prefix,
+// then a 65-char URL), early rows see a truncated URL and later rows the whole
+// one. Row 3 is equidistant and keeps the older end (boundChain owns why).
 func TestAutolinkScanWindowFollowsTheRenderedRow(t *testing.T) {
 	const (
 		prefix = "look at this link:  " // exactly 20 columns, so it soft-wraps

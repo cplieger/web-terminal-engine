@@ -2,14 +2,9 @@
 
 package terminal
 
-// Linux discovery for the automatic session title (see proctitle.go for the
-// ladder). TIOCGPGRP on the pty master gives the foreground process group, the
-// exact operation tmux uses (tcgetpgrp in osdep-linux.c), through
-// golang.org/x/sys/unix rather than parsing /proc/<pid>/stat, whose second field
-// can itself contain spaces and parentheses. procfs gives the name and the cwd:
-// cmdline (not comm) for the name, also matching tmux, because the kernel
-// truncates comm at TASK_COMM_LEN (16 bytes); comm is the fallback for an empty
-// cmdline. Everything is best-effort: a failure returns a zero value.
+// TIOCGPGRP gives the foreground group, as tmux's tcgetpgrp does, since
+// /proc/<pid>/stat's comm field can contain spaces and parentheses. The name
+// comes from cmdline, with comm (truncated at TASK_COMM_LEN) as the fallback.
 
 import (
 	"bytes"
@@ -56,11 +51,8 @@ func probeForeground(ptmx *os.File, rootPID int) autoTitleProbe {
 
 // foregroundPGID reads the pty's foreground process group.
 //
-// SyscallConn().Control rather than ptmx.Fd(): os.File.Fd() switches the
-// descriptor to blocking mode, and this pty is being read by a live goroutine.
-// Control hands the raw fd to the closure while keeping the file registered with
-// the runtime poller. (pty.Setsize already calls Fd() on the same handle, so the
-// package has been living with that; new code should not add to it.)
+// It uses SyscallConn().Control, not Fd(): Fd switches the descriptor to
+// blocking mode under the live reader goroutine.
 func foregroundPGID(ptmx *os.File) (int, error) {
 	rc, err := ptmx.SyscallConn()
 	if err != nil {
@@ -83,13 +75,8 @@ func foregroundPGID(ptmx *os.File) (int, error) {
 // comm. Empty when the process is gone (the documented pipeline case: the group
 // leader exited while another member runs) or unreadable.
 //
-// The result is SANITIZED before it is returned. argv[0] is chosen by whoever
-// started the process, so on a shared terminal it is untrusted input that ends
-// up in a tab label, an SSE frame, and any log line that carries the title —
-// exactly the CWE-117 shape the client-supplied titles are already bounded for.
-// A name is additionally required to be valid UTF-8, since procfs hands back raw
-// bytes and an invalid sequence would reach JSON encoding as replacement
-// characters.
+// argv[0] is untrusted and reaches tab labels, SSE and logs, so the result is
+// sanitized (CWE-117) and must be valid UTF-8.
 func processName(pid int) string {
 	if argv0 := readArgv0(procPath(pid, "cmdline")); argv0 != "" {
 		return cleanProcName(filepath.Base(argv0))

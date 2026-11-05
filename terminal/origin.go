@@ -14,54 +14,21 @@ import (
 // OriginPolicy is the set of browser origins allowed to open a terminal
 // WebSocket, in addition to the serving origin itself.
 //
-// It carries the whole cross-origin decision for this engine's sockets, because
-// nothing above it can. A WebSocket handshake is a GET, and
-// net/http.CrossOriginProtection — the CSRF middleware every consumer of this
-// engine runs — returns early for GET, HEAD and OPTIONS as safe methods
-// (csrf.go, Check). So an app-level cross-origin middleware never inspects the
-// upgrade at all, and this policy plus the same-origin floor beneath it is the
-// only gate between a hostile page and an interactive shell.
-//
-// A nil *OriginPolicy is valid and means same-origin only. That is the default
-// and the safe direction, so a consumer that configures nothing is protected.
-// The type is immutable once built and safe for concurrent use.
+// It is the only cross-origin gate on these sockets: net/http's
+// CrossOriginProtection skips GET, so it never sees a WebSocket handshake. A nil
+// policy means same-origin only. Immutable and safe for concurrent use.
 type OriginPolicy struct {
 	allowed map[string]struct{}
 }
 
 var errNotAnOrigin = errors.New("not a complete http(s) origin")
 
-// NewOriginPolicy validates an operator-supplied origin allowlist and returns
-// the policy plus the entries it dropped, so a caller can warn about a typo
-// without failing startup (the drop-and-report shape httpserver's ParseHostList and
-// ParseCIDRs use).
-//
-// Each entry must be a complete origin — scheme, host, optional port, and
-// nothing else: "https://terminal.example.com", "http://localhost:7681",
-// "https://[::1]:7681". The strictness is deliberate:
-//
-//   - A scheme is REQUIRED and must be http or https. "example.com" is not an
-//     origin, and http://x and https://x are different origins that must not
-//     collapse onto one entry.
-//   - A path, query, fragment, or userinfo is refused. An origin has none of
-//     them (RFC 6454), so such an entry could only ever be config that silently
-//     matches nothing.
-//   - "null" is refused, along with every other non-http(s) scheme. Browsers
-//     send Origin: null for a sandboxed iframe and for a file:// page, so
-//     allowing it would admit all of them at once.
-//   - There are no wildcards. A pattern language buys one thing here (a whole
-//     subdomain tree) and costs the "*" that quietly means allow-everything.
-//
-// A blank entry is skipped rather than reported, so a trailing comma in an env
-// var is not an error. Matching is exact, on the origin lowercased and stripped
-// of a default port.
-//
-// An all-invalid list yields an INACTIVE policy — same-origin only. That is the
-// fail-closed direction for this type, and it is deliberately the opposite of
-// httpserver's HostPolicy, where an all-invalid list becomes an active deny-all: a
-// Host allowlist is a GATE, so an empty one must refuse everything, while an
-// origin allowlist only ever WIDENS the same-origin floor, so an empty one must
-// widen nothing.
+// NewOriginPolicy validates an origin allowlist and returns the policy plus the
+// entries it dropped, so a caller can warn without failing startup. An entry is
+// an http or https origin (RFC 6454) with no path, query, fragment, userinfo or
+// wildcard, such as "https://[::1]:7681"; "null" is refused. Blank entries are
+// skipped. Matching is exact, lowercased and without a default port. An
+// all-invalid list yields a same-origin-only policy.
 func NewOriginPolicy(origins ...string) (policy *OriginPolicy, invalidEntries []string) {
 	allowed := make(map[string]struct{}, len(origins))
 	var invalid []string
@@ -133,17 +100,9 @@ func (p *OriginPolicy) Active() bool { return p != nil && len(p.allowed) > 0 }
 // Allows reports whether r may open a terminal session under this policy.
 // Exported so a consumer can apply the same decision to its own routes.
 //
-// A request with no Origin header is allowed: that is a non-browser client (a
-// CLI, a test, a health probe), which this header cannot govern anyway. A
-// same-origin request is allowed. Everything else must appear in the allowlist
-// exactly.
-//
-// The same-origin comparison is host-only, because the Host header carries no
-// scheme — the same limitation net/http.CrossOriginProtection documents about
-// its own fallback. An http-to-https difference on one host is therefore not
-// distinguished here, and HSTS is the mitigation.
-//
-// Nil-safe: a nil policy allows same-origin only.
+// A request with no Origin header (a non-browser client) or a same-origin one
+// is allowed; any other must match the allowlist. Same-origin compares hosts
+// only, since Host carries no scheme. A nil policy allows same-origin only.
 func (p *OriginPolicy) Allows(r *http.Request) bool {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -168,14 +127,8 @@ func (p *OriginPolicy) Allows(r *http.Request) bool {
 //
 // Inactive: nil, which leaves the library's own same-origin check as the gate.
 //
-// Active: InsecureSkipVerify, because Allows has already made a strictly
-// stronger decision than AcceptOptions.OriginPatterns can express. That matching
-// is path.Match-based (accept.go, match), so "*" means allow-everything, the
-// brackets of an IPv6 literal read as a character class, and the scheme is
-// compared only when the pattern happens to contain "://". Handing it patterns
-// would downgrade an exact decision to a glob one. The flag is reachable ONLY
-// through acceptWS, which has just enforced the policy, and is never set on the
-// default path.
+// Active: InsecureSkipVerify, since OriginPatterns' path.Match globbing is
+// weaker than Allows. Only acceptWS, after enforcing the policy, may use it.
 func (p *OriginPolicy) acceptOptions() *websocket.AcceptOptions {
 	if !p.Active() {
 		return nil
@@ -185,13 +138,8 @@ func (p *OriginPolicy) acceptOptions() *websocket.AcceptOptions {
 
 // acceptWS enforces the origin policy and then upgrades the connection.
 //
-// This is the only call site of websocket.Accept in the package, so the
-// Handler's session socket and the SessionManager's unknown-session socket
-// cannot disagree about origin policy. They did before it existed: the manager
-// hardcoded nil options while the handler honoured a configured allowlist, so a
-// widened policy worked for a live session and silently reverted to same-origin
-// for a reaped one — replacing the readable 4004 close with an opaque 403 and
-// stranding the client in the very reconnect loop 4004 exists to break.
+// It must stay the package's only websocket.Accept call, so the session and
+// unknown-session sockets apply one origin policy.
 func acceptWS(w http.ResponseWriter, r *http.Request, p *OriginPolicy) (*websocket.Conn, error) {
 	if !p.Allows(r) {
 		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)

@@ -1,10 +1,6 @@
-// Binary wire format for server → client messages. Fields are little-endian
-// and fixed-width, with no length-prefixed dictionary keys and no repeated
-// string identifiers, so frames stay small over slow links (notably an iPad on
-// a Korea↔France relay, where JSON payloads over 100KB made the browser choke).
-// Every frame opens with a 1-byte msg_type and the 8-byte inputAck, the
-// server-confirmed received count on the socket's input ledger. The per-message
-// layout is in docs/wire-protocol.md "Byte layout"; the encoders below are
+// Server-to-client frames are little-endian and fixed-width, so they stay small
+// on slow links. Each opens with a 1-byte msg_type and the 8-byte inputAck.
+// docs/wire-protocol.md "Byte layout" describes them; the encoders below are
 // authoritative.
 
 package terminal
@@ -34,27 +30,11 @@ const (
 	// (older clients ignore unknown message types), so no version bump.
 	wireMsgAckOnly byte = 7
 
-	// WireProtocolVersion is the current binary-protocol revision. The client
-	// sends it in the resume control message so the server can enforce its
-	// declared compatibility floor and expose stale pairings. Bump it on any
-	// breaking change to a frame layout or control-message shape. It mirrors
-	// WIRE_PROTOCOL_VERSION in web/src/wire-compatibility.ts and is exported as
-	// release metadata for Go consumers.
-	//
-	// v3: the modes frame gained a trailing kbdFlags byte (kitty keyboard
-	// protocol). The change is decoder-tolerant both ways (an older client
-	// ignores the extra byte; a newer client defaults kbdFlags to 0 for an
-	// older server's shorter frame).
-	//
-	// v4: typed client→server framing. Text messages carry control JSON;
-	// messages carry control JSON; binary messages carry PTY input with the
-	// full byte alphabet. Negotiated in-band per connection: a binary
-	// bootstrap resume declaring protocolVersion >= 4 ARMS the connection,
-	// the resumeAck tail proves the server's revision to the client, and one
-	// text `upgrade` control LATCHES typed mode. The v3 sentinel path
-	// (0x00-prefixed binary controls) is accepted indefinitely pre-latch, so
-	// the bump is the negotiation signal, not a compatibility break — v3
-	// clients and version-silent clients are fully supported.
+	// WireProtocolVersion is the current binary-protocol revision, mirroring
+	// WIRE_PROTOCOL_VERSION in web/src/wire-compatibility.ts. Bump it on any
+	// change to a frame layout or control-message shape. v4 adds typed framing
+	// (text controls, binary input), latched per connection by an `upgrade`
+	// control; v3 sentinel framing stays accepted before the latch.
 	WireProtocolVersion = 4
 
 	// MinSupportedClientWireVersion is the oldest explicitly declared client
@@ -107,24 +87,14 @@ const (
 	// tail) means unsupported: the client keeps its resident-tail cap.
 	resumeAckFlagHistoryPaging byte = 1 << 1
 
-	// resumeAckFlagServerFocus is bit2 of the resumeAck ackFlags byte: the
-	// server DERIVES the DEC 1004 answer for this session (attachment state,
-	// every attached client's reported focus, and its own keep-unfocused
-	// declaration) and honors the `focus` control. The client reports its
-	// terminal widget's focus with that control and writes no focus bytes of its
-	// own. An unset bit (or a server too old to carry the length-gated tail)
-	// reads as unsupported: the client still writes no focus bytes, it simply
-	// DROPS the report, because a client-written CSI I would override a
-	// keep-unfocused policy it cannot see.
+	// resumeAckFlagServerFocus: the server derives the DEC 1004 answer and
+	// honors the `focus` control. Without it the client drops its report and
+	// still writes no focus bytes, which could override WithKeepUnfocused.
 	resumeAckFlagServerFocus byte = 1 << 2
 
-	// resumeAckFlagEphemeralInput is bit3 of the resumeAck ackFlags byte: the
-	// server serves the `ephemeralInput` control, an UNCOUNTED best-effort input
-	// channel (see ephemeralInputControl). The client sends mouse reports there
-	// instead of through the reliable outbox. An unset bit (or an absent tail)
-	// reads as unsupported and the client falls back to reliable input, because
-	// a text control this server does not recognize is dropped post-latch and
-	// the report would vanish entirely.
+	// resumeAckFlagEphemeralInput: the server serves `ephemeralInput`, where the
+	// client sends mouse reports. Without it the client uses reliable input,
+	// since an unrecognized control is dropped after the latch.
 	resumeAckFlagEphemeralInput byte = 1 << 3
 )
 
@@ -164,11 +134,9 @@ func (f resumeAckFlags) bits() byte {
 
 // WireEnd is one half of a Go-server / TS-client pairing as WirePairIncompatibility
 // judges it: the revision that half speaks, and the minimum peer revision it
-// accepts. For the Go half the two values are normally this package's
-// WireProtocolVersion and MinSupportedClientWireVersion; for the TS half they
-// come from WIRE_PROTOCOL_VERSION and MIN_SUPPORTED_SERVER_WIRE_VERSION. A struct
-// because every permutation of four same-typed ints type-checks and several
-// return plausible verdicts: construct it with field names (WireEnd{Rev: ...}).
+// accepts: WireProtocolVersion and MinSupportedClientWireVersion for the Go
+// half, WIRE_PROTOCOL_VERSION and MIN_SUPPORTED_SERVER_WIRE_VERSION for the TS
+// half. Construct it with field names (WireEnd{Rev: ...}).
 type WireEnd struct {
 	// Rev is the wire-protocol revision this half speaks.
 	Rev int
@@ -177,16 +145,7 @@ type WireEnd struct {
 }
 
 // WirePair is the two halves of one Go-server / TS-client pairing, each
-// labelled by the role it plays.
-//
-// It is a struct rather than two adjacent WireEnd parameters because the
-// verdict survives a transposition while the REASON does not: every check
-// below is symmetric in shape, so a swapped call still refuses an incompatible
-// pair, but it names the wrong half — telling a release gate that the Go side
-// is behind when the TS side is. That is the same defect this function already
-// refuses to commit for garbage input, where it declines to give a confident
-// "bump your pin" diagnosis; a keyed literal makes the roles unswappable at
-// the call site.
+// labelled by its role so a transposed call cannot blame the wrong half.
 type WirePair struct {
 	// Server is the Go half, normally
 	// {WireProtocolVersion, MinSupportedClientWireVersion}.
@@ -195,58 +154,18 @@ type WirePair struct {
 	Client WireEnd
 }
 
-// WirePairIncompatibility reports whether a Go-server / TS-client PAIR is
-// declared-incompatible before either half runs, and why. It is the
-// peer-less, build-time form of the compatibility decision this package
-// already makes twice at runtime — the server refusing a below-floor client
-// (close code WireIncompatibleCloseCode) and the TS client refusing a
-// below-floor server — so a consumer's release gate can reach the same
-// verdict from two pairs of published integers instead of restating the rule.
-//
-// server is normally {WireProtocolVersion, MinSupportedClientWireVersion};
-// it is a parameter so a gate can also judge a pairing that does not involve
-// the engine version it links against (a cross-version matrix, a proposed
-// bump). client comes from the TS half's WIRE_PROTOCOL_VERSION /
-// MIN_SUPPORTED_SERVER_WIRE_VERSION.
-//
-// Returns "" when both declared floors admit the pairing; otherwise a
-// human-readable reason naming the violated floor or the self-inconsistent
-// half, the relevant revisions, and which half is behind. A caller decorates
-// that with its own remediation (which pin to bump is the consumer's build-
-// layout knowledge, not the engine's). Both CROSS-side floors are EXCLUSIVE
-// bounds: a revision exactly at the peer's floor is compatible, matching the
-// runtime checks. The WITHIN-side floor is inclusive: a half may declare a
-// floor equal to its own revision (it just refuses every older peer).
-//
-// Deliberately stricter than runtime on version-silent input: a
-// non-positive value is a caller error (it cannot be distinguished from
-// "not extracted"), so it is reported rather than tolerated. At runtime a
-// version-silent peer declares 0 and stays supported; at build time a 0 means
-// the gate failed to read the constant and must fail loudly.
-//
-// Higher-than-known revisions are compatible here, as at runtime: a future
-// revision alone does not prove its compatible baseline is unusable.
-//
-// Each half is also checked for internal coherence: a half's minimum-supported-
-// peer floor may not exceed its own revision, because such a build could not
-// talk to a peer of its own revision. This is a BEHAVIOUR CHANGE relative to
-// earlier releases (the check was added after v3.2.1): a pair whose halves are
-// individually incoherent (e.g. a client end with Rev 4 and MinPeer 5) was
-// previously judged on the cross-side floors alone and could be reported
-// compatible; it is now reported incompatible. No correctly extracted pair of
-// real released artifacts changes verdict — the engine's own constants have
-// always satisfied the invariant (rev 4, floor 3 on both halves) — so a gate
-// that starts failing here is reading garbage, which is exactly the outcome
-// intended.
+// WirePairIncompatibility is the build-time form of the runtime floor checks:
+// it returns "" when both halves' floors admit the pairing, else a reason
+// naming the violated floor and the half that is behind. A revision at the
+// peer's floor is compatible, and so is a revision newer than any known. A
+// non-positive value, or a half whose floor exceeds its own revision, is
+// reported as unreadable input rather than judged. It rejects 0 although the
+// runtime accepts a version-silent 0, because at build time 0 means the
+// constant was not read.
 func WirePairIncompatibility(p WirePair) string {
 	server, client := p.Server, p.Client
-	// Case order is load-bearing. Positivity first (a missing constant is the
-	// coarsest garbage), then each half's SELF-consistency, and only then the
-	// cross-side floors. Self-inconsistency must precede the cross-side
-	// verdicts because a garbage half otherwise yields a confident, misleading
-	// skew diagnosis ("the Go half is behind, bump your pin") for input that
-	// describes no real pairing at all — sending the caller to change a version
-	// pin when the actual defect is in how it read the numbers.
+	// Case order matters: garbage input must be reported before any cross-side
+	// case can misdiagnose it as a skew.
 	switch {
 	case server.Rev <= 0 || server.MinPeer <= 0:
 		return fmt.Sprintf(
@@ -283,14 +202,9 @@ func WirePairIncompatibility(p WirePair) string {
 	}
 }
 
-// encodeScreenMsg builds a binary screen frame containing only the
-// rows whose indices appear in `changed`. screenHeight is the full
-// terminal height (rowEls count on the client) — needed because rows
-// is sparse on the wire.
-//
-// ack is non-zero only on the resume window frame (handleResume passes the
-// resolved per-client ack); the per-flush dispatch path still encodes ack=0
-// and patches the real value in via withClientAck.
+// encodeScreenMsg builds a screen frame holding only the rows in changed;
+// screenHeight is sent because rows are sparse. ack is non-zero only on the
+// resume window frame; dispatch stamps it later with withClientAck.
 func encodeScreenMsg(base uint64, screenHeight, curRow, curCol int, ack uint64, changed []int, rows [][]vt.WireRun, cursorStyle uint8, cursorHidden, cursorBlink, bell, altActive, scrollbackCleared bool) []byte {
 	buf := make([]byte, 0, 64)
 	buf = append(buf, wireMsgScreen)
@@ -347,13 +261,9 @@ func encodeScrollMsg(ack, firstIndex uint64, lines [][]vt.WireRun) []byte {
 	return buf
 }
 
-// encodeResumeAck builds a resumeAck frame: the per-ledger received count, the
-// server boot epoch (the client detects a restart), and the retained-history
-// bounds, committed (one past the newest line) and oldestIndex (the client
-// detects an eviction gap). The trailing [serverWireVersion, ackFlags] pair is
-// the third length-gated tail (>= 35 bytes): the version lets the client report
-// a stale-bundle skew, and ackFlags carries the resumeAckFlags bits. An older
-// client ignores the tail; a newer one reads a shorter frame as every bit clear.
+// encodeResumeAck builds a resumeAck frame: the ledger's received count, the
+// boot epoch, the retained-history bounds, and a length-gated
+// [serverWireVersion, ackFlags] tail that a shorter frame reads as all clear.
 func encodeResumeAck(ack uint64, epochNanos int64, committed, oldestIndex uint64, flags resumeAckFlags) []byte {
 	buf := make([]byte, 0, 35)
 	buf = append(buf, wireMsgResumeAck)
@@ -377,26 +287,10 @@ func encodeAckOnly(ack uint64) []byte {
 	return buf
 }
 
-// encodeModesMsg builds a frame announcing the current DEC private
-// mode state. The builder emits this whenever it observes a change in
-// any tracked mode (see modesStable) so the client's input path can
-// format paste, arrow keys, keypad, mouse, and reverse video correctly:
-//
-//	[1B] msg_type = 3 (modes)
-//	[8B] inputAck (uint64)
-//	[1B] flags
-//	     bit 0: bracketed paste enabled (DEC ?2004h)
-//	     bit 1: application cursor keys (DECCKM, CSI ?1h) enabled
-//	     bit 2: SGR mouse encoding (DEC ?1006h) enabled
-//	     bit 3: focus reporting (DEC ?1004h) enabled
-//	     bit 4: application keypad (DECKPAM, ESC =) enabled
-//	     bit 5: reverse video (DECSCNM, DEC ?5h) enabled
-//	     bit 6: SGR-pixels mouse (DEC ?1016h) enabled
-//	[2B] mouseMode (uint16): 0=off, 1000=normal, 1002=button-event, 1003=any-event
-//	[1B] kbdFlags (uint8): kitty keyboard progressive-enhancement flags
-//	     (bit0 disambiguate, bit1 event-types, bit2 alternate-keys; 0 = legacy).
-//	     Added in wire protocol v3; a client decoding a pre-v3 frame defaults it
-//	     to 0.
+// encodeModesMsg builds a frame announcing the DEC modes the client's input
+// encoding depends on. After the header: [1B] modeFlag* bits, [2B] mouseMode
+// (0, 1000, 1002 or 1003), [1B] kitty kbdFlags, which a pre-v3 decoder
+// defaults to 0. docs/wire-protocol.md defers to this layout.
 func encodeModesMsg(bracketedPaste, appCursorKeys, mouseSGR, focusReporting, appKeypad, reverseVideo, mousePixels bool, mouseMode uint16, kbdFlags uint8) []byte {
 	buf := make([]byte, 0, 13)
 	buf = append(buf, wireMsgModes)
@@ -445,14 +339,7 @@ func withClientAck(template []byte, ack uint64) []byte {
 	return out
 }
 
-// encodePongMsg builds a liveness pong frame: just the type tag and the
-// fixed-width ack header every server→client frame carries (zero here —
-// the pong carries no input-ack; its only purpose is to prove the socket
-// is alive to the client's staleness probe). The client treats the mere
-// arrival of any frame as liveness, so the body is intentionally empty.
-//
-//	[1B] msg_type = 5 (pong)
-//	[8B] inputAck (uint64, always 0)
+// encodePongMsg builds a liveness pong: the header alone, with a zero ack.
 func encodePongMsg() []byte {
 	buf := make([]byte, 0, 9)
 	buf = append(buf, wireMsgPong)
@@ -526,13 +413,9 @@ func capRowRuns(runs []vt.WireRun) []vt.WireRun {
 	return stripRowURIs(runs)
 }
 
-// appendRowRuns writes one row payload. The per-row ceiling is applied HERE,
-// in the encoder every row-emitting path shares — page replies, live flush
-// frames, resume replay chunks, and screen frames — deliberately including
-// screen so a pathological row displays and pages identically (link-less in
-// both) instead of showing links on screen and losing them the moment it
-// scrolls off. The ceiling bounds every ROW, not the aggregate multi-row
-// messages.
+// appendRowRuns writes one row payload. The per-row ceiling lives here, in the
+// encoder every row path shares, so an oversized row renders the same on
+// screen as in scrollback.
 func appendRowRuns(buf []byte, runs []vt.WireRun) []byte {
 	runs = capRowRuns(runs)
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(runs)))
@@ -593,21 +476,9 @@ func encodeTitleMsg(title string) []byte {
 	return buf
 }
 
-// encodeClipboardMsg builds a clipboard frame carrying text an app copied via
-// OSC 52, for the client to write to the system clipboard:
-//
-//	[1B] msg_type = 6 (clipboard)
-//	[8B] inputAck (uint64)
-//	[2B] text_byte_len (uint16)
-//	[N B] UTF-8 text
-//
-// The payload originates from an OSC sequence, whose buffer (maxOSCLen) caps it
-// well below the uint16 length limit; the guard below is defensive only.
-//
-// The ack field is emitted as zero: this payload is encoded once per flush
-// and fanned out to every client, and withClientAck stamps each client's
-// real ack into the shared offset at write time (like every other payload
-// dispatchFrame carries).
+// encodeClipboardMsg builds a frame carrying text an app copied via OSC 52:
+// after the header, [2B] text_byte_len and the UTF-8 text. maxOSCLen keeps it
+// under the uint16 limit; the ack is zero until withClientAck stamps it.
 func encodeClipboardMsg(text []byte) []byte {
 	body := text
 	if len(body) > 0xFFFF {

@@ -382,15 +382,9 @@ func TestDispatchFrame_StaleFrameDropsStateKeepsDurable(t *testing.T) {
 	})
 
 	t.Run("a durable strip restamps the socket's freshest ack", func(t *testing.T) {
-		// A strip RESTAMPS its durable payloads with the socket's freshest ack
-		// (the batch's resumeAck), NOT the pre-resume ack captured at snapshot
-		// time: after a ledger-loss resume the captured value can exceed the
-		// client's reset outbox accounting, and applyAck's min(received,
-		// bytesSent) would then trim input the server never acked
-		// (connection.ts applyAck). The wire ack lives at bytes 1..9 of every
-		// payload (withClientAck). And the delivered bookkeeping must record
-		// exactly the stamped value — monotonic, so lastAckSent never regresses
-		// below the batch's store and never latches a value no frame carried.
+		// A strip restamps durable payloads with the batch's resumeAck, not the
+		// captured ack (writeClientPayloads owns why); the ack is at bytes 1..9.
+		// The bookkeeping must record exactly the stamped value.
 		p := newDispatchProbe(t)
 		p.state.lastAckSent.Store(11) // the resumeAck the batch wrote
 		restamp := p.mkFrame()
@@ -511,15 +505,9 @@ func soleClientState(t *testing.T, h *Handler) *clientState {
 }
 
 func TestResumeGate_LiveOutputDeferredThenFullRepaintFollows(t *testing.T) {
-	// End-to-end through a REAL handler: while the resume write lock is held
-	// (the batch stand-in — the very lock handleResume takes), live output
-	// produces NO content frames on the socket; after a builder reset taken
-	// under h.mu while the lock is still held (the invariant handleResume
-	// provides by resetting inside its snapshot's h.mu section) and the
-	// lock's release plus the dirty poke, the deferred output arrives —
-	// delayed, never dropped — AND a FULL repaint follows (the builder reset
-	// must not be removable: a plain diff also carries the text, so the
-	// full-frame assertion is what pins the reset).
+	// With writeMu held as handleResume holds it, live output sends nothing;
+	// after a reset under h.mu and the release, the output arrives as a full
+	// repaint. The full-frame check is what pins the reset.
 	h, ws, cleanup := dialOwnHandler(t, []string{"/bin/cat"})
 	defer cleanup()
 	frames := framePump(t, ws)

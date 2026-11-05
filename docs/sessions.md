@@ -198,6 +198,8 @@ The engine's value is the only assignment to `WT_SESSION_REAP` in the child envi
 
 `Containment` (`NewContainment`, `WithContainment`) is the stronger boundary, and it is opt-in. It puts each session in its own cgroup, which nothing can escape, and it reports per-session `memory.peak` and `pids.peak`.
 
+`NewContainment` needs a writable cgroup v2 root that belongs to the server's own container, and Linux 6.1 or later for `pids.peak`. Docker mounts `/sys/fs/cgroup` read-only. Remount it once in the entrypoint with `mount -o remount,rw /sys/fs/cgroup`, which needs `CAP_SYS_ADMIN`; you can drop the capability afterwards, because every later step is governed by file permissions.
+
 ### Zombie processes
 
 `StartZombieReaper(log, interval)` solves a separate problem and is also opt-in. Session reaping stops processes that are still alive. The zombie reaper collects the exit status of finished processes nobody waited for.

@@ -7,35 +7,24 @@ import (
 	"time"
 )
 
-// Zombie reaping collects exit statuses nobody wait()ed for, freeing PID slots;
-// session reaping (reap.go) ends live processes. A server that is its
-// container's PID 1 inherits every orphan, and os/exec waits only on its own
-// children, so without this every orphan stays a zombie. The sweep never waits
-// on a pid os/exec owns (spawnRegistry): taking that status makes cmd.Wait
-// report "no child processes". A periodic sweep, not a SIGCHLD handler:
-// signal.Notify is process-global state a library should not take, and a
-// zombie costs only a PID slot until the next sweep.
+// A PID 1 server inherits every orphan, which os/exec never waits on. The sweep
+// skips spawnRegistry's pids, or cmd.Wait would fail with "no child processes".
+// It polls instead of handling SIGCHLD: signal.Notify is process-global state.
 
 const (
-	// zombieSweepDefault is the sweep interval when a consumer passes 0. Long
-	// enough that the scan is free at any plausible process count, short enough
-	// that a pathological forker cannot exhaust pid_max between passes.
+	// zombieSweepDefault is short enough that a forker cannot exhaust pid_max
+	// between passes.
 	zombieSweepDefault = 30 * time.Second
 
-	// zombieSweepFloor is the lower bound on a consumer-supplied interval. The
-	// sweep walks /proc, so a caller asking for milliseconds would spend real CPU
-	// re-reading the same thousands of entries to no benefit.
+	// zombieSweepFloor keeps the /proc walk from burning CPU.
 	zombieSweepFloor = time.Second
 )
 
 // spawnRegistry records the pids whose exit status os/exec still owns, so the
 // zombie sweep can refuse to wait on them.
 //
-// The mutex does double duty and the second job is the load-bearing one: the
-// spawn path holds it for WRITE across pty.StartWithSize and the registration
-// that follows, so no pid exists un-registered while the sweep can see it, and
-// the sweep holds it for READ across its ownership check and the wait() that
-// follows, so a registration cannot interleave between the two.
+// Spawn holds mu for write across pty.StartWithSize and registration, and the
+// sweep for read across its check and wait(), so no unregistered pid is waited.
 type spawnRegistry struct {
 	m  map[int]struct{}
 	mu sync.RWMutex
@@ -77,17 +66,10 @@ func reapIfUnowned(pid int) bool {
 // StartZombieReaper makes this process collect the exit statuses of orphans that
 // have been re-parented onto it, and returns a stop function.
 //
-// Wire it from the composition root of a server that is (or may become) its
-// container's PID 1. It installs the child-subreaper flag so orphans re-parent
-// here even when the process is NOT PID 1 — behind an init shim, for example —
-// and then sweeps every interval, waiting only on pids the engine did not spawn.
-//
-// interval of 0 means the default; anything below one second is raised to it.
-// Off Linux this is a no-op returning a no-op stop, so a consumer wires it
-// unconditionally.
-//
-// Safe to call once per process. Calling it twice starts two sweeps, which is
-// harmless (wait() on an already-collected pid simply fails) but pointless.
+// Call it once from the composition root of a server that may be its
+// container's PID 1; it sets the child-subreaper flag, so it works behind an
+// init shim too. An interval of 0 means the default, and anything below one
+// second is raised to it. Off Linux it is a no-op.
 func StartZombieReaper(log *slog.Logger, interval time.Duration) (stop func()) {
 	l := containLogger(log)
 	if interval <= 0 {
@@ -112,10 +94,7 @@ func StartZombieReaper(log *slog.Logger, interval time.Duration) (stop func()) {
 				return
 			case <-t.C:
 				if n := sweepZombies(); n > 0 {
-					// INFO, not WARN: on a PID 1 server this is routine hygiene
-					// for other people's children, not a fault of this process.
-					// It stays visible because a sustained nonzero count is the
-					// signature of a child runtime that never reaps its own.
+					// INFO: reaping others' orphans is routine on PID 1.
 					l.Info("terminal: reaped orphaned processes", "count", n)
 				}
 			}

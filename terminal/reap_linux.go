@@ -2,13 +2,8 @@
 
 package terminal
 
-// Linux primitives for the marker reap domain (see reap.go for why the boundary
-// is an inherited environment variable rather than a process group).
-//
-// Everything here is procfs plus pidfd, the same two interfaces the rest of the
-// package already uses: proctitle_linux.go reads /proc/<pid>/cmdline and comm,
-// and containment_linux.go signals exclusively through a pidfd. Nothing here
-// needs a capability, a writable cgroup tree, or a mount.
+// The marker reap domain needs only procfs and pidfd: no capability, writable
+// cgroup tree or mount.
 
 import (
 	"bytes"
@@ -22,19 +17,11 @@ import (
 )
 
 const (
-	// reapEnvMaxBytes bounds the per-pid environ read. The marker pair is
-	// PREPENDED to the child environment (reap.go envPair), so it lands at the
-	// front of the block and a small prefix is enough to recognise a member.
-	//
-	// The bound is what makes a full scan affordable: an environment can reach
-	// ARG_MAX (megabytes), and reading all of it for every pid on a host running
-	// thousands of processes would turn an 81ms sweep into a memory-churning one.
+	// reapEnvMaxBytes bounds the per-pid environ read, which envPair's prepend
+	// makes enough; an environment can reach ARG_MAX.
 	reapEnvMaxBytes = 16 << 10
 
-	// reapStatusMaxBytes bounds the /proc/<pid>/status read used for VmRSS and
-	// the process state. The fields of interest sit in the first few hundred
-	// bytes; the cap exists so a hostile or exotic entry cannot make a teardown
-	// allocate without limit.
+	// reapStatusMaxBytes bounds the /proc/<pid>/status read for VmRSS and state.
 	reapStatusMaxBytes = 4 << 10
 )
 

@@ -15,12 +15,8 @@ import (
 // returned release channel is closed, plus a channel that closes when the
 // callback is entered.
 //
-// The callback is the LAST statement of the process monitor's body, so parking in
-// it holds the monitor goroutine open at a point where the child is already
-// reaped and every other teardown step has run. That gives these tests a
-// teardown they control the duration of, which is the only way to tell "waited"
-// from "returned fast and got lucky": a fixed sleep would let a non-blocking
-// Shutdown pass whenever the runner was quick.
+// The callback is the monitor's last statement, so parking there holds a
+// finished teardown open for as long as the test wants.
 func heldExitHandler(t *testing.T) (h *Handler, entered <-chan struct{}, release chan struct{}) {
 	t.Helper()
 	enteredCh := make(chan struct{})

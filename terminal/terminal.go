@@ -1,24 +1,13 @@
 // Package terminal bridges a PTY to a browser WebSocket.
 //
-// Each WebSocket connection spawns the configured command in its own PTY and
-// pipes bytes both ways. Server-side state is kept in the VT screen, and on
-// reconnect the current cell snapshot is replayed to the new client. No
-// external multiplexer is involved, because the VT emulator is the
-// persistence layer.
+// Each session runs the configured command in its own PTY. The VT screen is
+// the persistence layer: a reconnecting client receives the current cell
+// snapshot, with no external multiplexer.
 //
-// Wire protocol (binary WebSocket frames):
-//
-//	client to server: raw terminal input bytes
-//	server to client: binary frames encoding screen, scroll, modes, title,
-//	                  resumeAck and pong messages (see wire_binary.go). PTY
-//	                  output is rendered into the VT screen and sent as
-//	                  absolute-indexed cell runs, not as raw bytes
-//	client to server: JSON control messages prefixed with 0x00:
-//	  {"type":"resize",...}, {"type":"resume",...}, {"type":"ping"}
-//
-// The 0x00 prefix byte tells control messages from raw input, because no
-// valid terminal input starts with NUL. docs/wire-protocol.md has the full
-// format.
+// The client sends raw input bytes, and JSON control messages prefixed with
+// 0x00 (no valid terminal input starts with NUL). The server sends binary
+// frames of absolute-indexed cell runs, never raw PTY bytes.
+// docs/wire-protocol.md has the full format.
 package terminal
 
 import (
@@ -45,256 +34,141 @@ import (
 const (
 	wsReadLimit = 64 * 1024
 	ptyReadBuf  = 4096
-	// defaultCols is the width a session is spawned at before any client has said
-	// how wide it is, and it is the FLOOR of what a client may ask for on purpose:
-	// too wide and the excess renders past the viewport's right edge, where
-	// overflow-x: hidden and white-space: pre clip it unreachably; too narrow and
-	// the child merely wraps early, losing nothing. Keep it at or below
-	// minResizeCols so the spawn width can never exceed a real client's.
+	// defaultCols is the spawn width before any client reports one. Keep it at or
+	// below minResizeCols: a spawn wider than a real client renders past the
+	// viewport's clipped right edge, while a narrower one only wraps early.
 	defaultCols   = minResizeCols
 	defaultRows   = 30
 	flushInterval = 50 * time.Millisecond
 
-	// redrawSettleQuiet / redrawSettleCap parameterize the redraw-settle hold
-	// (armRedrawSettle): after a size change, flushes stay held until the
-	// child's redraw output has been quiet for redrawSettleQuiet. Quiet must
-	// exceed the child's inter-chunk rendering gaps (a program batching its
-	// redraw in DEC 2026 brackets writes them milliseconds apart), and it is
-	// the NORMAL exit from the hold.
-	//
-	// redrawSettleCap bounds one held stretch. Lapsing it does NOT fall back to
-	// streaming: a redraw larger than the cap is ordinary (a phone-width
-	// terminal reprinting a few thousand lines takes seconds), and releasing
-	// mid-redraw is what put a partial screen on the wire every flushInterval
-	// for the rest of it — the churn this hold exists to prevent. Instead the
-	// lapse lets ONE full repaint through and re-arms, up to
-	// redrawSettleMaxRearms times, so the client sees a coherent whole screen
-	// per cap interval. The re-arm budget is what keeps a program that streams
-	// continuously after a resize (`tail -f` on a busy log) from being
-	// throttled indefinitely: once spent, the hold disarms for good and output
-	// streams normally.
-	//
-	// The cap also bounds vt.Screen.Drained in the common case, whose only
-	// live-path consumer is inside flushFrameBuilder.Build: every lapse builds a
-	// frame, so drained lines normally wait at most one cap interval before being
-	// committed AND sent. The exception is a DEC 2026 (synchronized output) hold
-	// overlapping a lapse, since that gate also skips Build and this hold cannot
-	// clear it; there the accumulation lasts as long as the child keeps the 2026
-	// hold armed, which is a pre-existing property of that hold rather than of
-	// this one. What must NOT be done about it is draining on a held pass: Build
-	// is also what turns drained lines into the frame that carries them to
-	// clients, so a drain outside Build reaches the retained ring without ever
-	// reaching an attached client, which is a silent history hole rather than a
-	// saving.
+	// After a size change, armRedrawSettle holds flushes until the child's
+	// redraw has been quiet for redrawSettleQuiet, which must exceed a DEC 2026
+	// batch's inter-chunk gaps. Lapsing redrawSettleCap lets one full repaint
+	// through and re-arms, at most redrawSettleMaxRearms times, so a redraw
+	// longer than the cap still shows whole screens, and once the budget is
+	// spent output streams normally (`tail -f`). Never drain vt.Screen on a
+	// held pass: only flushFrameBuilder.Build turns drained lines into a frame
+	// clients receive.
 	redrawSettleQuiet     = 150 * time.Millisecond
 	redrawSettleCap       = time.Second
 	redrawSettleMaxRearms = 3
 
-	// healDebounce is how long the handler waits after a client disconnects
-	// before relaxing the shared screen to the smallest size the remaining
-	// clients need. It absorbs a brief reconnect (iOS wake, network blip): a
-	// client that drops and re-attaches at the same size within the window
-	// causes no grow-then-shrink flap, because the recompute at fire time counts
-	// the re-attached socket. A genuinely departed client is gone well before it
-	// elapses — a clean close is immediate, and an ungraceful drop is already
-	// ping-confirmed (~20-45s) by the time Remove runs.
+	// healDebounce delays relaxing the shared screen after a disconnect, so a
+	// client re-attaching at the same size (iOS wake, network blip) causes no
+	// grow-then-shrink flap: the recompute at fire time counts its new socket.
 	healDebounce = 3 * time.Second
 
-	// statusProcessExited (4001) is the WebSocket close code the terminal WS
-	// uses when the child process exits, so a client can tell a dead session
-	// (the tab should close) apart from a transient disconnect (reconnect).
-	// 4001 is in the private application close-code range (4000-4999).
+	// statusProcessExited tells a client the session is dead (close the tab),
+	// not transiently disconnected. 4000-4999 is the private close-code range.
 	statusProcessExited websocket.StatusCode = 4001
 
 	// WireIncompatibleCloseCode is the definitive WebSocket close code for an
 	// explicitly declared peer revision below the receiver's supported floor.
-	// The server uses it when rejecting a stale client; clients may use the
-	// same code when an explicit server revision is below their floor. It is
-	// exported so independently released consumers can recognize the contract.
+	// The server sends it to a stale client; a client may send it to a server
+	// whose declared revision is below its own floor.
 	WireIncompatibleCloseCode websocket.StatusCode = 4002
 
-	// wireIncompatibleClientReason is intentionally actionable and short enough
-	// for the WebSocket close-reason limit. The detailed versions are logged.
+	// wireIncompatibleClientReason must fit the WebSocket close-reason limit
+	// (RFC 6455 section 5.5: 123 bytes); the detailed versions are logged.
 	wireIncompatibleClientReason = "client wire protocol is below the server minimum; reload or upgrade the client"
 
-	// statusUnknownSession (4004) is the close code for a WS connect whose
-	// ?session= id the manager does not know (reaped, closed elsewhere, or a
-	// restarted server). The upgrade is ACCEPTED and then closed with this
-	// code: a plain pre-upgrade 404 surfaces in the browser as an opaque
-	// failed connect (code 1006, reason unreadable from JS), which the client
-	// can only treat as transient — an endless "Reconnecting…" flap against a
-	// session that will never exist. Like 4001 it is DEFINITIVE ("this
-	// session will never produce output"), and the client routes both to the
-	// same ended state. 4004 for the 404 mnemonic.
+	// statusUnknownSession closes an accepted upgrade whose ?session= id the
+	// manager does not know. A pre-upgrade 404 reaches JS only as an opaque
+	// 1006, which a client must treat as transient and would retry forever.
+	// Like 4001 it is definitive, and clients route both to the ended state.
 	statusUnknownSession websocket.StatusCode = 4004
 
-	// exitedAttachReplayGrace bounds how long a client that attaches to an
-	// ALREADY-exited session may take to complete its resume exchange before
-	// the definitive statusProcessExited close is sent. Without this grace the
-	// close raced (and in practice beat) the resumeAck + final-screen replay,
-	// so a client re-attaching to a dead session received nothing renderable —
-	// it saw only an instant 4001 (or, on clients that treat every close as
-	// transient, an infinite reconnect loop). The client sends resume as its
-	// first frame after open, so the grace only ever runs its full length for
-	// a client that never speaks the resume protocol.
+	// exitedAttachReplayGrace delays the 4001 close to a client attaching to an
+	// already-exited session, so its resumeAck and final-screen replay land
+	// first. A client sends resume as its first frame, so only a client that
+	// never speaks resume waits the full grace.
 	exitedAttachReplayGrace = 3 * time.Second
 
-	// maxScrollLinesPerFrame bounds the lines packed into one scroll frame so the wire
-	// num_lines (a uint16) can never be exceeded by the payload and a large drained burst
-	// (a fast child can produce far more than 65535 lines in one 50ms flush) is split into
-	// several < ~100KB frames instead of one multi-MB message. Mirrors handleResume's
-	// replayChunk. Any value well under 65535 works; 1000 keeps each frame small.
+	// maxScrollLinesPerFrame keeps a scroll frame under the wire's uint16
+	// num_lines and splits a large drained burst into small frames.
 	maxScrollLinesPerFrame = 1000
 
-	// Demand-paged scrollback: the client holds a small resident tail and
-	// fetches older history on demand through the `history` control; these
-	// bound what one request costs the server and what the pairing may promise.
-	//
-	// historyPageSize is the largest number of lines one page reply may carry.
-	// It matches maxScrollLinesPerFrame so a page is exactly one standard
-	// scroll frame; pageByteBudget bounds it further (a styled page serves
-	// fewer lines rather than a bigger frame).
+	// historyPageSize makes one page reply exactly one scroll frame;
+	// pageByteBudget can shorten it further.
 	historyPageSize = maxScrollLinesPerFrame
-	// paginationMinRing is the ring depth at or above which the server DECLARES
-	// paging (resumeAckFlagHistoryPaging). It is DERIVED from maxReplayLines and
-	// must stay derived: the resume replay is bounded unconditionally, so any ring
-	// deeper than that bound withholds rows from a fresh attach, and paging is the
-	// only way the client can ever ask for them.
-	//
-	// An independent value put a hole in that reasoning. It was 5000 — the legacy
-	// client resident default — on the argument that the bit invites the client to
-	// shrink its resident tail, so a ring too shallow to back the flip must not
-	// invite it. That argument was sound while a non-paging resume replayed the
-	// whole ring, and the unconditional replay bound retired it: at capacity 3000
-	// the replay delivered the newest 2000, the bit stayed clear, and 1000 lines
-	// still live in the authoritative ring were permanently unreachable — viewer-
-	// visible loss, not a delayed fetch. Declaring paging there costs the client
-	// the tail flip it can now afford (it fetches what it releases) and nothing
-	// else. Exported as MinPagingCapacity.
+	// paginationMinRing is the ring depth at which the server declares paging
+	// (exported as MinPagingCapacity). It must stay derived from maxReplayLines:
+	// a deeper ring withholds rows from the bounded resume replay, and paging is
+	// the only way a client can fetch them.
 	paginationMinRing = maxReplayLines + 1
-	// maxReplayLines caps the client-requested resume replay bound
-	// (controlMsg.ReplayMax). Sized on the resident-tail order, deliberately
-	// NOT the ring depth: it keeps the resume batch's byte-time planning-
-	// bounded (~200 KB of typical plain output, ~20 KB/s over the batch's 10 s
-	// write context) even for a consumer that configured a much larger client
-	// cap. The client clamps to the same constant before sending, so the SENT
-	// value equals the HONORED value — an identity the client's replay-jump
-	// prediction depends on.
+	// maxReplayLines caps controlMsg.ReplayMax, sized to bound the resume
+	// batch's bytes within its write context, not to the ring depth. The client
+	// clamps to the same constant, so the sent value equals the honored one,
+	// which its replay-jump prediction depends on.
 	maxReplayLines = 2000
-	// historyBurst/historyRefill are the per-socket history token bucket: the
-	// server-side floor against accidental bursts and unfair socket churn. The
-	// client paces itself faster (one token per 2s) so a healthy client stays
-	// under this floor with margin rather than by coincidence. This is fairness
-	// and burst suppression, not an aggregate abuse bound: the registry admits
-	// several sockets per session, exactly as the shipped resume throttle does.
+	// historyBurst/historyRefill are the per-socket history token bucket, a
+	// floor against bursts and socket churn, not an aggregate abuse bound. The
+	// client paces itself at one token per 2 s, so a healthy client stays under.
 	historyBurst  = 4.0
 	historyRefill = 1500 * time.Millisecond
-	// historyWriteTimeout bounds one page reply's write. It matches the resume
-	// batch's context rather than the 5 s live-dispatch one, because a reply
-	// holds the socket's writeMu and dispatchFrame's fan-out waits on it, so
-	// the blast radius of a slow write is the session; 10 s is the worst
-	// constant already accepted for that class, and is deliberately not
-	// extended. The client's data timeout (8 s) fires first by design.
+	// historyWriteTimeout matches the resume batch, not live dispatch: a page
+	// reply holds writeMu, which dispatchFrame's fan-out waits on. The client's
+	// 8 s data timeout fires first by design.
 	historyWriteTimeout = 10 * time.Second
 
-	// minResizeCols/minResizeRows are the smallest dimensions we
-	// accept from a resize control message. Anything below is floored
-	// up rather than dropped — iPad keyboard slide reports near-zero
-	// during animations and we want the start path to fire even if
-	// the first resize comes from such a frame.
+	// A resize below the minimum is floored, not dropped: an iPad keyboard
+	// slide reports near-zero sizes, and the start path must still fire.
 	minResizeCols = 20
 	minResizeRows = 5
 
-	// maxResizeCols/maxResizeRows bound a client's resize. vt.Screen caps its
-	// grid at 1000 for memory (vt's maxDimension owns why), so a larger value
-	// here would size the PTY past the screen; TestResizeCeilingFitsScreen
-	// pins the two together.
+	// maxResizeCols/maxResizeRows must not exceed vt.Screen's grid cap, or the
+	// PTY is sized past the screen; TestResizeCeilingFitsScreen pins them.
 	maxResizeCols = 1000
 	maxResizeRows = 1000
 
 	ctlTypeResize = "resize"
 	ctlTypeResume = "resume"
-	// ctlTypeUpgrade is the v4 typed-framing transition control: sent as the
-	// first TEXT message by a client that received proof (resumeAck
-	// serverWireVersion >= 4). Recognizing it latches the connection to typed
-	// mode; the message itself is otherwise a no-op.
+	// ctlTypeUpgrade, the first TEXT message from a client that saw resumeAck
+	// serverWireVersion >= 4, latches the connection to typed framing.
 	ctlTypeUpgrade = "upgrade"
 	ctlTypePing    = "ping"
 	// ctlTypeHistory requests a page of retained scrollback by absolute index.
-	// Adding a control type is back-compatible in both directions: an older
-	// server logs it as unrecognized and returns, which is exactly the "not
-	// supported" answer a newer client infers from the resumeAck's missing
-	// capability bit.
 	ctlTypeHistory = "history"
-	// ctlTypeFocus reports whether the client's terminal widget is focused. Like
-	// `resize` it is a property of the attached viewer folded into session state;
-	// the server derives the DEC 1004 answer from every client's report (see
-	// focusReportLocked). Honored only by a server that declares
-	// resumeAckFlagServerFocus; against an older one the client DROPS the report
-	// rather than writing the focus bytes itself, so a session's answer is always
-	// one party's to give.
+	// ctlTypeFocus reports the client widget's focus; focusReportLocked derives
+	// the DEC 1004 answer. Against a server without resumeAckFlagServerFocus the
+	// client drops it, so one party alone answers for a session.
 	ctlTypeFocus = "focus"
-	// ctlTypeEphemeralInput carries BEST-EFFORT input the server does not count
-	// against the resume ledger (see ephemeralInputControl). Declared with
-	// resumeAckFlagEphemeralInput.
+	// ctlTypeEphemeralInput carries best-effort input outside the resume ledger
+	// (ephemeralInputControl).
 	ctlTypeEphemeralInput = "ephemeralInput"
 	// maxLoggedControlTypeBytes bounds the client-chosen type an unrecognized
 	// control logs; every real control type is under 16 bytes.
 	maxLoggedControlTypeBytes = 32
 
-	// defaultScrollbackCapacity is the retained history depth, in lines, for
-	// replay and demand-paged history. Sized from measured long sessions (p99
-	// about 61,000 rendered lines, median about 2,500), so only long histories
-	// reach it. The ring grows on demand at about 345 bytes per line, about 34 MB
-	// at the ceiling. ScrollbackEnvVar overrides it: a large number is the
-	// "unlimited" setting, and 0 disables scrollback.
+	// defaultScrollbackCapacity is sized from measured long sessions (p99 about
+	// 61,000 lines). The ring grows on demand at about 345 bytes per line,
+	// about 34 MB at this ceiling.
 	defaultScrollbackCapacity = 100_000
 )
 
-// ScrollbackEnvVar is the environment variable consumers read to let an operator
-// override the retained-history depth (WithScrollbackCapacity). The engine owns
-// the NAME so the apps embedding this handler cannot drift apart, but does NOT
-// read it: a library that reads process state takes configuration out of its
-// caller's hands, so consumers read it (envx.IntStrict) and pass the option. It
-// carries no WT_ prefix because an operator sets it per app. Values: 0 disables
-// scrollback; 1..MinPagingCapacity-1 is honoured but too shallow for demand
-// paging, so clamp up and say so; anything larger is retained, with no upper bound.
+// ScrollbackEnvVar names the environment variable an operator sets to override
+// the retained-history depth. The engine never reads it: a consumer reads it
+// and passes the value through ClampScrollbackCapacity to
+// WithScrollbackCapacity, so every embedding app interprets it alike.
 const ScrollbackEnvVar = "SCROLLBACK"
 
 // DefaultScrollbackCapacity is the retained-history depth a handler uses when a
-// consumer sets none. Exported so a consumer can REPORT the effective depth at
-// startup without hardcoding the number — an operator debugging "my scrollback
-// stops early" needs to see it, and a consumer that omits the option cannot
-// otherwise name it.
+// consumer sets none, exported so a consumer can report the effective depth.
 const DefaultScrollbackCapacity = defaultScrollbackCapacity
 
 // MinPagingCapacity is the retained-history depth at or above which the handler
-// DECLARES demand-paged scrollback to its client (resumeAck ackFlags bit1).
-//
-// Exported because it is a cliff, not a preference: at or above it the client
-// can fetch any history the bounded resume replay withheld; below it the replay
-// carries the whole ring, so there is nothing withheld and nothing to fetch.
-// Prefer ClampScrollbackCapacity over comparing against this yourself.
+// declares demand-paged scrollback to its client. Below it the resume replay
+// carries the whole ring, so there is nothing to page.
+// Prefer ClampScrollbackCapacity over comparing against it.
 const MinPagingCapacity = paginationMinRing
 
 // ClampScrollbackCapacity turns an operator-supplied retained-history depth into
-// the one to configure, plus a human-readable reason when it had to change it.
-//
-// The three apps embedding this handler share one env var, so they must share
-// one interpretation of its awkward middle: a depth between 1 and
-// MinPagingCapacity is honoured by the ring but too shallow to declare paging,
-// and the resulting client behavior is the opposite of what the operator asked
-// for — the browser stops demand-loading and holds its whole legacy resident
-// cap, so asking for less server history spends more phone memory. That is
-// clamped UP and explained rather than obeyed quietly.
-//
-// 0 passes through: disabling scrollback is a coherent request (retain nothing
-// beyond the live screen) and it does not have the inverted outcome, because a
-// client cannot page against a server with no history at all. There is no upper
-// bound: the ring allocates only what it fills, so a deliberately enormous
-// number is the supported way to say "never truncate".
-//
-// The returned reason is empty when the input needed no adjustment.
+// the one to configure, plus a human-readable reason when it changed it; the
+// reason is empty otherwise. A negative depth becomes 0, which disables
+// scrollback. A depth between 1 and MinPagingCapacity is clamped up: too shallow
+// to declare paging, it would make the browser hold its whole legacy buffer, so
+// less server history would cost more client memory. There is no upper bound;
+// the ring allocates only what it fills.
 func ClampScrollbackCapacity(n int) (capacity int, reason string) {
 	if n < 0 {
 		return 0, fmt.Sprintf("%s=%d is negative; treating it as 0 (scrollback disabled)", ScrollbackEnvVar, n)
@@ -318,9 +192,7 @@ type handlerConfig struct {
 	originPolicy  *OriginPolicy
 	onProcessExit func(error)
 	theme         *vt.Theme
-	// containment/containmentID/containSample configure per-session process
-	// containment (WithContainment, WithContainmentSampleInterval). A nil
-	// containment disables it, which is the default.
+	// A nil containment, the default, disables process containment.
 	containment        *Containment
 	containmentID      SessionID
 	workDir            string
@@ -328,10 +200,7 @@ type handlerConfig struct {
 	env                []string
 	containSample      time.Duration
 	scrollbackCapacity int
-	// minContrast is the minimum-contrast floor passed to the screen
-	// (WithMinimumContrast). Zero, like 1, leaves the floor off. Grouped with the
-	// other non-pointer scalars rather than beside theme, so it does not split
-	// the struct's leading pointer run.
+	// minContrast of 0, like 1, leaves the contrast floor off.
 	minContrast   float64
 	keepUnfocused bool
 }
@@ -352,17 +221,10 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
-// WithCommandLogValue replaces the value the process-start log line records
-// as its "command" attribute. By default the line carries the child's full
-// argv; a consumer whose argv embeds operator-supplied values that could
-// carry a credential (CWE-532 — e.g. launch flags interpolated from a
-// compose file) passes a fixed marker such as "[redacted]" so the launch
-// event stays logged, and greppable by the stable "command" key, without
-// disclosing the argument values. This is the engine's only argv-bearing
-// log site, so the option makes the whole lifecycle log safe for sensitive
-// argv without the consumer wrapping the logger in a redacting slog.Handler.
-// An empty v is ignored (the package's skip-zero option convention), keeping
-// the default argv logging.
+// WithCommandLogValue replaces the child's argv in the process-start log
+// line's "command" attribute, the engine's only argv-bearing log site. Pass a
+// fixed marker such as "[redacted]" when argv may carry a credential
+// (CWE-532). An empty v is ignored, keeping the default argv logging.
 func WithCommandLogValue(v string) Option {
 	return func(c *handlerConfig) {
 		if v != "" {
@@ -376,20 +238,13 @@ func WithEnv(env []string) Option {
 	return func(c *handlerConfig) { c.env = env }
 }
 
-// WithScrollbackCapacity sets the number of scrollback lines retained for
-// replay to reconnecting clients and for demand-paged history requests — the
-// depth a user can scroll back to.
-//
-// Default is defaultScrollbackCapacity (100000). Negative values are treated as
-// 0, which disables scrollback: the live screen still works and absolute indices
-// still advance, but nothing survives scrolling off. The buffer grows on demand,
-// so a large capacity costs nothing until the session fills it, and there is
-// deliberately no "unlimited" sentinel — set a number larger than any session
-// will reach.
-//
-// Below MinPagingCapacity the handler does not declare demand paging (see that
-// constant: the failure is counter-intuitive, so prefer clamping up).
-// Operators override this via ScrollbackEnvVar; read it in the consumer.
+// WithScrollbackCapacity sets how many scrollback lines are retained for
+// resume replay and demand-paged history; the default is
+// DefaultScrollbackCapacity. A negative n is treated as 0, which disables
+// scrollback: nothing survives scrolling off the live screen. The buffer grows
+// on demand, so for "unlimited" pass a number no session will reach. Below
+// MinPagingCapacity the handler does not declare paging; pass the value
+// through ClampScrollbackCapacity first.
 func WithScrollbackCapacity(n int) Option {
 	return func(c *handlerConfig) {
 		c.scrollbackCapacity = max(n, 0)
@@ -400,17 +255,9 @@ func WithScrollbackCapacity(n int) Option {
 // WebSocket beyond same-origin. Build the policy with NewOriginPolicy; a nil
 // policy (the default) means same-origin only.
 //
-// Pass the SAME policy to WithManagerOriginPolicy when the handler is served
+// Pass the same policy to WithManagerOriginPolicy when the handler is served
 // through a SessionManager, so a widened origin also reaches the manager's
-// unknown-session socket. See OriginPolicy for why this gate exists at all: an
-// app-level cross-origin middleware never sees a WebSocket handshake.
-//
-// It replaced WithAcceptOptions, which handed consumers the dependency's whole
-// AcceptOptions struct: of its seven fields exactly one (OriginPatterns) was
-// useful here, one (InsecureSkipVerify) was a footgun, and the rest were dead
-// (Subprotocols — the engine's client negotiates none) or actively harmful
-// (CompressionMode would re-deflate per client the payload dispatchFrame encodes
-// once; OnPingReceived/OnPongReceived can break the adaptive-RTO ping loop).
+// unknown-session socket.
 func WithOriginPolicy(p *OriginPolicy) Option {
 	return func(c *handlerConfig) { c.originPolicy = p }
 }
@@ -422,13 +269,11 @@ func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
 
-// WithKeepUnfocused holds the child, when keep is true, in the "unfocused" DEC
-// 1004 state: whenever it enables focus reporting (CSI ?1004h) the server writes
-// a focus-out (ESC [ O) to its PTY and never a focus-in, so a program that only
-// emits OSC 9 notifications while unfocused keeps emitting them for the status
-// classifier. keep=false is the default, real focus reporting. The last
-// WithKeepUnfocused in the option list wins. The hold is one clause of the
-// server's DEC 1004 derivation, beside attachment state and each client's focus.
+// WithKeepUnfocused holds the child, when keep is true, in the unfocused DEC
+// 1004 state: whenever it enables focus reporting the server writes a
+// focus-out and never a focus-in, so a program that emits OSC 9 notifications
+// only while unfocused keeps emitting them. The default false reports real
+// focus; the last WithKeepUnfocused wins.
 func WithKeepUnfocused(keep bool) Option {
 	return func(c *handlerConfig) { c.keepUnfocused = keep }
 }
@@ -443,16 +288,10 @@ func WithTheme(t vt.Theme) Option {
 }
 
 // WithMinimumContrast sets a floor on the WCAG contrast ratio between a run's
-// text and its background, clamped to 1..21. A foreground below the floor is
-// blended toward white or black until it reaches it; backgrounds and default
-// foregrounds are left alone. Off by default (1), matching xterm.js's
-// minimumContrastRatio.
-//
-// Pass 4.5 (the WCAG AA floor for body text, and VS Code's default for its
-// integrated terminal) when your client renders on a dark background. A terminal
-// program selects a palette SLOT and cannot know what your client resolves it
-// to, so this is the only place the mismatch can be corrected. See
-// vt.WithMinimumContrast for the full rationale.
+// text and its background, clamped to 1..21; off (1) by default. A foreground
+// below the floor is blended toward white or black; backgrounds and default
+// foregrounds are untouched. 4.5 is the WCAG AA floor for body text.
+// vt.WithMinimumContrast owns the details.
 func WithMinimumContrast(ratio float64) Option {
 	return func(c *handlerConfig) { c.minContrast = ratio }
 }
@@ -477,88 +316,47 @@ type sessionState struct {
 	mu sync.Mutex
 }
 
-// clientState tracks per-WS-connection state. session is resolved
-// from the sessionId in the resume control message. session is stored
-// as an atomic.Pointer so the input path can test whether a session
-// is attached without taking registry.mu; the pointed-to sessionState
-// documents which lock guards each of its fields.
+// clientState tracks per-WS-connection state. session is atomic so the input
+// path can test for an attached ledger without taking clientRegistry.mu.
 type clientState struct {
-	// ws is the socket this state belongs to, set once by clientRegistry.Add
-	// so a resume that supersedes this socket can close it.
+	// ws is set once by clientRegistry.Add, so a superseding resume can close it.
 	ws      *websocket.Conn
 	session atomic.Pointer[sessionState]
-	// resumeLast/resumeTokens are the per-socket resume throttle's token
-	// bucket (see resumeControl). Owned by the socket's read loop — one
-	// socket's control messages are processed serially — so no lock and no
-	// atomics. resumeLast sits up here beside the session pointer because
-	// time.Time carries a *Location (fieldalignment).
+	// resumeLast/resumeTokens are resumeControl's token bucket. The three
+	// buckets are owned by the socket's serial read loop, so they take no lock;
+	// their time.Time halves lead the struct for fieldalignment.
 	resumeLast time.Time
-	// historyLast/historyTokens are the per-socket `history` throttle's token
-	// bucket (see takeHistoryToken), the same read-loop-owned shape as the
-	// resume pair above. time.Time carries a *Location, so it sits up here
-	// beside the others (fieldalignment).
+	// historyLast/historyTokens are takeHistoryToken's bucket.
 	historyLast time.Time
-	// ephemeralLast/ephemeralTokens are the per-socket `ephemeralInput` bucket
-	// (see takeEphemeralToken), the same read-loop-owned shape again.
+	// ephemeralLast/ephemeralTokens are takeEphemeralToken's bucket.
 	ephemeralLast time.Time
-	// lastAckSent is the most recent inputAck value actually written to this
-	// socket (stamped on a content frame by dispatchFrame, sent bare by a
-	// no-frame scheduler pass's ackOnly sweep, or carried by handleResume's
-	// resumeAck). The sweep compares it to the ledger's received count so input
-	// into a silent app is acknowledged on the next dirty pass. Atomic because
-	// handleResume (per-connection goroutine) and flushLoop both write it.
+	// lastAckSent is the last inputAck written to this socket, by dispatchFrame,
+	// the ackOnly sweep or handleResume; the sweep compares it to the ledger's
+	// count so input into a silent app is still acknowledged. Atomic because
+	// handleResume and flushLoop both write it.
 	lastAckSent atomic.Uint64
-	// cols/rows are this socket's most recently requested terminal size,
-	// guarded by clientRegistry.mu (NOT by the atomic session pointer). They
-	// feed MinLiveSize so a disconnect can relax the shared screen to the
-	// smallest size the remaining sockets need.
+	// cols/rows are guarded by clientRegistry.mu and feed MinLiveSize.
 	cols int
 	rows int
-	// resumeTokens is the throttle bucket's fill; its timestamp half
-	// (resumeLast) lives beside the session pointer above.
+	// resumeTokens is resumeLast's fill.
 	resumeTokens float64
-	// historyTokens is the history bucket's fill; its timestamp half
-	// (historyLast) lives beside the session pointer above.
+	// historyTokens is historyLast's fill.
 	historyTokens float64
-	// ephemeralTokens is the ephemeral-input bucket's fill; its timestamp half
-	// (ephemeralLast) lives beside the session pointer above.
+	// ephemeralTokens is ephemeralLast's fill.
 	ephemeralTokens float64
-	// focused is whether this client reports its terminal widget focused (the
-	// `focus` control). Guarded by clientRegistry.mu like cols/rows; the
-	// aggregate the DEC 1004 derivation reads is AnyClientFocused.
+	// focused is guarded by clientRegistry.mu and feeds AnyClientFocused.
 	focused bool
-	// fenced is set, under the ledger's mu, when a resume on this socket's
-	// ledger moved ownership to another socket. It is never cleared: nothing
-	// this socket sends reaches the PTY or shared state again, and it never
-	// owns a ledger again.
+	// fenced is set under the ledger's mu once a resume moved ownership to
+	// another socket, and never cleared: this socket's input is dropped.
 	fenced atomic.Bool
-	// writeMu serializes the two CONTENT-frame writers to this socket: the
-	// flush dispatcher's per-client payload loop (dispatchFrame) and
-	// handleResume's snapshot+batch. coder/websocket serializes individual
-	// Write calls, but not multi-write SEQUENCES — without this lock a live
-	// flush could interleave into the middle of a resume batch, or, worse,
-	// a resume batch whose window was snapshotted BEFORE a flush frame could
-	// be written AFTER it, regressing the client to an older screen until the
-	// next full repaint (the reconnect-during-output race). handleResume
-	// holds it across snapshot AND writes, so its window is at least as new
-	// as anything already written; the dispatcher acquires it BLOCKING, so a
-	// live frame built during a resume batch is DELAYED behind it rather
-	// than dropped — its payloads are not regenerable (buildFrame already
-	// committed the scroll lines and consumed the one-shots), so a drop
-	// would be a permanent scrollback hole for the resuming client. See
-	// writeClientPayloads for the cost bound and the stale-vs-durable
-	// payload split.
+	// writeMu serializes content-frame sequences: coder/websocket serializes
+	// single Writes only. handleResume holds it across snapshot and batch, so
+	// no older frame lands after a newer one; dispatchFrame blocks on it rather
+	// than dropping, because a built frame's payloads cannot be regenerated.
 	writeMu sync.Mutex
-	// resumeGen counts resume snapshots taken for this socket. Bumped by
-	// handleResume inside the same h.mu section as its screen snapshot; a
-	// frame whose generation (captured at client-snapshot time) no longer
-	// matches was built before the resume's snapshot, so dispatchFrame
-	// strips it to its durable payloads: the stale screen/modes/title
-	// snapshots are dropped (writing them after the batch would regress the
-	// client), while scroll lines and clipboard still go out — the batch
-	// does not re-deliver those (its replay starts above the client's
-	// haveThrough, which already spans the frame's lines), so dropping them
-	// would lose history. See writeClientPayloads.
+	// resumeGen is bumped by handleResume in the h.mu section of its snapshot.
+	// writeClientPayloads strips a frame built under an older generation to
+	// its durable payloads.
 	resumeGen atomic.Uint64
 }
 
@@ -624,12 +422,9 @@ func (st *clientState) takeHistoryToken() bool {
 // Handler serves /ws and tracks shared screen state. Multiple WS clients
 // can attach concurrently; the VT screen is the session state.
 //
-// h.started is atomic.Bool so the fast-path check in handleWS does not
-// race with ensureStarted's write under h.mu. Screen and PTY state is
-// guarded by h.mu; client tracking lives in the clientRegistry with its
-// own lock. flushLoop snapshots the per-flush data under h.mu and then
-// performs ws.Write outside the lock so a slow client can't block
-// readLoop / handleControl / new handleWS connections.
+// h.mu guards screen and PTY state; clientRegistry has its own lock. flushLoop
+// writes to sockets outside h.mu, so a slow client cannot block input,
+// control messages or new connections.
 type Handler struct {
 	cmd        *exec.Cmd
 	screen     *vt.Screen
@@ -638,14 +433,9 @@ type Handler struct {
 	scrollback *scrollbackRing
 	cancel     context.CancelFunc
 	ptmx       *os.File
-	// contain is this session's cgroup when containment is enabled, nil
-	// otherwise. Read WITHOUT the lock by the process monitor and the cost
-	// sampler, which is safe only because both are created by the `go` statements
-	// in ensureStarted AFTER this write: goroutine creation is synchronized before
-	// the goroutine runs. Holding h.mu at the write is not what makes those reads
-	// safe, since neither reader takes it. Any NEW reader outside those two
-	// goroutines needs h.mu or an atomic, including anything added to Close.
-	// (It is also reassigned to nil on the start-failure path below.)
+	// contain is nil with containment off. The process monitor and cost sampler
+	// read it lock-free only because ensureStarted starts them after the write;
+	// any other reader, Close included, needs h.mu or an atomic.
 	contain *sessionCgroup
 	// reap is this session's marker reap domain, nil until a spawn starts, after
 	// a failed spawn, or when its marker could not be minted. Read under exactly the same rules as
@@ -653,28 +443,18 @@ type Handler struct {
 	// by that goroutine.
 	reap       *sessionReap
 	procExitCh chan struct{}
-	// done closes once EVERY goroutine this handler started has returned: the PTY
-	// reader, the flush scheduler, the cost sampler, and the process monitor with
-	// all of its teardown (child reaped, containment ended, clients notified, the
-	// marker domain swept). Nil until ensureStarted runs, which is what makes
-	// wait() a no-op on a handler that never spawned anything.
-	//
-	// It is derived from h.wg rather than closed by hand, so it carries ONE
-	// meaning. Closing it as the monitor's own last act would have reported
-	// "teardown finished" while the reader and flush loops were still unwinding,
-	// which is a different claim and the one a leak test does not want. Guarded
-	// by h.mu.
+	// done closes once every goroutine this handler started, teardown included,
+	// has returned. It is derived from h.wg, never closed by hand, so it cannot
+	// claim teardown finished while a loop still unwinds. Nil until
+	// ensureStarted, which makes wait() a no-op on an unspawned handler.
+	// Guarded by h.mu.
 	done chan struct{}
-	// dirty is the flush scheduler's wakeup: 1-buffered so any number of
-	// markDirty pokes coalesce into one pending signal. flushLoop sleeps on
-	// it when idle — no ticker, no periodic wakeups (P4).
+	// dirty is 1-buffered so markDirty pokes coalesce; an idle flushLoop
+	// sleeps on it with no ticker.
 	dirty     chan struct{}
 	healTimer *time.Timer
-	// redrawSettleUntil / redrawLastData implement the redraw-settle hold
-	// (armRedrawSettle / redrawHoldUntil). Both guarded by h.mu; a zero
-	// redrawSettleUntil means the hold is inactive. The hold's two scalar
-	// companions (redrawRearms, redrawCoalesceNow) sit with the other
-	// non-pointer fields at the end of the struct, for field alignment.
+	// The redraw-settle hold's fields are guarded by h.mu; a zero
+	// redrawSettleUntil means the hold is inactive.
 	redrawSettleUntil time.Time
 	redrawLastData    time.Time
 	pendingClipboard  []byte
@@ -695,12 +475,8 @@ type Handler struct {
 	wg      sync.WaitGroup
 	mu      sync.Mutex
 	started atomic.Bool
-	// shutdownRequested latches true when the SERVER asked this session to end
-	// (Close, which is also what SessionManager.Close, the idle reaper and
-	// Shutdown reach it through). It is the input that keeps a server-initiated
-	// teardown out of the crashed classification — see crashedExit. Atomic, not
-	// h.mu-guarded: the process monitor reads it after cmd.Wait() returns, and
-	// Close holds h.mu while it stores.
+	// shutdownRequested latches when Close ends the session, keeping that exit
+	// out of crashedExit's crashed class. Atomic: the monitor reads it without h.mu.
 	shutdownRequested atomic.Bool
 	// redrawRearms counts how many times the redraw-settle cap has lapsed
 	// mid-redraw and coalesced instead of releasing, bounding the coalescing at
@@ -852,14 +628,9 @@ func (h *Handler) wait(ctx context.Context) error {
 }
 
 // waitClosed blocks until done closes or ctx expires, preferring done when both
-// are already ready.
-//
-// The default case is load-bearing, not an optimization. A bare two-case select
-// chooses UNIFORMLY AT RANDOM among ready cases, so a teardown that had already
-// finished would report an expiry roughly half the time whenever the caller's
-// budget had also run out — which is exactly the shape of a second Shutdown on a
-// fatal path, and a wrong answer that only shows up in half the runs is worse
-// than a consistently wrong one.
+// are already ready. The first non-blocking check is required: a two-case
+// select picks a ready case at random, so a finished teardown would report an
+// expiry half the time once the caller's budget has also run out.
 func waitClosed(ctx context.Context, done <-chan struct{}) error {
 	select {
 	case <-done:
@@ -899,13 +670,9 @@ func (h *Handler) Exited() bool {
 // ExitError returns what cmd.Wait() reported for the child: nil when the process
 // exited cleanly (status 0), was never started, or has not exited yet, and
 // otherwise the wait error — an *exec.ExitError for a non-zero or signalled
-// exit. Pair it with Exited to tell "not dead yet" from "died cleanly"; the
-// value is final once Exited reports true. Safe for concurrent use.
-//
-// This is the same error WithOnProcessExit's callback receives, retained so a
-// consumer that did not register one (or that reads state on its own schedule)
-// can still tell a clean exit from a crash. The engine's own status stream uses
-// it to report exited vs crashed (see crashedExit).
+// exit, the same error WithOnProcessExit's callback receives. Pair it with
+// Exited to tell "not dead yet" from "died cleanly"; the value is final once
+// Exited reports true. Safe for concurrent use.
 func (h *Handler) ExitError() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1000,28 +767,12 @@ func (h *Handler) ProgressValue() int {
 	return h.screen.ProgressValue
 }
 
-// ScrollbackBounds returns the absolute-index bounds of this session's retained
-// scrollback history: committed is the index of the next line to be committed
-// (one past the newest committed line, and the absolute index of the current
-// top screen row), oldest is the index of the oldest line still retained.
-// committed-oldest is therefore the number of lines retained, and every index
-// in [oldest, committed) can still be replayed on resume; anything below oldest
-// has been evicted by the retention cap (WithScrollbackCapacity).
-//
-// Both are 0 for a session that has committed nothing yet. Indices are
-// monotonic for the life of the session and are never reused, so a consumer can
-// compare two observations to see how much history advanced or was evicted.
-//
-// These are the same two values the resume handshake reports to a client; this
-// accessor exists so a consumer can observe them without decoding a wire frame.
-// Read-only by design: history bounds are produced by the child's output and the
-// configured capacity, never set from outside.
-//
-// Returned as a pair under a SINGLE lock acquisition, for the same reason as
-// titles() and statusSnapshot: read through two calls, a commit landing in
-// between yields a pair that never existed (an oldest from after an eviction
-// beside a committed from before it), which a consumer would read as a
-// larger-than-real retained range. Safe for concurrent use.
+// ScrollbackBounds returns the absolute-index bounds of the retained
+// scrollback, the values the resume handshake reports: every index in
+// [oldest, committed) is still retained, and committed is the absolute index
+// of the top screen row. Both are 0 before the first commit. Indices are
+// monotonic and never reused. The pair is read under one lock, so it is always
+// consistent. Safe for concurrent use.
 func (h *Handler) ScrollbackBounds() (committed, oldest uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -1087,25 +838,12 @@ func (h *Handler) exitAwareCloseCode() websocket.StatusCode {
 	}
 }
 
-// closeOnProcExit closes the client WS with statusProcessExited (4001) when the
-// child process exits, so the client can tell "process ended" (terminal, close
-// the tab) from a transient drop (reconnect). Canceling the read's context
-// instead would make coder/websocket fail the connection abnormally (1006)
-// rather than send a clean 4001, so this closes the socket directly;
-// coder/websocket permits Close concurrent with the read loop's Read. It also
-// returns when the client leaves (ctx done), so it never leaks.
-//
-// A client that attaches to an ALREADY-exited session (re-opening a dead tab,
-// or a page reload whose saved session died meanwhile) is given up to
-// exitedAttachReplayGrace to complete its resume exchange first — resumeServed
-// is closed by handleWS once handleResume has synchronously written the
-// resumeAck, modes/title, final screen, and history replay — so the client can
-// render the session's last state before the definitive 4001 lands. Closing
-// immediately (the previous behavior) raced the replay and reliably beat it,
-// leaving the client with nothing but the close. The mid-session exit path
-// (the process dies while the client is attached) keeps the immediate close:
-// that client already holds the screen, and prompt 4001 delivery is the
-// contract.
+// closeOnProcExit closes the client WS with statusProcessExited when the child
+// exits, or returns when ctx is done. It closes the socket directly: canceling
+// the read's context makes coder/websocket fail with 1006 instead of a clean
+// 4001. A client attaching to an already-exited session gets up to
+// exitedAttachReplayGrace for resumeServed (closed once handleResume wrote the
+// final state) before the close; a client attached at exit is closed at once.
 func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resumeServed <-chan struct{}) {
 	alreadyExited := h.Exited()
 	select {
@@ -1229,12 +967,8 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 		// the pair through exitOutcome). Nothing here can panic — a mutex and one
 		// assignment — so it is safe ahead of the teardown defer below.
 		h.setExitError(werr)
-		// Registered FIRST so LIFO runs it LAST: the marker reap walks /proc, and
-		// the client-visible exit broadcast (procExitCh, below) must not wait on a
-		// scan. Reclaiming a stranded tree a few milliseconds later costs nothing;
-		// delaying every session's 4001 close by a scan is user-visible, and it
-		// also moved Exited() late enough to break the attach-after-exit contract
-		// test that pins the replay-before-4001 grace.
+		// Deferred first so it runs last: the /proc walk must not delay the
+		// procExitCh broadcast, Exited() and every client's 4001 close.
 		defer h.reap.teardown()
 		// Guarantee client notification (procExitCh drives the 4001 close) and
 		// loop teardown even if the consumer onProcessExit callback panics; a
@@ -1258,26 +992,14 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 				h.cfg.logger.Error("terminal: onProcessExit callback panicked", "panic", r)
 			}
 		}()
-		// Containment teardown is owned HERE, and only here. Close does not
-		// run it: Close holds h.mu, and cancelling the context kills the head
-		// process, so this Wait returns and teardown happens on that path too.
-		// One owner plus the handle's own sync.Once means a crash-then-close
-		// sequence cannot double-run it.
-		// Stop sampling before the cgroup is removed, then tear down.
+		// Containment teardown runs only here, Close's path included (its cancel
+		// kills the head, so this Wait returns). Stop sampling before removal.
 		stopSampler()
 		h.contain.teardown()
 
-		// Symmetric with the "process started" INFO above so operators see the
-		// session lifecycle end and its exit status in the logs, not just the
-		// start. werr is nil on a clean (exit 0) shutdown; a child exiting
-		// non-zero is a normal session end, not a server fault, so this stays
-		// INFO (avoids WARN-spam on ordinary command exits).
-		//
-		// mem_peak_bytes/tasks_peak are the session's true high-water marks
-		// (cgroup memory.peak/pids.peak), not a sample, and they stay readable
-		// after the members are gone. tasks_peak counts TASKS, not processes:
-		// the pids controller reports TIDs. Zero when containment is off, so the
-		// line keeps its shape either way.
+		// INFO, not WARN: a non-zero exit is an ordinary session end. The peaks
+		// are cgroup high-water marks; tasks_peak counts TIDs (pids.peak), and
+		// both are 0 with containment off.
 		memPeak, tasksPeak := h.contain.peaks()
 		h.cfg.logger.Info("terminal: process exited",
 			"pid", pid, "error", werr,
@@ -1538,12 +1260,9 @@ func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 	committedBefore := h.scrollback.Committed()
 	if holdUntil.IsZero() {
 		if h.redrawCoalesceNow {
-			// The redraw-settle cap lapsed while the child was still writing, so
-			// this pass is the coalesced update for that interval. Force a FULL
-			// repaint: a diff against the client's cache would describe a screen
-			// caught mid-redraw, which is the partial state the hold exists to
-			// hide. Consumed here rather than at the lapse so a DEC 2026 hold
-			// overlapping the lapse cannot swallow it.
+			// A cap lapse's coalesced update is a full repaint, never a diff of a
+			// mid-redraw screen. Consumed here, not at the lapse, so an
+			// overlapping DEC 2026 hold cannot swallow it.
 			h.builder.Reset()
 			h.redrawCoalesceNow = false
 		}
@@ -1554,14 +1273,9 @@ func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 	}
 	if frame != nil && h.scrollbackClearedPending {
 		frame.scrollbackCleared = true
-		// scrollbackCleared only rides a screen message (dispatchFrame gates the
-		// screen payload on len(changed) > 0). A frame with no changed rows -- a
-		// title- or modes-only change arriving after ED3 -- sets the flag but emits
-		// no screen payload, silently dropping the clear signal (the client keeps
-		// history the server discarded until a resume). Fold the cursor row into
-		// changed so a screen payload carries the flag this frame, mirroring the
-		// bell handling in flush_builder.go. frame came from Build here (the
-		// clipboard-only frame is created later), so frame.rows/curRow are valid.
+		// scrollbackCleared rides only a screen payload, which needs a changed
+		// row; fold in the cursor row (as flush_builder.go does for bell) so a
+		// title- or modes-only frame after ED3 still carries the clear.
 		frame.changed = appendRowIfMissing(frame.changed, frame.curRow, len(frame.rows))
 		h.scrollbackClearedPending = false
 	}
@@ -1593,27 +1307,11 @@ func (h *Handler) flushPass() (holdUntil time.Time) {
 	return holdUntil
 }
 
-// flushLoop is the event-driven coalescing flush scheduler (P4; it replaced
-// the permanent 50 ms ticker). Semantics:
-//
-//   - IDLE: with nothing dirty, the loop sleeps on the dirty channel — zero
-//     wakeups, zero renders, no matter how many idle sessions a server holds.
-//   - FIRST output after idle flushes IMMEDIATELY: first-byte echo latency is
-//     the connect RTT, not a tick-alignment lottery (the old ticker added
-//     0-50 ms to every isolated keystroke echo).
-//   - SUSTAINED output batches exactly like the ticker did: after each pass
-//     the loop absorbs pokes for one flushInterval before flushing again, so
-//     consecutive frames stay >= flushInterval apart.
-//   - A DEC 2026 hold (synchronized output) arms a retry at the release
-//     deadline: the final held redraw flushes even when no PTY byte follows
-//     the hold (the deadline case a trigger-only scheduler would strand).
-//     A new poke during the hold sleep re-passes early, which re-reads the
-//     (possibly extended) deadline; passes stay suppressed while held.
-//
-// Dirty sources: PTY output (handlePTYData), resize, resume/attach, and
-// reliable input needing an ack sweep. Zero-client suspension
-// lives in buildFrame: a poke with nobody attached drains scrollback into the
-// ring and skips all render/diff work.
+// flushLoop is the coalescing flush scheduler. Idle, it sleeps on h.dirty with
+// no wakeups. The first output after idle flushes at once, so a keystroke echo
+// waits on no tick; sustained output keeps frames at least flushInterval
+// apart. A DEC 2026 hold arms a retry at its release deadline, so the final
+// held redraw flushes even when no PTY byte follows it.
 func (h *Handler) flushLoop(ctx context.Context) {
 	for h.waitForDirty(ctx) {
 		if !h.flushBurst(ctx) {
@@ -1756,27 +1454,13 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 		return
 	}
 	durable := durableSubset(frame.clipboardPayload, scrollPayloads)
-	// Fan out concurrently: one goroutine per client, each writing ITS frames
-	// in order. Serial fan-out let one wedged client stall every other
-	// client's output for up to 5s × payload count; now a
-	// wedged client costs only itself, and the tick blocks at most one 5s
-	// window total. Per-connection write serialization is coder/websocket's
-	// (concurrent writers to one conn are internally locked); the multi-write
-	// SEQUENCES that must not interleave — this loop's payload run and
-	// handleResume's snapshot+batch — are serialized by the per-client
-	// writeMu below, and a frame that predates a resume snapshot is stripped
-	// to its durable payloads by the generation check (see clientState).
-	// sweepAcks stays outside the lock on purpose: a bare ackOnly
-	// interleaving into a resume batch is harmless (the client ignores an
-	// ack at or below its trimmed count, and the resumeAck is the
-	// authoritative sync). withClientAck clones the shared template per
-	// call, so goroutines never share a buffer.
+	// One goroutine per client, so a wedged client stalls only itself and the
+	// pass waits at most one 5 s write window. clientState.writeMu owns
+	// sequence ordering against a resume batch. sweepAcks needs no writeMu: the
+	// client ignores an ack at or below its trimmed count.
 	var wg sync.WaitGroup
-	// delivered collects, per client that had at least one payload written,
-	// the ack value those payloads actually carried (the captured ack, or
-	// the restamped one when the sequence was stripped to its durable
-	// subset) — so the ack bookkeeping below never records a value no frame
-	// carried.
+	// delivered records the ack each client's payloads actually carried, so the
+	// bookkeeping below never records a value no frame carried.
 	var deliveredMu sync.Mutex
 	delivered := make(map[*websocket.Conn]uint64, len(frame.clients))
 	for ws, ack := range frame.clients {
@@ -1789,14 +1473,8 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 		})
 	}
 	wg.Wait()
-	// Record what each client was just told, so the next no-frame tick's ack
-	// sweep doesn't resend a value a content frame already carried. A client
-	// stripped to a non-empty durable subset IS recorded, at the restamped
-	// value its payloads actually carried (writeClientPayloads returns it);
-	// a client with nothing written is excluded — its authoritative ack is
-	// the resumeAck its batch already wrote. NoteAcksSent is monotonic, so
-	// a recorded value can never regress lastAckSent below what the batch
-	// stored.
+	// Record what each client was told, so the ack sweep does not resend it. A
+	// client with nothing written is absent: its resumeAck already told it.
 	h.registry.NoteAcksSent(delivered)
 }
 
@@ -1832,13 +1510,10 @@ func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen ui
 		st.writeMu.Lock()
 		defer st.writeMu.Unlock()
 		if st.resumeGen.Load() != gen {
-			// Built before the batch's snapshot: drop the state payloads (screen,
-			// modes, title), which would regress the client, and keep the durable
-			// ones. The batch replays above haveThrough, which already spans these
-			// scroll lines, and the clipboard is a one-shot; absolute indices make a
-			// late scroll chunk idempotent. Bell and the ED3 flag ride the dropped
-			// screen payload and are lost for this client alone; ED3 heals at the
-			// app's next ED3.
+			// Built before the batch's snapshot: drop screen, modes and title,
+			// which would regress the client. Scroll lines and clipboard stay, since
+			// the batch's replay does not resend them. Bell and the ED3 flag ride
+			// the dropped screen payload and are lost for this client.
 			payloads = durable
 			stripped = true
 		}
@@ -1851,18 +1526,11 @@ func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen ui
 		return 0, false
 	}
 	if stripped {
-		// Restamp with the freshest ack this socket was told. Under this
-		// writeMu, after a generation mismatch, that is exactly the latest
-		// resume batch's resumeAck value: the batch stored it under this
-		// same lock before we acquired it, no other resume can run while we
-		// hold it, and no sweep runs concurrently (flushLoop is serial, and
-		// sweeps happen only on passes that produced no frame). The
-		// captured ack predates the resume; after a LEDGER-LOSS resume it
-		// can even exceed the client's reset outbox accounting, where
-		// stamping it could falsely trim retransmitted-but-unacked input on
-		// the client (applyAck's min(received, bytesSent)). Re-sending the
-		// resumeAck's own value is a no-op under the client's monotone
-		// applyAck guard.
+		// The captured ack predates the resume and, after a ledger-loss resume,
+		// can exceed the client's reset outbox, falsely trimming unacked input.
+		// Under writeMu lastAckSent is exactly the latest resumeAck (no resume
+		// runs while it is held, and flushLoop never sweeps during a dispatch),
+		// which the client's monotone applyAck treats as a no-op.
 		ack = st.lastAckSent.Load()
 	}
 	writeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -1879,14 +1547,8 @@ func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen ui
 // slice and strings lead, then the pointer, then the 8-byte scalars, then the
 // machine ints. Read the comments for meaning, not the layout.
 type controlMsg struct {
-	// HaveThrough is the highest absolute line index the client already
-	// holds in its store. Sent in resume control messages so the server
-	// replays exactly the lines the client is missing (indices greater
-	// than HaveThrough), aligned by absolute identity rather than by a
-	// fragile count. -1 means the client holds nothing (cold load / DOM
-	// eviction) and wants the full retained history. The server clamps
-	// the replay start into the retained range and reports any eviction
-	// gap via the resumeAck bounds.
+	// HaveThrough is the highest absolute line index the client holds; resume
+	// replays only indices above it. -1 asks for the full retained history.
 	HaveThrough *int64    `json:"haveThrough"`
 	Type        string    `json:"type"`
 	SessionID   SessionID `json:"sessionId,omitempty"`
@@ -2142,18 +1804,8 @@ func (h *Handler) resumeControl(ws *websocket.Conn, state *clientState, c *contr
 		return d
 	}
 	if !state.takeResumeToken() {
-		// Resume-spam throttle: each resume runs a
-		// full per-socket write transaction — writeMu held across a screen
-		// snapshot, a builder reset and a replay of up to the whole retained
-		// ring — so an unthrottled client could pin the handler's flush
-		// pipeline with back-to-back batches. The bucket (burst 10, one
-		// token per 2s) sits far above any legitimate cadence (measured
-		// phone churn: ~one resume per 4 minutes; ledger switches and wire
-		// upgrades add a handful in quick succession, covered by the burst).
-		// An over-limit resume is DROPPED — no resumeAck — which a healthy
-		// client never experiences and a hostile one cannot tell from
-		// network loss. The v4 framing latch above stays armed either way,
-		// so a throttled client's later controls still parse.
+		// An over-limit resume is dropped with no resumeAck, indistinguishable
+		// from network loss; the v4 framing latch above stays armed.
 		h.cfg.logger.Warn("terminal: resume throttled",
 			"session_id", LogID(c.SessionID))
 		return d
@@ -2420,32 +2072,17 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 			"session_id", LogID(sessionID), "sent_bytes", sentBytes)
 	}
 
-	// The whole exchange — screen snapshot AND the multi-write batch — runs
-	// under this socket's write lock, with the generation bumped inside the
-	// same h.mu section as the snapshot. Together they close the
-	// reconnect-during-output race: a live flush either finished writing
-	// before the lock was acquired (then the snapshot below is at least as
-	// new as what it wrote), or it blocks on the lock until this batch is
-	// done, and the generation check then strips any frame built before
-	// this snapshot down to its durable payloads, so no stale screen state
-	// is written after the batch (builds hold h.mu, so a frame carrying the
-	// new generation was necessarily built after the snapshot). Without
-	// this, a flush could land out of order around the batch and the
-	// batch's older window overwrote a newer screen — a reconnect during
-	// active output showed an old or mixed screen until an unrelated full
-	// repaint.
+	// writeMu spans snapshot and batch, and the generation bump shares the
+	// snapshot's h.mu section: an earlier flush finished before this snapshot,
+	// and a later one waits and is stripped if built before it, so no stale
+	// screen lands after the batch.
 	state.writeMu.Lock()
 	defer state.writeMu.Unlock()
 
 	h.mu.Lock()
 	state.resumeGen.Add(1)
-	// Force a full repaint on the next flush. Taken INSIDE the snapshot's
-	// h.mu section, so the first frame built after this instant — including
-	// one built while the batch below is still writing, which the blocking
-	// dispatch gate delivers right after it — is a FULL frame of the then-
-	// current screen: the resuming client converges in one frame instead of
-	// receiving a diff against a cache it never had, and every other client
-	// gets the same full repaint an attach always forced.
+	// Reset inside the snapshot's h.mu section, so the first frame built after
+	// it is a full repaint, never a diff against a cache this client lacks.
 	h.builder.Reset()
 	// Commit any pending drain to history at its absolute index before
 	// computing the replay, so lines that scrolled while the client was
@@ -2476,13 +2113,9 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	winCursorStyle := h.screen.CursorStyle
 	winCursorHidden := h.screen.CursorHidden
 	winCursorBlink := h.screen.CursorBlink
-	// Snapshot and encode the current DEC private modes and title under h.mu so
-	// the resuming client's input encoding (app-cursor arrows, SGR mouse, etc.)
-	// is correct immediately, rather than defaulting until the next diff-driven
-	// flush (<= flushInterval) re-announces them via builder.Reset. Encode
-	// directly from screen state — do NOT use builder.buildModesPayload, which
-	// mutates the per-Handler builder's shared announce-state and would starve a
-	// concurrently connecting second client of its own modes frame.
+	// Encode modes straight from the screen, not builder.buildModesPayload:
+	// that mutates the shared announce state and would starve a client
+	// connecting concurrently of its own modes frame.
 	modesPayload := encodeModesMsg(h.screen.BracketedPaste, h.screen.AppCursorKeys,
 		h.screen.MouseSGR, h.screen.FocusReporting, h.screen.AppKeypad,
 		h.screen.ReverseVideo, h.screen.MousePixels, h.screen.MouseMode, h.screen.KeyboardFlags())
@@ -2501,12 +2134,9 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// resumeAck first so the client can trim its outbox and learn the
-	// history bounds (for gap detection) before the replay lands. ServerFocus
-	// and EphemeralInput are unconditionally true for this build: like
-	// historyPagingDeclared's handler half, this handler serves both controls,
-	// and WithKeepUnfocused is one clause of the focus derivation rather than a
-	// gate on the declaration.
+	// resumeAck first, so the client trims its outbox and learns the history
+	// bounds before the replay lands. This handler always serves focus and
+	// ephemeral input, WithKeepUnfocused included.
 	flags := resumeAckFlags{LedgerLost: ledgerLost, HistoryPaging: paging, ServerFocus: true, EphemeralInput: true}
 	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest, flags)) //nolint:errcheck // best-effort
 	state.lastAckSent.Store(ack)
@@ -2530,15 +2160,10 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 		}
 	}
 
-	// The client gates scroll application on its alt flag (store.ts applyScroll),
-	// and the window frame is what sets that flag to winAlt:
-	//   - winAlt == false: window FIRST so a client with a stale alt flag
-	//     (disconnected in alt, app left alt while away) leaves alt before the
-	//     replay lands.
-	//   - winAlt == true: replay FIRST so a client not yet in alt (fresh load /
-	//     second tab on an in-alt session) stores the main-screen history before
-	//     the window frame puts it into alt; otherwise the replay is dropped and
-	//     that history is lost until the next non-alt reconnect.
+	// The client drops scroll lines while its alt flag is set (store.ts
+	// applyScroll), and the window frame sets that flag to winAlt. So in alt the
+	// main-screen replay goes first, and out of alt the window goes first to
+	// clear a stale alt flag before the replay lands.
 	if winAlt {
 		replayHistory()
 		ws.Write(ctx, websocket.MessageBinary, windowPayload) //nolint:errcheck // best-effort
@@ -2625,14 +2250,9 @@ func (h *Handler) disarmRedrawSettle(reason string) {
 
 // redrawHoldUntil returns the moment the redraw-settle hold could next change
 // state, or the zero time when the hold is inactive or this pass may flush.
-// Caller holds h.mu.
-//
-// Three exits, and they are exhaustive: the child went quiet (the redraw is
-// over, release for good); the cap lapsed while the child is still writing and
-// coalescing budget remains (let ONE full repaint through, then re-arm); or the
-// cap lapsed with the budget spent (release for good and stream normally). Only
-// the middle one is new, and it is what stops a redraw longer than the cap from
-// streaming its remainder a partial screen at a time.
+// Caller holds h.mu. The hold releases for good when the child goes quiet or
+// the re-arm budget is spent; a cap lapse with budget left lets one full
+// repaint through and re-arms.
 func (h *Handler) redrawHoldUntil(now time.Time) time.Time {
 	if h.redrawSettleUntil.IsZero() {
 		return time.Time{}

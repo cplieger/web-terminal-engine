@@ -366,20 +366,10 @@ func TestDiffStatusesEmitsOnProgressValueChange(t *testing.T) {
 	}
 }
 
-// TestSessionActivityIsOrthogonalToStatus pins the two invariants nothing
-// structural enforces, because the secondary activity shares a struct and a
-// vocabulary with the turn status and a later edit could easily fold one into the
-// other.
-//
-// It must not enter computeStatus's five-level precedence and must not touch
-// tracker.latched: the state a host reports about a BACKGROUND task says nothing
-// about whose turn it is, so a run blocked on the user must not make the tab
-// claim the turn is blocked. And it must not feed ReportsActivity, which is the
-// PRIMARY dot's reveal gate — revealing that dot for a background task is exactly
-// the compounding a second, independent mark exists to avoid.
-//
-// The source is pinned at "input", the most attention-seeking secondary state,
-// for every stage.
+// TestSessionActivityIsOrthogonalToStatus pins that the secondary activity, a
+// background task's state, never enters computeStatus, tracker.latched or
+// ReportsActivity: it says nothing about whose turn it is. Every stage uses
+// "input", the most attention-seeking state.
 func TestSessionActivityIsOrthogonalToStatus(t *testing.T) {
 	src := newActivitySource()
 	m := NewSessionManager(catFactory,

@@ -282,15 +282,10 @@ func (r *clientRegistry) attachedSessions() map[*sessionState]bool {
 	return m
 }
 
-// gcIdleSessions deletes sessions unattached for longer than the 60-minute
-// retention window, skipping sessions attached to a live client (a
-// connected viewer's ledger must never be reclaimed under it). lastSeen is
-// stamped on attach, on input, and on DETACH, so "idle" here is time since
-// the last client let go — not time since the last keystroke. A GC'd
-// session that had received bytes is logged: a later reconnect with that
-// sessionId takes the explicit ledger-lost path on the resumeAck
-// (drop-and-notify), and the log is the server half of that event.
-// The caller MUST hold r.mu.
+// gcIdleSessions deletes ledgers no live client holds whose lastSeen (stamped
+// on attach, input and detach) is past the 60-minute retention window. A
+// reclaimed ledger that had received bytes is logged, as the server half of
+// the ledger-lost resumeAck a later reconnect gets. The caller must hold r.mu.
 func (r *clientRegistry) gcIdleSessions() {
 	attached := r.attachedSessions()
 	for id, s := range r.sessions {
@@ -373,15 +368,10 @@ func (r *clientRegistry) AckSweepTargets() map[*websocket.Conn]uint64 {
 	return m
 }
 
-// NoteAcksSent records the ack values a dispatched content frame carried to
-// each client (via withClientAck), so the next AckSweepTargets pass does not
-// send a redundant ackOnly for a value the client already received. The
-// store is monotonic (forward-only): a generation-stripped durable write
-// lands AFTER the resume batch that already recorded a newer resumeAck, and
-// its older-but-genuinely-carried ack must not regress lastAckSent ("the
-// highest ack this socket was told" — the invariant the sweep's dedupe
-// reads). Legitimate backward re-syncs (ledger replacement) go through
-// handleResume's unconditional Store, never through here.
+// NoteAcksSent records the ack each client's content frame carried, so
+// AckSweepTargets sends no redundant ackOnly. It only moves lastAckSent
+// forward: a stripped durable write lands after a resume batch that recorded
+// a newer ack. A deliberate backward re-sync is handleResume's Store.
 func (r *clientRegistry) NoteAcksSent(acks map[*websocket.Conn]uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

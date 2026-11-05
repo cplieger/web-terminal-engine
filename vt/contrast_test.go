@@ -116,14 +116,9 @@ func TestEnsureContrastLiftIsMinimal(t *testing.T) {
 }
 
 // TestEnsureContrastTreatsTheFloorAsInclusive covers the three places a color is
-// compared against the requested ratio. WCAG states every threshold as "at
-// least" a ratio, so a color sitting exactly ON the floor passes and nothing
-// above it has to move.
-//
-// Each case asks for the ratio one specific color already achieves against the
-// background, which is why the floors are derived here instead of written as
-// decimals: the boundary is only reached when the requested ratio and the
-// measured one are bit-identical, and no decimal literal expresses that.
+// compared against the requested ratio: WCAG thresholds are "at least". The
+// floors are derived from a color's measured ratio, since only a bit-identical
+// value reaches the boundary.
 func TestEnsureContrastTreatsTheFloorAsInclusive(t *testing.T) {
 	const midGrey = int32(0x808080)
 	cases := []struct {

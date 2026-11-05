@@ -14,18 +14,10 @@ import (
 	"github.com/coder/websocket"
 )
 
-// TestPingLoop_repeatedFailuresCancel verifies pingLoop closes the connection
-// (calls cancel) after maxConsecutiveFailures pings fail in a row. We dial a
-// WebSocket then CloseNow the client so every subsequent ws.Ping fails
-// immediately; after the failure threshold pingLoop must invoke cancel.
-//
-// The whole test is a clock assertion, so it runs in a synctest bubble on the
-// synthetic clock: httptest.NewTestServer puts the socket on the in-memory
-// fake network (a real loopback socket would park a bubble goroutine on an
-// external FD and the clock could never advance), and synctest.Sleep advances
-// exactly past the third tick. That turns a 6s wall-clock wait plus a 25s
-// escape bound into an exact deadline — a pingLoop that took four ticks used
-// to pass and now fails.
+// TestPingLoop_repeatedFailuresCancel verifies pingLoop calls cancel after
+// maxConsecutiveFailures failed pings, at exactly the third tick. It runs in a
+// synctest bubble on httptest.NewTestServer's in-memory network: a real socket
+// parks a goroutine on an external FD and the clock never advances.
 func TestPingLoop_repeatedFailuresCancel(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		srv := httptest.NewTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

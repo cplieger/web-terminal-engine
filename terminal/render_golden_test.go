@@ -11,24 +11,10 @@ import (
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
-// render_golden_test.go generates the cross-language DISPLAY-conformance
-// fixture: real escape sequences are fed through the actual vt.Screen, the
-// resulting styled runs are encoded as a binary screen frame, and the bytes are
-// written to ../render-golden/attributes.bin. The TypeScript tier
-// (web/src/render-e2e-golden.test.ts) decodes that frame with the real decoder,
-// renders it with the real render.ts, and asserts the SPEC — so this fixture is
-// the engine's ACTUAL wire output, not a hand-authored "expected". If the
-// engine's color resolution or attribute encoding drifts from the spec, the TS
-// test fails.
-//
-// The row→feature layout is the contract shared with the TS test; keep the two
-// in lockstep. Regenerate after an intentional change:
-//
-//	UPDATE_GOLDEN=1 go test ./terminal/ -run TestRenderGolden
-//
-// renderGoldenRows is the ordered list of (feature, escape sequence) written one
-// per screen row. Each sequence is self-contained (SGR reset appended) so an
-// attribute never bleeds into the next row.
+// renderGoldenRows feeds one feature per row through vt.Screen into
+// ../render-golden/attributes.bin, which web/src/render-e2e-golden.test.ts
+// renders and checks against the spec. The row layout is shared with that
+// test. Regenerate: UPDATE_GOLDEN=1 go test ./terminal/ -run TestRenderGolden
 var renderGoldenRows = []struct {
 	feature string
 	seq     string
@@ -95,18 +81,9 @@ func TestRenderGolden(t *testing.T) {
 	}
 }
 
-// --- Comprehensive all-codes display fixture (tier-3 CDP dump) ---------------
-//
-// TestRenderGoldenAllCodes feeds EVERY SGR display code through the real
-// vt.Screen — all attributes, all 16 basic fg/bg, the full 256-color palette
-// (38;5;0..255), truecolor, and underline-color — one code per row, then writes
-// the resulting wire frame (all-codes.bin) plus a layout MANIFEST
-// (all-codes.manifest.json) that records which SGR each row carries. The
-// Playwright tier (web/e2e/render-all-codes.e2e.test.ts) renders the frame in a
-// real headless Chromium, dumps every cell's computed style over CDP, and
-// asserts each against the SPEC derived independently from the manifest — the
-// manifest is only "what was fed", never the expected output.
-//
+// TestRenderGoldenAllCodes writes every SGR display code, one per row, to
+// all-codes.bin plus a manifest of what was fed, for
+// web/e2e/render-all-codes.e2e.test.ts to check in Chromium against the spec.
 // Regenerate: UPDATE_GOLDEN=1 go test ./terminal/ -run TestRenderGoldenAllCodes
 
 // allCodesEntry records one row's SGR for the manifest (what was fed, not the
@@ -229,24 +206,10 @@ func TestRenderGoldenAllCodes(t *testing.T) {
 	}
 }
 
-// --- Behavioral display conformance (escape sequence -> engine -> wire -> DOM) ---
-//
-// esctest2 proves the engine's screen MODEL is correct after an operation
-// (clear, erase, cursor move, insert/delete). It says nothing about whether the
-// browser RENDERER turns that model into correct DOM. TestRenderGoldenBehavior
-// closes that gap end to end: it runs a real escape SEQUENCE through the actual
-// vt.Screen, asserts the engine's resulting grid equals a SPEC-AUTHORED expected
-// grid (a spec-check of the engine, independent of esctest), then emits the real
-// wire frame. The TS side (web/src/render-behavior.test.ts) decodes that frame
-// with the real decoder, renders it with the real render.ts, and asserts the DOM
-// text grid equals the SAME spec grid — so one hand-authored grid pins both the
-// engine and the renderer, and they cannot silently disagree.
-//
-// Scope: in-place SCREEN operations (the grid the renderer paints). Scroll-to-
-// history (which emits scroll frames into the scrollback ring) is covered by
-// web/src/render-store.test.ts; this fixture asserts the on-screen grid only.
-//
-// Regenerate: UPDATE_GOLDEN=1 go test ./terminal/ -run TestRenderGoldenBehavior
+// TestRenderGoldenBehavior checks one spec-authored grid per in-place screen
+// operation against vt.Screen, then emits the wire frame for
+// web/src/render-behavior.test.ts to check the rendered DOM against the same
+// grid. Regenerate: UPDATE_GOLDEN=1 go test ./terminal/ -run TestRenderGoldenBehavior
 
 // behaviorScenarios is the ordered scenario table. `want` is the SPEC-EXPECTED
 // screen (H=4 rows x W=8 cols), each row trailing-trimmed like vt RowString. The

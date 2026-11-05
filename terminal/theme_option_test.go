@@ -6,15 +6,8 @@ import (
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
-// The theme is configured on the Handler but reported by the screen, so the only
-// thing that can break between them is the plumb-through in NewHandler. Assert
-// it behaviourally, through the OSC 11 query reply the screen queues for the
-// application, rather than by reaching for vt's unexported field.
-//
-// The reply is what a color-probing program actually reads, so a broken
-// plumb-through means light/dark detection answers with the built-in dark
-// default instead of the consumer's real colors -- silently, since a wrong
-// answer looks exactly like a right one.
+// The theme is reported by the screen, so this checks NewHandler's plumbing
+// through the OSC 11 reply a color-probing program reads.
 func TestWithThemeReachesTheScreen(t *testing.T) {
 	t.Parallel()
 

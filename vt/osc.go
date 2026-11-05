@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // decodeTitle applies the XTSMTITLE set-mode to an incoming OSC 0/1/2 title
@@ -131,18 +131,9 @@ func (s *Screen) dispatchOsc() {
 // hostile or runaway program cannot grow the stored string without bound.
 const maxNotificationLen = 256
 
-// handleOsc9 handles the two OSC 9 forms: a human-readable message is
-// captured into Notification (stripped and length-clamped, since it is
-// attacker-influenced); a ConEmu subcommand (OSC 9 ; Ps [; ...]) is not a
-// notification — only subcommand 4 (progress) is handled, into
-// Progress/ProgressValue. The engine stores notification text without
-// interpreting it; mapping a message to a session status is the consumer's job.
-//
-// The two forms are told apart by the FIRST ';'-delimited field: only a PURELY
-// numeric one is a subcommand, so "4 files changed" is free text. A payload
-// that is nothing but digits with no separator is a subcommand too — that is
-// how the abbreviated progress form (OSC 9 ; 4 ST, "stop the bar") reaches
-// setProgress instead of being captured as notification text "4".
+// handleOsc9 captures a message into Notification, sanitized and clamped, or
+// handles ConEmu subcommand 4 as progress. A purely numeric first field is a
+// subcommand, so "4 files changed" is text while a bare "4" stops the bar.
 func (s *Screen) handleOsc9(data string) {
 	if data == "" {
 		return
@@ -184,13 +175,9 @@ const (
 
 // setProgress records a ConEmu/iTerm2 OSC 9;4 progress report from the payload
 // following "4" ("st", "st;pr", or nothing at all). hasFields tells the
-// abbreviated form (no state field, stops the bar) from an explicit but empty
-// one ("9;4;", malformed). State 4 is read with iTerm2's semantics (warning at
-// pr percent, not ConEmu's paused), because the engine advertises
-// TERM_PROGRAM=iTerm.app. A report is a STATE, not an event: it persists until
-// the program sends another one. Malformed cases are undefined by both specs,
-// so these are OUR choices: an unparseable st or pr leaves the previous state
-// untouched; pr outside 0-100 is clamped; fields beyond pr are ignored.
+// abbreviated form (stops the bar) from a malformed "9;4;". State 4 follows
+// iTerm2. Neither spec defines malformed input: an unparseable field keeps the
+// previous state, pr is clamped to 0-100, and extra fields are ignored.
 func (s *Screen) setProgress(rest string, hasFields bool) {
 	if !hasFields {
 		// Abbreviated form: no state field at all means stop the progress bar.
@@ -246,7 +233,7 @@ func isAllDigits(s string) bool {
 	return true
 }
 
-// sanitizeNotification drops every rune of runesafe's unsafe classes — C0
+// sanitizeNotification drops every rune of textsafe's unsafe classes — C0
 // controls (newlines included) + DEL, C1 controls, Bidi_Control (Trojan-Source
 // reordering), and U+2028/U+2029 (JS line terminators) — from an OSC 9 message
 // and clamps it to maxNotificationLen runes, so the stored text is safe to
@@ -258,7 +245,7 @@ func sanitizeNotification(data string) string {
 		if n >= maxNotificationLen {
 			break
 		}
-		if runesafe.IsUnsafeSingleLine(r) {
+		if textsafe.IsUnsafeSingleLine(r) {
 			continue
 		}
 		b.WriteRune(r)
@@ -597,17 +584,8 @@ func (s *Screen) dynColor(slot int) int32 {
 // Format: params;URI — params may contain id=... separated by ':'. An empty URI
 // closes the current hyperlink.
 //
-// A payload with no second semicolon carries no URI field and is MALFORMED, so
-// it is ignored: the sequence is discarded and whatever hyperlink the pen holds
-// stays. That matches ghostty, whose OSC 8 parser moves to its invalid state
-// when the second separator is missing, and it is the conservative direction —
-// clearing instead would let one corrupt byte inside a URL end a link the
-// application had legitimately opened, mid-label.
-//
-// The unbounded-bleed failure this looks like it should guard against comes from
-// somewhere else entirely: an application that opens a link and never closes it.
-// No spelling of OSC 8 fixes that, and the pen's escape hatches are the three
-// sequences that reset it (empty URI, DECSTR, RIS) plus a screen switch.
+// A payload with no second semicolon is malformed and ignored, keeping the
+// pen's link, as ghostty does, so one corrupt byte cannot end a link mid-label.
 func (s *Screen) handleOsc8(data string) {
 	// Split on first ';' to separate params from URI.
 	_, uri, ok := strings.Cut(data, ";")

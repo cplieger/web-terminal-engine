@@ -7,16 +7,10 @@ import (
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
-// flushFrameBuilder computes outbound flush frames by diffing the
-// current screen state against the previously sent state.
-//
-// The diff is keyed by ABSOLUTE LINE INDEX, not by screen row. When the
-// screen scrolls up by K lines, a given line of content keeps its
-// absolute index (it just moves from window row y+K to window row y), so
-// comparing by absolute index means a pure scroll re-sends nothing: only
-// genuinely new or rewritten lines go on the wire. This is what lets the
-// client store every line idempotently by absolute index and never see a
-// duplicate.
+// flushFrameBuilder computes outbound flush frames by diffing the current
+// screen against the previously sent state, keyed by absolute line index, not
+// screen row: a pure scroll re-sends nothing, and the client stores each line
+// idempotently by index.
 type flushFrameBuilder struct {
 	prevTitle       string
 	prevRowWires    [][]vt.WireRun // last-sent window content; prevRowWires[i] is absolute index prevBase+i
@@ -46,22 +40,16 @@ func (b *flushFrameBuilder) Reset() {
 	b.prevRowWires = nil
 	b.prevBase = 0
 	b.prevCurValid = false
-	// A new/resuming client needs the current DEC modes and window title
-	// resent; without clearing these, modesStable/titleStable suppress the
-	// re-announce and a client that connects after they were set (page reload
-	// mid-session, second tab) keeps default modes (breaking mouse and arrow-key
-	// input encoding) and a stale title.
+	// A new or resuming client needs modes and title re-announced, or it keeps
+	// default modes (broken mouse and arrow encoding) and a stale title.
 	b.modesAnnounced = false
 	b.titleAnnounced = false
 }
 
-// Build computes the next outbound frame from the current screen state
-// and client snapshot. sizeEstablished gates emission entirely: until the
-// PTY has real dimensions (Handler.sizeEstablished), frames would be
-// rendered against a zero-size screen, so Build only drains scrollback and
-// returns nil. committedBefore is the absolute index of the top screen row
-// before this frame's drain is committed to history. Returns nil if there
-// is nothing to send.
+// Build computes the next outbound frame, or nil when there is nothing to
+// send. Until sizeEstablished it only drains scrollback, since a frame would
+// render a zero-size screen. committedBefore is the top row's absolute index
+// before this frame's drain is committed.
 func (b *flushFrameBuilder) Build(screen *vt.Screen, sizeEstablished bool, clients map[*websocket.Conn]uint64, committedBefore uint64) *flushFrame {
 	if !sizeEstablished {
 		screen.DrainScrollback()
@@ -83,11 +71,8 @@ func (b *flushFrameBuilder) Build(screen *vt.Screen, sizeEstablished bool, clien
 	drained, drainedWrapped := drainScrollback(screen)
 	var scrollOut [][]vt.WireRun
 	var scrollWrapped []bool
-	// Drain that straddles an alt-screen transition belongs to the buffer just
-	// left. vt's scrollUpOnce (csi.go:501) appends scrolled lines to Drained on any
-	// full-screen scroll region without checking InAltScreen, so on alt->main exit
-	// the leftover alt lines would be committed as main scrollback. Only emit drain
-	// that accrued purely on the main screen with no transition this tick.
+	// vt's scrollUpOnce drains alt-screen lines too, so commit only drain that
+	// accrued on the main screen with no alt transition this tick.
 	if !screen.InAltScreen && !altChanged && len(drained) > 0 {
 		scrollOut, scrollWrapped = drained, drainedWrapped
 	}
@@ -111,11 +96,8 @@ func (b *flushFrameBuilder) Build(screen *vt.Screen, sizeEstablished bool, clien
 	// the inline cursor span moves. trackCursor folds those rows in.
 	changed, cursorMoved := b.trackCursor(changed, len(rows), curRow, curCol)
 
-	// A bell (BEL 0x07) changes no cell and moves no cursor, so `changed` stays
-	// empty and the frame is dropped below (bell was already cleared at line
-	// 86-87). Even a forced non-nil frame would not deliver it: dispatchFrame
-	// gates the screen payload on len(changed) > 0. Fold the cursor row in so the
-	// screen frame is emitted and its cursorFlags bell bit reaches the client.
+	// A bell changes no cell, and the screen payload needs a changed row, so
+	// fold in the cursor row for its cursorFlags bell bit to reach the client.
 	if bell {
 		changed = appendRowIfMissing(changed, curRow, len(rows))
 	}
@@ -179,11 +161,8 @@ func (b *flushFrameBuilder) diffWindow(rows [][]vt.WireRun, base uint64) []int {
 // prevRow returns the last-sent content for absolute index abs, and whether
 // the cache covers that index at all.
 //
-// The cached flag is not a convenience: a row holding nothing but padding
-// encodes to ZERO runs (vt's trailing-blank trim), so a nil slice is now a
-// legitimate row VALUE and can no longer double as "no baseline". Reading it as
-// one marked every blank row changed on every frame, which kept frameEmpty from
-// ever holding and made a completely idle screen emit a frame per flush tick.
+// A blank row encodes to zero runs, so a nil slice is a real row value; read
+// as "no baseline" it would make an idle screen emit a frame every tick.
 func (b *flushFrameBuilder) prevRow(abs uint64) (runs []vt.WireRun, cached bool) {
 	prevLen := uint64(len(b.prevRowWires))
 	if prevLen == 0 || abs < b.prevBase || abs >= b.prevBase+prevLen {

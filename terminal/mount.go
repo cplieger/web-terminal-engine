@@ -38,40 +38,11 @@ const (
 	noStorePolicy      = "no-store"
 )
 
-// withNoStore states the session REST surface's cache policy on the response
-// header map BEFORE h runs. It is applied at two sites — inside RESTHandler
-// (upstream of the inner mux) and in MountSessionRoutes (upstream of a create
-// gate) — because neither alone covers everything; see MountSessionRoutes.
-//
-// What is at risk here is the cache KEY, not the body. Every session REST path
-// past the collection carries a session id as a path segment, and that id IS the
-// capability the /ws attach and resume present (the reason LogID exists and the
-// reason writeJSON refuses to let the two JSON bodies be stored). The responses
-// this wrapper newly covers carry no credential in their bodies at all — the
-// inner mux's 404 and 405 are net/http's constant error text, a path-cleaning
-// redirect is a Location header, a gate refusal is the consumer's throttle body.
-// The exposure is that a cache retains an ENTRY keyed by a token-bearing URL,
-// which RFC 9110 §15.1 invites by listing 404 and 405 among the statuses a cache
-// may reuse heuristically when the response carries no explicit freshness
-// information — and with no directive at all, those responses carried none.
-//
-// Setting the header here rather than in each handler settles the ordering
-// requirement STRUCTURALLY: the value is in the map before any handler can call
-// WriteHeader, after which a late Set is silently dropped and a wrapper that
-// looks correct does nothing. This site cannot be missed either — it is upstream
-// of every route in the mux, of every http.Error those routes reach, and of the
-// responses the mux synthesizes for a path or method it does not serve, which no
-// handler is invoked to write.
-//
-// A value already present is left exactly as it is. That is the deliberate
-// escape hatch, and it is why the policy needs no opt-out MountOption: a
-// consumer that wants a different answer — a stricter "no-store, no-cache,
-// must-revalidate", or genuinely wanting one of these routes cached — says so by
-// setting the header in its own outer middleware, which then stays that header's
-// single writer. The package cannot rank a stricter value against a weaker one
-// without parsing directives, so it treats any present value as intentional.
-// writeJSON is the one deliberate exception and overwrites: its bodies
-// CONTAIN the id, so their prohibition is not the consumer's to relax.
+// withNoStore sets Cache-Control: no-store before h runs, so even the mux's
+// own 404, 405 and redirects carry it. Session paths hold the session id, a
+// capability, and RFC 9110 §15.1 lets a cache reuse a 404 or 405 keyed by that
+// URL. A value already set by the consumer's middleware is kept;
+// writeJSON alone overwrites, because its bodies contain the id.
 func withNoStore(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if w.Header().Get(cacheControlHeader) == "" {
@@ -89,18 +60,10 @@ type mountConfig struct {
 	createGate func(http.Handler) http.Handler
 }
 
-// WithCreateGate wraps the session REST handler with mw before mounting, so a
-// caller cannot spawn PTY-backed child processes without bound: Create eagerly
-// forks one process per admitted POST, which is exactly the
-// expensive-shared-resource shape an aggregate rate limit exists for. The gate
-// is INJECTED rather than built in because throttle policy (tuning, the 429
-// body, whether to gate at all) is the consumer's decision and the engine
-// takes no HTTP-middleware dependency; pass a middleware that scopes itself to
-// the create request — e.g. webhttp.SessionCreateRateLimit(SessionsPath),
-// whose predicate gates POST SessionsPath and passes GET/DELETE/PUT through.
-// The gate wraps the REST handler on BOTH its mounts (SessionsPath and
-// SessionsSubtreePath) and never wraps the WebSocket or events handlers. A nil
-// mw is ignored (no gate).
+// WithCreateGate wraps the session REST handler with mw on both its mounts,
+// never the WebSocket or events handlers, so a consumer can bound process
+// creation: each admitted POST forks one process. Pass a middleware that gates
+// only POST SessionsPath, such as a rate limiter. A nil mw is ignored.
 func WithCreateGate(mw func(http.Handler) http.Handler) MountOption {
 	return func(c *mountConfig) {
 		if mw != nil {
@@ -110,17 +73,9 @@ func WithCreateGate(mw func(http.Handler) http.Handler) MountOption {
 }
 
 // SessionHandlers is the trio MountSessionRoutes wires: the terminal WebSocket,
-// the session REST API, and the status stream (SSE). A struct rather than three
-// positional http.Handler parameters because the three are adjacent and
-// same-typed, and a transposed pair produced a mux that still compiled and
-// still answered requests — just each on the wrong route. Field names label
-// each handler at the call site; normally the three are one SessionManager's
-// WebSocketHandler / RESTHandler / EventsHandler, which MountAPI wires for you.
-//
-// Every field is required. The zero SessionHandlers is not usable: a nil
-// handler reaches net/http's registration, which panics on "nil handler", so a
-// partially-filled literal fails at mount time rather than serving a route
-// that answers nothing.
+// the session REST API, and the status stream (SSE), normally one
+// SessionManager's handlers, which MountAPI wires for you. Every field is
+// required: a nil handler panics in net/http's registration at mount time.
 type SessionHandlers struct {
 	// WS serves the terminal WebSocket (mounted at WSPath).
 	WS http.Handler
@@ -150,16 +105,8 @@ func MountSessionRoutes(mux *http.ServeMux, h SessionHandlers, opts ...MountOpti
 	if c.createGate != nil {
 		rest = c.createGate(rest)
 	}
-	// Outside the gate, deliberately. A gate refusal (webhttp's 429) is written
-	// BY the gate and never reaches the REST handler, so RESTHandler's own
-	// withNoStore cannot cover it — and a refusal lands on the same token-bearing
-	// paths as everything else, with the same cache-key exposure. Wrapping the
-	// gated handler covers both it and everything it delegates to. Applied
-	// unconditionally, so a consumer inherits the policy by bumping the engine
-	// rather than by remembering an option; RESTHandler has already set the
-	// header by the time the inner copy runs, which that copy then leaves alone.
-	// Only rest is wrapped: WS is a WebSocket handshake, and Events sets its own
-	// stricter "no-cache, no-store" (see writeSSEHeaders).
+	// Outside the gate, so a gate refusal on these token-bearing paths is covered
+	// too. Events sets its own headers (writeSSEHeaders).
 	rest = withNoStore(rest)
 	mux.Handle(WSPath, h.WS)
 	mux.Handle(SessionsPath, rest)

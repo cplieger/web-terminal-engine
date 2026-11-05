@@ -1,18 +1,9 @@
 package terminal
 
-// SessionManager runs N independent PTY-backed terminal sessions behind one set
-// of HTTP handlers, so a browser can open several terminals (tabs) against one
-// server. Each session is a *Handler (its own process, VT screen, scrollback,
-// and resume state); sessions run continuously whether or not a client is
-// attached. The manager owns creation, lookup, the crypto-random session id
-// (which is both the routing id in /ws?session=<id> and the resume id), and an
-// ownership-keyed idle reaper.
-//
-// Why N plain PTYs and not a terminal multiplexer: nesting under tmux would mean
-// speaking tmux control mode to get per-session chrome, and a full-screen TUI
-// under tmux collides on the prefix key and mouse/focus passthrough. dtach adds
-// nothing here because the server process already outlives any client socket,
-// which is the persistence we need.
+// SessionManager runs independent PTY sessions, each a *Handler, behind one set
+// of HTTP handlers. Plain PTYs, not tmux: a TUI under tmux collides on the
+// prefix key and mouse passthrough, and the server already outlives every
+// client socket.
 
 import (
 	"cmp"
@@ -33,36 +24,15 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/cplieger/runesafe/v3"
+	"github.com/cplieger/go/textsafe"
 )
 
 // SessionID identifies one session: the value Create mints (128-bit
-// crypto-random hex), the key /ws?session=<id> routes by, and the resume id. A
-// distinct type rather than a bare string because a session id shares a
-// parameter list with other strings on this surface (SetSessionTitle's title
-// sits right next to it), and a swapped pair type-checks as plain strings while
-// storing the id as a tab label. The type makes the ID position sticky, so a
-// misplaced argument fails to compile.
-//
-// The type spans TWO populations, and the difference matters at every use:
-//
-//   - Ids this manager minted. Crypto-random hex, present in its maps.
-//   - Ids a caller ASSERTS. A resume frame's controlMsg.SessionID and the
-//     /ws?session= query value are arbitrary attacker-chosen bytes that arrive
-//     already typed. THE TYPE IS NOT VALIDATION: converting a string to
-//     SessionID checks nothing, and no constructor gates it.
-//
-// So a SessionID is only known to name a real session once a manager lookup
-// says so — that lookup is the gate, not the type. Treat any id that has not
-// been through one as untrusted text: bound it with LogID before it reaches a
-// log, and never join it into a path (Containment.create sanitizes for exactly
-// this reason). What the type buys is that the id cannot be transposed with a
-// title, a path, a command or a cgroup prefix, which is a different and
-// narrower claim than validity.
-//
-// On the wire an id is a plain JSON string: SessionID declares no MarshalJSON,
-// so encoding/json emits a defined string type exactly as its underlying
-// string, and omitempty elides it on empty as before.
+// crypto-random hex), the key /ws?session=<id> routes by, and the resume id.
+// The type prevents transposing it with another string; it is not validation.
+// An id from a request is attacker-chosen until a manager lookup finds it:
+// bound it with LogID before logging, and never join it into a path. On the
+// wire it is a plain JSON string.
 type SessionID string
 
 // SessionInfo is the public description of one session, returned by List and
@@ -86,34 +56,17 @@ type SessionInfo struct {
 	// precedence baked into Title) — used by an input-title UI that treats a
 	// program's OSC window title as unreliable.
 	ClientTitle string `json:"clientTitle"`
-	// PinnedTitle is the user's explicit name for this session, set through
-	// PUT /api/sessions/{id}/pinned-title and cleared through DELETE on the same
-	// path. It outranks every automatic source in Title; it is also exposed raw
-	// so a UI can tell that a pin EXISTS (to offer the automatic name again)
-	// rather than only seeing its effect.
+	// PinnedTitle is the user's explicit name (PUT or DELETE
+	// /api/sessions/{id}/pinned-title), which outranks every source in Title;
+	// exposed raw so a UI can tell that a pin exists.
 	PinnedTitle string `json:"pinnedTitle"`
 	Status      string `json:"status"` // a Status* value, or any status WithStatusClassifier returned
 	// Activity is the session's SECONDARY activity state ("" when none), carried
 	// beside Status and never merged into it. See SessionActivity.
 	Activity string `json:"activity"`
-	// Order is the session's position in the display order every viewer shares:
-	// 0-based, dense, and unique across the live set. It exists because the
-	// order is a property of the SESSION SET rather than of one browser, so two
-	// devices showing the same server agree on the arrangement, and a reorder
-	// made on one appears on the other.
-	//
-	// Read this FIELD to order a list, not the sequence the sessions arrived in.
-	// The REST list and the status stream are both served in this order, but a
-	// consumer that merges them (subscribing before its bootstrap list resolves,
-	// which is the way to avoid double-adopting a session) sees neither
-	// sequence intact.
-	//
-	// ABSENT on a status event carrying Removed: the session has left the order
-	// and has no position to report. The status stream's copy of this field is a
-	// pointer with omitempty for exactly that reason (see statusEvent.Order) —
-	// absent and present-and-zero are different answers, and 0 is the FRONT of the
-	// strip, so a consumer that read 0 there would be told a closing session had
-	// just become the first tab.
+	// Order is the session's 0-based, dense, unique position in the display
+	// order every viewer shares. Sort by this field: a consumer merging the REST
+	// list with the status stream sees neither sequence intact.
 	Order int `json:"order"`
 	// ActivityCount is how many sources produced Activity: >= 1 whenever Activity
 	// is non-empty, 0 when it is empty or the host does not count.
@@ -148,25 +101,17 @@ const (
 	StatusInput   = "input"   // blocked awaiting user action: OSC 7501 blocked, or latched from a notification
 	StatusDone    = "done"    // a turn completed: OSC 7501 done, or latched from a notification
 	StatusExited  = "exited"  // the process has exited
-	// StatusCrashed is a session whose process exited BADLY: a non-zero exit
-	// status, or a terminating signal it was not asked for. StatusExited is
-	// reserved for an ordinary end — status 0, or any exit the server itself
-	// caused (Close, the idle reaper, Shutdown) — so a routine restart never
-	// reads as a failure. crashedExit owns the exact boundary and states why
-	// each case falls where it does.
+	// StatusCrashed is a non-zero exit or an unrequested terminating signal;
+	// an exit the server caused is StatusExited. crashedExit owns the boundary.
 	StatusCrashed = "crashed"
 	// StatusFailed is OSC 7501 error, or OSC 9;4 progress state 2: the program
 	// reported an error state (with a percentage, or indeterminate when pr is
 	// omitted). It PERSISTS until the program changes it — it is a state, not
 	// an event, so no timeout and no output activity clears it.
 	StatusFailed = "failed"
-	// StatusWarning is OSC 9;4 progress state 4; after an OSC 7501 report,
-	// OSC 9;4 does not set it again until the next RIS. The two sources that define
-	// these sequences disagree on state 4: iTerm2 calls it a warning at pr
-	// percent, ConEmu calls it paused. The engine follows iTerm2, because it
-	// advertises TERM_PROGRAM=iTerm.app — that identity is what makes a client
-	// emit these sequences at all — and iTerm2's definition is the more
-	// specified of the two. Persists like StatusFailed.
+	// StatusWarning is OSC 9;4 state 4, iTerm2's warning (ConEmu reads it as
+	// paused), followed because the engine advertises TERM_PROGRAM=iTerm.app.
+	// Persists like StatusFailed; after an OSC 7501 report, only RIS re-enables it.
 	StatusWarning = "warning"
 )
 
@@ -258,12 +203,8 @@ type session struct {
 	alias       string // public URL name; see SessionInfo.Alias
 	clientTitle string // client-derived automatic title, below the OSC title
 	pinnedTitle string // the user's explicit name; outranks every automatic source
-	// autoTitle is the server-derived fallback (foreground process, then cwd,
-	// then command basename): the LAST rung, used when nothing else named the
-	// session. Only the status sweep writes it — see confirmAutoTitle — so List
-	// and snapshot read one confirmed value instead of each probing procfs and
-	// disagreeing with the live stream. Initialised at Create to the command
-	// basename so a List served before the first sweep still answers.
+	// autoTitle is written only by confirmAutoTitle, and set to the command
+	// basename at Create so a List before the first sweep still answers.
 	autoTitle string
 }
 
@@ -320,11 +261,8 @@ type SessionManager struct {
 	// after both loops are counted.
 	loopsDone chan struct{}
 	idleSince time.Time
-	// order is the display order every viewer shares: session ids, exactly the
-	// keys of sessions, maintained at the four sites that change the set (create
-	// appends, Close removes, the reaper and Shutdown clear). A slice rather than
-	// a position per session: a reorder writes one value and a close leaves no
-	// gap. Held in memory; CaptureSessionSet exports it.
+	// order holds exactly the keys of sessions; every site that changes the
+	// set (Create, Close, the reaper, Shutdown) must update it.
 	order         []SessionID
 	layout        PaneLayout
 	wg            sync.WaitGroup
@@ -515,19 +453,19 @@ const logIDPrefixBytes = 8
 // LogID returns a short, correlation-safe prefix of a session id for logs: at
 // most the first 8 bytes, cut on a rune boundary, plus an ellipsis when cut. A
 // client-supplied id is arbitrary bytes (see SessionID), so the prefix goes
-// through runesafe.SanitizeSingleLine and is always one valid UTF-8 line; a
+// through textsafe.SanitizeSingleLine and is always one valid UTF-8 line; a
 // minted hex id passes unchanged. The full id is a capability token (CWE-532 if
 // logged whole): every consumer that logs a session id passes it through here
 // rather than re-deriving the cut, and should pin the logged value in a test.
 func LogID(id SessionID) string {
 	if len(id) <= logIDPrefixBytes {
-		return runesafe.SanitizeSingleLine(string(id))
+		return textsafe.SanitizeSingleLine(string(id))
 	}
 	cut := logIDPrefixBytes
 	for cut > 0 && !utf8.RuneStart(id[cut]) {
 		cut--
 	}
-	return runesafe.SanitizeSingleLine(string(id[:cut])) + "\u2026"
+	return textsafe.SanitizeSingleLine(string(id[:cut])) + "\u2026"
 }
 
 // sessionOrder is one session's sort key for an enumeration: its position in the
@@ -542,19 +480,9 @@ type sessionOrder struct {
 // compareSessionOrder is the one order the session set is served in: the shared
 // display order first, then oldest createdAt, then id.
 //
-// Both enumerations use it — List (GET /api/sessions) and snapshot (the status
-// stream's initial sync) — so the two can never report a different order for the
-// same set. Until 3.10.0 they did: snapshot ranged m.sessions and returned
-// unsorted, Go randomizes map iteration per range, and a client that placed tabs
-// in arrival order therefore got a different strip on every connect.
-//
-// The createdAt and id keys are NOT redundant behind rank. rankOf gives a
-// session missing from m.order a rank past the end, and these two then order
-// those strays deterministically instead of letting them alias onto position 0.
-// That state is an invariant violation rather than a reachable case (see the
-// order field), so this is how a desync degrades: stray sessions sort last, by
-// age, and the strip stays stable. The id key also makes the order total, which
-// is what lets a client treat it as a fact rather than a hint.
+// List and snapshot both use it, so they always agree. The createdAt and id
+// keys order a session missing from m.order (an invariant violation) last and
+// stably, and make the order total.
 func compareSessionOrder(a, b sessionOrder) int {
 	if a.rank != b.rank {
 		return cmp.Compare(a.rank, b.rank)
@@ -593,41 +521,12 @@ func (m *SessionManager) dropFromOrderLocked(id SessionID) {
 	}
 }
 
-// SetSessionOrder replaces the display order every viewer shares, and is the
-// whole write side of tab-order sync: the caller sends the complete list of live
-// session ids in the order it wants them shown, and the next status sweep pushes
-// each session's new position to every other client within a tick.
-//
-// The list must name the live session set EXACTLY — same length, every id live,
-// no duplicates — and the whole write is refused otherwise. That one check does
-// three jobs. It keeps positions dense and unique, which is what makes a
-// position meaningful at all. It makes the write atomic, so two viewers
-// reordering at once produce an arrangement one of them actually chose rather
-// than an interleaving of both. And it turns a stale view into a refusal a
-// client can react to: a caller that has not yet seen a session created or
-// closed elsewhere is told so, instead of silently dropping that session out of
-// the order or resurrecting a dead id into it.
-//
-// No revision or If-Match beyond that. The set check already detects every
-// disagreement about WHICH sessions exist, and for a disagreement about their
-// ORDER alone the outcome is the same either way: whoever wrote last chose the
-// arrangement. A revision would only let a client discover that before being
-// told, at the cost of a rebase problem (re-applying "move this tab to position
-// 3" onto a list that changed underneath) with no better answer at the end.
-//
-// One precondition the set check CANNOT enforce, and a caller has to hold to it:
-// the list must be derived from a fully applied view. A reorder reaches a client
-// as one status event per moved session, so a client that re-sorts mid-burst
-// briefly holds two sessions at one position; a list derived from that hybrid
-// still names the live set exactly, so it is accepted and becomes the arrangement
-// every device sees — an arrangement no user chose, and one that does not heal
-// because it is now the server's answer. Apply the whole tick, then derive
-// anything you send back.
-//
-// Returns false when the list does not match, which the HTTP layer reports as
-// 409. The ids are not otherwise validated because they do not need to be: an id
-// that is not a live session fails the membership check, so no untrusted value
-// reaches the order.
+// SetSessionOrder replaces the display order every viewer shares; the next
+// status sweep pushes the new positions to every client. ids must name the
+// live set exactly (same length, all live, no duplicates), or it returns false
+// and changes nothing, so a caller with a stale view is refused. The last
+// writer wins. Derive ids from a fully applied status tick: a mid-tick view
+// can hold two sessions at one position and still pass the check.
 func (m *SessionManager) SetSessionOrder(ids []SessionID) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -861,12 +760,8 @@ func (m *SessionManager) listSnapshot(layout *PaneLayout, cleanExit *[]bool) []S
 			sessionOrder{createdAt: b.info.CreatedAt, id: b.info.ID, rank: b.rank},
 		)
 	})
-	// The published position is the index in THIS sequence, and this is the only
-	// write to the field, so what a client sorts by is 0-based, dense and unique
-	// whatever the manager's internal state happens to be. Taking it from the rank
-	// map instead would let two sessions the order does not name (an invariant
-	// violation, hence unreachable — but a wire contract should not rest on that)
-	// both claim the same position.
+	// Order is published as the index in this sequence, never the rank, so it
+	// stays dense and unique even if m.order desyncs.
 	out := make([]SessionInfo, 0, len(items))
 	if cleanExit != nil {
 		*cleanExit = make([]bool, 0, len(items))
@@ -1112,14 +1007,9 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 		}
 		m.mu.Unlock()
 		if !ok {
-			// Unknown session: accept the upgrade and close with the readable
-			// application code 4004, which the client routes to its ended
-			// state; a pre-upgrade 404 reaches browser JS as an opaque 1006 and
-			// loops reconnects. acceptWS applies the SAME origin policy as a
-			// live session's socket (WithManagerOriginPolicy), so an embedded
-			// client from an allowed origin gets 4004, not 403. A non-WebSocket
-			// GET gets Accept's own 426, as on the known-session path, so a
-			// probe cannot tell whether a session exists.
+			// statusUnknownSession owns why this accepts and then closes. A
+			// non-WebSocket GET gets Accept's 426 on both paths, so a probe cannot
+			// tell whether a session exists.
 			ws, err := acceptWS(w, r, m.originPolicy)
 			if err != nil {
 				return // acceptWS or Accept already wrote the response (403/426)
@@ -1191,15 +1081,9 @@ func (m *SessionManager) handleList(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, m.List())
 }
 
-// handleSetOrder serves PUT /api/sessions/order: the caller sends every live
-// session id in the order it wants them shown. 204 on success, 409 when the list
-// does not name the live set (see SetSessionOrder), 400 on a body this cannot
-// read.
-//
-// 409 rather than 404 or 400 for a set mismatch: the request is well formed and
-// the resource exists, the caller's view of the session set is simply behind. A
-// client answers it by re-listing and sending again, which is also what it does
-// when it learns of a session it had not seen.
+// handleSetOrder serves PUT /api/sessions/order: 204 on success, 400 on an
+// unreadable body, and 409 when the list does not name the live set, since the
+// caller's view is behind and it should re-list and retry.
 func (m *SessionManager) handleSetOrder(w http.ResponseWriter, r *http.Request) {
 	raw, ok := decodeOrderBody(w, r)
 	if !ok {
@@ -1359,15 +1243,10 @@ func decodeSeenBody(w http.ResponseWriter, r *http.Request) (uint64, bool) {
 	return *body.Seq, true
 }
 
-// decodeTitleBody reads the shared {"title": "..."} envelope both title routes
-// use, writing the 400 itself on a body that is oversized or undecodable. The
-// returned string is RAW: each caller applies its own sanitize bound.
-// decodeTitleBody reads a title out of a PUT body. Deliberately laxer than
-// decodeOrderBody, which requires its field and refuses trailing data: tightening
-// this one turns a request a client gets away with today (trailing junk after a
-// valid title object) into a 400, which is a behaviour change to two shipped
-// routes and belongs in its own release rather than riding along with a new
-// feature. Worth doing; not here.
+// decodeTitleBody reads the {"title": "..."} body both title routes share,
+// writing the 400 itself on an oversized or undecodable body. It tolerates
+// trailing data, unlike decodeOrderBody. The returned string is raw: each
+// caller applies its own sanitize bound.
 func decodeTitleBody(w http.ResponseWriter, r *http.Request) (string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var body struct {
@@ -1390,17 +1269,9 @@ const maxOrderBodyBytes = 64 * 1024
 // decodeOrderBody reads the id list out of a PUT /api/sessions/order body,
 // answering 400 itself when it cannot.
 //
-// The field must be PRESENT: a pointer, so a body that omits "order" or sends
-// null is a malformed request rather than an empty reorder. The difference is
-// visible only when no sessions are live, where an absent list would otherwise
-// match the empty live set and answer 204 — reporting success for a client bug
-// that sent the wrong shape. `{"order":[]}` against no sessions is still the
-// honest empty reorder and still succeeds.
-//
-// Trailing data is refused too. A single Decode stops at the end of the first
-// JSON value, so `{"order":[...]}{"order":[...]}` and `{...}garbage` would both
-// be accepted on the strength of the part that parsed, and the caller would
-// never learn that half its request was ignored.
+// A missing or null "order" is malformed, not an empty reorder, which would
+// otherwise match an empty live set. Trailing data after the first JSON value
+// is refused, so half a request is never silently ignored.
 func decodeOrderBody(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxOrderBodyBytes)
 	var body struct {

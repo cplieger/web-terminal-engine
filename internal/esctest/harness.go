@@ -2,21 +2,13 @@
 // (github.com/ThomasDickey/esctest2, George Nachman's esctest with Thomas
 // Dickey's fixes) against the engine's vt.Screen.
 //
-// esctest2 is GPL-2.0; the engine is MPL-2.0. Those cannot be COMBINED into one
-// work in this direction: MPL-2.0 §3.3 lets MPL files enter a GPL work, not GPL
-// code enter an MPL one. To keep the licenses at arm's length, esctest2 is NEVER
-// vendored into this repo. It is fetched separately (see scripts/esctest.sh) and
-// located at run time via the ESCTEST2_DIR environment variable. The suite is
-// executed as an ordinary subprocess and communicated with over a PTY — it is
-// never linked into the engine — so this is mere aggregation, not a derived work.
+// esctest2 is GPL-2.0 and the engine MPL-2.0; MPL-2.0 §3.3 lets MPL code enter
+// a GPL work, not the reverse, so it is never vendored: scripts/esctest.sh
+// fetches it, ESCTEST2_DIR locates it, and it runs as a subprocess over a PTY,
+// never linked.
 //
-// The model: esctest runs as the child process of a terminal. It writes escape
-// sequences to its stdout (which the terminal renders) and reads state back
-// through queries (cursor-position reports, and rectangular-area checksums via
-// DECRQCRA). It never inspects pixels, so it validates the Go VT state machine
-// directly with no browser involved. Run drives a real PTY: the child's stdout
-// feeds vt.Screen, and vt.Screen's Response bytes (query answers) are written
-// back to the child's stdin.
+// Run feeds the child's stdout to vt.Screen and writes the screen's query
+// answers back to its stdin, validating the VT state machine with no browser.
 package esctest
 
 import (
@@ -44,13 +36,9 @@ type Options struct {
 	Python string
 	// Include is a regexp restricting which tests run (esctest --include; default ".*").
 	Include string
-	// Options are esctest --options flags (e.g. "xtermWinopsEnabled"). Enabling
-	// xtermWinopsEnabled is the maximum-strictness setting: it turns the tests
-	// gated behind optionRequired(XTERM_WINOPS_ENABLED) — OSC 52 selection
-	// query, the Set/Reset-Title-Mode hex/UTF-8 tests, and DECNCSM — from
-	// "expected to fail (option missing)" into MUST-PASS. Do NOT add
-	// disableWideChars (it would force the 8-bit C1 control tests, which are
-	// incompatible with a UTF-8 terminal, into hard failures).
+	// Options are esctest --options flags; xtermWinopsEnabled makes its gated
+	// tests must-pass. Never add disableWideChars: it forces the 8-bit C1 tests,
+	// which a UTF-8 terminal cannot pass.
 	Options []string
 	// Timeout is how long esctest waits for each query response (default 1s).
 	Timeout time.Duration
@@ -83,15 +71,9 @@ var (
 	// every clean run and never on a runner-level crash, so its mere presence
 	// signals the run finished (see Run).
 	summaryRe = regexp.MustCompile(`\*{3} .*passed.*\*{3}`)
-	// summaryCountRe captures esctest's own passed/failed tallies from that same
-	// summary line so crossCheckSummary can compare them against the counts
-	// parseLog scrapes from per-test markers. esctest2 (pinned commit 664be3c)
-	// emits a three-clause summary via RunTests, e.g.
-	// "*** 498 tests passed, 34 known bugs, 0 tests failed ***", and upper-cases
-	// the failed clause to "N TESTS FAILED" whenever any test fails. The pattern
-	// therefore matches case-insensitively and tolerates the interposed
-	// "K known bug(s)," clause while still capturing passed (group 1) and failed
-	// (group 2).
+	// summaryCountRe captures passed and failed from esctest2's (664be3c)
+	// summary, "*** 498 tests passed, 34 known bugs, 0 tests failed ***", whose
+	// failed clause is upper-cased when any test fails.
 	summaryCountRe = regexp.MustCompile(`(?i)\*{3}\s+(\d+)\s+tests?\s+passed,\s+(?:\d+\s+known\s+bugs?,\s+)?(\d+)\s+tests?\s+failed\s+\*{3}`)
 )
 
@@ -126,13 +108,8 @@ func Run(ctx context.Context, opts *Options) (*Result, error) {
 	}
 	defer func() { _ = ptmx.Close() }()
 
-	// esctest runs with --expected-terminal=xterm and its per-test reset()
-	// establishes xterm's stock black-on-white resources (OSC 10 #000, OSC 11
-	// #fff). Configure the screen with that same theme so dynamic-color reset
-	// (OSC 110/111/112) restores the xterm default esctest asserts, rather than
-	// the engine's real dark default (which is correct for the browser but not
-	// what the xterm-conformance suite expects). This is test-harness config,
-	// like AllowScreenReport below; the shipped engine default stays dark.
+	// esctest's xterm reset asserts black on white, so OSC 110-112 must restore
+	// that rather than the engine's dark default.
 	screen := vt.New(cfg.Rows, cfg.Cols, vt.WithTheme(vt.Theme{
 		Foreground: vt.RGB(0, 0, 0),
 		Background: vt.RGB(0xff, 0xff, 0xff),
@@ -267,19 +244,9 @@ func parseLog(log string) *Result {
 	return res
 }
 
-// crossCheckSummary verifies esctest's own summary tallies match the counts
-// parseLog scraped from per-test markers. parseLog derives Passed by counting
-// "Passed." lines and Failed from "*** TEST x FAILED" markers; esctest's
-// summary ("*** N tests passed, K known bugs, M tests failed ***", with the
-// failed clause upper-cased to "M TESTS FAILED" on any failure) is an
-// independent count of the same outcomes, so the two must agree. When they
-// diverge the per-test scraper is blind to some result — a test that ERRORED
-// instead of cleanly FAILING, or a renamed marker — so this returns an error to
-// fail the gate loudly rather than report a false green. If the summary counts
-// cannot be parsed at all (an unrecognized format), the cross-check is skipped
-// with a warning rather than failed: parseLog's per-test-marker counts remain
-// the authoritative result, so a summary-wording drift must not turn the whole
-// gate red on its own.
+// crossCheckSummary returns an error when esctest's own summary tallies differ
+// from parseLog's per-test counts, which means the scraper missed a result. An
+// unparseable summary only warns: parseLog's counts stay authoritative.
 func crossCheckSummary(log string, res *Result) error {
 	m := summaryCountRe.FindStringSubmatch(log)
 	if m == nil {

@@ -1,28 +1,9 @@
 package vt
 
-// SCS (Select Character Set) support: G0-G3 designation, SO/SI locking shifts,
-// SS2/SS3 single shifts, and the DEC Special Graphics character set.
-//
-// Implements:
-//   - ESC ( <final>  → designate G0
-//   - ESC ) <final>  → designate G1
-//   - ESC * <final>  → designate G2
-//   - ESC + <final>  → designate G3
-//   - SO (0x0E)      → GL = G1 (locking shift)
-//   - SI (0x0F)      → GL = G0 (locking shift)
-//   - ESC N          → SS2 (single shift G2 for next printable)
-//   - ESC O          → SS3 (single shift G3 for next printable)
-//
-// Supported charsets: B = US ASCII (identity), 0 = DEC Special Graphics,
-// A = UK NRCS ('#' -> '£'). All other final bytes are treated as ASCII
-// (consumed, no error).
-//
-// OUT OF SCOPE: the remaining NRCS national replacement sets (French, German,
-// etc.). Their final byte is consumed but the charset is treated as ASCII —
-// they only matter for legacy non-UTF-8 apps.
-//
-// Reference: xterm.js Charsets.ts (MIT), VT220 Programmer Reference Manual
-// Table 2-4, Wikipedia "DEC Special Graphics".
+// SCS support: G0-G3 designation (ESC ( ) * +), SO/SI locking shifts and
+// SS2/SS3 single shifts. Charsets B (ASCII), 0 (DEC Special Graphics) and A
+// (UK) are mapped; every other final byte, the other NRCS sets included, is
+// read as ASCII. References: xterm.js Charsets.ts, VT220 manual Table 2-4.
 
 // charset identifies a character set designation.
 type charset uint8

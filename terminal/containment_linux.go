@@ -32,50 +32,11 @@ type Containment struct {
 // NewContainment prepares root for per-session containment and returns a handle,
 // or errContainmentUnsupported wrapped with the reason.
 //
-// root must be a WRITABLE cgroup v2 mount, which on a container means the mount
-// has been made read-write already (Docker mounts it read-only; the established
-// workaround is a one-time `mount -o remount,rw /sys/fs/cgroup` with
-// CAP_SYS_ADMIN in the entrypoint, after which the capability can be dropped:
-// every operation below is governed by file permissions, not capabilities).
-// It is typed (CgroupRoot) where prefix stays a plain string, so the two
-// same-shaped arguments cannot silently trade places.
-//
-// prefix namespaces every directory this package creates (e.g. "wt-"), which is
-// what lets the startup sweep recognize its own leftovers and never remove a
-// cgroup something else made.
-//
-// Order matters, and the ordering rule is that every check which can REFUSE runs
-// before anything that MUTATES:
-//
-//  1. verify root is a cgroup2 filesystem;
-//  2. verify root is this process's OWN cgroup root, not a shared or host one.
-//     Everything below rearranges the tree, so pointing this at the host's root
-//     (a container with a host cgroup namespace, or a server run as root on a
-//     workstation) would relocate unrelated workloads;
-//  3. sweep leftovers from a previous run, before the probe needs its own
-//     scratch cgroup back;
-//  4. probe that the kernel permits the clone3 syscall clone-time placement
-//     requires. This is NOT redundant with a writable root: they are independent,
-//     and a host with one but not the other would otherwise fail at the first
-//     session spawn rather than here. It needs no controllers, so it runs before
-//     delegation;
-//  5. move every process out of root, since cgroup v2 forbids enabling domain
-//     controllers on a cgroup that holds processes. Every process, not just this
-//     one: a container init or a stray docker exec would each block step 6;
-//  6. enable the memory and pids controllers for children of root;
-//  7. verify a child cgroup exposes every file teardown and logging read
-//     (cgroup.kill needs 5.14, memory.peak 5.19, pids.peak 6.1). On failure this
-//     rolls step 6 back, because leaving controllers enabled on the root imposes
-//     the no-internal-process constraint (and therefore a dependency on the
-//     container runtime's join-init-cgroup-on-EBUSY fallback for `docker exec`)
-//     on a host that gets no containment in return.
-//
-// Steps 5 and 6 are the only mutations, and step 5 is not rolled back: a process
-// moved into the server leaf is functionally where it would have been anyway, and
-// moving it back could fail for reasons that leave the tree in a worse state than
-// leaving it. So a failure after step 5 leaves processes relocated within this
-// container's own tree; it does not leave controllers enabled, and it does not
-// touch anything outside root.
+// root must be this process's own writable cgroup v2 root (Docker mounts it
+// read-only). prefix (e.g. "wt-") namespaces every directory, so the startup
+// sweep removes only its own. Refusing checks run before the mutations; a later
+// failure rolls back the controllers, not the processes moved to the server
+// leaf. Needs Linux 6.1 for pids.peak.
 func NewContainment(root CgroupRoot, prefix string, log *slog.Logger) (*Containment, error) {
 	log = containLogger(log)
 	rootDir := string(root)
@@ -128,18 +89,9 @@ func (c *Containment) path(leaf string) string {
 
 // verifyOwnRoot refuses a root that is plainly not this process's own cgroup root.
 //
-// Under a private cgroup namespace (Docker's cgroup v2 default) root IS the
-// container's own cgroup and holds no cgroups this package did not create. Under a
-// host cgroup namespace, or for a server run as root on an ordinary Linux host,
-// the same path is the HOST's root, where vacateRoot would relocate unrelated
-// workloads and delegate would rewrite the host's controller set.
-//
-// The signal is a foreign child. A systemd host's root always holds init.scope,
-// system.slice and user.slice; a container that can see the host tree sees those
-// too; a container's own root, and a delegated scratch root, hold nothing but this
-// package's own prefix. That is one readdir and it needs no assumption about where
-// this process sits, which matters because a legitimately delegated root is not
-// always the process's own cgroup.
+// On a host root, vacateRoot would relocate unrelated workloads. The signal is
+// a child cgroup without this package's prefix (a systemd host always has
+// init.scope): one readdir, assuming nothing about where this process sits.
 func (c *Containment) verifyOwnRoot() error {
 	entries, err := os.ReadDir(c.root)
 	if err != nil {
@@ -248,17 +200,9 @@ func (c *Containment) scratchCgroup() (string, error) {
 // probeCloneIntoCgroup checks that the kernel permits the clone3 syscall with
 // CLONE_INTO_CGROUP, which is what SysProcAttr.UseCgroupFD requires.
 //
-// The trick is to spawn a path that cannot exist. Go's fork path issues clone3
-// from the parent and only then execs in the child, so the two failures are
-// distinguishable and neither needs a real binary to be present (this package
-// cannot assume one: a consumer's image may be distroless):
-//
-//	ENOENT -> clone3 succeeded and only the exec failed, which is the pass condition.
-//	ENOSYS -> clone3 itself was refused, typically by a container seccomp profile.
-//	EPERM / EACCES -> the syscall is allowed but this cgroup or capability set is not.
-//
-// Anything else is reported as-is rather than guessed at; every failure disables
-// containment, and the distinction is for the operator reading the log.
+// It spawns a path that cannot exist, since a distroless image has no binary
+// to borrow: ENOENT means clone3 succeeded and only exec failed, the pass.
+// ENOSYS is usually a seccomp profile; any other error is reported as-is.
 func probeCloneIntoCgroup(cgroupFD int) error {
 	cmd := exec.CommandContext(context.Background(), "/nonexistent/web-terminal-engine-containment-probe")
 	cmd.SysProcAttr = &syscall.SysProcAttr{UseCgroupFD: true, CgroupFD: cgroupFD}
@@ -281,13 +225,9 @@ func probeCloneIntoCgroup(cgroupFD int) error {
 
 // sweep removes leftover session cgroups from a previous run of this process.
 //
-// The only thing that produces them is the server dying mid-session: a normal
-// teardown removes its own cgroup, and an unreaped zombie does not hold one (the
-// kernel detaches a task from its cgroup in do_exit, before it becomes a zombie).
-// Bounded by the prefix and by the kernel refusing to remove a cgroup that still
-// holds processes, so it cannot remove a live session or anything this package did
-// not create. Removal is depth-first because a leftover may contain sub-cgroups a
-// session created, and rmdir refuses a cgroup with children.
+// The prefix and rmdir's refusal of a populated cgroup keep it off live
+// sessions and foreign cgroups. Removal is depth-first, since rmdir also
+// refuses a cgroup with children.
 func (c *Containment) sweep() {
 	entries, err := os.ReadDir(c.root)
 	if err != nil {
@@ -424,15 +364,9 @@ func (s *sessionCgroup) current() (memBytes uint64, tasks, procs int) {
 // liveProcs returns every live process in this session's cgroup AND in any
 // sub-cgroup created beneath it.
 //
-// The recursion is not optional. cgroup.procs is per-cgroup while cgroup.events'
-// populated flag and the pids/memory counters are recursive, so enumerating only
-// the top level disagrees with the very flag teardown waits on: a session that
-// creates a sub-cgroup (its shell runs as root and this tree is writable by
-// construction) reports zero survivors while populated says 1, which would skip
-// the graceful SIGTERM pass and silence the reclaim warning in exactly the case
-// containment is doing the most work.
-//
-// Zombies are excluded by the kernel, so every entry is a live process.
+// It must recurse: cgroup.procs is per-cgroup but the populated flag teardown
+// waits on is recursive, so a top-level read would skip the SIGTERM pass for
+// a session that made a sub-cgroup. The kernel excludes zombies.
 func (s *sessionCgroup) liveProcs() []int {
 	var out []int
 	_ = filepath.WalkDir(s.dir, func(p string, d fs.DirEntry, err error) error {
@@ -460,12 +394,8 @@ func (s *sessionCgroup) populated() bool {
 
 // waitDrained waits up to timeout for the cgroup to hold no live process.
 //
-// cgroup.events is pollable and the kernel raises POLLPRI when it changes, so the
-// common case (the tree finished exiting) costs one read and the slow case costs
-// one wakeup rather than a fixed sleep. The value is read THROUGH the polled
-// descriptor: poll reports "changed since this fd last saw the value", so checking
-// it on a different descriptor would both miss a drain landing before the open and
-// never advance this fd's notion of what it has seen.
+// It polls cgroup.events for POLLPRI and reads through the polled fd: poll
+// reports changes since that fd last read, so another fd would miss a drain.
 func (s *sessionCgroup) waitDrained(timeout time.Duration) bool {
 	f, err := os.Open(filepath.Join(s.dir, "cgroup.events"))
 	if err != nil {

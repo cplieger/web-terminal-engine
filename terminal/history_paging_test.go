@@ -395,16 +395,9 @@ func TestResumeAck_historyPagingBit(t *testing.T) {
 	}
 }
 
-// TestPagingDeclaredWhereverReplayTruncates pins the invariant that couples the
-// two bounds: the resume replay is clamped UNCONDITIONALLY, so a ring the clamp
-// can truncate must declare paging or the withheld rows are unreachable for the
-// life of the session — the client has no other way to ask for them.
-//
-// The two constants were independent and left a window where that failed: the
-// threshold was 5000 and the bound 2000, so a ring configured anywhere in
-// 2001..4999 replayed its newest 2000 lines, cleared the paging bit, and stranded
-// the rest in the authoritative ring. Deriving the threshold closes the window;
-// this test is what keeps it closed if either number is edited again.
+// TestPagingDeclaredWhereverReplayTruncates pins that any ring the resume
+// replay clamp can truncate declares paging; otherwise the withheld rows are
+// unreachable for the session's life.
 func TestPagingDeclaredWhereverReplayTruncates(t *testing.T) {
 	// One line past the bound is the tightest case: the replay withholds exactly
 	// one row, and that row must still be requestable.

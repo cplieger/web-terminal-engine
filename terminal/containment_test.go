@@ -118,16 +118,8 @@ func TestWithContainmentNilIsNoop(t *testing.T) {
 	}
 }
 
-// TestUncontainedSessionIsSilent pins that a consumer who never enabled
-// containment pays nothing for it — not a cgroup attempt, and not a periodic
-// cost line. Both halves are log contracts on purpose: containment is optional,
-// so its absence is the ORDINARY case, and a warning or a per-interval Info line
-// on the ordinary case is noise in every operator's log stream forever. The cost
-// line would also be reading a cgroup that does not exist, so its numbers would
-// be zeros presented as measurements.
-//
-// Not parallel: it asserts on a captured logger and waits out several sampler
-// intervals.
+// TestUncontainedSessionIsSilent pins that a session without containment logs
+// no cgroup attempt and no cost line. Not parallel: it captures the logger.
 func TestUncontainedSessionIsSilent(t *testing.T) {
 	var buf bytes.Buffer
 	h := NewHandler([]string{"/bin/cat"},

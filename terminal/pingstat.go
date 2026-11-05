@@ -5,79 +5,26 @@ import (
 	"time"
 )
 
-// Adaptive pong timeout per WebSocket connection — Jacobson/Karels.
-//
-// Implements RFC 6298 (TCP RTO), the same algorithm TCP has used for
-// retransmission timeouts since 1988. We re-use it here for
-// WebSocket pong timeouts because the problem is the same: pick a
-// timeout that adapts to the connection's actual round-trip time
-// without false-disconnecting when latency spikes happen.
-//
-// Two state variables tracked per connection:
-//   - SRTT:   smoothed (EMA-mean) RTT
-//   - RTTVAR: smoothed (EMA-mean) absolute deviation |SRTT - R|
-//
-// Updated on every successful ping/pong:
-//
-//	RTTVAR ← (1 - β) · RTTVAR + β · |SRTT - R|       β = 1/4
-//	SRTT   ← (1 - α) · SRTT   + α · R                α = 1/8
-//	RTO    ← SRTT + K · RTTVAR                       K = 4
-//
-// First sample R seeds: SRTT = R, RTTVAR = R/2 (RFC 6298 §2.2).
-//
-// On a timeout (Karn/Jacobson rule 5.5), we double the current RTO
-// (capped) and do NOT update SRTT/RTTVAR from the failed attempt.
-// The elapsed-time-before-failure is not a real RTT measurement
-// (the pong might have arrived in 2.001s or 60s — we don't know),
-// so feeding it into the model would bias the mean toward the
-// arbitrary timeout value. Backoff handles this case correctly:
-// the next attempt has more time. When a real successful sample
-// finally arrives, the standard update converges back.
-//
-// After maxConsecutiveFailures backoff steps in a row, the model is
-// presumed stale (the connection is genuinely dead) and the loop
-// closes the connection.
-//
-// Why this design:
-//   - 37 years of TCP operational experience. Known-good algorithm.
-//   - MAD over variance: less sensitive to single outliers (RFC 6298
-//     explicitly chose this).
-//   - α=1/8 (slow mean) keeps the model stable across normal
-//     fluctuation; β=1/4 (faster variance) reacts to spikes.
-//   - K=4 gives ~99%+ tolerance for Gaussian-ish RTT distributions.
-//   - Backoff-on-timeout, not sample-from-timeout: avoids the trap
-//     where repeated near-threshold misses get recorded at the same
-//     threshold and the timeout never adapts upward.
-//
-// Concurrency: Record/Backoff/Timeout are called from the same
-// pingLoop goroutine, but the type guards with a mutex anyway so
-// future callers (metrics, debug pages) can read state safely.
+// The pong timeout is RFC 6298's TCP retransmission timeout per connection:
+// SRTT and RTTVAR are EMAs (α = 1/8, β = 1/4), RTO = SRTT + 4·RTTVAR, and the
+// first sample seeds SRTT = R, RTTVAR = R/2. A timeout doubles the RTO (capped)
+// without sampling (RFC 6298 §5.5): the elapsed time is not an RTT, and feeding
+// it in would pin the timeout at its own threshold. maxConsecutiveFailures
+// backoffs in a row close the connection.
 const (
-	// minPongTimeout is the hard floor on RTO. Never wait less than
-	// this regardless of the model's output. Protects against
-	// pathologically small SRTT/RTTVAR estimates (LAN-fast steady
-	// state) and single-sample anomalies. RFC 6298 uses 1s for TCP;
-	// we use 3s because our sampling frequency is much lower (1
-	// per 2s vs many per RTT) so the model has less data to lean on.
+	// minPongTimeout floors the RTO above RFC 6298's 1 s: one sample per 2 s
+	// gives the model far less data than TCP's per-RTT sampling.
 	minPongTimeout = 3 * time.Second
 
-	// maxPongTimeout is the hard cap on RTO, both for steady-state
-	// and after backoff doubling. RFC 6298 allows at least 60s; we
-	// cap lower because our use case is interactive (a user staring
-	// at a terminal) and >15s of unresponsiveness is degraded enough
-	// that operators should see warnings.
+	// maxPongTimeout caps the RTO, backoff included, well under RFC 6298's
+	// 60 s: past 15 s an interactive terminal is degraded enough to warn.
 	maxPongTimeout = 15 * time.Second
 
-	// bootstrapPongTimeout is used until the first successful sample
-	// arrives. RFC 6298 §2.1 specifies 1s for TCP; we use 8s because
-	// our worst-case deployment (cross-Pacific VPN) has ~1s steady-
-	// state RTT, and the first ping might hit a 2-3s jitter spike.
+	// bootstrapPongTimeout applies until the first sample, above RFC 6298's
+	// 1 s: a ~1 s-RTT VPN link's first ping can hit a 2-3 s jitter spike.
 	bootstrapPongTimeout = 8 * time.Second
 
-	// alpha is the EMA smoothing factor for SRTT. RFC 6298 §2.3
-	// recommends 1/8: each new sample shifts the smoothed mean by
-	// 12.5%, giving an effective half-life of ~5.5 samples. At our
-	// 2s ping interval, that's ~11 seconds of effective memory.
+	// alphaShift is SRTT's EMA factor, 1/8 per RFC 6298 §2.3.
 	alphaShift = 3 // 1/8 = 1 / (1 << 3)
 
 	// beta is the EMA smoothing factor for RTTVAR. RFC 6298 §2.3
@@ -85,17 +32,11 @@ const (
 	// jitter spike widens the bound before the mean catches up.
 	betaShift = 2 // 1/4 = 1 / (1 << 2)
 
-	// k is the multiplier on RTTVAR added to SRTT to compute RTO.
-	// RFC 6298 §2.3 specifies 4. With Gaussian-distributed RTT, K=4
-	// covers >99.99% of the distribution; with the heavier-tailed
-	// real-world distribution it covers somewhat less.
+	// k is RTTVAR's multiplier in the RTO, 4 per RFC 6298 §2.3.
 	k = 4
 
-	// maxConsecutiveFailures is the number of in-a-row backoffs
-	// before the loop declares the connection dead. Three steps of
-	// doubling (capped at maxPongTimeout each) means the loop
-	// tolerates ~maxConsecutiveFailures × maxPongTimeout of
-	// unresponsiveness ≈ 45s before close.
+	// maxConsecutiveFailures backoffs in a row declare the connection dead,
+	// after at most about 45 s of silence.
 	maxConsecutiveFailures = 3
 )
 
@@ -143,11 +84,8 @@ func (p *pingStat) Record(rtt time.Duration) {
 	p.rto = clampRTO(p.srtt + time.Duration(k)*p.rttvar)
 }
 
-// Backoff doubles the current RTO (capped at maxPongTimeout) per
-// RFC 6298 §5.5. Called when a ping times out; SRTT and RTTVAR are
-// intentionally NOT updated because the elapsed time before failure
-// isn't a real RTT measurement. Returns the new RTO so the caller
-// can log it.
+// Backoff doubles the RTO, capped at maxPongTimeout, after a ping timed out,
+// leaving SRTT and RTTVAR alone (RFC 6298 §5.5). It returns the new RTO.
 func (p *pingStat) Backoff() time.Duration {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -155,10 +93,8 @@ func (p *pingStat) Backoff() time.Duration {
 	return p.rto
 }
 
-// Timeout returns the current pong timeout and a flag indicating
-// whether it sits at the cap (either from steady-state computation
-// or accumulated backoff). The capped flag drives operator-visible
-// warnings.
+// Timeout returns the current pong timeout and whether it sits at
+// maxPongTimeout, from the model or from backoff.
 func (p *pingStat) Timeout() (timeout time.Duration, capped bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()

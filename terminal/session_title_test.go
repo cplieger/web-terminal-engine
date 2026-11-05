@@ -265,14 +265,9 @@ func TestConfirmAutoTitleWindow(t *testing.T) {
 // silent clear (clearing has its own verb), DELETE clears and is idempotent, and
 // both 404 on an unknown id.
 //
-// The subtests are ordered stages over ONE session's pin (set, sanitize,
-// truncate, refuse, clear) and must run IN SEQUENCE: a rejected write is
-// asserted against the pin the previous stage left in place, which is what
-// proves the rejection changed nothing. Consequence, stated so nobody is
-// surprised by it: the refuse-stage subtests do NOT pass when run alone with
-// -run, because the pin they expect to survive was never set. Only the
-// clear stage is self-sufficient (it sets its own pin first). A stage that
-// fails also invalidates the stages after it — read the FIRST failure.
+// The subtests are sequential stages over one pin: a refusal is checked against
+// the previous stage's pin, so refuse stages fail alone under -run. Read the
+// first failure.
 func TestSessionManagerPinnedTitleREST(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })

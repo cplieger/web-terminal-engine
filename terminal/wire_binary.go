@@ -159,7 +159,9 @@ type WirePair struct {
 // naming the violated floor and the half that is behind. A revision at the
 // peer's floor is compatible, and so is a revision newer than any known. A
 // non-positive value, or a half whose floor exceeds its own revision, is
-// reported as unreadable input rather than judged.
+// reported as unreadable input rather than judged. It rejects 0 although the
+// runtime accepts a version-silent 0, because at build time 0 means the
+// constant was not read.
 func WirePairIncompatibility(p WirePair) string {
 	server, client := p.Server, p.Client
 	// Case order matters: garbage input must be reported before any cross-side

@@ -11,9 +11,10 @@ import (
 
 // Containment places each session's tree in its own cgroup v2 at clone time,
 // the one boundary forking and setsid() cannot escape. Teardown is SIGTERM then
-// cgroup.kill, and memory.peak is accurate because cgroup v2 never migrates
-// existing charges. It sets no memory ceiling, which would OOM-kill a live
-// session. reap.go is the default boundary without cgroups.
+// cgroup.kill. memory.peak is a true high-water mark only because the child is
+// placed at clone time: cgroup v2 does not move existing charges when a process
+// migrates in. It sets no memory ceiling, which would OOM-kill a live session.
+// reap.go is the default boundary without cgroups.
 
 // errContainmentUnsupported is returned by NewContainment on any platform or host
 // that cannot support the feature. Consumers should log it once and continue

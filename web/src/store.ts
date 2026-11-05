@@ -780,7 +780,6 @@ export class LineStore {
    * `committed` is deliberately not stored: the replay-jump prediction takes it
    * from the ack being processed, and a stored copy could carry a previous ack's.
    */
-  // deadset:ignore DS1801 -- published LineStore method; dropping the leading parameter would break its callers
   noteResumeBounds(_committed: number, oldestIndex: number): void {
     if (Number.isInteger(oldestIndex) && oldestIndex >= 0) {
       this.serverOldest = oldestIndex;

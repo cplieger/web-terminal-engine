@@ -418,7 +418,6 @@ test.describe("real-browser display output (geometry + painted pixels + visual c
     await page.evaluate(() => {
       const engine = window.__engine!;
       engine.modes.applySnapshot({ ...WTE.POWER_ON_MODES, reverseVideo: true });
-      engine.renderer.updateReverseVideo();
     });
     const reversed = avgLuminance(decodePng(await page.screenshot()), rect);
     // Light-text-on-dark (low mean) must invert to dark-text-on-light (high mean).

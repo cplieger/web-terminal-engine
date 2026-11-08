@@ -1,0 +1,4 @@
+# Removed as a fix, not a break: the reaper took exit statuses from a host's own
+# os/exec children, and no first-party server ever ran it. Delete this file once
+# a stable tag contains the removal.
+github.com/cplieger/web-terminal-engine/v6/terminal: StartZombieReaper: removed

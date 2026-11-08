@@ -76,6 +76,20 @@ export function plainEscapeSeq(kittyActive: boolean): string {
   return kittyActive ? `${ESC}[27u` : ESC;
 }
 
+/**
+ * Whether `text` is exactly an unmodified Escape or a Ctrl+C as this module
+ * encodes them for a sink with no KeyboardEvent (the toolbar, sticky Ctrl), in
+ * either keyboard mode: the input a user sends to interrupt.
+ */
+export function isInterruptInput(text: string): boolean {
+  return (
+    text === plainEscapeSeq(false) ||
+    text === plainEscapeSeq(true) ||
+    text === ctrlByteFor("c") ||
+    text === kittyCtrlCharSeq("c")
+  );
+}
+
 /** True when the kitty disambiguate flag is active in `modes`. */
 export function kittyDisambiguateActive(modes: KeyboardModes): boolean {
   return (modes.getKeyboardFlags() & KITTY_DISAMBIGUATE) !== 0;
@@ -672,6 +686,36 @@ export function mapKeyboardEvent(ev: KeyboardEvent, modes: KeyboardModes): Keybo
   return { kind: "ignore" };
 }
 
+// One mode state per mode bit that changes a key's kind: DECKPAM (honoured only
+// without kitty; it also turns a numpad Shift+PageUp from a scroll into a send)
+// and kitty disambiguate. DECCKM changes bytes, never the kind.
+const KIND_MODE_STATES: readonly KeyboardModes[] = [
+  { isApplicationCursor: () => false, isApplicationKeypad: () => false, getKeyboardFlags: () => 0 },
+  { isApplicationCursor: () => false, isApplicationKeypad: () => true, getKeyboardFlags: () => 0 },
+  {
+    isApplicationCursor: () => false,
+    isApplicationKeypad: () => false,
+    getKeyboardFlags: () => KITTY_DISAMBIGUATE,
+  },
+];
+
+/**
+ * What to do with `ev` at keydown before the modes are known, reading none of
+ * them. A key every mode state treats alike gets that kind. Otherwise an
+ * unmodified key (Shift aside) is "send": the caller maps it with
+ * mapKeyboardEvent once the modes are known, and types its character or runs
+ * its scroll when those modes do not send it. A Ctrl, Alt or Meta chord some
+ * state leaves unsent is "ignore", so the browser keeps it.
+ */
+export function keyActionBeforeModes(ev: KeyboardEvent): KeyboardResult["kind"] {
+  const kinds = KIND_MODE_STATES.map((modes) => mapKeyboardEvent(ev, modes).kind);
+  const first = kinds[0] ?? "ignore";
+  if (kinds.every((kind) => kind === first)) {
+    return first;
+  }
+  return ev.ctrlKey || ev.altKey || ev.metaKey ? "ignore" : "send";
+}
+
 /**
  * ctrlByteFor returns the C0 control byte produced by Ctrl+`ch`, or `null`
  * when the character has no Ctrl mapping: a-z (case-folded) give \x01..\x1a,
@@ -752,25 +796,39 @@ function numpadCodeToKey(code: string): string | undefined {
 
 // -- Bracketed paste --------------------------------------------------------
 
-/** The mode bit `bracketTextForPaste` reads; a `ModeState` satisfies it. */
+/** The mode bit `bracketPaste` reads; a `ModeState` satisfies it. */
 export interface PasteModes {
   isBracketedPaste(): boolean;
 }
 
+/** A paste as two parts: `body` may be cut short, `tail` must always follow what was sent of it. */
+export interface BracketedPaste {
+  /** The opening sentinel and the text, or the bare text when bracketed paste is off. */
+  readonly body: string;
+  /** The closing sentinel, or "" when bracketed paste is off. */
+  readonly tail: string;
+}
+
 /**
- * bracketTextForPaste wraps text in DEC 2004 bracketed-paste sentinels when
- * `modes` reports bracketed-paste mode (CSI ?2004h) enabled, and returns it
- * unchanged otherwise. Embedded ESC bytes are replaced with U+241B first: an
- * attacker-controlled paste containing \x1b[201~ would otherwise close the
- * paste region early and have the rest interpreted as a command.
+ * bracketPaste splits a paste into DEC 2004 bracketed-paste parts when `modes`
+ * reports bracketed-paste mode (CSI ?2004h) enabled, and returns the bare text
+ * with an empty tail otherwise. Embedded ESC bytes are replaced with U+241B
+ * first: an attacker-controlled paste containing \x1b[201~ would otherwise
+ * close the paste region early and have the rest interpreted as a command.
  */
-export function bracketTextForPaste(text: string, modes: PasteModes): string {
+export function bracketPaste(text: string, modes: PasteModes): BracketedPaste {
   if (!modes.isBracketedPaste()) {
-    return text;
+    return { body: text, tail: "" };
   }
   // eslint-disable-next-line no-control-regex -- intentional: sanitising ESC bytes in pasted text
   const sanitised = text.replace(/\x1b/g, "\u241B");
-  return `\x1b[200~${sanitised}\x1b[201~`;
+  return { body: `\x1b[200~${sanitised}`, tail: "\x1b[201~" };
+}
+
+/** bracketPaste's two parts as one string, for a sink that never cuts a paste short. */
+export function bracketTextForPaste(text: string, modes: PasteModes): string {
+  const { body, tail } = bracketPaste(text, modes);
+  return body + tail;
 }
 
 /**

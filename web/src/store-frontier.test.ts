@@ -36,7 +36,7 @@ describe("LineStore.absentEdgesNear: the bottom frontier", () => {
   it("offers the frontier when the server still retains history below the tail", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(100, 10));
-    s.noteResumeBounds(110, 0);
+    s.noteResumeBounds(0);
 
     expect(s.absentEdgesNear(100, 500)).toEqual([{ lo: 0, hi: 100 }]);
   });
@@ -46,7 +46,7 @@ describe("LineStore.absentEdgesNear: the bottom frontier", () => {
     // there is no longer anything below to ask for.
     const s = new LineStore();
     s.applyScroll(scrollMsg(100, 10));
-    s.noteResumeBounds(110, 100);
+    s.noteResumeBounds(100);
 
     expect(s.absentEdgesNear(100, 500)).toEqual([]);
   });
@@ -65,7 +65,7 @@ describe("LineStore.absentEdgesNear: the nearness band", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(1000, 10));
     s.applyScroll(scrollMsg(3000, 10));
-    s.noteResumeBounds(3010, 1000); // nothing older survives: frontier closed
+    s.noteResumeBounds(1000); // nothing older survives: frontier closed
     return s;
   }
 
@@ -96,7 +96,7 @@ describe("LineStore.absentEdgesNear: ordering by nearness to the reader", () => 
     s.applyScroll(scrollMsg(1000, 10));
     s.applyScroll(scrollMsg(3000, 10));
     s.applyScroll(scrollMsg(5000, 10));
-    s.noteResumeBounds(5010, 1000);
+    s.noteResumeBounds(1000);
     return s;
   }
 
@@ -125,15 +125,15 @@ describe("LineStore: the paging floor", () => {
     // is the repair path for a floor raised by a mis-correlated clamp.
     const s = new LineStore();
     s.raisePagingFloor(500);
-    s.noteResumeBounds(2000, 800);
+    s.noteResumeBounds(800);
 
     expect(s.pagingFloorIndex()).toBe(500);
   });
 
   it("ignores an invalid server oldest, the floor repair included", () => {
     const s = new LineStore();
-    s.noteResumeBounds(2000, -1);
-    s.noteResumeBounds(2000, 1.5);
+    s.noteResumeBounds(-1);
+    s.noteResumeBounds(1.5);
 
     expect(s.serverOldestIndex()).toBe(-1);
     expect(s.pagingFloorIndex()).toBe(0);
@@ -141,7 +141,7 @@ describe("LineStore: the paging floor", () => {
 
   it("accepts a server oldest of exactly 0", () => {
     const s = new LineStore();
-    s.noteResumeBounds(2000, 0);
+    s.noteResumeBounds(0);
 
     expect(s.serverOldestIndex()).toBe(0);
   });

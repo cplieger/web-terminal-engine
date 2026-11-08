@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } fr
 import { createConnection } from "./connection.js";
 import { bracketTextForPaste } from "./keyboard.js";
 import { createModeState, POWER_ON_MODES } from "./modes.js";
+import { LineStore } from "./store.js";
 import { createTerminalEngine, type TerminalEngineOptions } from "./terminal.js";
 import {
   appendTerminalElements,
@@ -215,6 +216,17 @@ function modesFrame(flags: number): ArrayBuffer {
   return buf;
 }
 
+/** MSG_GRID announcing a `cols` x `rows` server screen. */
+function gridFrame(cols: number, rows: number): ArrayBuffer {
+  const buf = new ArrayBuffer(13);
+  const v = new DataView(buf);
+  v.setUint8(0, 8);
+  v.setBigUint64(1, 0n, true);
+  v.setUint16(9, cols, true);
+  v.setUint16(11, rows, true);
+  return buf;
+}
+
 /** A decoded screen message of `rowCount` rows, for the renderer's own entry point. */
 function screenMessage(rowCount: number): ScreenMessage {
   const row: WireRun[] = [{ t: "x", f: -1, b: -1, a: 0, uc: -1 }];
@@ -286,6 +298,36 @@ beforeEach(() => {
   vi.stubGlobal("WebSocket", makeMockWebSocket());
 });
 
+describe("the reverse-video class follows the mode state", () => {
+  it("drops on a session switch, before the next session's modes frame", () => {
+    const fx = createEngineFixture();
+    const sock = openSession(fx, "reverse-on");
+    sock.fireMessage(modesFrame(32)); // DECSCNM on
+    expect(fx.termWrap.classList.contains("term-reverse-video")).toBe(true);
+
+    fx.engine.connection.setSession("reverse-off");
+
+    expect(fx.engine.modes.isReverseVideo()).toBe(false);
+    expect(fx.termWrap.classList.contains("term-reverse-video")).toBe(false);
+  });
+});
+
+describe("the server's grid reaches the renderer", () => {
+  it("routes a grid frame, so gridSize answers the server's columns", () => {
+    const fx = createEngineFixture();
+    const sock = openSession(fx, "grid");
+    sock.fireMessage(screenFrame(4));
+    const grid = new ArrayBuffer(13);
+    const v = new DataView(grid);
+    v.setUint8(0, 8); // MSG_GRID
+    v.setUint16(9, 40, true);
+    v.setUint16(11, 4, true);
+    sock.fireMessage(grid);
+
+    expect(fx.engine.renderer.gridSize().cols).toBe(40);
+  });
+});
+
 describe("two engines on one page", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -343,12 +385,12 @@ describe("two engines on one page", () => {
     const b = createEngineFixture();
     const sock = openSession(a, "a");
 
-    sock.fireMessage(modesFrame(0));
+    sock.fireMessage(modesFrame(1)); // bracketed paste on
 
-    expect(a.engine.modes.isBracketedPaste()).toBe(false);
-    expect(b.engine.modes.isBracketedPaste()).toBe(true);
-    expect(bracketTextForPaste("x", b.engine.modes)).toBe("\x1b[200~x\x1b[201~");
-    expect(bracketTextForPaste("x", a.engine.modes)).toBe("x");
+    expect(a.engine.modes.isBracketedPaste()).toBe(true);
+    expect(b.engine.modes.isBracketedPaste()).toBe(false);
+    expect(bracketTextForPaste("x", a.engine.modes)).toBe("\x1b[200~x\x1b[201~");
+    expect(bracketTextForPaste("x", b.engine.modes)).toBe("x");
   });
 
   it("a mousedown on A's terminal reports through A's connection only", async () => {
@@ -360,6 +402,7 @@ describe("two engines on one page", () => {
       fx.termWrap.style.height = "100px";
       fx.engine.renderer.handleScreen(screenMessage(3));
       fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, mouseMode: 1000, mouseSGR: true });
+      fx.engine.modes.setKnown(true); // as the socket's modes frame would
     }
     await nextFrames();
     const sentA = vi.spyOn(a.engine.connection, "sendEphemeral");
@@ -406,13 +449,121 @@ describe("two engines on one page", () => {
 
     expect(sockA.url).toBe(sockB.url);
     expect(sockA.url).not.toContain("session=");
-    const resumeA = controls(sockA)[0]!;
-    const resumeB = controls(sockB)[0]!;
+    const resumeA = controls(sockA).find((c) => c["type"] === "resume")!;
+    const resumeB = controls(sockB).find((c) => c["type"] === "resume")!;
     expect(resumeA["type"]).toBe("resume");
     expect(resumeB["type"]).toBe("resume");
     expect(resumeA["sessionId"]).not.toBe(resumeB["sessionId"]);
     expect(String(resumeA["sessionId"]).split("#")[0]).toBe(sessionStorage.getItem("k1"));
     expect(String(resumeB["sessionId"]).split("#")[0]).toBe(sessionStorage.getItem("k2"));
+  });
+});
+
+describe("a session's server epoch travels with its store", () => {
+  // Split view: two engines (panes) show one session's store in turn, and each
+  // connection keeps resume state for every session it ever showed.
+  function splitView(): {
+    a: EngineFixture;
+    b: EngineFixture;
+    s: LineStore;
+    restartsA: ReturnType<typeof vi.fn>;
+    restartsB: ReturnType<typeof vi.fn>;
+  } {
+    const restartsA = vi.fn();
+    const restartsB = vi.fn();
+    const a = createEngineFixture({ callbacks: { onServerRestart: restartsA } });
+    const b = createEngineFixture({ callbacks: { onServerRestart: restartsB } });
+    const s = new LineStore();
+    // A shows s under process 1, then moves on to another session.
+    a.engine.renderer.bind(s);
+    openSession(a, "s", { serverEpoch: 1 }).fireMessage(scrollFrame(0, 2));
+    a.engine.renderer.bind(new LineStore());
+    openSession(a, "t", { serverEpoch: 1 });
+    // The server restarts as process 2, and B shows s.
+    b.engine.renderer.bind(s);
+    openSession(b, "s", { serverEpoch: 2 }).fireMessage(scrollFrame(0, 3));
+    return { a, b, s, restartsA, restartsB };
+  }
+
+  it("detects the restart in an engine that never saw the session", () => {
+    const { s, restartsB } = splitView();
+
+    expect(restartsB).toHaveBeenCalledTimes(1);
+    expect(s.highestIndex()).toBe(2);
+  });
+
+  it("keeps the newer process's content when the store moves back to an engine that saw the older one", () => {
+    const { a, b, s, restartsA } = splitView();
+    b.engine.renderer.bind(new LineStore());
+    b.engine.connection.forgetSession("s");
+
+    a.engine.renderer.bind(s);
+    openSession(a, "s", { serverEpoch: 2 });
+
+    expect(restartsA).not.toHaveBeenCalled();
+    expect(s.highestIndex()).toBe(2);
+    expect(s.getLine(2)?.[0]?.t).toBe("h");
+  });
+
+  it("drops input typed at restored content once the server turns out to have restarted", () => {
+    const { s } = splitView();
+    const restored = LineStore.fromSnapshot(s.snapshot());
+    const restarts = vi.fn();
+    const c = createEngineFixture({ callbacks: { onServerRestart: restarts } });
+    c.engine.renderer.bind(restored!);
+    c.engine.connection.setSession("s");
+    const sock = latest();
+    c.engine.connection.sendBinary(new Uint8Array([120]));
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame({ serverEpoch: 3 }));
+
+    expect(inputFrames(sock)).toEqual([]);
+    expect(restarts).toHaveBeenCalledTimes(1);
+  });
+
+  it("files a save under the process the content came from, whichever engine learned it", () => {
+    const { s } = splitView();
+
+    expect(s.snapshot()?.serverEpoch).toBe(2);
+  });
+});
+
+describe("the grid a modes subscriber reads is this attachment's", () => {
+  /** Session "a" on a 97x24 screen, then a switch to "b"; returns b's socket, acked. */
+  function switchFromWideSession(fx: EngineFixture): MockWS {
+    const a = openSession(fx, "a");
+    a.fireMessage(gridFrame(97, 24));
+    a.fireMessage(modesFrame(0));
+    a.fireMessage(screenFrame(24));
+    fx.engine.connection.setSession("b");
+    const b = latest();
+    b.fireOpen();
+    b.fireMessage(resumeAckFrame());
+    return b;
+  }
+
+  it("is the new session's columns and rows when its modes become known", () => {
+    const fx = createEngineFixture();
+    const b = switchFromWideSession(fx);
+    const seen: { cols: number; rows: number }[] = [];
+    fx.engine.modes.subscribe(() => {
+      if (fx.engine.modes.isKnown()) {
+        seen.push(fx.engine.renderer.gridSize());
+      }
+    });
+    b.fireMessage(gridFrame(40, 10));
+    b.fireMessage(modesFrame(0));
+
+    expect(seen).toEqual([{ cols: 40, rows: 10 }]);
+  });
+
+  it("is the measured fallback, not the previous session's, until the new grid frame comes", () => {
+    const fx = createEngineFixture();
+    const b = switchFromWideSession(fx);
+    b.fireMessage(modesFrame(0));
+
+    expect(fx.engine.renderer.gridSize().cols).toBe(fx.engine.renderer.computeSize().cols);
+    expect(fx.engine.renderer.gridSize().cols).not.toBe(97);
   });
 });
 
@@ -581,7 +732,7 @@ describe("dispose()", () => {
     fx.engine.scroll.restoreView({ top: 40, following: false });
     fx.engine.mouse.resyncGesture();
     fx.engine.mouse.disarmGesture();
-    fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: false });
+    fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: true });
     fx.engine.connection.connect();
     fx.engine.connection.setSession("t");
 
@@ -589,7 +740,7 @@ describe("dispose()", () => {
     expect(fx.termWrap.scrollTop).toBe(0);
     expect(fx.engine.scroll.isUserScrolledUp()).toBe(false);
     expect(sent).not.toHaveBeenCalled();
-    expect(fx.engine.modes.isBracketedPaste()).toBe(true);
+    expect(fx.engine.modes.isBracketedPaste()).toBe(false);
     expect(sockets).toHaveLength(1);
   });
 
@@ -620,7 +771,19 @@ describe("dispose()", () => {
     expect(connection.sendEphemeral("x")).toBe(false);
     expect(connection.requestHistory(0, 10)).toBe(false);
     expect(connection.historyBudget()).toBe(0);
-    expect(connection.serverEpochOf("s")).toBe(0);
+    expect(connection.cancelPendingInput()).toBe(false);
+    expect(connection.pendingInputBytes()).toBe(0);
+    expect(connection.lastAnnouncedSize()).toBeNull();
+    expect(
+      renderer.applyResumeTransition({
+        serverEpoch: 9,
+        committed: null,
+        serverOldest: null,
+        paging: false,
+        sentHaveThrough: -1,
+        sentReplayMax: null,
+      }),
+    ).toBe(false);
     expect(connection.currentSessionId()).toBe("");
     expect(modes.snapshot()).toEqual(POWER_ON_MODES);
   });
@@ -714,7 +877,7 @@ describe("construction rollback", () => {
       output,
       termWrap,
       callbacks: noopCallbacks(),
-      initialModes: { ...POWER_ON_MODES, bracketedPaste: false },
+      initialModes: { ...POWER_ON_MODES, bracketedPaste: true },
     });
 
     expect(caught).toBe(injected);
@@ -722,8 +885,8 @@ describe("construction rollback", () => {
     expect(removeWrap.mock.calls.map((c) => c[0])).toEqual(["scroll"]);
     expectEverythingReleased();
     const modes = vi.mocked(createModeState).mock.results[0]!.value;
-    modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: false });
-    expect(modes.isBracketedPaste()).toBe(true);
+    modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: true });
+    expect(modes.isBracketedPaste()).toBe(false);
   });
 
   it("a mouse controller that cannot register its wheel listener unwinds the three before it and the renderer", () => {
@@ -785,10 +948,10 @@ describe("POWER_ON_MODES", () => {
   it("is frozen, so a stray assignment throws and changes nothing", () => {
     expect(Object.isFrozen(POWER_ON_MODES)).toBe(true);
     expect(() => {
-      (POWER_ON_MODES as { bracketedPaste: boolean }).bracketedPaste = false;
+      (POWER_ON_MODES as { bracketedPaste: boolean }).bracketedPaste = true;
     }).toThrow(TypeError);
-    expect(POWER_ON_MODES.bracketedPaste).toBe(true);
-    expect(createModeState().isBracketedPaste()).toBe(true);
+    expect(POWER_ON_MODES.bracketedPaste).toBe(false);
+    expect(createModeState().isBracketedPaste()).toBe(false);
   });
 });
 

@@ -13,6 +13,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -136,15 +138,172 @@ func TestFocusReport_transitions(t *testing.T) {
 		if got := h.focusReportLocked(true); !bytes.Equal(got, focusInSeq) {
 			t.Fatalf("focusReportLocked focused = %q, want ESC[I", got)
 		}
-		h.screen.FocusReporting = false
+		writeScreen(t, h, "\x1b[?1004l")
 		if got := h.focusReportLocked(true); got != nil {
 			t.Fatalf("focusReportLocked on the disable = %q, want nil", got)
 		}
-		h.screen.FocusReporting = true
+		writeScreen(t, h, "\x1b[?1004h")
 		if got := h.focusReportLocked(true); !bytes.Equal(got, focusInSeq) {
 			t.Errorf("focusReportLocked on re-enable = %q, want ESC[I (the state is re-reported)", got)
 		}
 	})
+}
+
+func TestFocusReport_reEnableInsideOneRead(t *testing.T) {
+	tests := []struct {
+		name   string
+		reread string
+	}{
+		{"a 1004 disable and enable", "\x1b[?1004l\x1b[?1004h"},
+		{"a soft reset and an enable", "\x1b[!p\x1b[?1004h"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h, pr := focusPipeHandler(t)
+			h.handlePTYData([]byte("\x1b[?1004h"))
+			if got := readPipe(t, pr, len(focusOutSeq)); got != string(focusOutSeq) {
+				t.Fatalf("report on the first enable = %q, want ESC[O", got)
+			}
+			h.handlePTYData([]byte(tc.reread))
+			if got := readPipe(t, pr, len(focusOutSeq)); got != string(focusOutSeq) {
+				t.Errorf("report after %q in one read = %q, want ESC[O (every enable re-reports)", tc.reread, got)
+			}
+		})
+	}
+}
+
+// TestFocusReport_writeOrderFollowsAssignment_Concurrent holds one report's PTY
+// write pending (the pipe is full) while a second trigger runs: focusTold must
+// not move until the first is written, so the child reads the reports in the
+// order focusTold took them.
+func TestFocusReport_writeOrderFollowsAssignment_Concurrent(t *testing.T) {
+	h, pr := focusPipeHandler(t)
+	h.screen.FocusReporting = true
+	a := h.registry.Add(&websocket.Conn{})
+	b := h.registry.Add(&websocket.Conn{})
+	h.registry.SetClientFocus(a, true)
+	h.reportFocus()
+	if got := readPipe(t, pr, len(focusInSeq)); got != string(focusInSeq) {
+		t.Fatalf("first report = %q, want ESC[I", got)
+	}
+	fillPipe(t, h.ptmx)
+
+	var wg sync.WaitGroup
+	wg.Go(func() { // a's tab closes: nobody is focused
+		h.registry.SetClientFocus(a, false)
+		h.reportFocus()
+	})
+	awaitFocusTold(t, h, focusToldOut)
+	wg.Go(func() { // the user clicks into b
+		h.registry.SetClientFocus(b, true)
+		h.reportFocus()
+	})
+	deadline := time.Now().Add(200 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if told := lockedFocusTold(h); told != focusToldOut {
+			t.Errorf("focusTold = %v while ESC[O is still unwritten, want it held at focus-out", told)
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	wg.Wait()
+	want := string(focusOutSeq) + string(focusInSeq)
+	if tail := readPipeUntil(t, pr, want); tail != want {
+		t.Errorf("PTY bytes after the filler = %q, want ESC[O then ESC[I", tail)
+	}
+	if told := lockedFocusTold(h); told != focusToldIn {
+		t.Errorf("focusTold = %v, want focus-in, the last report written", told)
+	}
+}
+
+// focusPipeHandler returns a started handler whose PTY is a pipe, and the
+// pipe's read end. No process runs.
+func focusPipeHandler(t *testing.T) (*Handler, *os.File) {
+	t.Helper()
+	h := NewHandler([]string{"true"}, WithLogger(nil))
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
+	h.ptmx = pw
+	h.started.Store(true)
+	startReplyLoop(t, h)
+	return h, pr
+}
+
+// readPipeUntil reads pr until the bytes after the 'x' filler hold want, or
+// two seconds pass, and returns those bytes.
+func readPipeUntil(t *testing.T, pr *os.File, want string) string {
+	t.Helper()
+	if err := pr.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	var tail []byte
+	buf := make([]byte, 64<<10)
+	for len(tail) < len(want) {
+		n, err := pr.Read(buf)
+		tail = append(tail, bytes.TrimLeft(buf[:n], "x")...)
+		if err != nil {
+			break
+		}
+	}
+	return string(tail)
+}
+
+func readPipe(t *testing.T, pr *os.File, n int) string {
+	t.Helper()
+	if err := pr.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buf := make([]byte, n)
+	got, err := io.ReadFull(pr, buf)
+	if err != nil {
+		t.Fatalf("reading %d PTY bytes: %v (got %q)", n, err, buf[:got])
+	}
+	return string(buf)
+}
+
+// fillPipe writes 'x' bytes into w until the pipe is full, so the next write
+// blocks.
+func fillPipe(t *testing.T, w *os.File) {
+	t.Helper()
+	raw, err := w.SyscallConn()
+	if err != nil {
+		t.Fatalf("SyscallConn: %v", err)
+	}
+	// A write of up to PIPE_BUF bytes is all or nothing, so the page-sized
+	// writes stop with up to a page free and the single bytes take the rest.
+	if err := raw.Write(func(fd uintptr) bool {
+		for _, chunk := range [][]byte{bytes.Repeat([]byte("x"), 4096), []byte("x")} {
+			for {
+				if _, werr := syscall.Write(int(fd), chunk); werr != nil {
+					break
+				}
+			}
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("fill pipe: %v", err)
+	}
+}
+
+func lockedFocusTold(h *Handler) toldFocus {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.focusTold
+}
+
+func awaitFocusTold(t *testing.T, h *Handler, want toldFocus) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for lockedFocusTold(h) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("focusTold never became %v", want)
+		}
+		time.Sleep(time.Millisecond)
+	}
 }
 
 // TestWithKeepUnfocused_optionSemantics pins the option's own wiring, carried
@@ -201,6 +360,7 @@ func focusPTYFixture(t *testing.T) (ws *websocket.Conn, awaitPTY func(n int) str
 	h.ptmx = pw
 	h.started.Store(true)
 	h.screen.FocusReporting = true
+	startReplyLoop(t, h)
 
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)

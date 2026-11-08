@@ -576,7 +576,6 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 			m = eraseSpareBoth
 		}
 		s.eraseRegionMode(0, 0, s.Height-1, s.Width-1, m)
-		s.dropDrained()
 		s.clearWrapState()
 	case 3:
 		// ED3 ("Erase Saved Lines"): clears scrollback only, screen untouched.
@@ -981,6 +980,9 @@ func (s *Screen) setMode(mode int) {
 	case 1000, 1002, 1003:
 		s.MouseMode = uint16(mode) // #nosec G115 -- mode is one of 1000/1002/1003, fits uint16
 	case 1004:
+		if !s.FocusReporting {
+			s.FocusEnableSeq++
+		}
 		s.FocusReporting = true
 	case 1006:
 		s.MouseSGR = true
@@ -1036,7 +1038,6 @@ func (s *Screen) resetMode(mode int) {
 		s.noClearOnColumn = false
 	case 47, 1047, 1049:
 		s.exitAltScreen(mode)
-		s.dropDrained()
 	case 1048:
 		s.restoreCursor()
 	case 1000:
@@ -1129,7 +1130,6 @@ func (s *Screen) setColumnMode() {
 		return
 	}
 	s.eraseRegion(0, 0, s.Height-1, s.Width-1)
-	s.dropDrained()
 }
 
 // --- DECRQM handler (uses new param structure) ---

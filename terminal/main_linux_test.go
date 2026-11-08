@@ -3,14 +3,15 @@
 package terminal
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
-	"unsafe"
 
 	"golang.org/x/sys/unix"
 )
@@ -21,10 +22,6 @@ import (
 // the test binary exits. A zombie child counts too: nothing ever waited on it.
 func TestMain(m *testing.M) {
 	code := m.Run()
-	if !inSubreaperHelper(os.Getenv(subreaperHelperEnv)) && isChildSubreaper() {
-		fmt.Fprintln(os.Stderr, "FAIL: a test made the shared test binary a child subreaper (run it through subreaperChild)")
-		code = 1
-	}
 	if leaked := awaitNoChildren(waitPatience); len(leaked) > 0 {
 		fmt.Fprintf(os.Stderr, "FAIL: %d child process(es) outlived their test (shut the handler down in t.Cleanup):\n", len(leaked))
 		for _, pid := range leaked {
@@ -39,12 +36,6 @@ func TestMain(m *testing.M) {
 		}
 	}
 	os.Exit(code)
-}
-
-func isChildSubreaper() bool {
-	var on int32
-	err := unix.Prctl(unix.PR_GET_CHILD_SUBREAPER, uintptr(unsafe.Pointer(&on)), 0, 0, 0)
-	return err == nil && on != 0
 }
 
 // awaitNoChildren polls until this process has no child, live or zombie,
@@ -89,4 +80,33 @@ func cmdlineOf(pid int) string {
 		return "(zombie: never waited on)"
 	}
 	return ""
+}
+
+// statStateAndPPID reads the process state and parent pid from a procfs stat
+// line.
+func statStateAndPPID(path string) (state byte, ppid int, ok bool) {
+	f, err := os.Open(path) // #nosec G304 -- procfs path built from a numeric pid
+	if err != nil {
+		return 0, 0, false
+	}
+	defer func() { _ = f.Close() }()
+	buf, err := io.ReadAll(io.LimitReader(f, reapStatusMaxBytes))
+	if err != nil {
+		return 0, 0, false
+	}
+	// Everything before the LAST ')' is pid + comm; the fields after it are
+	// positionally reliable regardless of what the executable was called.
+	_, afterComm, found := bytes.CutLast(buf, []byte(")"))
+	if !found {
+		return 0, 0, false
+	}
+	fields := bytes.Fields(afterComm)
+	if len(fields) < 2 || len(fields[0]) == 0 {
+		return 0, 0, false
+	}
+	parent, err := strconv.Atoi(string(fields[1]))
+	if err != nil {
+		return 0, 0, false
+	}
+	return fields[0][0], parent, true
 }

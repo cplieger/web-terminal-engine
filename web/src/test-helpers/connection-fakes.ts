@@ -8,11 +8,12 @@ function fakeRenderer(overrides: Partial<FakeRenderer> = {}): FakeRenderer {
   return {
     getReplayBoundary: () => -1,
     replayMaxForResume: () => 5000,
-    applyResumeTransition: () => undefined,
+    applyResumeTransition: () => false,
     noteResumeBounds: () => undefined,
     handleHistoryReply: () => undefined,
     noteSolicited: () => undefined,
     clearSolicited: () => undefined,
+    clearGrid: () => undefined,
     maybeFetchHistory: () => undefined,
     ...overrides,
   };

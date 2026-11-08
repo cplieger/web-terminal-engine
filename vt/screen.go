@@ -44,7 +44,10 @@ type Screen struct {
 	// maps it (see NotificationSeq for edge detection).
 	Notification string
 	tabStops     []bool
-	Drained      [][]WireRun
+	// Drained holds the main-screen lines scrolled off since the last
+	// DrainScrollback, all of them main-screen history: alternate-screen rows
+	// never enter it, and only a scrollback erase (ED 3, RIS) drops it.
+	Drained [][]WireRun
 	// drainedWrapped[i] is the wrapped flag Drained[i] carried as it left the
 	// screen: whether it soft-wraps from the line drained before it.
 	drainedWrapped []bool
@@ -58,7 +61,7 @@ type Screen struct {
 	// so a URL chain that straddles the scrollback boundary can still be
 	// joined when stamping live rows and later drains. nil when the top row
 	// starts its own chain. Bounded to maxAutolinkRows-1 entries. Main screen
-	// only (alt drains are discarded by the flush builder).
+	// only, like Drained.
 	drainTail []string
 	// pendingClipboard holds an OSC 52 copy payload queued for the consumer;
 	// drained atomically via TakeClipboard.
@@ -100,6 +103,10 @@ type Screen struct {
 	// message text repeats. Starts at 0 (no notification seen). It shares its
 	// counter with ProgramReportSeq.
 	NotificationSeq uint64
+	// FocusEnableSeq counts DEC 1004 off-to-on transitions, so a reader that
+	// samples FocusReporting once per Write still sees a disable and re-enable
+	// inside it.
+	FocusEnableSeq uint64
 	// minContrast is the minimum WCAG contrast ratio enforced between a run's
 	// text and its background (contrast.go). 1 disables the floor and is the
 	// default; WithMinimumContrast raises it. Sits between two 8-byte-aligned
@@ -723,13 +730,16 @@ func (s *Screen) markWrapContinuation() {
 	}
 }
 
-// drainTopRow commits row 0 to the pending scrollback drain (stamping any
-// detected URLs first, chain-joined across the drain boundary) and maintains
-// drainTail: when the row about to become the new top row soft-continues the
-// drained one, the drained row's text is retained so the chain can still be
-// joined; otherwise the retained tail is dropped. Alt-screen drains are
-// discarded by the flush builder, so the tail only tracks the main screen.
+// drainTopRow commits main-screen row 0 to the pending scrollback drain
+// (stamping any detected URLs first, chain-joined across the drain boundary)
+// and maintains drainTail: when the row about to become the new top row
+// soft-continues the drained one, the drained row's text is retained so the
+// chain can still be joined; otherwise the retained tail is dropped. An
+// alternate-screen row scrolls away with no history, as in xterm.
 func (s *Screen) drainTopRow() {
+	if s.InAltScreen {
+		return
+	}
 	// Row 0's trailing blanks are content, not padding, when row 1 soft-wraps
 	// from it — the same flag that decides whether the drain tail is retained
 	// for chain joining, read once for both.
@@ -737,9 +747,6 @@ func (s *Screen) drainTopRow() {
 	runs := s.stampAutolinks(0, s.cellsToRuns(s.Cells[0], continuesBelow))
 	s.Drained = append(s.Drained, runs)
 	s.drainedWrapped = append(s.drainedWrapped, len(s.wrapped) > 0 && s.wrapped[0])
-	if s.InAltScreen {
-		return
-	}
 	if continuesBelow {
 		s.drainTail = append(s.drainTail, rowMatchText(s.Cells[0]))
 		if len(s.drainTail) > maxAutolinkRows-1 {

@@ -47,18 +47,12 @@ export interface BindMobileToolbarOptions {
    */
   readonly toolbar: HTMLElement;
   /**
-   * Send sink for arrow keys, Tab, Enter, Esc — i.e. for everything
-   * the toolbar emits. Sticky-Ctrl input goes through `applyStickyCtrl`
-   * on the controller; the consumer is responsible for routing
-   * keyboard / paste / IME text through it before handing the result
-   * to the same `send`.
+   * Called once per arrow, Tab, Enter or Esc press with that press's encoder,
+   * which answers the press's bytes under the `modes` it is given (the arrows
+   * follow kitty and DECCKM, Escape kitty). Sticky-Ctrl input goes through the
+   * controller's `applyStickyCtrl` instead.
    */
-  readonly send: (bytes: string) => void;
-  /**
-   * The mode state of the terminal the toolbar types into, read at each press:
-   * the arrow and Escape bytes depend on its kitty and DECCKM bits.
-   */
-  readonly modes: KeyboardModes;
+  readonly send: (encode: KeyEncoder) => void;
   /** Optional id overrides. Missing keys fall back to defaults. */
   readonly ids?: MobileToolbarIds;
   /**
@@ -68,16 +62,19 @@ export interface BindMobileToolbarOptions {
   readonly onCtrlChange?: (armed: boolean) => void;
 }
 
+/** A key's bytes under the mode state of the terminal it is sent to; pure, so it may be called more than once. */
+export type KeyEncoder = (modes: KeyboardModes) => string;
+
 /** Returned from `bindMobileToolbar`; manages sticky-Ctrl state and tear-down. */
 export interface MobileToolbarController {
   /**
-   * Apply sticky-Ctrl to input text. Not armed: `text` unchanged. Armed and one
-   * character (one code point): its CSI u form under kitty disambiguate
-   * (`kittyCtrlCharSeq`), else its Ctrl byte (`ctrlByteFor`), or the character
-   * when none exists. Armed and longer (paste, IME commit): `text` unchanged,
-   * since Ctrl over a multi-character string would garble it. Every armed call disarms.
+   * Apply sticky-Ctrl to `text` as it is typed: every armed call disarms, at
+   * once. Armed and one character (one code point): the encoder of its Ctrl
+   * chord, its CSI u form under kitty disambiguate (`kittyCtrlCharSeq`), else
+   * its Ctrl byte (`ctrlByteFor`), or the character when none exists. Not armed,
+   * or longer (paste, IME commit, which Ctrl would garble): null, `text` unchanged.
    */
-  applyStickyCtrl(text: string): string;
+  applyStickyCtrl(text: string): KeyEncoder | null;
   /** Programmatically arm/disarm Ctrl. Updates the toolbar button visuals (`.armed` class + `aria-pressed`) + fires `onCtrlChange`. */
   setCtrlArmed(on: boolean): void;
   /** Whether sticky-Ctrl is currently armed. */
@@ -134,12 +131,9 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
 
   // Arrow buttons emit exactly what an unmodified physical arrow press emits
   // (the toolbar.test.ts equivalence fixtures pin the two paths together).
-  function arrowSeq(letter: "A" | "B" | "C" | "D"): string {
-    return plainCursorKeySeq(
-      letter,
-      kittyDisambiguateActive(opts.modes),
-      opts.modes.isApplicationCursor(),
-    );
+  function arrow(letter: "A" | "B" | "C" | "D"): KeyEncoder {
+    return (modes) =>
+      plainCursorKeySeq(letter, kittyDisambiguateActive(modes), modes.isApplicationCursor());
   }
 
   // Listener registry so dispose() can detach them all.
@@ -172,64 +166,55 @@ export function bindMobileToolbar(opts: BindMobileToolbarOptions): MobileToolbar
   on(upBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
-    opts.send(arrowSeq("A"));
+    opts.send(arrow("A"));
   });
   on(downBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
-    opts.send(arrowSeq("B"));
+    opts.send(arrow("B"));
   });
   on(rightBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
-    opts.send(arrowSeq("C"));
+    opts.send(arrow("C"));
   });
   on(leftBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
-    opts.send(arrowSeq("D"));
+    opts.send(arrow("D"));
   });
 
   on(tabBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
-    opts.send("\t");
+    opts.send(() => "\t");
   });
   on(enterBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
-    opts.send("\r");
+    opts.send(() => "\r");
   });
   on(escBtn, (e) => {
     e.preventDefault();
     setCtrlArmed(false);
     // The shared logical-Escape encoding (CSI 27 u under kitty disambiguate,
     // bare ESC otherwise) — same single home the physical path uses.
-    opts.send(plainEscapeSeq(kittyDisambiguateActive(opts.modes)));
+    opts.send((modes) => plainEscapeSeq(kittyDisambiguateActive(modes)));
   });
 
-  function applyStickyCtrl(text: string): string {
+  function applyStickyCtrl(text: string): KeyEncoder | null {
     if (!armed) {
-      return text;
+      return null;
     }
-    if (isOneCodePoint(text)) {
-      setCtrlArmed(false);
-      // Matches a physical Ctrl chord for an unshifted Latin character; a shifted
-      // or non-Latin one can differ off a US layout, since toolbar input has no
-      // KeyboardEvent.code and kittyCtrlCharSeq reads the character alone.
-      if (kittyDisambiguateActive(opts.modes)) {
-        const seq = kittyCtrlCharSeq(text);
-        if (seq !== null) {
-          return seq;
-        }
-      }
-      const ctrl = ctrlByteFor(text);
-      return ctrl ?? text;
-    }
-    // Multi-char input (paste, IME commit) — applying Ctrl to a string
-    // would garble it. Disarm and pass through verbatim.
     setCtrlArmed(false);
-    return text;
+    if (!isOneCodePoint(text)) {
+      return null;
+    }
+    // Matches a physical Ctrl chord for an unshifted Latin character; a shifted
+    // or non-Latin one can differ off a US layout, since toolbar input has no
+    // KeyboardEvent.code and kittyCtrlCharSeq reads the character alone.
+    return (modes) =>
+      (kittyDisambiguateActive(modes) ? kittyCtrlCharSeq(text) : null) ?? ctrlByteFor(text) ?? text;
   }
 
   function dispose(): void {

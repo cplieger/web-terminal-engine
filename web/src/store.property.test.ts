@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import fc from "fast-check";
 import { LineStore } from "./store.js";
+import { ackEpoch } from "./test-helpers/store-epoch.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
 function rowOf(t: string): WireRun[] {
@@ -119,17 +120,11 @@ describe("LineStore invariants (property)", () => {
   });
 
   it("every retained line holds the most recent content written to its index (model-based)", () => {
-    // Model-based property (stronger than the count invariant above). The model
-    // is a plain last-writer-wins dictionary from absolute index to text: it
-    // knows nothing about the cap, eviction, or the oldest/highest bookkeeping,
-    // so it is a genuine simplification of the store and cannot share an
-    // eviction bug with it. WHICH lines survive is the eviction policy (covered
-    // by the cap invariant + the unit tests); here we assert that for every line
-    // the store chose to RETAIN, its content equals the last text written to
-    // that index. This catches content corruption and index misalignment (an
-    // off-by-one in `firstIndex + i`, a stale dedup) that a count-only invariant
-    // sails past. Small index range + generous batches so lines collide and the
-    // cap actually evicts.
+    // The model is a last-writer-wins map from index to text, knowing nothing of
+    // the cap or eviction, so it cannot share an eviction bug with the store.
+    // Every line the store retains must hold the last text written at its index
+    // (catches an off-by-one in `firstIndex + i` or a stale dedup). A small index
+    // range and large batches make lines collide and the cap evict.
     const cap = 40;
     fc.assert(
       fc.property(
@@ -235,7 +230,7 @@ describe("LineStore paging invariants (property)", () => {
     //    off a refetchable line. Exempt mid-jump only: a replay jump
     //    reclassifies the whole island as cache and retires the window, so
     //    until the batch's first frame there is legitimately no live tail.
-    if (!midJump && total > 0 && s.snapshot(1) === null) {
+    if (!midJump && total > 0 && s.snapshot() === null) {
       return `${label}: the highest retained line is browse cache, so nothing is persistable`;
     }
     return null;
@@ -272,6 +267,7 @@ describe("LineStore paging invariants (property)", () => {
         fc.integer({ min: 0, max: 3000 }),
         (ops, viewport) => {
           const s = new LineStore();
+          ackEpoch(s, 7);
           let next = 0; // the next live index to append
           let violation: string | null = null;
           // Whether the store is in the post-jump transient: a jump ack has
@@ -337,7 +333,7 @@ describe("LineStore paging invariants (property)", () => {
                 const haveThrough = s.replayBoundary();
                 const serverOldest = haveThrough + 100;
                 s.applyResumeAck({
-                  epochChanged: false,
+                  serverEpoch: null,
                   committed: Math.max(next, haveThrough + 1),
                   serverOldest: op.jump ? serverOldest : 0,
                   paging: op.paging,

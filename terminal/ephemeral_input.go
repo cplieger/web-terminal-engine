@@ -68,5 +68,8 @@ func (h *Handler) ephemeralInputControl(state *clientState, c *controlMsg) {
 		h.cfg.logger.Debug("terminal: ephemeral pty write", "error", err)
 		return
 	}
+	if h.registry.Claim(state) {
+		h.resizeToOwner("size owner sent mouse input")
+	}
 	h.markDirty()
 }

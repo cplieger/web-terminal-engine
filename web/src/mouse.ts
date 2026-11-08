@@ -97,15 +97,15 @@ const BUTTONS_BIT = [1, 4, 2, 8, 16] as const;
 
 /** `MouseInputHandler` plus the mode state the listeners gate on. */
 export interface MouseControllerOptions extends MouseInputHandler {
-  modes: Pick<ModeState, "getMouseMode" | "isMouseSGR" | "isMousePixels">;
+  modes: Pick<ModeState, "getMouseMode" | "isMouseSGR" | "isMousePixels" | "isKnown">;
 }
 
 /** Pointer and wheel forwarding for one terminal element. */
 export interface MouseController {
   /**
-   * Cancels a gesture left in flight once the resume has declared the server's
-   * capabilities: emits one release for each recorded button the last reading
-   * says is now up, so a drag is not left pressed across a reconnect.
+   * Cancels a gesture left in flight once the new socket's server has declared
+   * its capabilities and modes: emits one release for each recorded button the
+   * last reading says is now up, so a drag is not left pressed across a reconnect.
    */
   resyncGesture(): void;
   /** Forgets the held gesture without reporting anything, for a consumer pointing this terminal at another session. */
@@ -200,6 +200,12 @@ export function createMouseController(opts: MouseControllerOptions): MouseContro
     }
   }
 
+  // Every report goes through here: none while the modes are unknown, since the
+  // program may not be tracking the mouse at all. false means not delivered.
+  function send(seq: string): boolean {
+    return handler !== null && modes.isKnown() && handler.sendReport(seq);
+  }
+
   function flushMotion(): void {
     motionFrame = null;
     const seq = pendingMotion;
@@ -207,7 +213,7 @@ export function createMouseController(opts: MouseControllerOptions): MouseContro
     if (seq === null || !handler) {
       return;
     }
-    handler.sendReport(seq);
+    send(seq);
   }
 
   function detach(): void {
@@ -221,12 +227,9 @@ export function createMouseController(opts: MouseControllerOptions): MouseContro
     attachedEl = null;
   }
 
-  // Called on the resumeAck, not the socket's open: the ephemeral channel is
-  // not yet known at open, so a release sent there would take the reliable
-  // fallback and become the one replayable mouse report. Reports PRESENT state
-  // (what RFB and Guacamole do implicitly with their next message), one release
-  // per recorded button the last reading says is UP; a release that happened
-  // off-element is invisible either way.
+  // Reports PRESENT state (what RFB and Guacamole do implicitly with their next
+  // message), one release per recorded button the last reading says is UP; a
+  // release that happened off-element is invisible either way.
   function resyncGesture(): void {
     if (!handler) {
       return;
@@ -240,7 +243,7 @@ export function createMouseController(opts: MouseControllerOptions): MouseContro
         continue; // still held
       }
       const code = buttonCode(domButtonToXterm(button), false, false, false, false);
-      if (handler.sendReport(encodeSGR(code, pos.col, pos.row, true))) {
+      if (send(encodeSGR(code, pos.col, pos.row, true))) {
         pressed.delete(button); // only a DELIVERED release ends the gesture, as in onMouseUp
       }
     }
@@ -374,7 +377,7 @@ export function createMouseController(opts: MouseControllerOptions): MouseContro
     }
     cancelPendingMotion();
     const code = buttonCode(domButtonToXterm(e.button), false, e.shiftKey, e.altKey, e.ctrlKey);
-    if (handler.sendReport(encodeSGR(code, pos.col, pos.row, false))) {
+    if (send(encodeSGR(code, pos.col, pos.row, false))) {
       // Only a DELIVERED press starts a gesture, so onMouseUp cannot report a
       // release for a press the application never saw.
       pressed.set(e.button, pos);
@@ -394,13 +397,13 @@ export function createMouseController(opts: MouseControllerOptions): MouseContro
     if (!pos) {
       // The record SURVIVES a release that could not be reported. `pressed` is what
       // the application believes is held, and it was told nothing here, so
-      // resyncGesture must still find the button and cancel it on the next open.
+      // resyncGesture must still find the button and cancel it after a reconnect.
       return;
     }
     if (pressed.has(e.button)) {
       const btn = domButtonToXterm(e.button);
       const code = buttonCode(btn, false, e.shiftKey, e.altKey, e.ctrlKey);
-      if (handler.sendReport(encodeSGR(code, pos.col, pos.row, true))) {
+      if (send(encodeSGR(code, pos.col, pos.row, true))) {
         pressed.delete(e.button); // only a DELIVERED release ends the gesture
       }
     }
@@ -484,7 +487,7 @@ export function createMouseController(opts: MouseControllerOptions): MouseContro
     if (e.deltaY !== 0) {
       const btn = e.deltaY < 0 ? 64 : 65;
       const code = buttonCode(btn, false, e.shiftKey, e.altKey, e.ctrlKey);
-      handler.sendReport(encodeSGR(code, pos.col, pos.row, false));
+      send(encodeSGR(code, pos.col, pos.row, false));
     }
     e.preventDefault();
   }

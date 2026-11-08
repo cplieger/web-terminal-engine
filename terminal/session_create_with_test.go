@@ -42,6 +42,35 @@ func TestCreateWith_zeroSpecMatchesCreate(t *testing.T) {
 	}
 }
 
+// TestCreateWith_answersTheListedTitle: the create response is the first
+// enumeration a client sees, so its Title must be the one List reports.
+func TestCreateWith_answersTheListedTitle(t *testing.T) {
+	tests := []struct {
+		name string
+		spec CreateSpec
+		want string
+	}{
+		{"no pin answers the command basename", CreateSpec{}, "cat"},
+		{"a pin answers the pin", CreateSpec{PinnedTitle: "build box"}, "build box"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewSessionManager(catFactory)
+			t.Cleanup(func() { shutdownManager(t, m) })
+			info, err := m.CreateWith(tc.spec)
+			if err != nil {
+				t.Fatalf("CreateWith = %v, want nil", err)
+			}
+			if info.Title != tc.want {
+				t.Errorf("CreateWith Title = %q, want %q", info.Title, tc.want)
+			}
+			if listed := listedInfo(t, m, info.ID).Title; listed != info.Title {
+				t.Errorf("List Title = %q, CreateWith Title = %q, want equal", listed, info.Title)
+			}
+		})
+	}
+}
+
 func TestCreateWith_buildReplacesTheFactory(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })

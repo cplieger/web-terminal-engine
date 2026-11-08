@@ -12,7 +12,8 @@
       "THIRD_PARTY_NOTICES.md",
       "README.md",
       "src/**/*.ts",
-      "wire-compatibility.json"
+      "wire-compatibility.json",
+      "layout-shapes.json"
     ],
     "exclude": ["src/**/*.test.ts", "src/**/*-setup.ts", "src/**/test-helpers/**"]
   }

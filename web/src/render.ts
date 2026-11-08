@@ -7,7 +7,7 @@
 // window block always has `height` rows, so scrollHeight grows only when real
 // history commits.
 
-import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
+import type { GridMessage, ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 import { COMPATIBILITY_TAIL_CAP, LineStore, PAGE_SIZE, PREFETCH_THRESHOLD } from "./store.js";
 import type { ScrollController } from "./scroll.js";
 import type { ModeState } from "./modes.js";
@@ -28,6 +28,7 @@ const WIDTH_MAP_MAX = 20_000;
 
 const MAX_ROWS_PER_FRAME = 300;
 const MAX_RENDER_NO_PROGRESS_RETRIES = 3;
+// The server's resize floor (wire-golden/limits.json).
 const MIN_COLS = 20;
 const MIN_ROWS = 5;
 
@@ -76,7 +77,8 @@ export interface RendererOptions {
   /** Outer scroll container; the overlays, `--char-w` and the blink class live on it. */
   termWrap: HTMLElement;
   scroll: ScrollController;
-  modes: Pick<ModeState, "isReverseVideo">;
+  /** The renderer follows it: the `term-reverse-video` class tracks `isReverseVideo()`. */
+  modes: Pick<ModeState, "isReverseVideo" | "subscribe">;
   /** Invoked when the cursor moves. */
   onCursorMove?: () => void;
   /**
@@ -130,22 +132,26 @@ export interface Renderer {
    * the application drew and the server has not committed.
    */
   getReplayBoundary(): number;
-  /** Record the server's retained-history bounds from a resumeAck. */
-  noteResumeBounds(committed: number, oldest: number): void;
+  /** Record the server's oldest retained index from a resumeAck. */
+  noteResumeBounds(oldest: number): void;
   /**
    * Apply a correlated history page; when the reply proved history is gone,
    * raise the paging floor so nothing below it is requested again.
    */
   handleHistoryReply(msg: ScrollMessage, raiseFloorTo: number | null): void;
-  /** Run the store's single resume-ack transition, supplying the viewport the store cannot see. */
+  /**
+   * Run the bound store's single resume-ack transition, supplying the viewport the
+   * store cannot see. Returns true when the store discarded its content: another
+   * process's, or restored and not confirmed (`LineStore.applyResumeAck`).
+   */
   applyResumeTransition(ack: {
-    epochChanged: boolean;
+    serverEpoch: number | null;
     committed: number | null;
     serverOldest: number | null;
     paging: boolean;
     sentHaveThrough: number;
     sentReplayMax: number | null;
-  }): void;
+  }): boolean;
   /** Record the window of a history request going out. */
   noteSolicited(fromAbs: number, end: number): void;
   /** Release the in-flight window (reply applied, timed out, socket gone). */
@@ -167,6 +173,10 @@ export interface Renderer {
   handleScreen(msg: ScreenMessage): void;
   /** Apply a `ScrollMessage` to the store and schedule a flush. */
   handleScroll(msg: ScrollMessage): void;
+  /** Record a `GridMessage` as this attachment's server grid, read by `gridSize()`. */
+  handleGrid(msg: GridMessage): void;
+  /** Forget the server grid: a new attachment starts, and its grid frame follows. */
+  clearGrid(): void;
   /**
    * The renderer's half of a scroll-position event: re-evaluate the paging
    * trigger, then resume a drain that stopped with rows still queued.
@@ -190,8 +200,10 @@ export interface Renderer {
   /** The integer (cols, rows) the terminal element can fit, clamped to 20x5; `{0,0}` once disposed. */
   computeSize(): { cols: number; rows: number };
   /**
-   * The grid currently ON SCREEN (rows from the last frame, 0 before the first),
-   * for `MouseInputHandler.gridSize`; `{0,0}` once disposed.
+   * The server screen's grid: the current attachment's last grid frame; before
+   * one (an older server, or a new attachment whose frame has not come) the
+   * measured columns and the window's rows (0 before the first frame). For
+   * `MouseInputHandler.gridSize` and input prediction; `{0,0}` once disposed.
    */
   gridSize(): { cols: number; rows: number };
   /** The cursor's pixel position in `termWrap`'s coordinate space plus the cell height. */
@@ -200,8 +212,6 @@ export interface Renderer {
   cellSize(): { width: number; height: number };
   /** Show or hide the predicted-cursor overlay at window-relative (row, col). */
   setPredictedCursor(row: number, col: number, active: boolean): void;
-  /** Apply or remove the DECSCNM reverse-video class on `termWrap`. */
-  updateReverseVideo(): void;
   /**
    * Release every timer, listener, element and callback the renderer holds and
    * clear its DOM; every method stays callable and answers its empty value.
@@ -550,11 +560,11 @@ export function createRenderer(opts: RendererOptions): Renderer {
     return store ? store.replayBoundary() : -1;
   }
 
-  function noteResumeBounds(committed: number, oldest: number): void {
+  function noteResumeBounds(oldest: number): void {
     if (!store) {
       return;
     }
-    store.noteResumeBounds(committed, oldest);
+    store.noteResumeBounds(oldest);
     scheduleFlush();
   }
 
@@ -575,15 +585,15 @@ export function createRenderer(opts: RendererOptions): Renderer {
   }
 
   function applyResumeTransition(ack: {
-    epochChanged: boolean;
+    serverEpoch: number | null;
     committed: number | null;
     serverOldest: number | null;
     paging: boolean;
     sentHaveThrough: number;
     sentReplayMax: number | null;
-  }): void {
+  }): boolean {
     if (!store) {
-      return;
+      return false;
     }
     // A tab switch reconnects, so this transition routinely runs mid-rebuild at
     // a clamped offset over rows still being built. The store's reclassify pass
@@ -593,12 +603,13 @@ export function createRenderer(opts: RendererOptions): Renderer {
     // overrides the live follow flag.
     const pending = pendingRestoreAbs();
     const pendingRestoreArmed = pending !== null;
-    store.applyResumeAck({
+    const foreign = store.applyResumeAck({
       ...ack,
       viewportAbs: pending ?? viewportAbs(),
       following: !pendingRestoreArmed && !scroll.isUserScrolledUp(),
     });
     scheduleFlush();
+    return foreign;
   }
 
   function noteSolicited(fromAbs: number, end: number): void {
@@ -644,65 +655,6 @@ export function createRenderer(opts: RendererOptions): Renderer {
       return null;
     }
     return "#" + c.toString(16).padStart(6, "0");
-  }
-
-  // --- URL detection (xterm.js addon-web-links pattern) ---
-  const URL_RE = /(https?|HTTPS?):\/\/[^\s"'!*(){}|\\^<>`]*[^\s"':,.!?{}|\\^~[\]`()<>]/g;
-
-  function linkifySpans(
-    spans: (HTMLSpanElement | HTMLAnchorElement)[],
-  ): (HTMLSpanElement | HTMLAnchorElement)[] {
-    const out: (HTMLSpanElement | HTMLAnchorElement)[] = [];
-    for (const span of spans) {
-      // An OSC 8 anchor's href is authoritative: re-scanning its VISIBLE text
-      // would rebuild a URL that wraps across rows from a fragment.
-      if (span.tagName === "A") {
-        out.push(span);
-        continue;
-      }
-      const text = span.textContent;
-      URL_RE.lastIndex = 0;
-      let match: RegExpExecArray | null;
-      let last = 0;
-      let found = false;
-      while ((match = URL_RE.exec(text)) !== null) {
-        found = true;
-        if (match.index > last) {
-          const pre = span.cloneNode(false) as HTMLSpanElement;
-          pre.textContent = text.slice(last, match.index);
-          out.push(pre);
-        }
-        const a = document.createElement("a");
-        a.href = match[0];
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-        // `.term-autolink` keeps a persistent underline because the match is
-        // scoped to the URL text; an OSC 8 link can span a padded region (a URL
-        // wrapping inside a table cell), so it gets only the hover underline.
-        a.className = "term-link term-autolink";
-        a.textContent = match[0];
-        // Property-by-property, never cssText: a cssText assignment is a
-        // string-PARSED style write, the one kind a style-src CSP governs.
-        for (let i = 0; i < span.style.length; i++) {
-          const prop = span.style.item(i);
-          a.style.setProperty(
-            prop,
-            span.style.getPropertyValue(prop),
-            span.style.getPropertyPriority(prop),
-          );
-        }
-        out.push(a);
-        last = match.index + match[0].length;
-      }
-      if (!found) {
-        out.push(span);
-      } else if (last < text.length) {
-        const post = span.cloneNode(false) as HTMLSpanElement;
-        post.textContent = text.slice(last);
-        out.push(post);
-      }
-    }
-    return out;
   }
 
   // A hyperlink run is "link text" only if it has a glyph that is not whitespace
@@ -861,8 +813,9 @@ export function createRenderer(opts: RendererOptions): Renderer {
         a.href = href;
         a.target = "_blank";
         a.rel = "noopener noreferrer";
-        // Attr bit 1024 (vt.AttrAutolink) is a server-detected bare URL, styled
-        // like the client's own autolinks; an OSC 8 link keeps the hover-only base.
+        // Links are the server's (vt stampAutolinks): attr bit 1024
+        // (vt.AttrAutolink) marks a bare URL it found, which keeps a persistent
+        // underline; an OSC 8 link keeps the hover-only base.
         a.className = (attrs & 1024) !== 0 ? "term-link term-autolink" : "term-link";
         for (const s of runSpans) {
           a.appendChild(s);
@@ -879,7 +832,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
       span.textContent = "\u00a0";
       out.push(span);
     }
-    return linkifySpans(out);
+    return out;
   }
 
   // --- Frame handling: feed the store, then flush to DOM ---
@@ -907,6 +860,16 @@ export function createRenderer(opts: RendererOptions): Renderer {
     lastInboundMs = Date.now();
     store.applyScroll(msg);
     scheduleFlush();
+  }
+
+  function handleGrid(msg: GridMessage): void {
+    if (Number.isInteger(msg.cols) && msg.cols > 0 && Number.isInteger(msg.rows) && msg.rows > 0) {
+      serverGrid = { cols: msg.cols, rows: msg.rows };
+    }
+  }
+
+  function clearGrid(): void {
+    serverGrid = null;
   }
 
   function scheduleFlush(): void {
@@ -1784,6 +1747,10 @@ export function createRenderer(opts: RendererOptions): Renderer {
   // tracking, and computeSize() costs a computed-style read plus two layout reads.
   let measuredCols = 0;
 
+  // The current attachment's, not the bound store's: a store outlives the
+  // socket that sized it, and a session switch rebinds no store of its own.
+  let serverGrid: { cols: number; rows: number } | null = null;
+
   function computeSize(): { cols: number; rows: number } {
     if (!termWrap) {
       return { cols: 0, rows: 0 };
@@ -1799,14 +1766,14 @@ export function createRenderer(opts: RendererOptions): Renderer {
     return { cols, rows };
   }
 
-  // Rows are the store's, not `computeSize()`'s: the server's screen is
-  // last-writer-wins across attached clients, so the measured height can
-  // describe a grid nothing is painting, and the mouse hit test ANCHORS on this
-  // number. Columns stay measured: the store has none (trailing blanks are
-  // trimmed off the wire) and that axis only bounds a report.
+  // The server's, not `computeSize()`'s: one client's measured box need not be
+  // the shared screen's size, and the mouse hit test anchors on this.
   function gridSize(): { cols: number; rows: number } {
     if (!store) {
       return { cols: 0, rows: 0 };
+    }
+    if (serverGrid !== null) {
+      return { ...serverGrid };
     }
     const rows = store.isAlt() ? store.getAltRows().length : store.getWindow().height;
     return { cols: measuredCols > 0 ? measuredCols : computeSize().cols, rows };
@@ -1967,15 +1934,9 @@ export function createRenderer(opts: RendererOptions): Renderer {
   }
 
   function updateReverseVideo(): void {
-    if (!termWrap) {
-      return;
-    }
-    if (modes.isReverseVideo()) {
-      termWrap.classList.add("term-reverse-video");
-    } else {
-      termWrap.classList.remove("term-reverse-video");
-    }
+    termWrap?.classList.toggle("term-reverse-video", modes.isReverseVideo());
   }
+  let unsubscribeModes = (): void => undefined;
 
   // Pause the blink interval while hidden; resume (cursor solid, phase reset)
   // when the tab is foregrounded again. blinkEnabled/cursorHidden keep their
@@ -1998,6 +1959,7 @@ export function createRenderer(opts: RendererOptions): Renderer {
       blinkInterval = null;
     }
     blinkMode = "off";
+    unsubscribeModes();
     document.removeEventListener("visibilitychange", onVisibilityChange);
     resetVariantContexts();
     widthFlat.fill(WIDTH_FLAT_UNSET);
@@ -2035,6 +1997,8 @@ export function createRenderer(opts: RendererOptions): Renderer {
 
   try {
     document.addEventListener("visibilitychange", onVisibilityChange);
+    unsubscribeModes = modes.subscribe(updateReverseVideo);
+    updateReverseVideo();
     syncCursorBlink();
   } catch (err) {
     dispose();
@@ -2061,6 +2025,8 @@ export function createRenderer(opts: RendererOptions): Renderer {
     pendingRowCount,
     handleScreen,
     handleScroll,
+    handleGrid,
+    clearGrid,
     handleScrollPosition,
     captureViewMemory,
     pendingRestoreAbs,
@@ -2071,7 +2037,6 @@ export function createRenderer(opts: RendererOptions): Renderer {
     getCursorPx,
     cellSize,
     setPredictedCursor,
-    updateReverseVideo,
     dispose,
   };
 }

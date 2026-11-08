@@ -1022,7 +1022,7 @@ describe("a resume transition answers the follow question this layer owns", () =
   function transition(): { viewportAbs: number; following: boolean } {
     const seen = vi.spyOn(render.boundStore(), "applyResumeAck");
     render.applyResumeTransition({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: false,
@@ -1228,7 +1228,7 @@ describe("a scroll-position event drives the paging trigger", () => {
 describe("the top-of-store marker states what is true above the oldest line held", () => {
   function declarePaging(): void {
     render.applyResumeTransition({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,

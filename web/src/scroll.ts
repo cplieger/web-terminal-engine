@@ -34,8 +34,13 @@ export interface ScrollController {
   reconcileScrollRange(): void;
   /** Pin the viewport to the bottom iff the user is following. */
   stickToBottom(): void;
-  /** Force scroll to the bottom and re-engage following. */
-  scrollToBottom(): void;
+  /**
+   * Re-engage following at once and move to the bottom. With `smooth` the
+   * browser animates the move, and output arriving meanwhile is pinned when it settles.
+   */
+  scrollToBottom(opts?: { smooth?: boolean }): void;
+  /** Move one viewport up (-1), which stops following, or down (1), which follows again at the bottom. */
+  scrollByPage(direction: -1 | 1): void;
   /** Whether the user has scrolled away from the bottom (auto-follow disengaged). */
   isUserScrolledUp(): boolean;
   /** The viewport's current scroll offset; 0 once disposed. */
@@ -70,7 +75,8 @@ export function createScrollController(opts: ScrollControllerOptions): ScrollCon
   let echoSilent = false;
   // A settle found user movement inside a write; the next event reports it.
   let positionOwed = false;
-  // The pin hold: a press is down, or its momentum has not settled yet.
+  // The pin hold: a press is down, or a movement the browser animates (a
+  // press's momentum, a smooth scrollToBottom) has not settled yet.
   let pressHeld = false;
   let momentumPending = false;
   let scrolledSincePress = false;
@@ -489,13 +495,41 @@ export function createScrollController(opts: ScrollControllerOptions): ScrollCon
     write(bottomOffset(), false);
   }
 
-  function scrollToBottom(): void {
+  function scrollToBottom(opts?: { smooth?: boolean }): void {
     if (!scrollEl) {
       return;
     }
     settle();
-    write(bottomOffset(), false);
+    intentUnconfirmed = false;
     setFollowing(true);
+    if (opts?.smooth !== true || distanceFromBottom() <= 0) {
+      write(bottomOffset(), false);
+      return;
+    }
+    // The animation's target is fixed here and a pin write would abort it
+    // (CSSOM View "perform a scroll"), so the hold defers every pin until the
+    // animation settles; the release then pins to wherever the bottom is.
+    if (!pressHeld) {
+      momentumPending = true;
+      armQuietTimer();
+    }
+    scrollEl.scrollTo({ top: bottomOffset(), behavior: "smooth" });
+  }
+
+  function scrollByPage(direction: -1 | 1): void {
+    if (!scrollEl) {
+      return;
+    }
+    settle();
+    intentUnconfirmed = false;
+    const top = scrollEl.scrollTop;
+    const page = scrollEl.clientHeight;
+    write(direction < 0 ? Math.max(0, top - page) : Math.min(bottomOffset(), top + page), false);
+    if (direction < 0 && expectedTop < top) {
+      setFollowing(false);
+    } else if (direction > 0 && atBottom()) {
+      setFollowing(true);
+    }
   }
 
   function isUserScrolledUp(): boolean {
@@ -580,6 +614,7 @@ export function createScrollController(opts: ScrollControllerOptions): ScrollCon
     reconcileScrollRange,
     stickToBottom,
     scrollToBottom,
+    scrollByPage,
     isUserScrolledUp,
     currentScrollTop,
     adjustForContentShift,

@@ -1,149 +1,67 @@
-// Absolute-index line store: the client's authoritative model of the
-// terminal. One buffer keyed by absolute line index, with the live screen
-// window sliding along it. This is the data model that resolves the
-// live/history split: there is no separate
-// "live zone" and "scrollback" here, only lines addressed by absolute index,
-// the last `height` of which happen to still be changing.
-//
-// The store is pure (no DOM). The renderer (render.ts) reads from it and
-// reflects changes to the DOM; the connection layer feeds decoded wire
-// messages into it. Applying a line is idempotent by absolute index, which is
-// what makes re-delivery (resume replay, fast-burst re-send, a doubled frame
-// from a zombie socket) incapable of duplicating a row.
+// Absolute-index line store: the client's model of the terminal. Lines are
+// keyed by absolute index with the live screen window sliding along the tail,
+// so there is no separate scrollback. Pure: no DOM, no globals.
 
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 import { interiorGaps, retainedIntervals, type Interval } from "./intervals.js";
+import { replayStart } from "./replay.js";
 
 /**
- * The tail cap held while paging is unconfirmed — the legacy default, so a
- * pairing with a server that cannot serve history back never has its reachable
- * history cut.
- *
- * This is the SOURCE of the default cap, not a second name for it: `MAX_LINES`
- * derives from it below. The two were independent literals, so editing this one
- * — the exported, documented, obviously-intended knob — changed nothing except
- * which assertion failed.
+ * The tail cap held while paging is unconfirmed, so a server that cannot serve
+ * history back never has its reachable history cut. `MAX_LINES` derives from it.
  */
 export const COMPATIBILITY_TAIL_CAP = 5000;
 
-/**
- * Maximum lines retained client-side. Older lines are evicted from the top.
- * Identical to the compatibility cap by construction: the depth a client holds
- * when nothing has told it to hold less IS the pre-flip cap.
- */
+/** Maximum lines retained client-side when the consumer sets no cap. */
 const MAX_LINES = COMPATIBILITY_TAIL_CAP;
 
 /**
- * SNAPSHOT_VERSION is the shape version of a persisted store snapshot. Bump it
- * on any change to StoreSnapshot's fields or their meaning; fromSnapshot rejects
- * anything that does not match, so an older snapshot is discarded rather than
- * misread. There is deliberately no migration path: a discarded snapshot costs
- * one full resume, which is exactly the behavior of not having persisted at all.
- *
- * One carve-out, because the rule above exists to prevent MISREADING and this
- * cannot be misread: adding an OPTIONAL field whose absence is defined to mean
- * exactly the pre-existing behaviour needs no bump. `fromSnapshot` reads fields
- * individually off an `unknown` record and validates each, so an older entry
- * simply lacks the key and takes the documented absent path. The test is whether
- * a v-matching entry written by the previous release still hydrates to the same
- * store it would have before; if it does not, bump. `unconfirmedFrom` is the
- * first field added under this carve-out.
+ * Shape version of a persisted snapshot; `fromSnapshot` discards any other, so a
+ * stale snapshot costs one full resume instead of being misread. An OPTIONAL
+ * field whose absence means the old behaviour needs no bump (`unconfirmedFrom`):
+ * the test is that a previous release's entry still hydrates to the same store.
  */
 const SNAPSHOT_VERSION = 1;
 
 /**
- * A persisted line store, as plain data: no class instances, no functions, no
- * cycles, so it survives structuredClone and can go straight into IndexedDB
- * without a bespoke serializer (WireRun is primitives only — see types.ts).
- *
- * What is deliberately NOT here, and must not be added without re-reading why:
- *
- * - The live window (`WindowState`). It is last session's geometry, and it is
- *   load-bearing in two places that would silently misbehave under a stale
- *   value: `inWindow()` is what exempts live-window rows from the staleness
- *   guard and from cap eviction. The first screen frame re-establishes it.
- * - `serverOldest`. It is the server's retained-history bound from a resumeAck,
- *   and the next resumeAck supplies the current one. A stale value would make
- *   the "earlier output trimmed" marker report on a range that no longer exists.
- * - The alternate screen (`alt`, `altRows`). Ephemeral by definition: an alt
- *   grid is not history and is never addressed by absolute index.
+ * A persisted line store as plain, structuredClone-safe data. Deliberately
+ * absent: the live window (`inWindow()` exempts its rows from the staleness
+ * guard and from eviction, so a stale one misbehaves; the first screen frame
+ * restores it), `serverOldest` (the next resumeAck supplies it) and the
+ * alternate screen (not history).
  */
 export interface StoreSnapshot {
   /** Shape version; must equal SNAPSHOT_VERSION or the snapshot is discarded. */
   v: number;
   /**
-   * The server boot epoch these lines belong to, as last reported by a
-   * resumeAck, or 0 when the client never learned one.
-   *
-   * This is the field that makes persistence safe rather than actively harmful.
-   * Absolute line indices are only meaningful within one server process: a
-   * restarted server begins again at 0. Restart detection is otherwise
-   * in-memory — the first resumeAck of a page load records the epoch with
-   * nothing to compare against — so a hydrated store plus a restarted server
-   * would present stale content as live AND then silently drop the new
-   * session's output, whose low indices fall at or below the hydrated
-   * everEvictedThrough and are refused by apply-line guard 2.
-   *
-   * The consumer must therefore hand this to the connection layer before
-   * connecting (see connection.adoptPersistedEpoch), so the first resumeAck
-   * has something to compare against and the existing restart path fires.
+   * The server boot epoch these lines belong to, always positive. Indices are
+   * only meaningful within one server process, so a restored store's first
+   * resumeAck under another epoch wipes the lines instead of showing them as live.
    */
   serverEpoch: number;
-  /** Lowest absolute index in `lines`.
-   *
-   *  Write-side metadata: `fromSnapshot` derives the bounds from the pairs it
-   *  actually accepted rather than trusting these, so a corrupt value here changes
-   *  nothing on the way back in. They are carried because a consumer's storage
-   *  layer wants them without parsing the payload (the keeper records `highest` as
-   *  its save watermark), and they are deliberately NOT validated against the pairs
-   *  — a check with no failure mode behind it is worse than none. */
+  /** Lowest absolute index in `lines`. Write-side metadata for the consumer's
+   *  storage layer; `fromSnapshot` derives the bounds from the pairs instead. */
   oldest: number;
   /** Highest absolute index in `lines`. Write-side metadata; see `oldest`. */
   highest: number;
   /**
-   * The saving store's provisional floor: the lowest index at or above which its
-   * content had not been confirmed as committed history by the server. ABSENT
-   * when everything it held was confirmed, and absent in every snapshot written
-   * before this field existed, which is the same state and takes the same path.
-   *
-   * Carried because the alternative is a reloaded page telling the server "no
-   * need to re-send" about screen rows it only ever saw the application draw.
-   * The window descriptor cannot serve here (see above: a stale one is
-   * load-bearing in two places), and this is not geometry — it is one index,
-   * meaningless to interpret as anything else.
-   *
-   * `fromSnapshot` treats a malformed value as absent rather than rejecting the
-   * snapshot. Being wrong in that direction costs a replayed screenful; rejecting
-   * would throw away a whole session's history over a field that is an
-   * optimisation of correctness, not a correctness precondition.
+   * The saving store's provisional floor (`LineStore.unconfirmedFrom`), absent
+   * when everything held was confirmed, which is also how an older snapshot
+   * reads. Without it a reloaded page would tell the server not to re-send screen
+   * rows it only saw the app draw. A malformed value is read as absent.
    */
   unconfirmedFrom?: number;
-  /**
-   * The retained lines as [absoluteIndex, runs] pairs, ascending. Pairs rather
-   * than an object keyed by index, because object keys stringify and absolute
-   * indices are numbers; pairs clone as-is and read plainly in a debugger.
-   */
+  /** The retained lines as ascending [absoluteIndex, runs] pairs (object keys
+   *  would stringify the indices). */
   lines: [number, WireRun[]][];
 }
 
 /**
- * isWireRunArray reports whether a value decoded from OUTSIDE this program is a
- * usable run array.
- *
- * This is the only path into a store that admits externally-sourced run objects:
- * the wire decoder constructs each WireRun field by field from typed cursor reads,
- * so `t` is a string by construction and applyLine's own `Array.isArray(runs)`
- * check inherits that guarantee. A snapshot inherits nothing, and the difference
- * is not academic — a run whose `t` is not a string reaches the renderer's
- * per-character loop and throws, the row stays queued because the drain only
- * clears a row after a successful build, and every row above it is blocked. That
- * failure is permanent and self-perpetuating (the store hydrated, so the entry is
- * never dropped, so the next reload breaks the same way), where every other
- * rejection here degrades to "nothing restored".
- *
- * Optional numeric fields are checked when present rather than defaulted: a
- * string in `f` would flow into a colour lookup, and silently coercing it would
- * hide a producer bug instead of rejecting a payload this store cannot trust.
+ * isWireRunArray validates a run array decoded from outside this program (a
+ * snapshot). The wire decoder builds runs field by field, so only this path can
+ * admit a run whose `t` is not a string, which throws in the renderer's row
+ * build, blocks every row above it and persists across reloads. Optional
+ * numeric fields are checked, not coerced.
  */
 function isWireRunArray(value: unknown): value is WireRun[] {
   if (!Array.isArray(value)) {
@@ -171,68 +89,37 @@ function isWireRunArray(value: unknown): value is WireRun[] {
 }
 
 /**
- * evictionBatch returns how many lines an at-cap eviction pass NOMINALLY frees
- * (the hysteresis band), derived from the cap so tiny test stores keep
- * one-at-a-time eviction (a batch of 1 IS the pre-batching behavior) while the
- * real 5000-line store frees 256 rows per pass. A pass can free fewer when the
- * retained history above the cap is smaller than the batch: headroom is taken
- * from evictable HISTORY only, never from the protected live window, so a cap
- * close to the screen height degrades toward per-line eviction (see the
- * operating-range note on the consumer option docs).
- *
- * Why evictions are batched at all: every evicted line removes a DOM row from
- * the TOP of the scroller, which shifts every row below it and invalidates the
- * whole scrolled-contents layer. At the cap, one-at-a-time eviction turns a
- * streaming session into one whole-layer invalidation PER LINE — on WebKit
- * (which re-rasterizes the resident tiles each time) that is the single largest
- * compositor cost this client can trigger, and on a memory-pressured iPhone it
- * is churn the page cannot afford. Batching keeps appends eviction-free between passes, so the
- * layer shifts once per batch instead of once per line. The retained count is
- * hard-bounded at `max(maxLines, live-window height)` after every apply — the
- * window is never evicted (a cap at or below the screen height keeps the full
- * screen with zero scrollback), and everything else stays under the cap
- * whatever shape the frames arrive in (enforceCap's skip-over-window walk
- * also bounds content committed above a stale window, e.g. a resume replay).
+ * evictionBatch is how many lines an at-cap eviction pass nominally frees: 1 for
+ * tiny test stores, 256 for the real 5000-line store. Each evicted line removes a
+ * DOM row from the top of the scroller and invalidates the whole scrolled layer
+ * (WebKit re-rasterizes its tiles), so batching shifts the layer once per batch.
+ * Headroom comes from history only, never the live window.
  */
 function evictionBatch(maxLines: number): number {
   return Math.min(256, Math.max(1, Math.floor(maxLines / 16)));
 }
 
-/**
- * Demand-paged-scrollback residency constants.
- *
- * The store holds a small RESIDENT TAIL plus a disposable BROWSE CACHE of
- * pages fetched on demand. The two budgets are enforced by separate mechanisms
- * that can never touch each other's lines: live output cannot evict browse
- * cache, and browse pressure cannot evict the tail.
- */
+// Demand-paged scrollback: a resident TAIL plus a disposable BROWSE CACHE of
+// fetched pages, each with its own budget; neither can evict the other's lines.
 
-/**
- * The resident-tail target once the server has DECLARED it serves paging. The
- * compatibility value below is what the tail holds until then.
- */
+/** The resident-tail target once the server declares paging. */
 export const RESIDENT_TAIL_CAP = 1500;
 
 /** Lines of paged-in history retained as disposable cache. Engine-internal. */
 export const BROWSE_CACHE_CAP = 2500;
 
 /**
- * How close the viewport must come to an absent range's edge before a fetch is
- * triggered, and the radius of the eviction exemption around the reader. It is
- * both because they are the same idea: the band worth prefetching is the band
- * worth not evicting.
+ * How near an absent range's edge the viewport comes before a fetch, and the
+ * radius exempt from eviction around the reader: the same band.
  */
 export const PREFETCH_THRESHOLD = 500;
 
-/** Lines requested per page, and the ceiling on one eviction pass's removals. */
+/** Lines requested per page (the server's, wire-golden/limits.json), and the ceiling on one
+ *  eviction pass's removals. */
 export const PAGE_SIZE = 1000;
 
-/**
- * The viewport exemption can never pin browse membership above its cap. Checked
- * statically here rather than left as a comment, because the eviction loop's
- * termination argument at the page-apply target rests on it: if the exemption
- * could cover the whole cache, a pass with work to do could find no victim.
- */
+/** The viewport exemption stays below the cache cap, or an eviction pass with
+ *  work to do could find no victim. */
 if (2 * PREFETCH_THRESHOLD + 1 >= BROWSE_CACHE_CAP) {
   throw new Error(
     `paged-scrollback invariant violated: the viewport exemption (${2 * PREFETCH_THRESHOLD + 1} lines) ` +
@@ -240,17 +127,12 @@ if (2 * PREFETCH_THRESHOLD + 1 >= BROWSE_CACHE_CAP) {
   );
 }
 
-/** The live screen window: a fixed `height`-row block at the tail of the buffer.
- *  Describes the MAIN screen even while the alternate screen is active: the alt
- *  grid's geometry lives in the store's altRows, so during an alt session that
- *  outlived a resize, `base`/`height` report the main region alt exit restores,
- *  not the current terminal size. */
+/** The live screen window at the tail of the buffer. It describes the MAIN
+ *  screen even while alt is active (the alt grid's geometry lives in altRows). */
 export interface WindowState {
   /** Absolute index of window row 0 (the MAIN screen's; frozen during alt). */
   base: number;
-  /** Number of rows in the window — the MAIN screen's height, which equals
-   *  the terminal height except during an alt session that resized (then the
-   *  alt grid's height lives in altRows and this keeps the restore target). */
+  /** Rows in the MAIN screen's window, kept through an alt session's resize. */
   height: number;
   /** Cursor row within the window (0..height-1). */
   cursorRow: number;
@@ -311,33 +193,11 @@ function rowEqual(a: WireRun[], b: WireRun[]): boolean {
 
 /**
  * The client's model of one terminal: lines keyed by absolute index, the live
- * screen window sliding along the tail, and the change set a renderer drains each
- * frame. Holds no DOM and reads no globals, so a consumer may own several (one
- * per tab) and bind whichever is visible.
- *
- * Applying is idempotent by absolute index, which is what makes re-delivery —
- * resume replay, a doubled frame from a zombie socket — incapable of duplicating
- * a row. The apply methods enforce the store's invariants themselves and refuse
- * rather than throw: a frame that violates one is dropped, so a malformed or
- * misordered stream degrades to missing content, never to an exception in the
- * middle of a render. A drop is not reported either, so a caller that needs to
- * know what the store holds asks it (oldestIndex, highestIndex, retainedRanges)
- * instead of tracking what it sent.
- *
- * What the caller must hold up:
- *
- * - Feed the store every frame the server sends, in arrival order, and pass
- *   `viewportAbs`/`following` where a method asks for them. The store never
- *   infers where the reader is; the renderer is the only layer that knows.
- * - Drain with drainChanges once per frame and apply the result. Nothing is
- *   re-reported, so a skipped drain loses the notification, not the content.
- * - Treat every reader (getLine, forEachLine, getAltRows) as a view onto live
- *   state: the runs are the store's own, valid until the next apply, and are not
- *   to be mutated.
- *
- * Residency is a HISTORY budget floored at the live window, so a small cap keeps
- * the full screen and simply retains no scrollback; the constructor documents the
- * difference between supplying one and letting the engine choose.
+ * window at the tail, and the change set a renderer drains each frame. Applying
+ * is idempotent by index; a frame that breaks an invariant is dropped silently,
+ * so callers ask what is held (oldestIndex, retainedRanges). Feed every frame in
+ * arrival order, drain once per frame (nothing is re-reported), and treat read
+ * runs as views valid until the next apply.
  */
 export class LineStore {
   private lines = new Map<number, WireRun[]>();
@@ -359,14 +219,8 @@ export class LineStore {
 
   // --- demand-paged scrollback ---
 
-  /**
-   * The RESIDENT TAIL cap, and the one deliberately mutable piece of residency
-   * policy: the capability the server declares in its resumeAck decides it at
-   * runtime. It starts at the compatibility value and flips ONE-WAY to the
-   * supported target through `applyResumeAck`. Every residency reader uses this
-   * value — the tail-budget gate, `evictionBatch`, and `snapshot`'s default
-   * bound — so a flip moves all of them together.
-   */
+  /** The resident-tail cap: the compatibility value until `applyResumeAck` flips
+   *  it one-way to the supported target; every residency reader uses it. */
   private effectiveTailCap: number;
 
   /** The post-flip target: what the tail shrinks to once paging is declared. */
@@ -376,122 +230,59 @@ export class LineStore {
   private readonly compatibilityCap: number;
 
   /**
-   * The keys currently held as BROWSE CACHE — a subset of `lines`' keys, and
-   * the cache's whole model: membership, size and eviction candidates all read
-   * it directly. It drives cap accounting, eviction and snapshot exclusion. It
-   * is NOT a guard-2 bypass — re-delivery into a retained index passes only
-   * through applyLine's idempotence, or arrives under a fresh
-   * `solicitedPending`.
-   *
-   * A SET of keys rather than a set of intervals, and no companion counter.
-   * Both alternatives were built first and both leaked defects that this shape
-   * cannot express:
-   *
-   *  - INTERVALS described ranges the store need not hold, so every question
-   *    ("is the reader on cache?", "how many cache lines?", "which to evict?")
-   *    became a walk over a numeric SPAN. The replay-jump band is a hull from
-   *    `oldest` through the client's `haveThrough`, so that span is as wide as
-   *    the client is behind: a 500k hull measured 2.3 s of main-thread work for
-   *    ten real rows, and 80M measured 1.2 s in the one query that still walked
-   *    it. Keys are bounded by residency, so every question here is O(cache).
-   *  - A COMPANION COUNT (`browseCount`) had to be maintained by arithmetic at
-   *    every mutation, and was wrong at four of them — it reached -96 on a third
-   *    successive jump ack. `browse.size` cannot drift because it is not
-   *    maintained at all.
-   *
-   * The one invariant is `browse ⊆ lines.keys()`, and it holds because `forget`
-   * is the sole deletion path and deletes from both.
+   * The keys held as BROWSE CACHE, a subset of `lines`' keys: membership, size
+   * and eviction candidates all read it, so every query is O(cache), never
+   * O(span) (a replay-jump hull can span millions of indices). Not a guard-2
+   * bypass. Invariant `browse ⊆ lines.keys()`: `forget` is the only deletion path
+   * and deletes from both.
    */
   private browse = new Set<number>();
 
-  /**
-   * The window of the request currently in flight, or null. Lines inside it are
-   * applyable even below prior evictions — paging is exactly a legitimate
-   * re-fetch below the stale-re-send watermark, which is why the watermark
-   * doctrine needed a solicited-range exception rather than a weaker guard.
-   * Exactly one slot, matching single-flight: there is nothing to expire.
-   */
+  /** The in-flight request's window, or null: lines inside it apply even below
+   *  the eviction watermark (a page is a legitimate re-fetch). One slot. */
   private solicitedPending: Interval | null = null;
 
-  /**
-   * The lowest index still worth requesting. Raised by a clamped or empty
-   * reply (the server proving nothing at or below it survives), lowered only by
-   * a resumeAck reporting an older retained edge — which within one epoch is
-   * the repair path for a mis-correlated clamp.
-   */
+  /** The lowest index still worth requesting: raised by a clamped or empty reply,
+   *  lowered only by a resumeAck reporting an older retained edge. */
   private pagingFloor = 0;
 
   /** When browse cache was last created or read, for the consumer's TTL. */
   private browseActivityMs = 0;
 
-  /**
-   * Whether the last resumeAck declared paging; the renderer needs it for the
-   * top-of-store marker and cannot derive it. A boolean, false until an ack says
-   * otherwise: before the first ack and under `unsupported` the answer is the
-   * same, so a third state would be read by nothing.
-   */
+  /** Whether the last resumeAck declared paging (the renderer's top marker). */
   private paging = false;
 
   /**
-   * The highest index the application erased (ED3), or -1. Not
+   * The highest index the application erased (ED3), or -1. Separate from
    * `everEvictedThrough`, which marks budget trims and drives the "earlier output
-   * trimmed" marker that ED3 must not show. Without it a late, uncorrelated page
-   * reply lands as TAIL, outside the cache budget and TTL, and never leaves. Safe
-   * within an epoch: the ring's `Clear()` keeps `committed`, so no erased index is
-   * reused. It tracks what was dropped; the cleared bound would refuse the reprint.
+   * trimmed" marker ED3 must not show; without it a late page reply lands as tail
+   * and never leaves. Safe within an epoch: the server never reuses an index.
    */
   private erasedThrough = -1;
 
   /**
-   * Memo for `retainedRanges()`, invalidated by every key-set mutation.
-   *
-   * Coalescing the keys costs a copy and a sort of the whole residency, and the
-   * scroll seam asks for it on EVERY scroll event (the fetch trigger reads the
-   * gaps near the viewport) while the renderer asks again on every flush (the
-   * gap markers are re-derived, not tracked). Measured at 4500 retained rows:
-   * 95 us per call, so 5.7 ms per 60-event scroll frame — a third of a frame
-   * budget, on the phone this whole feature exists for, during the one
-   * interaction it exists to serve. The key set changes far less often than it
-   * is asked about, so the answer is computed once per change instead of once
-   * per question.
-   *
-   * Invalidation is sound for the same reason the browse set is: insertion has
-   * one owner (`applyLine`) and deletion has one owner (`forget`), so there are
-   * exactly two places to clear it, plus `reset`. The snapshot hydrate writes
-   * keys directly and deliberately clears NOTHING: it builds a store whose memo
-   * is still unset, and an invalidation there is unreachable by construction
-   * (verified by mutation — the test that covers it fails only if a future edit
-   * reads the geometry before the keys land).
+   * Memo for `retainedRanges()`: the scroll seam asks on every scroll event and
+   * the renderer on every flush, and coalescing sorts the residency (95 us at
+   * 4500 rows). Cleared by the only insertion (`applyLine`), the only deletion
+   * (`forget`) and `reset`; a snapshot hydrate builds a store with no memo yet.
    */
   private rangesMemo: Interval[] | null = null;
 
+  /** The server process (boot epoch) the content belongs to, or 0 when unknown. */
+  private epoch = 0;
+
+  /** The epoch came from a snapshot, so the next resumeAck must confirm it. */
+  private epochSeeded = false;
+
   /**
-   * @param maxLines  retained-line cap, or OMITTED for the engine's choice.
-   *                  Optional rather than defaulted, because the two are not
-   *                  the same statement: "omitted" selects the engine's own
-   *                  post-flip target, and expressing that as a default VALUE
-   *                  made the consumer's explicit `5000` indistinguishable from
-   *                  silence — a UI passing `scrollbackLines: 5000` had its cap
-   *                  silently replaced by the small target on the first paging
-   *                  ack. It also made every call site spell the distinction
-   *                  itself (`x !== undefined ? new LineStore(x) : new
-   *                  LineStore()`), which is the shape a sentinel forces. A
-   *                  HISTORY
-   *                  budget floored at the live screen: the current window's
-   *                  rows are never evicted, so a cap at or below the
-   *                  terminal height keeps the full screen and simply
-   *                  retains no scrollback. Injectable so eviction is
-   *                  testable without allocating thousands of rows, and
-   *                  consumer-tunable through the renderer/UI plumb.
+   * @param maxLines  the history budget, floored at the live window, or OMITTED
+   *                  for the engine's choice. Omitted is not a default value: an
+   *                  explicit 5000 holds in every capability state, while omitted
+   *                  flips to the smaller target once paging is declared.
    */
   constructor(maxLines?: number) {
-    // Constructor-knob semantics: an OMITTED
-    // cap means "engine's choice", so it holds the legacy value until paging is
-    // declared and then flips to the small target. A SUPPLIED cap is an
-    // explicit memory decision by the consumer and holds in EVERY capability
-    // state — the flip is then a no-op. Either way the tail never exceeds what
-    // the consumer asked for, and never drops below what a non-paging server
-    // can serve back.
+    // Omitted: the legacy cap until paging is declared, then the small target.
+    // Supplied: the consumer's memory decision, held in every state.
     this.compatibilityCap = maxLines ?? MAX_LINES;
     this.supportedTarget = maxLines ?? RESIDENT_TAIL_CAP;
     this.effectiveTailCap = this.compatibilityCap;
@@ -514,29 +305,37 @@ export class LineStore {
 
   /**
    * Lowest index the server has not confirmed as committed (+Infinity when all
-   * is). A SCREEN-frame row is a repaintable position, provisional until it
-   * scrolls off; a SCROLL or history row is committed. Those rows form a
-   * contiguous suffix, so one number suffices. It lowers on any screen frame and
-   * rises only when a durable frame reaches it from below: too low replays a few
-   * rows, too high is the defect this prevents.
+   * is). Screen-frame rows are provisional until they scroll off; scroll and
+   * history rows are committed. They form a suffix, so one number suffices: it
+   * lowers on any screen frame and rises only when a durable frame reaches it.
    */
   private unconfirmedFrom = Number.POSITIVE_INFINITY;
 
   /**
-   * The resume replay-exclusion boundary: the highest index this client will not
-   * ask the server to re-send. Send it as `haveThrough`, never `highestIndex()`: a
-   * background tab's window rows hold what the app drew there, and claiming them
-   * means their committed content is never re-sent, so a stale input box surfaces
-   * as scrollback. It may name an index never held or since evicted; the only
-   * guarantee is `replayBoundary() <= highestIndex()`, equal when none is provisional.
+   * The highest index this client asks the server not to re-send: send it as
+   * `haveThrough`, never `highestIndex()`, whose window rows hold what the app
+   * drew and would surface a stale screen as scrollback. Always `<= highestIndex()`.
    */
   replayBoundary(): number {
     if (this.highest < 0) {
       return this.highest;
     }
-    // unconfirmedFrom is +Infinity when nothing is provisional, so the min is
-    // `highest` and this is a no-op for a store fed only by durable frames.
     return Math.min(this.highest, this.unconfirmedFrom - 1);
+  }
+
+  /**
+   * The boot epoch of the server process the content belongs to, from the last
+   * resumeAck that reported one or from the snapshot it was restored from; 0
+   * when unknown.
+   */
+  serverEpoch(): number {
+    return this.epoch;
+  }
+
+  /** True while the store holds content restored by `fromSnapshot` that no
+   *  resumeAck has confirmed or discarded yet. */
+  isUnconfirmedRestore(): boolean {
+    return this.epochSeeded && this.highest >= 0;
   }
 
   /** Lowest absolute index held, or -1 if empty. */
@@ -544,11 +343,7 @@ export class LineStore {
     return this.oldest;
   }
 
-  /**
-   * True if history older than what the store holds was trimmed (evicted
-   * client-side, or the server reported it no longer retains it). The
-   * renderer shows a "history trimmed" marker at the top in this case.
-   */
+  /** Whether older history was trimmed, here or by the server (the top marker). */
   hasTrimmedHistory(): boolean {
     if (this.oldest > 0 && this.everEvictedThrough >= 0) {
       return true; // we evicted the oldest lines ourselves
@@ -566,33 +361,19 @@ export class LineStore {
     return this.alt;
   }
 
-  /**
-   * The ephemeral alt-screen grid rows, as a read-only view of the store's
-   * internal arrays (no copy: the pre-2026-07 deep copy allocated the whole
-   * grid on every flush while a full-screen TUI was active — measured at real
-   * cost in the render bench). Row identity is meaningful: applyScreen
-   * replaces exactly the changed rows' arrays and leaves unchanged rows
-   * reference-identical, which is what lets the renderer reconcile the alt
-   * grid row-by-row instead of rebuilding it (renderAlt).
-   */
+  /** The alt grid's rows, uncopied and read-only: an unchanged row keeps its
+   *  identity across frames, which lets the renderer reconcile row by row. */
   getAltRows(): readonly (readonly WireRun[])[] {
     return this.altRows;
   }
 
-  /**
-   * Iterate retained lines from oldest to highest in absolute-index order,
-   * skipping holes. The renderer uses this to build and order DOM rows; a hole
-   * (a jump in abs between consecutive lines) is a trimmed-history gap the
-   * renderer marks.
-   */
+  /** Iterate retained lines in ascending index order, skipping holes. */
   forEachLine(cb: (abs: number, runs: WireRun[]) => void): void {
     if (this.oldest < 0) {
       return;
     }
-    // Iterate the retained keys (bounded by maxLines), sorted ascending, not the
-    // integer range [oldest, highest]: a frame whose base jumps far from a
-    // retained index makes that range ~2^53 wide and freezes the tab (the DoS
-    // enforceCap is written to avoid).
+    // Sorted keys, not the integer range: a far-jumping base would make the range
+    // ~2^53 wide and freeze the tab.
     const keys = [...this.lines.keys()].sort((a, b) => a - b);
     for (const abs of keys) {
       const runs = this.lines.get(abs);
@@ -613,26 +394,13 @@ export class LineStore {
    * changed window row at its absolute index (base + y).
    */
   applyScreen(msg: ScreenMessage): void {
-    // ED3 FIRST, before the screen-mode dispatch: the server attaches the flag
-    // to whatever frame it builds next, alt included, so handling it only on
-    // the main path made an alt-active ED3 (`clear; vim foo`, `reset` in a
-    // full-screen app) a no-op whose erased transcript spliced contiguously into
-    // later output. `msg.base` bounds either buffer: in alt it is frozen at
-    // `committedBefore`, one past the newest committed line.
+    // ED3 before the alt dispatch: the server attaches it to whatever frame it
+    // builds next, alt included. `msg.base` bounds either buffer.
     if (msg.scrollbackCleared) {
       this.applyScrollbackCleared(msg.base);
     }
-    // A ROWS-LESS screen frame is a SIGNAL, not geometry, and must not redefine
-    // any buffer's shape. The connection layer forwards a pre-ack ED3 exactly that
-    // way (its rows are suppressed because the resume batch will repaint them),
-    // and no real terminal has a zero-height screen. On the MAIN path, taking the
-    // window from it set `height = 0`, which put the window bottom at `base - 1`
-    // and handed truncateBelowWindow every retained row at or above `base` as
-    // stranded: measured wiping a 3024-line store to 0 rows, and silently, because
-    // neither that path nor the ED3 drop advances the eviction watermark that
-    // would show a trim marker. On the ALT path it reached `enterAltIfNeeded(0)`
-    // and collapsed the alt grid to zero rows until the next full frame. The
-    // signal above is the whole payload of such a frame.
+    // A rows-less frame is a signal (a pre-ack ED3), not geometry: a zero-height
+    // window would hand truncateBelowWindow every row and collapse the alt grid.
     if (msg.rows.length === 0) {
       return;
     }
@@ -650,11 +418,8 @@ export class LineStore {
     }
     this.exitAltIfNeeded();
     this.updateWindow(msg);
-    // Every index in this window is provisional: the app repaints these screen
-    // positions in place, so what the store holds there is the last thing drawn,
-    // not what the server will commit at that absolute index. Unconditional and
-    // independent of `changed`, because an unchanged row still holds provisional
-    // content from an earlier frame.
+    // Every row of this window is provisional, changed or not: the app repaints
+    // these positions in place.
     this.markUnconfirmedFrom(msg.base);
     for (const y of msg.changed) {
       const row = msg.rows[y];
@@ -663,10 +428,7 @@ export class LineStore {
       }
     }
     this.truncateBelowWindow();
-    // Re-check the cap AFTER the window settled: a screen frame can LOWER the
-    // retention bound without applying a single line — a height shrink whose
-    // rows are byte-identical short-circuits applyLine on the idempotency
-    // guard, and applyLine is otherwise the only enforceCap caller.
+    // A height shrink with identical rows applies no line, yet lowers the bound.
     this.enforceCap();
   }
 
@@ -674,13 +436,13 @@ export class LineStore {
   applyScroll(msg: ScrollMessage): void {
     if (this.alt) {
       // In alt, rows below the frozen MAIN window base are main-screen history
-      // (a resume replay, or a durable chunk that raced an alt flip) and are
-      // stored: the alt display renders from altRows, and they surface at alt
-      // exit's rebuild. Rows AT or ABOVE the base break the protocol (no live
-      // scroll during alt) and are dropped to keep the frozen window intact.
-      // With no main window ever seen (attaching straight into alt) there is
-      // nothing to protect, so all rows are accepted; the alt-exit full frame
-      // overwrites the window region either way.
+      // (a resume replay, lines committed in the pass that entered alt, a
+      // durable chunk that raced an alt flip) and are stored; they surface at
+      // alt exit's rebuild. Rows at or above the base break the protocol (no
+      // live scroll during alt) and are dropped to keep the frozen window
+      // intact. With no main window seen (attaching straight into alt) every
+      // row is accepted; the alt-exit full frame overwrites the window region
+      // either way.
       const base = this.win.height > 0 ? this.win.base : Number.POSITIVE_INFINITY;
       for (let i = 0; i < msg.lines.length; i++) {
         const abs = msg.firstIndex + i;
@@ -689,10 +451,8 @@ export class LineStore {
           this.applyLine(abs, row);
         }
       }
-      // Confirm only the prefix the alt gate actually ACCEPTED. The rows at or
-      // above the frozen base were dropped, so they are not committed history as
-      // far as this store is concerned and must not raise the floor over
-      // themselves.
+      // Confirm only the accepted prefix: rows dropped at or above the base are not
+      // committed history here.
       this.confirmRange(msg.firstIndex, Math.min(msg.lines.length, base - msg.firstIndex));
       return;
     }
@@ -705,11 +465,7 @@ export class LineStore {
     this.confirmRange(msg.firstIndex, msg.lines.length);
   }
 
-  /**
-   * Lower the provisional floor to `base`: everything from there up is content
-   * the application drew, not content the server committed. See
-   * `unconfirmedFrom` for why the floor moves in only one direction here.
-   */
+  /** Lower the provisional floor to `base`: the app drew everything from there up. */
   private markUnconfirmedFrom(base: number): void {
     if (!Number.isInteger(base) || base < 0) {
       return; // a malformed frame must not move the floor
@@ -720,39 +476,11 @@ export class LineStore {
   }
 
   /**
-   * Raise the provisional floor past a range the server just committed, and heal
-   * it when the range proves the old floor is unreachable.
-   *
-   * The reach test is the correctness argument for the ordinary case. A chunk
-   * landing above the floor leaves rows between the floor and the chunk still
-   * provisional, so raising past it would claim exactly the rows this mechanism
-   * exists to exclude. Under the normal dispatch order the test passes: a screen
-   * frame lowers the floor to its new base and the scroll chunks carrying the rows
-   * that just scrolled off start at or below that floor. When those chunks do NOT
-   * arrive — the server writes each payload as its own message and ignores write
-   * errors, so a socket that dies mid-dispatch is ordinary — the floor stays put
-   * and the next resume asks for the range again.
-   *
-   * The HEAL is the second clause, and without it the floor wedges permanently.
-   * Three ordinary events deliver content far above the floor and leave nothing
-   * that can ever reach it: an ED3 (which drops every line below the new base,
-   * taking the floor's own neighbourhood with it), a clamped replay, and the ring
-   * eviction every server eventually performs. Measured before the heal existed: a
-   * store whose floor sat at 99 still reported 99 after fifteen healthy frames had
-   * carried `highest` to 297, and after a clamped replay took it to 5223. Every
-   * attach then asked for a maximal replay forever, and `snapshot()` persisted the
-   * wedge across reloads — strictly worse than the defect the floor exists to fix.
-   *
-   * So a range arriving entirely above `oldest` while the floor sits BELOW
-   * `oldest` heals it: nothing at or above the floor is held any more, so there is
-   * nothing left to protect, and holding the claim down protects only rows that no
-   * longer exist. This is safe in the one direction that matters — it never raises
-   * the floor over a row the store still holds provisionally, because such a row
-   * would be at or above `oldest` by definition.
-   *
-   * `applyHistoryScroll` deliberately does not call this. A demand-paged reply
-   * fetches history strictly below the resident tail; it can neither reach the
-   * floor nor witness the floor being orphaned.
+   * Raise the provisional floor past a range the server committed. A range above
+   * the floor leaves rows between still provisional, so the floor stays and the
+   * next resume asks again. Heal: a floor below `oldest` (after ED3, a clamped
+   * replay or ring eviction) protects nothing held, so a range above `oldest`
+   * raises it; without it every attach replays maximally forever.
    */
   private confirmRange(firstIndex: number, count: number): void {
     if (!Number.isInteger(firstIndex) || firstIndex < 0 || count <= 0) {
@@ -760,9 +488,6 @@ export class LineStore {
     }
     const end = firstIndex + count;
     if (firstIndex > this.unconfirmedFrom) {
-      // The heal: the floor names an index the store no longer holds, so it is
-      // protecting nothing. Recorded through the same path as an ordinary raise so
-      // there is one writer, not two.
       if (this.oldest >= 0 && this.unconfirmedFrom < this.oldest) {
         this.unconfirmedFrom = Math.max(end, this.oldest);
       }
@@ -773,20 +498,13 @@ export class LineStore {
     }
   }
 
-  /**
-   * Record the server's retained-history bounds from a resumeAck so the
-   * renderer can tell a genuine trim from a still-loading state.
-   *
-   * `committed` is deliberately not stored: the replay-jump prediction takes it
-   * from the ack being processed, and a stored copy could carry a previous ack's.
-   */
-  noteResumeBounds(_committed: number, oldestIndex: number): void {
+  /** Record the server's oldest retained index from a resumeAck, so the trim
+   *  marker tells a real trim from loading. */
+  noteResumeBounds(oldestIndex: number): void {
     if (Number.isInteger(oldestIndex) && oldestIndex >= 0) {
       this.serverOldest = oldestIndex;
-      // Within one boot epoch a ring's oldest only RISES, so a report below the
-      // floor cannot be ordinary progress — it is the repair path for a floor
-      // raised by a mis-correlated clamp, and lowering it back is how a
-      // session that wrongly condemned its own history recovers.
+      // A ring's oldest only rises within an epoch, so a lower report repairs a floor
+      // raised by a mis-correlated clamp.
       if (oldestIndex < this.pagingFloor) {
         this.pagingFloor = oldestIndex;
       }
@@ -825,11 +543,7 @@ export class LineStore {
     return this.browseActivityMs;
   }
 
-  /**
-   * Record the window of a request about to go out, so its reply can apply
-   * below the stale-re-send watermark. Exactly one slot, matching
-   * single-flight — a second call replaces the first rather than accumulating.
-   */
+  /** Record the window of a request about to go out; a second call replaces it. */
   noteSolicited(fromAbs: number, end: number): void {
     if (!Number.isSafeInteger(fromAbs) || !Number.isSafeInteger(end) || end <= fromAbs) {
       return;
@@ -842,30 +556,17 @@ export class LineStore {
     this.solicitedPending = null;
   }
 
-  /**
-   * The retained ranges, coalesced from the KEY SET. This is the authority for
-   * gap geometry — see intervals.ts for why it cannot be the browse set.
-   */
+  /** The retained ranges coalesced from the key set: the gap geometry's authority. */
   retainedRanges(): Interval[] {
     this.rangesMemo ??= retainedIntervals(this.lines.keys());
-    // A COPY of the runs, not the memo itself: this is a public accessor and a
-    // caller that mutated the returned list would corrupt every later answer.
-    // The run count is small (one tail plus a cache run or two) where the key
-    // count is thousands, which is the whole reason the memo pays.
+    // A copy: a caller mutating the result must not corrupt the memo.
     return this.rangesMemo.map((iv) => ({ ...iv }));
   }
 
   /**
-   * The absent edges within `threshold` lines of `abs`, nearest first: the
-   * trigger's input. Each entry is a gap the viewport is approaching, already
-   * clamped to what is worth requesting — an interior hole between two retained
-   * runs, or the bottom FRONTIER pseudo-gap `[pagingFloor, oldestHeld)`.
-   *
-   * The frontier is included only when there is something below to ask for:
-   * `oldestHeld > 0`, the floor does not already cover it, and the server still
-   * reports retaining something older. A gap whose high edge is at or below the
-   * floor is omitted, because the floor means the server has PROVEN nothing at
-   * or below it survives.
+   * The absent edges within `threshold` of `abs`, nearest first: interior holes
+   * and the bottom frontier `[pagingFloor, oldestHeld)`, the latter only while the
+   * server still retains something older. Gaps at or below the floor are omitted.
    */
   absentEdgesNear(abs: number, threshold: number): Interval[] {
     const runs = this.retainedRanges();
@@ -881,9 +582,8 @@ export class LineStore {
     ) {
       candidates.push({ lo: this.pagingFloor, hi: lowest });
     }
-    // `gapHigh > pagingFloor`, deliberately NOT gapLow: after a ring exhaustion
-    // followed by a later tail trim, the frontier's low edge EQUALS the floor,
-    // and that reopened frontier must stay fetchable.
+    // Test the high edge: after ring exhaustion and a tail trim the frontier's low
+    // edge equals the floor, and it must stay fetchable.
     const live = candidates.filter((g) => g.hi > this.pagingFloor && g.hi > g.lo);
     const near = live.filter((g) => abs >= g.lo - threshold && abs <= g.hi + threshold);
     near.sort((a, b) => Math.abs(abs - a.hi) - Math.abs(abs - b.hi));
@@ -891,49 +591,21 @@ export class LineStore {
   }
 
   /**
-   * Apply a correlated history page. The bulk entry point for paged-in lines,
-   * distinct from `applyScroll` in three ways that all matter: it classifies
-   * what it stores as BROWSE cache, it suppresses per-line cap enforcement in
-   * favour of one budget pass at the end, and it clips to the solicited window.
-   *
-   * `viewportAbs` comes from the renderer — the only layer that knows where the
-   * reader is — and decides which end of the cache is safe to evict. The store
-   * never guesses it.
+   * Apply a correlated history page: what it stores is BROWSE cache, the cap is
+   * enforced once at the end, and only the solicited window gets a page's
+   * exemptions. `viewportAbs`, from the renderer, picks which cache end to evict.
    */
   applyHistoryScroll(msg: ScrollMessage, viewportAbs: number): void {
-    // The ALT GATE first, identical to applyScroll's prologue: the fetch
-    // controller is scrollback-UI-only, but a reply can still land during an
-    // alt flip. History strictly below the frozen main base is safe to store
-    // (it surfaces at alt exit's rebuild); at or above it would corrupt the
-    // frozen window region.
-    const altBase = this.alt
-      ? this.win.height > 0
-        ? this.win.base
-        : Number.POSITIVE_INFINITY
-      : Number.POSITIVE_INFINITY;
+    // The alt gate, as in applyScroll: only rows below the frozen main base.
+    const altBase = this.alt && this.win.height > 0 ? this.win.base : Number.POSITIVE_INFINITY;
 
-    // Only the INTERSECTION with the in-flight window gets solicited treatment.
-    // A correlated frame wider than the current slot — a timed-out larger reply
-    // racing a shrunken retry — has its out-of-window lines routed through the
-    // ordinary guards instead, where they are typically refused below the
-    // watermark. Without the clip, a stale oversized reply would apply
-    // content the client did not ask for on this attempt.
+    // Only lines inside the in-flight window get solicited treatment; the rest of a
+    // stale, wider reply goes through the ordinary guards.
     const s = this.solicitedPending;
     if (s === null) {
-      // The question was RETRACTED, so the answer is dropped whole. Every one of
-      // the bulk path's concessions — admission below the stale-re-send
-      // watermark, suppressed per-line cap enforcement, disposable-cache
-      // classification — is paid for by a request the client currently has out.
-      //
-      // Downgrading it to the ordinary scroll path instead is NOT equivalent and
-      // was tried first: at the store level a page reply is indistinguishable
-      // from legitimate new content at the same indices (after ED3 an app
-      // reprints its transcript below the new window base, and that must apply),
-      // so the ordinary path admits the stale rows too. Only the CALLER knows
-      // this frame was correlated against a window that no longer exists, so
-      // only here can it be refused. The three cancellers are ED3, an epoch
-      // reset, and a closed socket; if the range still matters the trigger asks
-      // again, subject to the floor.
+      // No request out: drop the reply whole. The ordinary path would admit it (after
+      // ED3 a reprint at the same indices must apply), and only here is it known to
+      // answer a retracted request (ED3, an epoch reset, a closed socket).
       return;
     }
     const applied: number[] = [];
@@ -944,8 +616,7 @@ export class LineStore {
         continue;
       }
       if (abs < s.lo || abs >= s.hi) {
-        // Outside the solicited window: ordinary guards, ordinary
-        // classification (it is not this request's content).
+        // Outside the solicited window: not this request's content.
         this.applyLine(abs, row);
         continue;
       }
@@ -960,33 +631,17 @@ export class LineStore {
       this.enforceCap();
       return;
     }
-    // Exactly the keys this reply put in the store join the cache. Re-fetching a
-    // range already cached is a no-op per key, so overlap cannot inflate the
-    // cache size the way a reply-length increment would.
+    // Keys already cached are no-ops, so overlap cannot inflate the cache.
     this.classifyAsBrowse(applied);
-    // ONE budget pass, at the page-apply target. The transient between the
-    // apply above and this pass is the reason the invariants are documented as
-    // holding at OPERATION boundaries, not inside a bulk apply.
+    // One budget pass: the invariants hold at operation boundaries, not mid-apply.
     this.enforceBrowseBudget(BROWSE_CACHE_CAP, viewportAbs);
     this.enforceCap();
   }
 
   /**
-   * Move the given retained keys into the browse classification without
-   * touching a single line. This is a RECLASSIFICATION, not a trim: nothing is
-   * deleted, no DOM changes, and `everEvictedThrough` is untouched — which is
-   * what lets the cap flip and the replay jump hand a band to the cache budget
-   * instead of evicting it out from under the reader.
-   *
-   * It takes KEYS, not a range, and that is the point: every caller already
-   * knows exactly which indices it is reclassifying (the page's applied list,
-   * the flip's excess tail keys, the jump's keys below the send watermark), so
-   * no span loop exists anywhere in the cache model. The range-taking version
-   * this replaced had to walk `[lo, hi)` to find the retained members, and its
-   * band is routinely a hull tens of millions of indices wide.
-   *
-   * Unheld keys are skipped, so the subset invariant survives a caller passing
-   * an index the store does not have.
+   * Move held keys into the browse classification: a reclassification, not a
+   * trim (nothing deleted, `everEvictedThrough` untouched). It takes keys, not a
+   * range, so no caller walks a span. Unheld keys are skipped.
    */
   private classifyAsBrowse(keys: Iterable<number>): number {
     let added = 0;
@@ -1003,49 +658,22 @@ export class LineStore {
   }
 
   /**
-   * Evict browse cache down to `target`, far edge first.
-   *
-   * Removal is EXACTLY the overflow, capped at one page per step: a one-line
-   * overflow removes one line, not a page, because anything larger thrashes
-   * fetch/evict cycles at the cap. Victims are taken from whichever END of the
-   * cache is FARTHER from `viewportAbs`, and every line within
-   * `PREFETCH_THRESHOLD` of it is EXEMPT — an eviction must never create a hole
-   * the trigger immediately re-fetches, nor blank the rows under the reader.
-   *
-   * Direction is computed from the cache's own extremes, never from a range's
-   * edges. The version this replaced asked whether an interval began at or above
-   * the viewport to find its far side, which is false whenever the reader is
-   * INSIDE the cache — the normal deep-scroll shape — so it always took the low
-   * end: the direction an up-scrolling reader is heading, while the pages behind
-   * them were never freed.
-   *
-   * Termination: the exemption band is one contiguous range, so if any victim is
-   * available at the far end the pass makes progress, and every removal shrinks
-   * `browse`. When the reader's own neighbourhood is all that remains the pass
-   * stops and accepts the bounded overshoot rather than spinning — that stop
-   * rule is target-agnostic, which is what makes a smaller reclassify target
-   * safe too.
+   * Evict browse cache down to `target`: exactly the overflow (at most a page per
+   * step; more thrashes fetch and evict), from the cache end farther from
+   * `viewportAbs`, never within PREFETCH_THRESHOLD of it. When only the reader's
+   * neighbourhood remains the pass stops and accepts the bounded overshoot.
    */
   private enforceBrowseBudget(target: number, viewportAbs: number): void {
-    // The viewport exemption is reachable: the resume-ack pass targets
-    // PREFETCH_THRESHOLD while the band is 2 * PREFETCH_THRESHOLD + 1 wide, so
-    // runs either side of a reader in a hole (400 at [0,400), 400 at
-    // [600,1000), reader at 500) are all exempt yet over a 500 target. The pass
-    // then stops and keeps them, the bounded overshoot preferred to blanking
-    // rows under the reader.
+    // Reachable: the resume-ack pass targets PREFETCH_THRESHOLD, below the band's
+    // width, so runs either side of a reader can all be exempt yet over target.
     const exemptLo = viewportAbs - PREFETCH_THRESHOLD;
     const exemptHi = viewportAbs + PREFETCH_THRESHOLD + 1;
     const exempt = (abs: number) => abs >= exemptLo && abs < exemptHi;
 
     while (this.browse.size > target) {
-      // The victim pool IS the browse set: bounded by the cache, not by
-      // residency and not by any numeric span. `size` is the count the loop
-      // tests, so the gate and the pool cannot disagree.
       const keys = [...this.browse].sort((a, b) => a - b);
       const budget = Math.min(this.browse.size - target, PAGE_SIZE);
-      // Distance from the reader decides which end goes; on a tie the older
-      // (lower) end goes, matching the tail cap's oldest-first bias. `keys` is
-      // non-empty because `size > target >= 0`.
+      // The end farther from the reader goes; on a tie the older end.
       const lowest = keys[0] ?? 0;
       const highest = keys[keys.length - 1] ?? 0;
       const fromTop = Math.abs(highest - viewportAbs) > Math.abs(viewportAbs - lowest);
@@ -1061,9 +689,7 @@ export class LineStore {
         break; // the reader's own neighbourhood is all that is left: overshoot
       }
       for (const abs of victims) {
-        // forget() drops the line AND its classification. A cache drop is NOT a
-        // permanent trim, so everEvictedThrough deliberately stays where it is
-        // and the same index can be re-fetched later.
+        // A cache drop, not a trim: everEvictedThrough stays, so it can be re-fetched.
         this.forget(abs);
       }
       this.recomputeBounds();
@@ -1071,15 +697,14 @@ export class LineStore {
   }
 
   /**
-   * The resume-ack transition as ONE store operation, because the order of its
-   * steps is load-bearing and its inputs span three layers (connection, store,
-   * renderer). `committed`/`serverOldest` are NULLABLE AS A PAIR: an older
-   * server sends neither, and inventing zeros would lower the floor and forge a
-   * jump, so such an ack runs only the epoch reset and the capability read.
+   * The resume-ack transition as one operation, because its step order matters.
+   * `committed`/`serverOldest` are null as a pair on an older server's ack, which
+   * then runs only the epoch check and the capability read. Returns true when the
+   * content was discarded: another process's, or restored and not confirmed.
    */
   applyResumeAck(ack: {
-    /** The boot epoch changed: everything retained is from another server. */
-    epochChanged: boolean;
+    /** The acking server's boot epoch, or null when the ack carries none. */
+    serverEpoch: number | null;
     /** One past the server's newest committed line, or null on an old ack. */
     committed: number | null;
     /** The server's oldest retained index, or null on an old ack. */
@@ -1092,57 +717,34 @@ export class LineStore {
     sentReplayMax: number | null;
     /** Where the reader is, from the renderer. */
     viewportAbs: number;
-    /**
-     * Whether the reader is at the live tail, from the renderer — which KNOWS,
-     * where the store could only ever guess.
-     *
-     * The store used to derive it from `viewportAbs >= win.base`, and every
-     * failure of that derivation was a real defect. It read a window descriptor
-     * that step 4 of this very transition RETIRES, so the answer was wrong for
-     * every predicted replay jump. With no descriptor at
-     * all, which is the DOMINANT shape here (this ack is the first frame of its
-     * batch, so it precedes the window frame, and a hydrated store persists no
-     * window), the fallback was wrong in both directions: "not following" strands
-     * ~2000 lines over budget on the first attach over a snapshot, and
-     * "following" would drain a reader who is demonstrably deep in history.
-     *
-     * The renderer has one unambiguous source (`scroll.isUserScrolledUp()`, plus
-     * an armed restore, which means "in history at the anchor"), so it answers and
-     * the store stops inferring. Retiring the window descriptor mid-transition can
-     * no longer corrupt anything.
-     */
+    /** Whether the reader is at the live tail, from the renderer, which knows; the
+     *  window descriptor cannot tell (step 4 retires it, and a first ack precedes
+     *  the window frame). */
     following: boolean;
-  }): void {
-    // (1) An epoch change resets everything, cap included: a different server
-    // process shares no absolute indices with the old one.
-    if (ack.epochChanged) {
-      this.reset();
-    }
-    // (2) The capability, recorded for the renderer before anything reads it, and
-    // stated in BOTH directions: an ack is the only thing that knows, so an
-    // unsupported pairing must actively restore the compatibility cap rather than
-    // relying on some earlier reset to have cleared it. (When paging IS declared,
-    // step 3's flip owns the cap.)
+  }): boolean {
+    // (1) Content from another server process goes: a different process shares
+    // no absolute indices with the old one.
+    const foreign = this.adoptServerEpoch(ack.serverEpoch);
+    // (2) The capability, stated both ways: only an ack knows, so an unsupported
+    // pairing restores the compatibility cap (when declared, step 3 owns it).
     this.paging = ack.paging;
     if (!ack.paging) {
       this.effectiveTailCap = this.compatibilityCap;
     }
-    // (2b) Bounds, when the ack carries them.
+    // (2b) Bounds, when the ack carries them, before the batch's replay meets
+    // the alt gate.
     if (ack.committed !== null && ack.serverOldest !== null) {
-      this.noteResumeBounds(ack.committed, ack.serverOldest);
+      this.noteResumeBounds(ack.serverOldest);
+      this.raiseAltBase(ack.committed);
     }
     // (3) Capability: the cap flip, bookkeeping only.
     let reclassified = false;
     if (ack.paging) {
       reclassified = this.confirmPaging();
     }
-    // (4) The replay JUMP, predicted from what this socket SENT — never from
-    // the store's current `highest`, which a frame arriving between send and
-    // ack could have moved, masking the jump and leaving the stranded band for
-    // enforceCap to eat. Gated on `paging`: under an unsupported pairing the
-    // band stays TAIL, which is today's behavior and bounded by the
-    // compatibility cap. Reclassifying it there would hand disposable-cache
-    // semantics to history no fetch can restore.
+    // (4) The replay jump, predicted from what this socket SENT, not the current
+    // `highest` (a frame between send and ack moves it). Only under paging: else
+    // the band stays tail, since no fetch could restore it.
     if (ack.paging && ack.committed !== null && ack.serverOldest !== null) {
       const jumped = this.predictReplayJump(
         ack.committed,
@@ -1152,59 +754,59 @@ export class LineStore {
       );
       reclassified = reclassified || jumped;
     }
-    // (5) ONE budget pass, if either step moved anything into the cache. The two
-    // steps used to be compared as bands to pick the wider one; with membership
-    // as a key set there is nothing to compare — the containment test below
-    // reads the set itself and has one answer regardless of which step grew it.
+    // (5) One budget pass if either step moved anything into the cache.
     if (reclassified) {
-      // CONTAINMENT: a FOLLOWING viewport is looking at the live tail, so the
-      // disposable band drains to the small target; a reader in HISTORY keeps
-      // the full cache and the TTL cleans up. Ask only `following`: whether the
-      // row under the reader is cache fails for a hole in the cache and for an
-      // armed restore anchor whose row was dropped, and drained such a reader
-      // to 801 rows instead of 2420.
+      // A following reader drains the band to the small target; a reader in history
+      // keeps the full cache and the TTL cleans up.
       this.enforceBrowseBudget(
         ack.following ? PREFETCH_THRESHOLD : BROWSE_CACHE_CAP,
         ack.viewportAbs,
       );
       this.enforceCap();
     }
+    return foreign;
   }
 
   /**
-   * The cap flip: set the effective tail cap to the supported target and
-   * reclassify the excess tail as browse cache; returns whether anything moved.
-   * The band keeps the newest `max(supportedTarget, windowHeight)` tail lines
-   * and never crosses `win.base`, because browse cache is evictable and a live
-   * window row must not be.
+   * Whether the content is another server process's: a reported epoch must equal
+   * the known one, and a restored store's epoch is a claim that only a reporting
+   * server can confirm. Foreign content is reset; a reported epoch is adopted.
    */
+  private adoptServerEpoch(reported: number | null): boolean {
+    const foreign =
+      reported === null ? this.epochSeeded : this.epoch !== 0 && this.epoch !== reported;
+    if (foreign) {
+      this.reset();
+      this.epoch = 0;
+    }
+    if (reported !== null) {
+      this.epoch = reported;
+    }
+    this.epochSeeded = false;
+    return foreign;
+  }
+
+  /** The cap flip: the supported target becomes the cap and the excess tail turns
+   *  into browse cache, never crossing `win.base`. Returns whether anything moved. */
   private confirmPaging(): boolean {
     this.effectiveTailCap = this.supportedTarget;
     const keep = Math.max(this.supportedTarget, this.win.height);
     if (this.tailCount <= keep || this.oldest < 0) {
       return false;
     }
-    // Walk the tail keys oldest-first and take all but the newest `keep`.
     const tailKeys = [...this.lines.keys()]
       .filter((k) => !this.browse.has(k))
       .sort((a, b) => a - b);
-    // `excess >= 1` here, so no guard: `tailCount` is `lines.size -
-    // browse.size` while `tailKeys.length` is `lines.size` minus the browse
-    // keys that are ACTUALLY in `lines`, so `tailKeys.length >= tailCount`
-    // unconditionally — and reaching this line means the gate above found
-    // `tailCount > keep`.
+    // excess >= 1: tailKeys.length >= tailCount > keep.
     const excess = tailKeys.length - keep;
     const winFloor = this.win.height > 0 ? this.win.base : Number.POSITIVE_INFINITY;
     return this.classifyAsBrowse(tailKeys.slice(0, excess).filter((k) => k < winFloor)) > 0;
   }
 
   /**
-   * Predict where the replay will START and, if above the sent `haveThrough`
-   * (a replay clamp or a plain eviction gap), reclassify the stranded band as
-   * browse cache before the batch applies. The band's top is `sentHaveThrough`
-   * (rows above it are committed history). It retires the window descriptor, so
-   * a later step in this transition that relies on a window bound must restore
-   * it first.
+   * Predict where the replay starts; if above the sent `haveThrough`, reclassify
+   * every held key at or below it as browse cache before the batch applies, and
+   * retire the window descriptor so the batch's window frame cannot claim the band.
    */
   private predictReplayJump(
     committed: number,
@@ -1213,29 +815,13 @@ export class LineStore {
     sentReplayMax: number | null,
   ): boolean {
     const base = sentHaveThrough + 1;
-    let predicted = Math.max(base, serverOldest);
-    if (sentReplayMax !== null) {
-      predicted = Math.max(predicted, committed - sentReplayMax);
-    }
+    const predicted = replayStart(committed, serverOldest, sentHaveThrough, sentReplayMax);
     if (predicted <= base || this.oldest < 0 || sentHaveThrough < this.oldest) {
-      // No jump, or nothing this socket claimed is still held, so the stranded
-      // band is empty and there is nothing to reclassify.
-      //
-      // The third clause used to mean only "an empty or fresh store", because the
-      // wire value was the highest held index and so never sat below `oldest`.
-      // The replay boundary can: a post-ED3 store has `oldest === win.base` and
-      // claims `win.base - 1`. That is still the right answer here, for the
-      // reason above rather than the original one — the band is `keys <=
-      // sentHaveThrough`, which is empty exactly when this fires, so both the
-      // reclassify and the budget pass it gates would be no-ops. The descriptor
-      // is then not retired either, which is equally harmless: retirement exists
-      // so a band containing old window rows survives the batch's own window
-      // frame, and there is no band.
+      // No jump, or nothing claimed is still held (a post-ED3 store claims
+      // `win.base - 1`, below `oldest`): the band is empty.
       return false;
     }
-    // The stranded band is every retained key at or below what this socket told
-    // the server it had. Taken from the KEY SET, so a client reconnecting far
-    // behind costs its residency, not the width of the range it is missing.
+    // From the key set: a client far behind costs its residency, not the gap's width.
     const stranded: number[] = [];
     for (const abs of this.lines.keys()) {
       if (abs <= sentHaveThrough) {
@@ -1248,11 +834,7 @@ export class LineStore {
     return true;
   }
 
-  /**
-   * Raise the paging floor: the server proved nothing at or below `end`
-   * survives, so no further request below it can succeed. Called for a clamped
-   * reply (`firstIndex > fromAbs`) and for an empty one.
-   */
+  /** Raise the paging floor: the server proved nothing at or below `end` survives. */
   raisePagingFloor(end: number): void {
     if (Number.isSafeInteger(end) && end > this.pagingFloor) {
       this.pagingFloor = end;
@@ -1260,15 +842,9 @@ export class LineStore {
   }
 
   /**
-   * Drop the browse cache. The consumer owns the TTL that calls this (the
-   * engine has no notion of tabs or visibility) and supplies both inputs.
-   *
-   * A VISIBLE page whose reader sits on browse rows SKIPS the drop: the TTL is
-   * an inactivity signal, and a reader parked on a long stack trace is inactive
-   * while looking straight at cache content — wiping it and re-fetching one RTT
-   * later serves nobody. A HIDDEN page has no reader, so it drops
-   * unconditionally; without that condition the skip would retain exactly the
-   * deep-scrolled cache the hidden-page TTL exists to free.
+   * Drop the browse cache; the consumer owns the TTL that calls it. A visible page
+   * whose reader sits on cache rows skips (the reader is looking at them); a
+   * hidden page drops unconditionally.
    */
   dropBrowseCache(viewportAbs: number, pageVisible: boolean): void {
     if (this.browse.size === 0) {
@@ -1283,23 +859,8 @@ export class LineStore {
     this.recomputeBounds();
   }
 
-  /**
-   * Remove one retained line and its browse classification. The single owner of
-   * every deletion in this store.
-   *
-   * It exists because classification lives in a second structure keyed by the
-   * same indices, and a second structure is only as correct as its
-   * least-maintained mutation path. Two paths did not maintain it — ED3's
-   * `applyScrollbackCleared` and the resize `truncateBelowWindow`, the latter firing
-   * on every soft-keyboard open — so deleting a browse-classified line left the
-   * cache accounting too high, `tailCount` understated, and the tail cap
-   * under-enforcing for the rest of the epoch. Funnelling every removal through
-   * here removes the CLASS rather than those two instances, and is what makes
-   * `browse ⊆ lines.keys()` a fact rather than a hope.
-   *
-   * Returns whether a line was actually held (mirroring Map.delete), so callers
-   * can count real removals.
-   */
+  /** Remove one line and its browse classification: the only deletion path, which
+   *  keeps `browse ⊆ lines.keys()`. Returns whether the line was held. */
   private forget(abs: number): boolean {
     const held = this.lines.delete(abs);
     if (held) {
@@ -1327,11 +888,7 @@ export class LineStore {
     this.highest = max;
   }
 
-  /**
-   * Full reset: drop all lines and window state. Used on server restart (a new
-   * boot epoch), where absolute indices start over from 0 and any retained
-   * content is stale. The renderer wipes all DOM on the next drain.
-   */
+  /** Full reset for a new server epoch: indices start over, so all content goes. */
   reset(): void {
     this.lines.clear();
     this.rangesMemo = null;
@@ -1349,51 +906,30 @@ export class LineStore {
     this.windowDirty = true;
     this.altDirty = true;
     this.resetPending = true;
-    // CONTENT-derived paging state goes with the content: a new boot epoch shares
-    // no absolute indices with the old one, so the cache, the in-flight window and
-    // the floor are all meaningless at once.
+    // Content-derived paging state goes with the content.
     this.browse.clear();
     this.solicitedPending = null;
     this.pagingFloor = 0;
     this.browseActivityMs = 0;
-    // CAPABILITY is deliberately NOT reset here. It describes the SERVER on the
-    // other end of the socket, not the content, and only a resumeAck can restate
-    // it. `render.resetScreen()` and `render.resetScrollback()` reach this on
-    // alt-screen entry, nowhere near a resume; clearing it there would leave
-    // `pagingDeclared()` false until the next reconnect, so the top marker would
-    // claim "earlier output trimmed" about fetchable history and the tail cap
-    // would revert to the compatibility value.
+    // The capability and the epoch stay: they describe the server, only a
+    // resumeAck restates them, and the renderer's resets (resetScreen,
+    // resetScrollback) reach here with no resume.
   }
 
   /**
-   * Serialize the newest retained lines as plain, structuredClone-safe data, for
-   * a consumer that persists scrollback across a page discard (see
-   * StoreSnapshot for what is deliberately excluded and why).
-   *
-   * `serverEpoch` is the boot epoch the caller last saw in a resumeAck; pass 0
-   * if none is known. It is required rather than optional because a snapshot
-   * without it cannot be hydrated safely, and an optional parameter is a
-   * corruption bug waiting for the one caller who omits it.
-   *
-   * `maxLines` bounds the tail, defaulting to the store's own cap. A smaller
-   * bound is the normal choice: the screen plus recent history is what a
-   * returning user needs, and the cost of persisting is a repeated serialize on
-   * a device that may already be under memory pressure. The depth that is not
-   * kept is reported honestly after hydration, via the trim marker.
-   *
-   * Returns null when there is nothing worth persisting (an empty store), so a
-   * caller cannot accidentally store an empty snapshot over a good one.
+   * Serialize the newest tail lines, filed under `serverEpoch()`, as
+   * structuredClone-safe data. Null when empty (an empty snapshot must never
+   * overwrite a good one) or when the epoch is unknown (`fromSnapshot` refuses
+   * what no server can confirm). `maxLines` bounds the tail, defaulting to the
+   * store's cap.
    */
-  snapshot(serverEpoch: number, maxLines: number = this.effectiveTailCap): StoreSnapshot | null {
-    if (this.oldest < 0 || this.highest < 0) {
+  snapshot(maxLines: number = this.effectiveTailCap): StoreSnapshot | null {
+    if (this.oldest < 0 || this.highest < 0 || this.epoch === 0) {
       return null;
     }
     const cap = Number.isInteger(maxLines) && maxLines > 0 ? maxLines : this.effectiveTailCap;
-    // Persist the LIVE TAIL only: walk down from `highest` and stop at the first
-    // absent index OR browse member, since a fetched page can sit flush against
-    // the tail with no numeric gap. Cache is disposable (one page fetch), and a
-    // hydrated store must be ONE contiguous tail to keep its derived
-    // `everEvictedThrough = oldest - 1` honest.
+    // The live tail only, down to the first hole or cache line: a hydrated store
+    // must be one contiguous tail for `everEvictedThrough = oldest - 1` to hold.
     const tail: number[] = [];
     for (let abs = this.highest; abs >= 0 && tail.length < cap; abs--) {
       if (!this.lines.has(abs) || this.browse.has(abs)) {
@@ -1420,68 +956,45 @@ export class LineStore {
     }
     return {
       v: SNAPSHOT_VERSION,
-      serverEpoch: Number.isFinite(serverEpoch) ? serverEpoch : 0,
-      // Derived from what is actually being written, not from this.oldest: a
-      // bounded tail starts above it.
+      serverEpoch: this.epoch,
+      // What is written, not this.oldest: a bounded tail starts above it.
       oldest: first,
       highest: last,
       lines,
-      // OMITTED when nothing held is provisional, which is also what an older
-      // snapshot looks like, so absent and "all confirmed" are deliberately the
-      // same state on the way back in. JSON has no Infinity, so a sentinel value
-      // would have to be invented and then defended; absence needs neither.
+      // Omitted when all is confirmed, the state an older snapshot reads as.
       ...(Number.isFinite(this.unconfirmedFrom) ? { unconfirmedFrom: this.unconfirmedFrom } : {}),
     };
   }
 
   /**
-   * Rehydrate a store from a snapshot, or return null when the snapshot is
-   * missing, malformed, or of a different shape version.
-   *
-   * Returning null rather than throwing (or returning a half-built store) is the
-   * point: every failure mode here — a truncated write, a hand-edited value, a
-   * snapshot from an older release — has the same correct handling, which is to
-   * start empty and take a full resume.
-   *
-   * The hydrated store reports the depth it does NOT have.
-   * `everEvictedThrough` is set to `oldest - 1`, which is what the eviction
-   * bookkeeping would say had this client trimmed those lines itself: the
-   * staleness guard then refuses a late re-delivery of a line below the tail
-   * (it is not wanted; the tail is deliberate), and `hasTrimmedHistory()`
-   * reports true so the renderer shows its "earlier output trimmed" affordance
-   * instead of implying the history is complete.
-   *
-   * `maxLines` is the hydrated store's retained-line cap, and it also BOUNDS the
-   * restore: a snapshot larger than the cap is trimmed to its newest `maxLines`
-   * lines, because the cap is a memory budget (the renderer builds one DOM row
-   * per retained line) and a restore that ignored it would blow the budget until
-   * eviction caught up. The trimmed depth is reported through the usual channel:
-   * `hasTrimmedHistory()`.
-   *
-   * The caller MUST pass `snap.serverEpoch` to the connection layer before
-   * connecting; see StoreSnapshot.serverEpoch for what goes wrong otherwise.
+   * Rehydrate a store, or null for a missing, malformed or other-version snapshot,
+   * or one with no server epoch: each starts empty and takes a full resume. Lines
+   * below the tail read as trimmed (`everEvictedThrough = oldest - 1`), and the
+   * restore is bounded to `maxLines`, the store's own cap. The restored epoch is
+   * unconfirmed: the first resumeAck applied to the store keeps the content only
+   * when it reports the same epoch.
    */
   static fromSnapshot(snap: unknown, maxLines?: number): LineStore | null {
     if (typeof snap !== "object" || snap === null) {
       return null;
     }
     const rec = snap as Record<string, unknown>;
-    // Read the payload as unknown[] rather than through StoreSnapshot's typed
-    // field: this data has been outside the program's memory, so its shape is an
-    // assumption until checked, and typing it first would make the checks below
-    // statically dead (the compiler would "know" each entry is a valid pair).
+    // Read as unknown: this data was outside the program.
     if (rec["v"] !== SNAPSHOT_VERSION || !Array.isArray(rec["lines"])) {
+      return null;
+    }
+    // A process-start timestamp: any positive integer, including the values
+    // above 2^53 that a u64 nanosecond epoch decodes to.
+    const epoch: unknown = rec["serverEpoch"];
+    if (typeof epoch !== "number" || !Number.isInteger(epoch) || epoch <= 0) {
       return null;
     }
     const raw = rec["lines"] as unknown[];
     if (raw.length === 0) {
       return null;
     }
-    // Mirrors the constructor: an absent or invalid cap means "engine's choice"
-    // and is FORWARDED as absent, not as a value. Resolved BEFORE the store is
-    // constructed, because it has to be the store's own cap as well as the trim
-    // bound — passing the raw value here gave `fromSnapshot(snap, 0)` a store
-    // that trimmed at 5000 and then evicted almost everything on the next append.
+    // An absent or invalid cap is forwarded as absent (the engine's choice) and
+    // must also be the trim bound.
     const cap =
       maxLines !== undefined && Number.isInteger(maxLines) && maxLines > 0 ? maxLines : undefined;
     const bound = cap ?? MAX_LINES;
@@ -1489,8 +1002,7 @@ export class LineStore {
     const pairs: [number, WireRun[]][] = [];
     let highest = -1;
     for (const entry of raw) {
-      // One bad row must not poison the whole restore, and a partially applied
-      // one is worse than none: bail out entirely and take a full resume.
+      // A partly applied restore is worse than none: one bad row rejects it.
       if (!Array.isArray(entry) || entry.length !== 2) {
         return null;
       }
@@ -1508,17 +1020,9 @@ export class LineStore {
       pairs.push([abs, runs]);
       highest = abs;
     }
-    // Bound the restore to the store's own cap. A snapshot may legitimately be
-    // larger than the cap this client runs with (the same snapshot outlives a
-    // consumer lowering its budget, and the persisted bound is a separate knob),
-    // and hydrating over the cap would blow the memory budget the cap exists to
-    // set — the renderer builds one DOM row per retained line. The whole payload
-    // is validated first, so a corrupt head still rejects the restore rather
-    // than being silently sliced off.
+    // Trimmed after the whole payload validated, so a corrupt head still rejects.
     const kept = pairs.length > bound ? pairs.slice(pairs.length - bound) : pairs;
-    // Non-empty, and its first index is a validated non-negative integer: the
-    // empty-payload return above leaves at least one pair, `bound` is at least
-    // 1, and every entry's index was checked on the way into `pairs`.
+    // Unreachable: raw is non-empty and bound >= 1.
     const first = kept[0];
     if (first === undefined) {
       throw new Error("restore: no line pairs left after validation");
@@ -1529,13 +1033,12 @@ export class LineStore {
     }
     store.oldest = oldest;
     store.highest = highest;
+    store.epoch = epoch;
+    store.epochSeeded = true;
     // Everything below the tail is gone as far as this store is concerned.
     store.everEvictedThrough = oldest - 1;
-    // Restore the saving store's provisional floor. A malformed or absent value
-    // leaves it at +Infinity, which is the pre-existing behaviour: the whole
-    // hydrated tail reads as confirmed and the first resume claims all of it.
-    // Read off the unknown record like every other field, and clamped into the
-    // kept range because the tail may have been trimmed above the saved floor.
+    // A malformed or absent floor leaves +Infinity: the whole tail reads as
+    // confirmed. A floor below the kept tail is healed by the next confirmRange.
     const savedFloor: unknown = rec["unconfirmedFrom"];
     if (typeof savedFloor === "number" && Number.isInteger(savedFloor) && savedFloor >= 0) {
       store.unconfirmedFrom = savedFloor;
@@ -1571,30 +1074,18 @@ export class LineStore {
     return this.win.height > 0 && abs >= this.win.base && abs < this.win.base + this.win.height;
   }
 
-  /**
-   * applyLine is the guarded core. It enforces the apply-line guard set
-   * valid index, not stale, idempotent, and
-   * cap-bounded. Returns nothing; effects are recorded in the dirty/evicted
-   * sets for the next drain.
-   */
+  /** The guarded core of every apply; effects land in the dirty/evicted sets. */
   private applyLine(abs: number, runs: WireRun[], bulk = false): void {
     // Guard 1: a valid, non-negative integer index.
     if (!Number.isInteger(abs) || abs < 0) {
       return;
     }
-    // Guard 2: refuse an index at or below the permanent-eviction watermark (a
-    // stale re-send), EXCEPT inside the live window (a hostile frame whose base
-    // retreats must still draw, as enforceCap never evicts the window) and
-    // EXCEPT inside the in-flight request window: a page is by definition a
-    // re-fetch below the watermark, and an UNSOLICITED line there is still
-    // refused.
+    // Guard 2: refuse a stale re-send at or below the eviction watermark, except
+    // inside the live window and inside the solicited request window.
     if (abs <= this.everEvictedThrough && !this.inWindow(abs) && !this.isSolicited(abs)) {
       return;
     }
-    // Guard 2b: not an index the APPLICATION erased. Same two exemptions, and
-    // `erasedThrough` is why it is separable from guard 2 above — see its
-    // declaration for why ED3 cannot advance the trim watermark, and why
-    // refusing an erased index can never refuse legitimate content.
+    // Guard 2b: not an index the application erased (see erasedThrough).
     if (abs <= this.erasedThrough && !this.inWindow(abs) && !this.isSolicited(abs)) {
       return;
     }
@@ -1602,9 +1093,8 @@ export class LineStore {
     if (!Array.isArray(runs)) {
       return;
     }
-    // Guard 5: idempotent — identical content is a no-op (no DOM churn, no
-    // selection disturbance). Guards 4/6/8/9 (gap, alt-consistency, cell
-    // width, row-element integrity) live at the callers and the renderer.
+    // Guard 5: identical content is a no-op (no DOM churn). Guards 4, 6, 8 and 9
+    // live at the callers and the renderer.
     const existing = this.lines.get(abs);
     if (existing !== undefined && rowEqual(existing, runs)) {
       return;
@@ -1619,10 +1109,8 @@ export class LineStore {
     if (abs > this.highest) {
       this.highest = abs;
     }
-    // Guard 10: enforce the cap by evicting from the oldest end. SUPPRESSED
-    // during a bulk page apply, which runs one budget pass of its own at the
-    // end: per-line enforcement there would trim the tail against a count the
-    // apply is still in the middle of changing.
+    // Guard 10: the cap, suppressed in a bulk page apply, which runs one pass at
+    // the end.
     if (!bulk) {
       this.enforceCap();
     }
@@ -1634,30 +1122,20 @@ export class LineStore {
     return s !== null && abs >= s.lo && abs < s.hi;
   }
 
-  // applyScrollbackCleared handles ED3 (which an inline TUI can emit on every
-  // resize): drop lines below `base`, leave everEvictedThrough
-  // alone (a deliberate erase is not a trim), CANCEL the in-flight request
-  // (its reply would re-admit the erased rows through the guard-2 exemption),
-  // and snap the paging floor to `base` (or the trigger re-fetches them). The
-  // last two run even when no line below `base` is held.
+  // applyScrollbackCleared handles ED3: drop lines below `base` without moving
+  // everEvictedThrough (an erase is not a trim), cancel the in-flight request (its
+  // reply would re-admit erased rows) and raise the paging floor to `base`.
   private applyScrollbackCleared(base: number): void {
     this.solicitedPending = null;
     this.raisePagingFloor(base);
-    // The provisional floor moves up with the erase. Everything below `base` is
-    // about to be dropped, so a floor down there would name rows the store no
-    // longer holds and hold the resume claim below them forever: measured as a
-    // floor stuck at 99 while `highest` climbed to 297 over fifteen healthy
-    // frames, which turned every attach into a maximal replay. Never LOWERS the
-    // floor, so a floor already above the erase bound keeps protecting its rows.
+    // The provisional floor rises with the erase, never lowers.
     if (base > this.unconfirmedFrom) {
       this.unconfirmedFrom = base;
     }
     if (this.oldest < 0 || this.oldest >= base) {
       return;
     }
-    // Bounded key-scan (like enforceCap), not an integer walk over [oldest, base).
-    // Through forget() so a browse-classified line takes its classification with
-    // it: an application clearing its scrollback deletes cache as readily as tail.
+    // A key scan through forget(), so cache lines lose their classification too.
     for (const abs of [...this.lines.keys()]) {
       if (abs < base) {
         this.forget(abs);
@@ -1669,29 +1147,14 @@ export class LineStore {
     this.recomputeBounds();
   }
 
-  // truncateBelowWindow evicts every retained line past the window's bottom row.
-  // The window's bottom row is the most recent line in the terminal, so no line
-  // can exist at a higher absolute index. A resize that SHRINKS the screen (the
-  // iOS soft keyboard opening) moves the window bottom up while the taller
-  // screen's former bottom rows stay in the store at higher indices — stranded
-  // below the live window. Cap eviction only trims the top/oldest, so nothing
-  // removes them: they linger as phantom blank rows beneath the real content, an
-  // "empty" region the user can scroll into and the reason the content never
-  // appears to shrink to fit on a short viewport. Evicting them keeps the tail
-  // invariant (highest === window bottom); it is the tail-side complement to the
-  // top-side cap eviction.
+  // truncateBelowWindow drops lines below the window's bottom row, the newest
+  // line: a shrinking resize (a soft keyboard opening) strands the taller screen's
+  // bottom rows there as phantom blank rows that cap eviction never trims.
   private truncateBelowWindow(): void {
     if (this.highest < 0) {
       return;
     }
-    // No window established yet — the descriptor is still the initial base
-    // 0/height 0, whose bottom row is -1, below every index a line can hold.
-    // This whole pass rests on "the window's bottom row is the most recent line
-    // in the terminal", which says nothing at all when there is no window: a
-    // resume replays history BEFORE the screen frame describing the window, so
-    // taking -1 as the tail bound strands that replay and forgets it, silently
-    // (this path is not a trim, so no marker explains it). Same test `inWindow`
-    // and applyScroll's alt gate use to ask whether a window exists at all.
+    // No window yet: a resume replays history before its window frame.
     if (this.win.height <= 0) {
       return;
     }
@@ -1699,9 +1162,7 @@ export class LineStore {
     if (this.highest <= windowBottom) {
       return;
     }
-    // Bounded key-scan (like enforceCap), NOT an integer walk over
-    // [windowBottom+1, highest]: a frame whose base drops far below a high
-    // retained index would otherwise loop up to ~2^53 times and freeze the tab.
+    // A key scan, not an integer walk: a far-dropped base would loop ~2^53 times.
     let newHighest = -1;
     for (const abs of [...this.lines.keys()]) {
       if (abs > windowBottom) {
@@ -1719,41 +1180,28 @@ export class LineStore {
   }
 
   private enforceCap(): void {
-    // The gate and the victim target read `tailCount`, not `lines.size`: browse
-    // cache has its OWN budget, enforced at page-apply time, so live output must
-    // not evict a page the reader is browsing (up to 93 cache lines per applied
-    // line at the default batch).
+    // Tail count only: browse cache has its own budget, enforced at page apply.
     if (this.tailCount <= this.tailBound) {
       return;
     }
     const target = this.tailBound - evictionBatch(this.tailBound) + 1;
-    // ONE oldest-first eviction walk that SKIPS the live window: the cap is a
-    // history budget floored at the screen height. Content above the window (a
-    // replay delivered before its window frame, a malformed stream) is evictable,
-    // so size <= max(maxLines, window height) holds for any frame order. Oldest-
-    // first keeps the lines next to the window; a newest-first trim leaves a hole
-    // under the live screen that resume cannot backfill. everEvictedThrough also
-    // covers the hopped band, safe because applyLine's guard 2 exempts the window.
+    // One oldest-first walk that skips the live window: the cap is a history budget
+    // floored at the screen height, and oldest-first leaves no hole under the screen
+    // that resume cannot backfill. everEvictedThrough also covers a hopped band,
+    // safe because guard 2 exempts the window.
     const winBottom = this.win.height > 0 ? this.win.base + this.win.height - 1 : -1;
     const hasWindow = this.win.height > 0;
     let cursor = this.oldest;
     let hopped = false;
-    // The `cursor < highest` half of the guard keeps the NEWEST line alive in
-    // a scroll-only store (a cap-1 store must still show something). With a
-    // protected window retained there is always content to show, so a line
-    // ABOVE the window bottom — the tail invariant broken by a scroll frame,
-    // a shape only a malformed stream produces — is evictable even when it is
-    // the highest key; otherwise one such line parks the store at bound+1
-    // (found by the interleaved property test).
+    // `cursor < highest` keeps the newest line of a scroll-only store; with a
+    // window, a line above its bottom (a malformed stream) is evictable even then.
     while (
       this.tailCount > target &&
       cursor >= 0 &&
       (cursor < this.highest || (hasWindow && cursor > winBottom))
     ) {
       if (hasWindow && cursor >= this.win.base && cursor <= winBottom) {
-        // Hop the cursor over the protected window to the first retained key
-        // above it. O(1) contiguous probe first; the scan fallback is
-        // bounded by map size (the DoS note below applies here too).
+        // Hop over the protected window (a scan bounded by map size).
         if (winBottom >= this.highest) {
           break; // the window is the tail: nothing evictable above it
         }
@@ -1764,14 +1212,7 @@ export class LineStore {
         }
         continue;
       }
-      // AMENDMENT 2: the hop predicate extends to BROWSE intervals. The walk
-      // steps over them exactly the way it steps over the window, which is
-      // what keeps `this.oldest` correct: it stays the GLOBAL minimum retained
-      // key (browse included), and hopping arms the once-per-pass bounds
-      // recompute below. Without this the cursor would delete cache lines as
-      // if they were tail, and `oldestIndex()` — which the frontier and the
-      // gap geometry both read — would go stale on the first trim of any
-      // browse episode.
+      // Hop browse keys like the window, so `oldest` stays the global minimum key.
       if (this.browse.has(cursor)) {
         const next = this.minKeyAboveNonBrowse(cursor);
         hopped = true;
@@ -1783,31 +1224,12 @@ export class LineStore {
       }
       const victim = cursor;
       if (this.forget(victim)) {
-        // AMENDMENT 3: only TAIL victims advance everEvictedThrough. A browse
-        // eviction is a cache drop, not a permanent trim, and must not teach
-        // guard 2 to refuse a later re-fetch of the same index. (Browse lines
-        // never reach here anyway — amendment 2 hops them — so this is the
-        // invariant stated where a future edit would break it, and forget()
-        // keeps the classification consistent if one ever does.)
+        // Only tail victims advance the watermark: a cache drop is not a trim.
         this.everEvictedThrough = Math.max(this.everEvictedThrough, victim);
       }
-      // No empty-store arm: the walk cannot evict the last line. The loop
-      // guard's `cursor < this.highest` conjunct stops it once the cursor
-      // reaches the newest key, and with a protected window the sibling
-      // `cursor > winBottom` cannot hold there either. That is the ONLY thing
-      // holding when the target is 0, which `new LineStore(0)` produces
-      // (`evictionBatch(0)` is 1, so `target = 0 - 1 + 1`; the bare
-      // constructor accepts 0, unlike `createRenderer` and `fromSnapshot`, which
-      // both require a positive integer) — a reason to leave that conjunct
-      // alone.
-      // Advance to the lowest remaining key above the victim. Contiguous
-      // history (the common case: live scroll-off, resume replay, a
-      // cat-bigfile burst) leaves victim + 1 present -- an O(1) probe. Only a
-      // hole at the boundary falls back to a scan, and that scan is bounded
-      // by map size (<= the retention bound), NOT by the integer gap to the
-      // next retained line, so a malformed/compromised frame whose base jumps
-      // far ahead of a retained low index cannot make eviction walk billions
-      // of indices (an algorithmic-complexity DoS that freezes the tab).
+      // The loop guard keeps the last line even at target 0 (`new LineStore(0)`).
+      // Next key: an O(1) probe for contiguous history, else a scan bounded by map
+      // size, never by the integer gap (a far-jumping base would be a DoS).
       cursor = this.lines.has(victim + 1) ? victim + 1 : this.minKeyAbove(victim);
       if (!hopped) {
         // Classic head eviction: the cursor IS the minimum retained key.
@@ -1818,31 +1240,13 @@ export class LineStore {
       }
     }
     if (hopped) {
-      // The cursor hopped the window or a browse interval, so the minimum
-      // retained key is not the cursor: recompute both bounds once per pass
-      // (bounded scan; once per PASS, never per victim).
-      let min = -1;
-      let max = -1;
-      for (const k of this.lines.keys()) {
-        if (min < 0 || k < min) {
-          min = k;
-        }
-        if (k > max) {
-          max = k;
-        }
-      }
-      this.oldest = min;
-      this.highest = max;
+      // After a hop the cursor is not the minimum key: recompute once per pass.
+      this.recomputeBounds();
     }
   }
 
-  /**
-   * The lowest retained NON-BROWSE key strictly above k, or -1. The eviction
-   * walk uses it to step past a whole browse interval in one move rather than
-   * key by key: a 2500-line cache would otherwise cost 2500 iterations of the
-   * hop branch on every tail trim taken while the reader is deep in history.
-   * Bounded by map size, like minKeyAbove.
-   */
+  /** The lowest retained non-browse key above k, or -1: steps over a cache run in
+   *  one move. Bounded by map size. */
   private minKeyAboveNonBrowse(k: number): number {
     let min = -1;
     for (const key of this.lines.keys()) {
@@ -1865,15 +1269,8 @@ export class LineStore {
   }
 
   private updateWindow(msg: ScreenMessage): void {
-    // A base that is not a non-negative integer is not a screen position — the
-    // same validity test markUnconfirmedFrom applies to this very value — so it
-    // must not redefine the window's shape, for the same reason a rows-less
-    // frame must not: `base + height - 1` lands below every retained index, and
-    // truncateBelowWindow then hands the WHOLE store over as stranded past the
-    // live window. That is the silent wipe applyScreen's rows-less guard
-    // records, reached with rows present, and just as silent (this path is not a
-    // trim, so no marker explains the missing transcript). The frame's
-    // addressable rows still apply through applyLine's guard 1.
+    // A malformed base must not redefine the window, or truncateBelowWindow would
+    // silently wipe the store; its rows still meet applyLine's guard 1.
     if (!Number.isInteger(msg.base) || msg.base < 0) {
       return;
     }
@@ -1893,15 +1290,9 @@ export class LineStore {
   }
 
   private updateWindowCursor(msg: ScreenMessage): void {
-    // In the alt screen the base AND height keep the MAIN window's values —
-    // the alt grid's own height lives in altRows — and only the cursor tracks
-    // the alt frame. This keeps the retention bound (max(maxLines, window
-    // height)) and the guard-2 window exemption defined over the MAIN screen,
-    // the region alt exit must restore, rather than over a phantom range
-    // mixing the main base with the alt height (a smaller alt frame otherwise
-    // appeared to lower the bound below the
-    // protected main rows, and the exemption described rows that were not the
-    // writable screen).
+    // In alt the height stays the MAIN window's, so the bound and the guard-2
+    // exemption describe the screen alt exit restores.
+    this.raiseAltBase(msg.base);
     const next: WindowState = {
       ...this.win,
       cursorRow: msg.cursor[0],
@@ -1912,6 +1303,18 @@ export class LineStore {
     };
     if (!windowEqual(this.win, next)) {
       this.win = next;
+      this.windowDirty = true;
+    }
+  }
+
+  /** Raise the frozen main base to `committed` (every alt frame's base and every
+   *  resumeAck report it): the server commits main lines while alt is active. */
+  private raiseAltBase(committed: number): void {
+    if (!this.alt || this.win.height === 0 || !Number.isSafeInteger(committed)) {
+      return;
+    }
+    if (committed > this.win.base) {
+      this.win = { ...this.win, base: committed };
       this.windowDirty = true;
     }
   }

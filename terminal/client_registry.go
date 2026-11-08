@@ -25,7 +25,15 @@ type clientRegistry struct {
 	clients  map[*websocket.Conn]*clientState
 	sessions map[SessionID]*sessionState
 	logger   *slog.Logger
-	mu       sync.Mutex
+	// held is the size owner's sender after its last socket left, kept a
+	// candidate for sizeHoldGrace so a reconnect does not move the size.
+	held *heldSender
+	// lastClaimed is the sender that most recently claimed the size.
+	lastClaimed *sessionState
+	// seq orders attaches and size claims. heldGen numbers held entries.
+	seq     uint64
+	heldGen uint64
+	mu      sync.Mutex
 	// anyFocused mirrors "some registered client reports its widget focused" so
 	// the DEC 1004 derivation reads it with one load. handlePTYData reads it once
 	// per PTY chunk, and r.mu is the lock the flush dispatcher, the input path
@@ -48,36 +56,139 @@ func newClientRegistry(logger *slog.Logger) *clientRegistry {
 func (r *clientRegistry) Add(ws *websocket.Conn) *clientState {
 	state := &clientState{ws: ws}
 	r.mu.Lock()
+	r.seq++
+	state.attachSeq = r.seq
 	r.clients[ws] = state
 	r.refreshAnyFocusedLocked()
 	r.mu.Unlock()
 	return state
 }
 
-// Remove unregisters a WebSocket connection and returns the size that client
-// last reported (0, 0 if none), which Handler.maybeHealSize uses to decide
-// whether the departure heals the shared screen size. It stamps lastSeen on the
-// departing client's ledger so the idle-GC window runs from the detach: a tab
-// that only read output never advances lastSeen, and without the stamp its
-// ledger went GC-eligible the instant the socket dropped. A departing owner
-// gives up its ledger, so a later resume there supersedes nobody.
-func (r *clientRegistry) Remove(ws *websocket.Conn) (cols, rows int) {
+// Remove unregisters a WebSocket connection. When it was the last socket of
+// the size owner's sender, that sender stays the owner, at the departed size,
+// until EndHold(hold) or its next socket links; hold is 0 otherwise. It stamps
+// lastSeen on the departing client's ledger so the idle-GC window runs from the
+// detach: a tab that only read output never advances lastSeen, and without the
+// stamp its ledger went GC-eligible the instant the socket dropped. A departing
+// owner gives up its ledger, so a later resume there supersedes nobody.
+func (r *clientRegistry) Remove(ws *websocket.Conn) (hold uint64) {
 	var st *clientState
 	var sess *sessionState
 	r.mu.Lock()
+	before, hadOwner := r.ownerLocked()
 	if st = r.clients[ws]; st != nil {
-		cols, rows = st.cols, st.rows
 		if sess = st.session.Load(); sess != nil {
 			sess.lastSeen = time.Now()
 		}
 	}
 	delete(r.clients, ws)
 	r.refreshAnyFocusedLocked()
+	if after, ok := r.ownerLocked(); hadOwner && before.socket == st && (!ok || after.sess != before.sess || before.sess == nil) {
+		r.heldGen++
+		hold = r.heldGen
+		r.held = &heldSender{sess: before.sess, order: before.order, cols: before.cols, rows: before.rows, gen: hold}
+	}
 	r.mu.Unlock()
 	if sess != nil {
 		sess.release(st)
 	}
-	return cols, rows
+	return hold
+}
+
+// EndHold drops the held sender Remove reported as hold, if it is still held.
+func (r *clientRegistry) EndHold(hold uint64) {
+	r.mu.Lock()
+	if r.held != nil && r.held.gen == hold {
+		r.held = nil
+	}
+	r.mu.Unlock()
+}
+
+// heldSender is a departed size owner kept as a candidate (see Remove).
+type heldSender struct {
+	sess       *sessionState // nil for a socket that never resumed
+	order      uint64
+	gen        uint64
+	cols, rows int
+}
+
+// sizeCandidate is one sender's bid for the shared PTY size.
+type sizeCandidate struct {
+	sess   *sessionState // nil for a socket that never resumed
+	socket *clientState  // nil for the held sender
+	claim  uint64        // the sender's last claim; 0 when it never sent input
+	order  uint64        // the sender's first attach
+	cols   int
+	rows   int
+}
+
+// beats reports whether c owns the size over o: the latest claim wins, then
+// the earliest-attached sender; between two sockets of one sender, the newer.
+func (c *sizeCandidate) beats(o *sizeCandidate) bool {
+	if c.claim != o.claim {
+		return c.claim > o.claim
+	}
+	if c.sess != nil && c.sess == o.sess {
+		return c.socket != nil && (o.socket == nil || c.socket.attachSeq > o.socket.attachSeq)
+	}
+	return c.order < o.order
+}
+
+// ownerLocked returns the size owner among the live, unfenced sockets with a
+// recorded size and the held sender. The caller holds r.mu.
+func (r *clientRegistry) ownerLocked() (owner sizeCandidate, ok bool) {
+	consider := func(c sizeCandidate) {
+		if !ok || c.beats(&owner) {
+			owner, ok = c, true
+		}
+	}
+	if h := r.held; h != nil {
+		c := sizeCandidate{sess: h.sess, order: h.order, cols: h.cols, rows: h.rows}
+		if h.sess != nil {
+			c.claim = h.sess.claimSeq
+		}
+		consider(c)
+	}
+	for _, st := range r.clients {
+		if st.cols <= 0 || st.rows <= 0 || st.fenced.Load() {
+			continue
+		}
+		c := sizeCandidate{socket: st, order: st.attachSeq, cols: st.cols, rows: st.rows}
+		if sess := st.session.Load(); sess != nil {
+			c.sess, c.claim, c.order = sess, sess.claimSeq, sess.firstAttach
+		}
+		consider(c)
+	}
+	return owner, ok
+}
+
+// OwnerSize returns the size of the PTY size owner: the sender that most
+// recently sent input, or, before anyone has, the earliest-attached one. ok is
+// false when no candidate has a size. Only Handler.resizeToOwner calls it.
+func (r *clientRegistry) OwnerSize() (cols, rows int, ok bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	owner, ok := r.ownerLocked()
+	return owner.cols, owner.rows, ok
+}
+
+// Claim makes state's sender the size owner, as its input just reached the
+// PTY, and reports whether the owner changed. A socket with no ledger claims
+// nothing.
+func (r *clientRegistry) Claim(state *clientState) bool {
+	sess := state.session.Load()
+	if sess == nil {
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastClaimed == sess {
+		return false
+	}
+	r.seq++
+	sess.claimSeq = r.seq
+	r.lastClaimed = sess
+	return true
 }
 
 // release gives up st's ownership of the ledger; a no-op when another socket
@@ -91,9 +202,7 @@ func (s *sessionState) release(st *clientState) {
 }
 
 // RecordSize stores a client's most recently requested terminal size on its
-// per-socket state. Per-socket (not per-session) on purpose: in managed mode
-// several devices on the same server session share one sessionState, so only
-// the socket distinguishes their sizes. Guarded by r.mu.
+// per-socket state, its bid in OwnerSize. Guarded by r.mu.
 func (r *clientRegistry) RecordSize(state *clientState, cols, rows int) {
 	r.mu.Lock()
 	state.cols = cols
@@ -131,31 +240,6 @@ func (r *clientRegistry) refreshAnyFocusedLocked() {
 // needs no separate attachment test. One atomic load: it is read per PTY chunk.
 func (r *clientRegistry) AnyClientFocused() bool {
 	return r.anyFocused.Load()
-}
-
-// MinLiveSize returns the smallest cols and smallest rows across all currently
-// connected clients that have reported a size; ok is false when none has. Each
-// dimension is minimized independently so the result fits inside every client's
-// viewport (every attached client can see the whole screen). Guarded by r.mu.
-func (r *clientRegistry) MinLiveSize() (cols, rows int, ok bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for _, st := range r.clients {
-		if st.cols <= 0 || st.rows <= 0 {
-			continue
-		}
-		if !ok {
-			cols, rows, ok = st.cols, st.rows, true
-			continue
-		}
-		if st.cols < cols {
-			cols = st.cols
-		}
-		if st.rows < rows {
-			rows = st.rows
-		}
-	}
-	return cols, rows, ok
 }
 
 // Snapshot returns the connected clients with everything a dispatch pass
@@ -206,12 +290,15 @@ func (r *clientRegistry) ResolveSession(state *clientState, sessionID SessionID)
 	sess, ok := r.sessions[sessionID]
 	if !ok {
 		created = true
-		sess = &sessionState{lastSeen: time.Now()}
+		sess = &sessionState{lastSeen: time.Now(), firstAttach: state.attachSeq}
 		r.sessions[sessionID] = sess
 		r.gcIdleSessions()
 		r.evictOldestSession()
 	} else {
 		sess.lastSeen = time.Now()
+	}
+	if r.held != nil && r.held.sess == sess {
+		r.held = nil
 	}
 	prev := state.session.Swap(sess)
 	r.mu.Unlock()

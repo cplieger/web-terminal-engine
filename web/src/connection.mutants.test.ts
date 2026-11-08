@@ -304,7 +304,7 @@ let maybeFetchHistory: ReturnType<typeof vi.fn<() => void>>;
 let handleHistoryReply: ReturnType<typeof vi.fn<FakeRenderer["handleHistoryReply"]>>;
 let noteSolicited: ReturnType<typeof vi.fn<(fromAbs: number, end: number) => void>>;
 let clearSolicited: ReturnType<typeof vi.fn<() => void>>;
-let resumeTransitions: { epochChanged: boolean; paging: boolean; sentHaveThrough: number }[];
+let resumeTransitions: { serverEpoch: number | null; paging: boolean; sentHaveThrough: number }[];
 
 function baseCallbacks(): ConnectionCallbacks {
   return {
@@ -332,10 +332,11 @@ function spyRenderer(): Partial<FakeRenderer> {
     clearSolicited,
     applyResumeTransition: (ack) => {
       resumeTransitions.push({
-        epochChanged: ack.epochChanged,
+        serverEpoch: ack.serverEpoch,
         paging: ack.paging,
         sentHaveThrough: ack.sentHaveThrough,
       });
+      return false;
     },
   };
 }
@@ -783,8 +784,9 @@ describe("connection: session identity and the resume ledger", () => {
 
   it("forgetting a background session leaves the live socket alone", () => {
     const background = freshId("bg");
-    conn.adoptPersistedEpoch(background, 4_242); // registers the session
+    conn.setSession(background); // registers the session
     const { sock } = openSession("fg");
+    const opened = sockets.length;
 
     conn.forgetSession(background);
 
@@ -792,7 +794,7 @@ describe("connection: session identity and the resume ledger", () => {
     // at, and the shell has no way to notice: it would just stop receiving
     // frames until something else reconnected.
     expect(sock.closed).toBe(false);
-    expect(sockets).toHaveLength(1);
+    expect(sockets).toHaveLength(opened);
   });
 
   it("a host with no Web Crypto at all fails closed instead of throwing a type error", () => {
@@ -821,18 +823,14 @@ describe("connection: what a resume ack tells the store", () => {
     vi.useRealTimers();
   });
 
-  it("an ordinary ack reports no epoch change", () => {
+  it("an ack hands the store the server's epoch", () => {
     openSession("epoch-first", { serverEpoch: 777 });
 
-    // epochChanged is the store's instruction to throw away everything it holds
-    // as belonging to a previous server process. Reported on a first attach it
-    // discards a perfectly live screen on every connect.
-    expect(resumeTransitions).toEqual([
-      { epochChanged: false, paging: false, sentHaveThrough: -1 },
-    ]);
+    // The store decides from it whether its content is this process's.
+    expect(resumeTransitions).toEqual([{ serverEpoch: 777, paging: false, sentHaveThrough: -1 }]);
   });
 
-  it("a boot-epoch change is reported to the store's ack transition", () => {
+  it("a boot-epoch change reaches the store, and nothing queued means nothing to report", () => {
     const id = freshId("epoch-move");
     conn.setSession(id);
     latest().fireOpen();
@@ -842,11 +840,8 @@ describe("connection: what a resume ack tells the store", () => {
     latest().fireOpen();
     latest().fireMessage(resumeAckFrame({ serverEpoch: 888 }));
 
-    // Absolute line indices are only meaningful within one server process. A
-    // restart the store never hears about leaves it presenting the previous
-    // run's output as live and then refusing the new session's low indices.
-    expect(resumeTransitions.at(-1)?.epochChanged).toBe(true);
-    expect(onServerRestart).toHaveBeenCalledTimes(1);
+    expect(resumeTransitions.at(-1)?.serverEpoch).toBe(888);
+    expect(onServerRestart).not.toHaveBeenCalled();
   });
 
   it("a restart drops the outbox, so nothing is replayed onto the new process", () => {
@@ -865,32 +860,11 @@ describe("connection: what a resume ack tells the store", () => {
     // bytes cannot be "delivered late" — they can only be executed against a
     // shell that never saw the earlier ones.
     expect(inputSent(second)).toEqual([]);
+    expect(onServerRestart).toHaveBeenCalledTimes(1);
     conn.reconnectNow();
     const third = latest();
     third.fireOpen();
     expect(controlsOfType(third, "resume")[0]!["sentBytes"]).toBe(0);
-  });
-
-  it("a seeded epoch no server will confirm reads as a restart exactly once", () => {
-    const id = freshId("seeded");
-    conn.adoptPersistedEpoch(id, 999); // a claim about content restored from disk
-    conn.setSession(id);
-    latest().fireOpen();
-    latest().fireMessage(resumeAckFrame({ serverEpoch: 0 })); // version-silent
-
-    // Unverifiable restored content is handled as a restart: the alternative is
-    // presenting a previous run's output as live and then permanently refusing
-    // the new session's low absolute indices.
-    expect(resumeTransitions.at(-1)?.epochChanged).toBe(true);
-    expect(onServerRestart).toHaveBeenCalledTimes(1);
-
-    conn.reconnectNow();
-    latest().fireOpen();
-    latest().fireMessage(resumeAckFrame({ serverEpoch: 0 }));
-
-    // The claim was settled by the first ack. Re-arming it makes a server that
-    // simply never reports an epoch announce a restart on every reconnect.
-    expect(onServerRestart).toHaveBeenCalledTimes(1);
   });
 
   it("the ack's retained-history bounds are handed to the consumer", () => {
@@ -1185,7 +1159,7 @@ describe("connection: an initialSize provider that misbehaves", () => {
     expect(controlsOfType(sock, "resize")).toEqual([]);
     expect(controlsOfType(sock, "resume")).toHaveLength(1);
     expect(warnSpy).toHaveBeenCalledWith(
-      "vterm: initialSize provider threw; announcing no size",
+      "vterm: measuring the size at open threw; announcing no size",
       expect.any(Error),
     );
   });
@@ -1338,23 +1312,26 @@ describe("connection: a callback that disposes the connection mid-handler", () =
     expect(controlsOfType(sock, "upgrade")).toEqual([]);
   });
 
-  it("an onServerRestart handler that disposes stops an unconfirmed seeded epoch mid-reset", () => {
+  it("an onServerRestart handler that disposes stops the rest of the ack", () => {
     install({
       onServerRestart: () => {
         onServerRestart();
         conn.dispose();
       },
     });
-    const id = freshId("dispose-seeded");
-    conn.adoptPersistedEpoch(id, 4242);
+    const id = freshId("dispose-restart");
     conn.setSession(id);
+    latest().fireOpen();
+    latest().fireMessage(resumeAckFrame({ serverEpoch: 1, committed: 10, oldestIndex: 0 }));
+    expect(conn.sendBinary(new Uint8Array([65]))).toBe(true);
+    conn.reconnectNow();
     const sock = latest();
     sock.fireOpen();
 
-    sock.fireMessage(resumeAckFrame({ serverEpoch: 0 }));
+    sock.fireMessage(resumeAckFrame({ serverEpoch: 2, committed: 12, oldestIndex: 0 }));
 
     expect(onServerRestart).toHaveBeenCalledTimes(1);
-    expect(resumeTransitions).toEqual([]);
+    expect(onResumeBounds).toHaveBeenCalledTimes(1);
   });
 
   it("an onResumeBounds handler that disposes stops the gesture resync", () => {

@@ -1,14 +1,8 @@
-// The store's change-tracking contract: which descriptor fields make the
-// renderer repaint, what a store reports before any frame has arrived, and what
-// a full reset restores.
-//
-// The renderer drains three booleans (`windowChanged`, `altChanged`,
-// `fullReset`) plus two index lists, and does nothing it was not told about. A
-// descriptor field `windowEqual` forgets to compare is therefore a caret that
-// never moves, and a tracking set `reset()` forgets to clear is a DOM rebuild
-// for rows the store no longer holds.
-//
-// Pure data structure, no DOM.
+// The store's change tracking: which descriptor fields make the renderer
+// repaint, what a store reports before any frame, and what a reset restores.
+// The renderer repaints only what it drains (`windowChanged`, `altChanged`,
+// `fullReset` and two index lists), so a field `windowEqual` skips is a caret
+// that never moves, and a set `reset()` keeps rebuilds rows the store dropped.
 
 import { describe, it, expect } from "vitest";
 import { LineStore } from "./store.js";
@@ -207,7 +201,7 @@ describe("LineStore: what a full reset restores", () => {
   it("restores every bound it reports to a consumer", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, 4));
-    s.noteResumeBounds(100, 2);
+    s.noteResumeBounds(2);
     s.raisePagingFloor(3);
     s.noteSolicited(0, 2);
     s.applyHistoryScroll(scrollMsg(0, 2), 0);
@@ -251,7 +245,7 @@ describe("LineStore: what a full reset restores", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, 4));
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 4,
       serverOldest: 0,
       paging: true,

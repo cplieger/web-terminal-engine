@@ -7,12 +7,13 @@
 
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 import { type Connection, createConnection } from "./connection.js";
-import { createModeState, type ModeState } from "./modes.js";
+import { createModeState, type ModeState, POWER_ON_MODES } from "./modes.js";
 import { LineStore } from "./store.js";
 import { mapKeyboardEvent } from "./keyboard.js";
 import { connectionDeps } from "./test-helpers/connection-fakes.js";
 import { createEngineFixture, registerForDispose } from "./test-helpers/engine-fixture.js";
 import type { ServerMessage } from "./types.js";
+import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
 
 let conn: Connection;
 
@@ -122,6 +123,7 @@ interface DecodedControlFrame {
   sessionId?: string;
   cols?: number;
   rows?: number;
+  gridFrames?: boolean;
 }
 
 function decodeControlFrame(arg: unknown): DecodedControlFrame | null {
@@ -307,6 +309,18 @@ describe("connection: wake reconnect resumes from the held index (bug 2)", () =>
     expect(resume!.haveThrough).toBe(42); // server replays only lines after 42
   });
 
+  it("declares on every resume that it decodes grid frames", () => {
+    conn = registerForDispose(
+      createConnection({ ...connectionDeps(), callbacks: baseCallbacks() }),
+    );
+    conn.connect();
+    allMockWebSockets[0]!.fireOpen();
+
+    expect(
+      controlFramesSent(allMockWebSockets[0]!).find((m) => m.type === "resume")?.gridFrames,
+    ).toBe(true);
+  });
+
   it("sends -1 when the renderer holds nothing, because that is the boundary", () => {
     // A renderer holding an empty store answers -1: nothing is held, so nothing
     // can be claimed. The next test is the one that distinguishes the two.
@@ -394,7 +408,7 @@ describe("connection: wake reconnect resumes from the held index (bug 2)", () =>
     expect(frames[0]!.type).toBe("resume");
   });
 
-  it("keeps the resume as message one when no initialSize is wired at all", () => {
+  it("announces computeSize's answer before the resume when no initialSize is wired", () => {
     conn = registerForDispose(
       createConnection({ ...connectionDeps(), callbacks: baseCallbacks() }),
     );
@@ -402,7 +416,9 @@ describe("connection: wake reconnect resumes from the held index (bug 2)", () =>
     const sock = allMockWebSockets[0]!;
     sock.fireOpen();
 
-    expect(controlFramesSent(sock)[0]!.type).toBe("resume");
+    const frames = controlFramesSent(sock);
+    expect(frames[0]).toEqual({ type: "resize", cols: 80, rows: 24 });
+    expect(frames[1]!.type).toBe("resume");
   });
 
   it("refuses a malformed announced size rather than putting it on the wire", () => {
@@ -476,6 +492,73 @@ describe("connection: wake reconnect resumes from the held index (bug 2)", () =>
 
     conn.sendResize(); // same size again: deduplicated
     expect(controlFramesSent(sock).filter((m) => m.type === "resize").length).toBe(2);
+  });
+
+  it("re-announces on a new socket the size an earlier socket already sent", () => {
+    // The server records a size per socket, so the new socket has none until it announces.
+    conn = registerForDispose(
+      createConnection({ ...connectionDeps(), callbacks: baseCallbacks() }),
+    );
+    conn.connect();
+    const first = allMockWebSockets[0]!;
+    first.fireOpen();
+    conn.sendResize();
+    conn.reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    conn.sendResize();
+
+    const resizes = controlFramesSent(second).filter((m) => m.type === "resize");
+    expect(resizes).toEqual([{ type: "resize", cols: 80, rows: 24 }]);
+  });
+
+  it("lastAnnouncedSize is the last size sent on any socket, kept across a reconnect", () => {
+    let measured = { cols: 80, rows: 24 };
+    let initial: { cols: number; rows: number } | null = { cols: 100, rows: 40 };
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        callbacks: { ...baseCallbacks(), computeSize: () => measured, initialSize: () => initial },
+      }),
+    );
+    expect(conn.lastAnnouncedSize()).toBeNull();
+
+    conn.connect();
+    allMockWebSockets[0]!.fireOpen();
+    expect(conn.lastAnnouncedSize()).toEqual({ cols: 100, rows: 40 });
+    conn.sendResize();
+    expect(conn.lastAnnouncedSize()).toEqual({ cols: 80, rows: 24 });
+
+    // Measured but never sent: no socket is connected.
+    conn.disconnect();
+    measured = { cols: 120, rows: 50 };
+    conn.sendResize();
+    expect(conn.lastAnnouncedSize()).toEqual({ cols: 80, rows: 24 });
+
+    // A socket that opens without announcing leaves the record as it was.
+    initial = null;
+    conn.connect();
+    allMockWebSockets.at(-1)!.fireOpen();
+    expect(conn.lastAnnouncedSize()).toEqual({ cols: 80, rows: 24 });
+
+    conn.dispose();
+    expect(conn.lastAnnouncedSize()).toBeNull();
+  });
+
+  it("lastAnnouncedSize hands out a copy the caller cannot use to move the record", () => {
+    conn = registerForDispose(
+      createConnection({ ...connectionDeps(), callbacks: baseCallbacks() }),
+    );
+    conn.connect();
+    const sock = allMockWebSockets[0]!;
+    sock.fireOpen();
+    conn.sendResize();
+    const seen = conn.lastAnnouncedSize()!;
+    seen.cols = 1;
+
+    expect(conn.lastAnnouncedSize()).toEqual({ cols: 80, rows: 24 });
+    conn.sendResize(); // 80x24 is still this socket's announced size
+    expect(controlFramesSent(sock).filter((m) => m.type === "resize").length).toBe(1);
   });
 
   it("probes a silent socket with a ping and reconnects when the probe goes unanswered", () => {
@@ -587,67 +670,6 @@ describe("connection: per-session resume state (tab switch)", () => {
   // to stay isolated rather than relying on a reset that the module does not
   // expose.
 
-  it("treats a hydrated session's first resumeAck as a restart when the epoch moved", () => {
-    // The corruption case persistence exists to avoid. Absolute line indices are
-    // only meaningful within one server process, and restart detection is
-    // otherwise in-memory: the FIRST resumeAck of a page load records the epoch
-    // with nothing to compare against. So a store restored from disk after the
-    // server restarted would be presented as live, and the new session's output
-    // — whose indices start again near 0 — would then be refused by the store's
-    // staleness guard. Seeding the persisted epoch is what gives that first
-    // resumeAck something to compare against.
-    conn.adoptPersistedEpoch("epoch-restored", 111);
-    conn.setSession("epoch-restored");
-    const sock = allMockWebSockets.at(-1)!;
-    sock.fireOpen();
-    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 222 }));
-
-    expect(onServerRestart).toHaveBeenCalledTimes(1);
-  });
-
-  it("stays quiet when a hydrated session reconnects to the SAME server process", () => {
-    // The other half: a wake that finds the server still running must not throw
-    // away the content that was just restored.
-    conn.adoptPersistedEpoch("epoch-same", 333);
-    conn.setSession("epoch-same");
-    const sock = allMockWebSockets.at(-1)!;
-    sock.fireOpen();
-    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 333 }));
-
-    expect(onServerRestart).not.toHaveBeenCalled();
-  });
-
-  it("ignores an absent persisted epoch rather than seeding a sentinel", () => {
-    // 0 means "no epoch was ever recorded", which is indistinguishable from a
-    // version-silent server. Seeding it would make the next real epoch look like
-    // a restart and wipe a perfectly good restore.
-    conn.adoptPersistedEpoch("epoch-zero", 0);
-    conn.adoptPersistedEpoch("epoch-zero", Number.NaN);
-    conn.setSession("epoch-zero");
-    const sock = allMockWebSockets.at(-1)!;
-    sock.fireOpen();
-    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 444 }));
-
-    expect(onServerRestart).not.toHaveBeenCalled();
-  });
-
-  it("treats a hydrated session as restarted when the server reports NO epoch", () => {
-    // The one hole the epoch comparison alone leaves, and it is the design's worst
-    // case rather than a nuisance: a server downgraded to reporting no epoch between
-    // the save and the load never contradicts the seeded value, so the stale store
-    // would be presented as live and would then refuse the new session's low
-    // absolute indices — wrong, and then permanently blank. A seeded epoch is a
-    // CLAIM about restored content; a resume that cannot confirm it is handled as a
-    // restart.
-    conn.adoptPersistedEpoch("epoch-silent-server", 111);
-    conn.setSession("epoch-silent-server");
-    const sock = allMockWebSockets.at(-1)!;
-    sock.fireOpen();
-    sock.fireMessage(resumeAckFrame({ received: 0 })); // no serverEpoch at all
-
-    expect(onServerRestart).toHaveBeenCalledTimes(1);
-  });
-
   it("does NOT treat a session whose epoch it LEARNED as restarted by a silent ack", () => {
     // The other half, and the reason the seeded/learned distinction exists: an
     // epoch learned from an earlier ack is an observation, and a server that reports
@@ -665,42 +687,6 @@ describe("connection: per-session resume state (tab switch)", () => {
     second.fireMessage(resumeAckFrame({ received: 0 })); // silent this time
 
     expect(onServerRestart).not.toHaveBeenCalled();
-  });
-
-  it("refuses to seed an epoch over one a server already reported", () => {
-    // "Seed" is the whole contract: it exists to give the FIRST resumeAck something
-    // to compare against. Overwriting a value a server reported would make a genuine
-    // restart look like agreement, or a live session look restarted — so a caller
-    // that reaches here twice, or after connecting, is refused rather than obeyed.
-    conn.setSession("epoch-no-clobber");
-    const sock = allMockWebSockets.at(-1)!;
-    sock.fireOpen();
-    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 555 }));
-    expect(conn.serverEpochOf("epoch-no-clobber")).toBe(555);
-
-    conn.adoptPersistedEpoch("epoch-no-clobber", 111);
-
-    expect(conn.serverEpochOf("epoch-no-clobber")).toBe(555);
-    expect(onServerRestart).not.toHaveBeenCalled();
-  });
-
-  it("reports the epoch a session's content belongs to, so a snapshot can record it", () => {
-    // The read half. Without it a consumer persisting a store has no way to
-    // record WHICH server process its absolute indices came from, and the seeding
-    // above has nothing to be seeded with.
-    expect(conn.serverEpochOf("epoch-read")).toBe(0);
-    conn.setSession("epoch-read");
-    const sock = allMockWebSockets.at(-1)!;
-    sock.fireOpen();
-    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 555 }));
-
-    expect(conn.serverEpochOf("epoch-read")).toBe(555);
-  });
-
-  it("reports 0 for a session it has never seen rather than throwing", () => {
-    // A save can be attempted for a tab that never completed a resume; 0 is the
-    // same "unknown" value adoptPersistedEpoch ignores, so the pair composes.
-    expect(conn.serverEpochOf("never-connected-at-all")).toBe(0);
   });
 
   it("resolves a stable unmanaged session id, so the untabbed path has a key", () => {
@@ -773,7 +759,8 @@ describe("connection: per-session resume state (tab switch)", () => {
     conn.setSession("noreplay-A");
     const a = allMockWebSockets[0]!;
     a.fireOpen();
-    // Type into A while connected: the bytes go out on A and into A's outbox.
+    a.fireMessage(resumeAckFrame({ received: 0 }));
+    // Type into A while connected: the bytes go out on A and stay in flight.
     conn.sendBinary(new Uint8Array([104, 105])); // "hi"
     expect(rawInputSends(a).length).toBe(1);
 
@@ -795,7 +782,8 @@ describe("connection: per-session resume state (tab switch)", () => {
     conn.setSession("own-A");
     const a1 = allMockWebSockets[0]!;
     a1.fireOpen();
-    conn.sendBinary(new Uint8Array([120])); // "x" into A, unacked (no resumeAck)
+    a1.fireMessage(resumeAckFrame({ received: 0 }));
+    conn.sendBinary(new Uint8Array([120])); // "x" into A, sent, never acked
 
     conn.setSession("own-B"); // leave A with an unacked byte
     allMockWebSockets[1]!.fireOpen();
@@ -833,19 +821,173 @@ describe("connection: per-session resume state (tab switch)", () => {
     expect(onServerRestart).not.toHaveBeenCalled();
   });
 
-  it("still fires a server-restart reset when the SAME session's boot-epoch changes", () => {
+  it("drops and reports input queued for a process that a new epoch replaced", () => {
     conn.setSession("restart-A");
     const a1 = allMockWebSockets[0]!;
     a1.fireOpen();
     a1.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+    conn.sendBinary(new Uint8Array([120])); // sent, never acked
 
-    // A reconnects and the server reports a different epoch: A's process was
-    // replaced. That is a genuine restart for this session.
     conn.reconnectNow();
     const a2 = allMockWebSockets[1]!;
     a2.fireOpen();
     a2.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 999 }));
+
     expect(onServerRestart).toHaveBeenCalledTimes(1);
+    expect(rawInputSends(a2)).toEqual([]);
+  });
+
+  function connectionWithContent(contentLost: (epoch: number | null) => boolean): {
+    c: Connection;
+    epochs: (number | null)[];
+    restarts: ReturnType<typeof vi.fn<() => void>>;
+  } {
+    const epochs: (number | null)[] = [];
+    const restarts = vi.fn<() => void>();
+    const c = registerForDispose(
+      createConnection({
+        ...connectionDeps({
+          applyResumeTransition: (ack) => {
+            epochs.push(ack.serverEpoch);
+            return contentLost(ack.serverEpoch);
+          },
+        }),
+        callbacks: {
+          onMessage: () => undefined,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          onServerRestart: restarts,
+          computeSize: () => ({ cols: 80, rows: 24 }),
+        },
+      }),
+    );
+    return { c, epochs, restarts };
+  }
+
+  it("hands the bound store the ack's epoch, null for a server that reports none", () => {
+    const { c, epochs } = connectionWithContent(() => false);
+    c.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+    c.reconnectNow();
+    allMockWebSockets.at(-1)!.fireOpen();
+    allMockWebSockets.at(-1)!.fireMessage(resumeAckFrame({ received: 0 }));
+
+    expect(epochs).toEqual([111, null]);
+    c.dispose();
+  });
+
+  it("reports a restart when only the bound store's content was another process's", () => {
+    // A fresh connection has no epoch of its own for the session: the content's
+    // epoch, which travels with the store, is what detects this restart.
+    const { c, restarts } = connectionWithContent((epoch) => epoch === 222);
+    c.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 222 }));
+
+    expect(restarts).toHaveBeenCalledTimes(1);
+    c.dispose();
+  });
+
+  it("drops input typed before the first ack at content the store discards", () => {
+    const { c, restarts } = connectionWithContent((epoch) => epoch === 222);
+    c.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    c.sendBinary(new Uint8Array([120]));
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 222 }));
+
+    expect(rawInputSends(sock)).toEqual([]);
+    expect(c.pendingInputBytes()).toBe(0);
+    expect(restarts).toHaveBeenCalledTimes(1);
+    c.dispose();
+  });
+
+  it("drops input typed before the first ack at restored content a silent ack cannot confirm", () => {
+    const { c, restarts } = connectionWithContent((epoch) => epoch === null);
+    c.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    c.sendBinary(new Uint8Array([120]));
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame({ received: 0 }));
+
+    expect(rawInputSends(sock)).toEqual([]);
+    expect(restarts).toHaveBeenCalledTimes(1);
+    c.dispose();
+  });
+
+  it("sends input typed before the first ack when the store keeps its content", () => {
+    const { c, restarts } = connectionWithContent(() => false);
+    c.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    c.sendBinary(new Uint8Array([120]));
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 222 }));
+
+    expect(rawInputSends(sock)).toHaveLength(1);
+    expect(restarts).not.toHaveBeenCalled();
+    c.dispose();
+  });
+
+  it("keeps input meant for the process the session last acked, whatever the store held", () => {
+    // A store moved in from another connection may be discarded while this
+    // session's own process is unchanged: its input still belongs there.
+    let acks = 0;
+    const { c, restarts } = connectionWithContent(() => ++acks === 2);
+    c.setSession(freshSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    first.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+    c.sendBinary(new Uint8Array([120])); // sent, never acked
+
+    c.reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    second.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+
+    expect(rawInputSends(second)).toHaveLength(1);
+    expect(restarts).toHaveBeenCalledTimes(1); // the content loss alone
+    c.dispose();
+  });
+
+  it("reports once when the same ack loses both the content and the queued input", () => {
+    const { c, restarts } = connectionWithContent((epoch) => epoch === 999);
+    c.setSession(freshSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    first.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+    c.sendBinary(new Uint8Array([120]));
+
+    c.reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    // ledgerLost too (ackFlags bit 0), as a new process reports it.
+    const ack = new Uint8Array(35);
+    ack.set(new Uint8Array(resumeAckFrame({ received: 0, serverEpoch: 999 })));
+    ack[33] = WIRE_PROTOCOL_VERSION;
+    ack[34] = 1;
+    second.fireMessage(ack.buffer);
+
+    expect(restarts).toHaveBeenCalledTimes(1);
+    c.dispose();
+  });
+
+  it("does not report an epoch change that dropped no input and no content", () => {
+    // The renderer owns the content's epoch (this suite's renderer holds none),
+    // so a new process with nothing queued for the old one lost nothing here.
+    conn.setSession("restart-empty");
+    const a1 = allMockWebSockets[0]!;
+    a1.fireOpen();
+    a1.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+
+    conn.reconnectNow();
+    const a2 = allMockWebSockets[1]!;
+    a2.fireOpen();
+    a2.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 999 }));
+
+    expect(onServerRestart).not.toHaveBeenCalled();
   });
 
   it("forgetSession drops the active session and tears down its socket", () => {
@@ -1087,21 +1229,45 @@ describe("connection: a process-exited close (4001) is definitive, not transient
     expect(allMockWebSockets.length).toBe(2);
   });
 
-  it("a reconnect explicitly requested after a 4001 still works (re-viewing a dead session)", () => {
+  it("refuses the wake path after a 4001, so an ended session opens no socket", () => {
     initWith({ withProcessExit: true });
     conn.setSession("procexit-D");
-    const sock = allMockWebSockets[0]!;
-    sock.fireOpen();
-    sock.fireClose(4001);
-    expect(allMockWebSockets.length).toBe(1);
+    allMockWebSockets[0]!.fireOpen();
+    allMockWebSockets[0]!.fireClose(4001);
 
-    // The consumer may still re-attach deliberately (a tab switch back onto
-    // the dead session calls setSession -> reconnectNow): the module must not
-    // have latched anything that blocks an explicit reconnect.
     conn.reconnectNow();
+
+    expect(allMockWebSockets.length).toBe(1);
+  });
+
+  it("reconnects an ended session on an explicit connect, or a setSession back onto it", () => {
+    initWith({ withProcessExit: true });
+    conn.setSession("procexit-E");
+    allMockWebSockets[0]!.fireOpen();
+    allMockWebSockets[0]!.fireClose(4001);
+
+    conn.connect();
     expect(allMockWebSockets.length).toBe(2);
-    const again = allMockWebSockets[1]!;
-    expect(again.url).toContain("session=procexit-D");
+    expect(allMockWebSockets[1]!.url).toContain("session=procexit-E");
+
+    allMockWebSockets[1]!.fireOpen();
+    allMockWebSockets[1]!.fireClose(4001);
+    conn.setSession("procexit-E");
+    expect(allMockWebSockets.length).toBe(3);
+  });
+
+  it("leaves the ended state when another session is shown or the session is forgotten", () => {
+    initWith({ withProcessExit: true });
+    conn.setSession("procexit-F");
+    allMockWebSockets[0]!.fireOpen();
+    allMockWebSockets[0]!.fireClose(4004);
+
+    conn.forgetSession("procexit-F");
+    conn.setSession("procexit-G");
+    allMockWebSockets[1]!.fireOpen();
+    conn.reconnectNow();
+
+    expect(allMockWebSockets.length).toBe(3);
   });
 
   it("routes an unknown-session close (4004) to the same definitive path as 4001", () => {
@@ -1216,6 +1382,7 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
     conn.setSession(freshSessionId()); // opens a socket via reconnectNow
     const first = allMockWebSockets.at(-1)!;
     first.fireOpen();
+    first.fireMessage(resumeAckFrame({ received: 0 }));
     conn.sendBinary(new Uint8Array([1, 2, 3])); // applied by the server, never acked
 
     // Reconnect: the resume claims sentBytes=3; the server's ledger is gone
@@ -1236,6 +1403,7 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
     conn.setSession(freshSessionId());
     const first = allMockWebSockets.at(-1)!;
     first.fireOpen();
+    first.fireMessage(resumeAckFrame({ received: 0 }));
     conn.sendBinary(new Uint8Array([1, 2, 3]));
     first.fireMessage(ackOnlyFrame(3)); // the server received and acked all 3
 
@@ -1255,6 +1423,7 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
     conn.setSession(freshSessionId());
     const first = allMockWebSockets.at(-1)!;
     first.fireOpen();
+    first.fireMessage(resumeAckFrame({ received: 0 }));
     conn.sendBinary(new Uint8Array([1, 2, 3]));
     first.fireMessage(ackOnlyFrame(3));
 
@@ -1280,6 +1449,7 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
     conn.setSession(freshSessionId());
     const first = allMockWebSockets.at(-1)!;
     first.fireOpen();
+    first.fireMessage(resumeAckFrame({ received: 0 }));
     conn.sendBinary(new Uint8Array([1, 2, 3])); // lost in transit, never applied
 
     conn.reconnectNow();
@@ -1296,6 +1466,7 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
     conn.setSession(freshSessionId());
     const first = allMockWebSockets.at(-1)!;
     first.fireOpen();
+    first.fireMessage(resumeAckFrame({ received: 0 }));
     conn.sendBinary(new Uint8Array([1, 2, 3]));
 
     first.fireMessage(ackOnlyFrame(3)); // quiet-input ack (no content frame)
@@ -1517,13 +1688,27 @@ describe("connection: v4 typed-framing negotiation (see WIRE_PROTOCOL_VERSION in
     const sock = allMockWebSockets.at(-1)!;
     sock.fireOpen();
 
-    const first = controlFramesSent(sock)[0];
-    expect(first?.type).toBe("resume");
+    const types = controlFramesSent(sock).map((m) => m.type);
+    expect(types.slice(0, 2)).toEqual(["resize", "resume"]);
     const log = sendLog(sock);
-    expect(log[0]?.kind).toBe("control"); // the binary bootstrap resume
+    expect(log.slice(0, 2).map((e) => e.kind)).toEqual(["control", "control"]);
+    expect(log.some((e) => e.kind === "input")).toBe(false); // input waits for the resumeAck
   });
 
   it("upgrades on v4 proof: text upgrade precedes the retransmit, later controls are text", () => {
+    let cols = 80;
+    conn.dispose();
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        callbacks: {
+          onMessage,
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          computeSize: () => ({ cols, rows: 24 }),
+        },
+      }),
+    );
     conn.setSession(freshSessionId());
     const sock = allMockWebSockets.at(-1)!;
     sock.fireOpen();
@@ -1538,6 +1723,7 @@ describe("connection: v4 typed-framing negotiation (see WIRE_PROTOCOL_VERSION in
     expect(after[1]?.kind).toBe("input"); // retransmit follows the latch
     expect(after[1]?.bytes).toEqual([1, 2, 3]);
 
+    cols = 100;
     conn.sendResize();
     const last = sendLog(sock).at(-1)!;
     expect(last.kind).toBe("text");
@@ -1574,19 +1760,29 @@ describe("connection: v4 typed-framing negotiation (see WIRE_PROTOCOL_VERSION in
 
   it("v3-mode input splits leading NULs; upgraded input goes verbatim", () => {
     conn.setSession(freshSessionId());
-    const sock = allMockWebSockets.at(-1)!;
-    sock.fireOpen();
+    const v3 = allMockWebSockets.at(-1)!;
+    v3.fireOpen();
+    v3.fireMessage(resumeAckV3(0)); // an old server: no proof, no upgrade
 
-    // v3 mode (no proof yet): leading NULs go out as solitary frames.
+    // v3 mode: leading NULs go out as solitary frames.
     conn.sendBinary(new Uint8Array([0, 0, 65]));
-    let inputs = sendLog(sock).filter((s) => s.kind === "input");
-    expect(inputs.map((s) => s.bytes)).toEqual([[0], [0], [65]]);
+    expect(
+      sendLog(v3)
+        .filter((s) => s.kind === "input")
+        .map((s) => s.bytes),
+    ).toEqual([[0], [0], [65]]);
 
-    // Upgrade, then the same bytes go out as ONE full-alphabet frame.
-    sock.fireMessage(resumeAckV4(3)); // acks the 3 bytes already sent
+    // Upgraded, the same shape goes out as ONE full-alphabet frame.
+    conn.reconnectNow();
+    const v4 = allMockWebSockets.at(-1)!;
+    v4.fireOpen();
+    v4.fireMessage(resumeAckV4(3)); // acks the 3 bytes already sent
     conn.sendBinary(new Uint8Array([0, 66]));
-    inputs = sendLog(sock).filter((s) => s.kind === "input");
-    expect(inputs.at(-1)?.bytes).toEqual([0, 66]);
+    expect(
+      sendLog(v4)
+        .filter((s) => s.kind === "input")
+        .at(-1)?.bytes,
+    ).toEqual([0, 66]);
   });
 
   it("v3 reconnect replay splits a leading-NUL chunk (the F5 regression)", () => {
@@ -1597,6 +1793,7 @@ describe("connection: v4 typed-framing negotiation (see WIRE_PROTOCOL_VERSION in
     conn.setSession(freshSessionId());
     const first = allMockWebSockets.at(-1)!;
     first.fireOpen();
+    first.fireMessage(resumeAckV3(0));
     conn.sendBinary(new Uint8Array([0, 65]));
 
     conn.reconnectNow();
@@ -1613,6 +1810,7 @@ describe("connection: v4 typed-framing negotiation (see WIRE_PROTOCOL_VERSION in
     conn.setSession(freshSessionId());
     const first = allMockWebSockets.at(-1)!;
     first.fireOpen();
+    first.fireMessage(resumeAckV3(0));
     conn.sendBinary(new Uint8Array([0, 65])); // v3 mode live send: split into [0],[65]
 
     // Reconnect to a v4 server with the chunk still unacked: the retransmit
@@ -1654,24 +1852,26 @@ describe("connection: v4 typed-framing negotiation (see WIRE_PROTOCOL_VERSION in
   });
 });
 
-describe("connection: per-session DEC-mode mirror (P3)", () => {
-  // Mode state is one instance per connection while every session has its own
-  // snapshot: a keystroke in the tab-switch window must encode under the NEW
-  // session's modes, never the OLD tab's (vim's DECCKM arrows bleeding into a
-  // shell tab, wrong paste bracketing, stale kitty flags). setSession restores
-  // the target's cached snapshot synchronously; these tests drive the full path
-  // a real switch takes: binary modes frames in, keyboard encoding out.
+describe("connection: the DEC modes are the current socket's server's", () => {
+  // The server's screen owns the modes, and a client may encode input only under
+  // modes the current socket's server announced. Every other moment (creation,
+  // a connect, a close, a session switch) leaves them unknown, and a switch
+  // resets them to power-on, never to a snapshot the server may have changed
+  // since (a shell that turned bracketed paste back on while another tab showed).
   let modes: ModeState;
+  let resyncGesture: ReturnType<typeof vi.fn<() => void>>;
 
   beforeEach(() => {
     allMockWebSockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
     modes = createModeState();
+    resyncGesture = vi.fn<() => void>();
     conn = registerForDispose(
       createConnection({
         ...connectionDeps(),
         modes,
+        mouse: { resyncGesture },
         callbacks: {
           onMessage: vi.fn(),
           onOpen: () => undefined,
@@ -1713,55 +1913,234 @@ describe("connection: per-session DEC-mode mirror (P3)", () => {
     return buf;
   }
 
-  it("a keydown in the switch window encodes under the TARGET session's modes, never the old tab's", () => {
-    // Session A announces DECCKM + kitty disambiguate (a vim-like app).
+  it("a switch restores power-on modes, not a cached snapshot, and stays unknown until the modes frame", () => {
     conn.setSession("modes-A");
     const a = allMockWebSockets.at(-1)!;
     a.fireOpen();
     a.fireMessage(modesFrame({ bracketed: true, appCursor: true, kbdFlags: 1 }));
-    expect(modes.isApplicationCursor()).toBe(true);
-    expect(modes.getKeyboardFlags()).toBe(1);
+    expect(modes.isKnown()).toBe(true);
 
-    // Switch to a session the page has never seen: SYNCHRONOUSLY at power-on
-    // defaults — an ArrowUp fired before B's modes frame arrives encodes as
-    // legacy CSI A, not A's SS3/kitty form.
     conn.setSession("modes-B");
-    expect(modes.isApplicationCursor()).toBe(false);
-    expect(modes.getKeyboardFlags()).toBe(0);
-    const up = mapKeyboardEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }), modes);
-    expect(up).toEqual({ kind: "send", bytes: "\x1b[A" });
-
-    // B announces its own modes (mouse tracking, no DECCKM).
     allMockWebSockets.at(-1)!.fireOpen();
-    allMockWebSockets.at(-1)!.fireMessage(modesFrame({ bracketed: true, mouseMode: 1000 }));
-    expect(modes.getMouseMode()).toBe(1000);
-
-    // Switching BACK to A restores A's snapshot synchronously: the same
-    // ArrowUp now encodes under A's DECCKM... except kitty disambiguate
-    // supersedes it (CSI form) — exactly what A's live encoder did.
+    allMockWebSockets.at(-1)!.fireMessage(modesFrame({ mouseMode: 1000 }));
     conn.setSession("modes-A");
+
+    expect(modes.isKnown()).toBe(false);
+    expect(modes.snapshot()).toEqual(POWER_ON_MODES);
+    const a2 = allMockWebSockets.at(-1)!;
+    a2.fireOpen();
+    a2.fireMessage(modesFrame({ bracketed: false, appCursor: true }));
+    expect(modes.isKnown()).toBe(true);
     expect(modes.isApplicationCursor()).toBe(true);
-    expect(modes.getKeyboardFlags()).toBe(1);
-    expect(modes.getMouseMode()).toBe(0); // B's mouse mode did not bleed into A
-    const upOnA = mapKeyboardEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }), modes);
-    expect(upOnA).toEqual({ kind: "send", bytes: "\x1b[A" }); // kitty CSI form
-    // Escape makes the kitty restoration visible unambiguously.
-    const esc = mapKeyboardEvent(new KeyboardEvent("keydown", { key: "Escape" }), modes);
-    expect(esc).toEqual({ kind: "send", bytes: "\x1b[27u" });
+    expect(mapKeyboardEvent(new KeyboardEvent("keydown", { key: "ArrowUp" }), modes)).toEqual({
+      kind: "send",
+      bytes: "\x1bOA",
+    });
   });
 
-  it("a modes frame updates the mode state AND the session's cached snapshot (single writer)", () => {
+  it("is unknown from creation, and again on every reconnect and close", () => {
+    expect(modes.isKnown()).toBe(false);
     conn.setSession("modes-C");
     const c = allMockWebSockets.at(-1)!;
     c.fireOpen();
-    c.fireMessage(modesFrame({ bracketed: false, appCursor: true }));
-    expect(modes.isBracketedPaste()).toBe(false);
+    expect(modes.isKnown()).toBe(false);
+    c.fireMessage(modesFrame({}));
+    expect(modes.isKnown()).toBe(true);
 
-    // Bounce away and back with no new frames: the cache round-trips.
+    conn.reconnectNow();
+    expect(modes.isKnown()).toBe(false);
+    const c2 = allMockWebSockets.at(-1)!;
+    c2.fireOpen();
+    c2.fireMessage(modesFrame({}));
+    c2.fireClose(1006);
+    expect(modes.isKnown()).toBe(false);
+  });
+
+  function resumeAckFrame(): ArrayBuffer {
+    const ack = new ArrayBuffer(33); // received 0, no epoch, no tail
+    new DataView(ack).setUint8(0, 2);
+    return ack;
+  }
+
+  it("resyncs the mouse gesture once, at the resumeAck, when the modes frame came first", () => {
     conn.setSession("modes-D");
-    expect(modes.isBracketedPaste()).toBe(true); // D: power-on defaults
-    conn.setSession("modes-C");
-    expect(modes.isBracketedPaste()).toBe(false);
-    expect(modes.isApplicationCursor()).toBe(true);
+    const d = allMockWebSockets.at(-1)!;
+    d.fireOpen();
+    d.fireMessage(modesFrame({ mouseMode: 1002 }));
+    expect(resyncGesture).not.toHaveBeenCalled();
+
+    d.fireMessage(resumeAckFrame());
+    d.fireMessage(modesFrame({ mouseMode: 1000 }));
+
+    expect(resyncGesture).toHaveBeenCalledTimes(1);
+  });
+
+  it("resyncs the mouse gesture once, at the modes frame, when the resumeAck came first", () => {
+    conn.setSession("modes-D2");
+    const d = allMockWebSockets.at(-1)!;
+    d.fireOpen();
+    d.fireMessage(resumeAckFrame());
+    expect(resyncGesture).not.toHaveBeenCalled();
+
+    d.fireMessage(modesFrame({ mouseMode: 1002 }));
+    d.fireMessage(modesFrame({ mouseMode: 1000 }));
+    expect(resyncGesture).toHaveBeenCalledTimes(1);
+
+    conn.reconnectNow();
+    const d2 = allMockWebSockets.at(-1)!;
+    d2.fireOpen();
+    d2.fireMessage(resumeAckFrame());
+    d2.fireMessage(modesFrame({ mouseMode: 1000 }));
+    expect(resyncGesture).toHaveBeenCalledTimes(2);
+  });
+
+  it("takes a resumed socket's first screen frame as known, from a server that sends no modes frame", () => {
+    conn.setSession("modes-E");
+    const e = allMockWebSockets.at(-1)!;
+    e.fireOpen();
+    e.fireMessage(resumeAckFrame());
+    expect(modes.isKnown()).toBe(false);
+
+    const screen = new ArrayBuffer(27); // a screen frame with no changed rows
+    new DataView(screen).setUint8(0, 0);
+    e.fireMessage(screen);
+
+    expect(modes.isKnown()).toBe(true);
+  });
+});
+
+describe("connection: a socket's input waits for its first size", () => {
+  // The server resizes a fresh PTY only when a size arrives, so a byte that
+  // reaches it first runs at the PTY's default size: a command typed at a
+  // brand-new session would see a 20-column terminal.
+  let size: { cols: number; rows: number } | null;
+  let onInputReady: ReturnType<typeof vi.fn<(s: { cols: number; rows: number }) => void>>;
+  let onServerRestart: ReturnType<typeof vi.fn<() => void>>;
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    size = null;
+    onInputReady = vi.fn<(s: { cols: number; rows: number }) => void>();
+    onServerRestart = vi.fn<() => void>();
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        callbacks: {
+          onMessage: vi.fn(),
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          onInputReady,
+          onServerRestart,
+          computeSize: () => ({ cols: 120, rows: 40 }),
+          initialSize: () => size,
+        },
+      }),
+    );
+  });
+
+  afterEach(() => {
+    conn.disconnect();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function resumeAckFrame(serverEpoch = 0): ArrayBuffer {
+    const ack = new ArrayBuffer(33); // received 0, no tail; epoch 0 is "none"
+    const v = new DataView(ack);
+    v.setUint8(0, 2);
+    v.setBigUint64(9, BigInt(serverEpoch), true);
+    return ack;
+  }
+
+  // Each send in order: "resize", "resume" or the input bytes as text.
+  function wireLog(sock: MockWS): string[] {
+    const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    return calls.map((c) => {
+      const frame = decodeControlFrame(c[0]);
+      if (frame !== null) {
+        return frame.type ?? "control";
+      }
+      const a = c[0];
+      const bytes = a instanceof ArrayBuffer ? new Uint8Array(a) : (a as Uint8Array);
+      return new TextDecoder().decode(bytes);
+    });
+  }
+
+  it("holds input typed before the socket could measure itself until its first resize", () => {
+    conn.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame());
+    conn.sendBinary(new TextEncoder().encode("ls\r"));
+    expect(wireLog(sock)).toEqual(["resume"]);
+
+    conn.sendResize();
+
+    expect(wireLog(sock)).toEqual(["resume", "resize", "ls\r"]);
+    expect(onInputReady).toHaveBeenCalledExactlyOnceWith({ cols: 120, rows: 40 });
+  });
+
+  it("sends a mouse report only once the socket announced its size", () => {
+    conn.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame());
+
+    expect(conn.sendEphemeral("\x1b[<0;10;5M")).toBe(false);
+    conn.sendResize();
+    expect(conn.sendEphemeral("\x1b[<0;10;5M")).toBe(true);
+  });
+
+  it("reports input ready once per socket, at its resume, with the size it announced", () => {
+    size = { cols: 100, rows: 30 };
+    conn.setSession(freshSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    expect(onInputReady).not.toHaveBeenCalled();
+    first.fireMessage(resumeAckFrame());
+    expect(onInputReady).toHaveBeenCalledExactlyOnceWith({ cols: 100, rows: 30 });
+
+    conn.sendResize(); // a new size on the same socket starts nothing new
+    expect(onInputReady).toHaveBeenCalledTimes(1);
+
+    conn.reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    second.fireMessage(resumeAckFrame());
+    expect(onInputReady).toHaveBeenCalledTimes(2);
+    expect(onInputReady).toHaveBeenLastCalledWith({ cols: 100, rows: 30 });
+  });
+
+  it("delivers a command sent on input ready to the shell a server restart replaced", () => {
+    size = { cols: 100, rows: 30 };
+    conn.setSession(freshSessionId());
+    const first = allMockWebSockets.at(-1)!;
+    first.fireOpen();
+    first.fireMessage(resumeAckFrame(111));
+    conn.sendBinary(new TextEncoder().encode("x")); // sent to the old shell, never acked
+    onInputReady.mockImplementation(() => {
+      conn.sendBinary(new TextEncoder().encode("make\r"));
+    });
+
+    conn.reconnectNow();
+    const second = allMockWebSockets.at(-1)!;
+    second.fireOpen();
+    second.fireMessage(resumeAckFrame(999));
+
+    expect(onServerRestart).toHaveBeenCalledTimes(1);
+    expect(wireLog(second)).toEqual(["resize", "resume", "make\r"]);
+  });
+
+  it("puts input queued before the open after the open's size and the resume", () => {
+    size = { cols: 100, rows: 30 };
+    conn.setSession(freshSessionId());
+    conn.sendBinary(new TextEncoder().encode("a"));
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame());
+
+    expect(wireLog(sock)).toEqual(["resize", "resume", "a"]);
   });
 });

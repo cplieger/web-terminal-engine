@@ -114,11 +114,12 @@ test("v4 upgrade delivers the 0x00-leading collision payload as full-alphabet PT
     const renderer: ConnectionOptions["renderer"] = {
       getReplayBoundary: () => -1,
       replayMaxForResume: () => 5000,
-      applyResumeTransition: () => undefined,
+      applyResumeTransition: () => false,
       noteResumeBounds: () => undefined,
       handleHistoryReply: () => undefined,
       noteSolicited: () => undefined,
       clearSolicited: () => undefined,
+      clearGrid: () => undefined,
       maybeFetchHistory: () => undefined,
     };
     const mouse: ConnectionOptions["mouse"] = { resyncGesture: () => undefined };

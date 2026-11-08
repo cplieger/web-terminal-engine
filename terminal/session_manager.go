@@ -370,9 +370,10 @@ func (m *SessionManager) CreateWith(spec CreateSpec) (SessionInfo, error) {
 var createStartedHook = func() {}
 
 // createWith returns the SessionInfo describing what it stored, so handleCreate
-// echoes the createdAt and Order every later enumeration reports. Both are sort
-// keys: a re-derived createdAt matched neither List nor the stream, and a zero
-// Order put the newest tab at the FRONT of a strip until the next status event.
+// echoes the createdAt, Order and Title every later enumeration reports. The
+// first two are sort keys: a re-derived createdAt matched neither List nor the
+// stream, and a zero Order put the newest tab at the FRONT of a strip until the
+// next status event.
 func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	m.mu.Lock()
 	if m.closed {
@@ -422,9 +423,13 @@ func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	// sweep refines it to a foreground-process or cwd name, but a List served
 	// before the first sweep must still name the session. The alias and pin are
 	// written in this same block so no reader sees the session without them.
-	m.sessions[id] = &session{
+	stored := &session{
 		id: id, alias: alias, pinnedTitle: pinned, handler: h, createdAt: now, autoTitle: h.commandBase(),
 	}
+	m.sessions[id] = stored
+	// Read under m.mu: the sweep's confirmAutoTitle may write autoTitle as soon
+	// as the lock is released.
+	title := effectiveTitle(&titleSources{pinned: pinned, auto: stored.autoTitle})
 	// Newest session last, which is where a new tab belongs. A client that has
 	// arranged its tabs keeps that arrangement; only the new id moves.
 	m.order = append(m.order, id)
@@ -440,7 +445,8 @@ func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	// A freshly eager-started session is idle until it produces output; the
 	// status stream corrects that within a tick if the process died instantly.
 	return SessionInfo{
-		ID: id, Alias: alias, PinnedTitle: pinned, Title: pinned,
+		ID: id, Alias: alias, PinnedTitle: pinned,
+		Title:  title,
 		Status: StatusIdle, CreatedAt: now, Order: order,
 	}, nil
 }

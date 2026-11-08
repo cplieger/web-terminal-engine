@@ -35,6 +35,7 @@ const expectedSGR = (b: number, col: number, row: number, release: boolean): str
 
 beforeEach(() => {
   modes.applySnapshot(POWER_ON_MODES);
+  modes.setKnown(true);
 });
 
 // Motion is coalesced to one report per animation frame (press, release and
@@ -216,6 +217,20 @@ describe("button-byte composition via init() event path — press (SGR 1006)", (
     const { term, sent } = setup();
     term.dispatchEvent(makeMouse("mousedown", { button, shift, ctrl, alt }));
     expect(sent).toEqual([expectedSGR(b, 3, 3, false)]);
+  });
+});
+
+describe("a mouse report needs known modes", () => {
+  it("sends nothing while the modes are unknown, and reports once they are known", () => {
+    enableSGR(1002);
+    modes.setKnown(false);
+    const { term, sent } = setup();
+    term.dispatchEvent(makeMouse("mousedown", { button: 0 }));
+    expect(sent).toEqual([]);
+
+    modes.setKnown(true);
+    term.dispatchEvent(makeMouse("mousedown", { button: 0 }));
+    expect(sent).toEqual([expectedSGR(0, 3, 3, false)]);
   });
 });
 

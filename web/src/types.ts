@@ -109,25 +109,18 @@ export interface ResumeAckMessage {
   oldestIndex?: number;
   /**
    * The server DECLARES that it serves demand-paged scrollback (`history`
-   * controls) and that its ring is deep enough to back the client shrinking its
-   * resident tail. Absent on any server too old to carry the ack's third
-   * length-gated tail, which reads the same as false: no paging.
-   *
-   * Capability is declared here rather than probed with a request because this
-   * ack is the first frame of every resume batch — the client knows one RTT
-   * after attach, with nothing sent and no way to mistake a slow link for an
-   * old server.
+   * controls) from a ring deep enough to back a shrunk resident tail. Absent
+   * (an older server) reads as false: no paging. Declared in this ack, the
+   * first frame of every resume batch, so a slow link never reads as an old
+   * server, as a probe would.
    */
   historyPaging?: boolean;
   /**
-   * The server DECLARES that it owns DEC 1004 focus for this session: it derives
-   * the answer from attachment state, every attached client's reported focus and
-   * its own keep-unfocused declaration, and honors the `focus` control. Absent
-   * (or false) means the server does not, and the report is DROPPED — the client
-   * writes no focus bytes in either case, because one client cannot answer for a
-   * session two devices may be attached to and a client-written CSI I would
-   * override a keep-unfocused policy it cannot see. Report the terminal widget's
-   * focus with `connection.setClientFocus` regardless of this bit.
+   * The server DECLARES that it owns DEC 1004 focus for this session and honors
+   * the `focus` control. Absent (or false), the report is dropped. The client
+   * writes no focus bytes either way: it cannot answer for other attached
+   * devices or a keep-unfocused policy it cannot see. Report the widget's focus
+   * with `connection.setClientFocus` regardless of this bit.
    */
   serverFocus?: boolean;
   /**
@@ -139,25 +132,18 @@ export interface ResumeAckMessage {
    */
   ephemeralInput?: boolean;
   /**
-   * The server's wire-protocol revision (third length-gated tail, absent on
-   * older servers). A value OUTSIDE the client's supported range means one
-   * side runs a stale bundle/binary; the connection module warns and fires
-   * `onWireVersionMismatch` so the UI can offer a reload. Versions inside
-   * the range are normal pairings (a v3 server just means the socket stays
-   * in sentinel mode); a value >= 4 additionally triggers the typed-framing
-   * upgrade (see WIRE_PROTOCOL_VERSION in wire-compatibility.ts).
+   * The server's wire-protocol revision (absent on older servers). A value
+   * outside the client's supported range fires `onWireVersionMismatch`, so the
+   * UI can offer a reload; a value >= 4 turns on typed framing
+   * (`WIRE_PROTOCOL_VERSION` owns the range).
    */
   serverWireVersion?: number;
   /**
    * Set when the resume key missed the server's registry while this client
-   * claimed sent bytes: the input ledger was reclaimed (idle GC / cap
-   * eviction), so the server cannot vouch for any previously sent input.
-   * The connection module responds deterministically with its designed loss
-   * semantic — drop the outbox rather than replay possibly-duplicate input —
-   * and notifies (`onServerRestart`) only when that outbox actually held
-   * unacked bytes; a fully-acked session lost nothing and resets silently.
-   * Absent on older servers (the `received === 0 && bytesAcked > 0` heuristic
-   * remains as their fallback).
+   * claimed sent bytes: the input ledger was reclaimed, so the server cannot
+   * vouch for earlier input. The connection drops its outbox rather than
+   * replay possibly-duplicate input, and fires `onServerRestart` only when
+   * that outbox held unacked bytes. Absent on older servers.
    */
   ledgerLost?: boolean;
 }
@@ -174,6 +160,19 @@ export interface AckOnlyMessage {
   type: "ackOnly";
   /** Server-confirmed bytesReceived for the input ACK protocol. */
   inputAck: number;
+}
+
+/**
+ * The server screen's grid, sent on resume and after each size change to a
+ * socket whose resume declared `gridFrames`.
+ */
+export interface GridMessage {
+  /** Discriminator — always `"grid"`. */
+  type: "grid";
+  cols: number;
+  rows: number;
+  /** Server-confirmed bytesReceived for the input ACK protocol. */
+  inputAck?: number;
 }
 
 /**
@@ -245,6 +244,7 @@ export type ServerMessage =
   | ModesMessage
   | TitleMessage
   | ClipboardMessage
+  | GridMessage
   | AckOnlyMessage;
 
 /**
@@ -259,6 +259,8 @@ export type ControlMessage =
       sentBytes: number;
       haveThrough: number;
       protocolVersion: number;
+      /** This client decodes grid frames (type 8); a server sends none otherwise. */
+      gridFrames?: boolean;
       /**
        * Ask for a replay smaller than the server's own bound. Clamped by BOTH
        * sides to the same constant (MAX_REPLAY_LINES) so the value sent

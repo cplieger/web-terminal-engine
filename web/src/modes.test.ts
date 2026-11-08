@@ -5,7 +5,7 @@
 // reverse video (DECSCNM), DECKPAM application keypad. The arrow-key encoding
 // these modes drive is covered in keyboard.test.ts and keyboard.property.test.ts.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { bracketTextForPaste } from "./keyboard.js";
 import { createModeState, POWER_ON_MODES, type ModeState } from "./modes.js";
 
@@ -37,8 +37,9 @@ function readModes(modes: ModeState): ReadModes {
 
 describe("modes: getters mirror the DEC private-mode state synced from the server", () => {
   it("a fresh instance reads the power-on defaults", () => {
+    // A fresh vt.Screen has every mode off (wire-golden/modes-power-on.bin).
     expect(readModes(createModeState())).toEqual({
-      bracketed: true,
+      bracketed: false,
       appCursor: false,
       mouseSGR: false,
       focus: false,
@@ -187,5 +188,52 @@ describe("modes: isBracketedPaste gates the observable paste-bracketing behavior
     // No sentinels, and the embedded ESC is left intact (sanitising only
     // happens while bracketing).
     expect(bracketTextForPaste("a\x1b[201~b", modes)).toBe("a\x1b[201~b");
+  });
+});
+
+describe("modes: known state and subscribers", () => {
+  it("notifies after every snapshot and every change of isKnown, until unsubscribed", () => {
+    const m = createModeState();
+    let calls = 0;
+    const off = m.subscribe(() => {
+      calls++;
+    });
+    m.applySnapshot({ ...POWER_ON_MODES, reverseVideo: true });
+    m.setKnown(false);
+    m.setKnown(false);
+    m.setKnown(true);
+    expect(calls).toBe(3);
+    off();
+    m.applySnapshot(POWER_ON_MODES);
+    expect(calls).toBe(3);
+  });
+
+  it("keeps notifying the others when one subscriber throws", () => {
+    const m = createModeState();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let reached = false;
+    m.subscribe(() => {
+      throw new Error("boom");
+    });
+    m.subscribe(() => {
+      reached = true;
+    });
+    m.setKnown(false);
+    expect(reached).toBe(true);
+    expect(errors).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops its subscribers on dispose and ignores later writes", () => {
+    const m = createModeState();
+    let calls = 0;
+    m.subscribe(() => {
+      calls++;
+    });
+    m.dispose();
+    m.setKnown(false);
+    m.applySnapshot({ ...POWER_ON_MODES, reverseVideo: true });
+    expect(calls).toBe(0);
+    expect(m.isKnown()).toBe(true);
+    expect(m.isReverseVideo()).toBe(false);
   });
 });

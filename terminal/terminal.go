@@ -32,6 +32,8 @@ import (
 )
 
 const (
+	// wsReadLimit bounds one client message; the client splits input to it.
+	// wire-golden/limits.json holds it and every other limit the client mirrors.
 	wsReadLimit = 64 * 1024
 	ptyReadBuf  = 4096
 	// defaultCols is the spawn width before any client reports one. Keep it at or
@@ -53,10 +55,9 @@ const (
 	redrawSettleCap       = time.Second
 	redrawSettleMaxRearms = 3
 
-	// healDebounce delays relaxing the shared screen after a disconnect, so a
-	// client re-attaching at the same size (iOS wake, network blip) causes no
-	// grow-then-shrink flap: the recompute at fire time counts its new socket.
-	healDebounce = 3 * time.Second
+	// sizeHoldGrace is how long the size owner's sender keeps the size after its
+	// last socket left, so a reconnect (iOS wake, network blip) moves nothing.
+	sizeHoldGrace = 3 * time.Second
 
 	// statusProcessExited tells a client the session is dead (close the tab),
 	// not transiently disconnected. 4000-4999 is the private close-code range.
@@ -306,6 +307,11 @@ type sessionState struct {
 	lastSeen time.Time
 	// owner is guarded by mu.
 	owner *clientState
+	// claimSeq orders this sender's last size claim and firstAttach its first
+	// socket's attach (see clientRegistry.OwnerSize). Guarded by
+	// clientRegistry.mu.
+	claimSeq    uint64
+	firstAttach uint64
 	// received is written only under mu, so the PTY write and the count are
 	// one step against a resume's ack read; readers that need no such
 	// ordering (Snapshot, the ack sweep, the GC) load it without mu.
@@ -335,9 +341,10 @@ type clientState struct {
 	// count so input into a silent app is still acknowledged. Atomic because
 	// handleResume and flushLoop both write it.
 	lastAckSent atomic.Uint64
-	// cols/rows are guarded by clientRegistry.mu and feed MinLiveSize.
-	cols int
-	rows int
+	// cols/rows/attachSeq are guarded by clientRegistry.mu and feed OwnerSize.
+	cols      int
+	rows      int
+	attachSeq uint64
 	// resumeTokens is resumeLast's fill.
 	resumeTokens float64
 	// historyTokens is historyLast's fill.
@@ -358,6 +365,13 @@ type clientState struct {
 	// writeClientPayloads strips a frame built under an older generation to
 	// its durable payloads.
 	resumeGen atomic.Uint64
+	// modesTold/titleTold/gridTold are the announcement versions this socket
+	// was sent, written under writeMu by announceTo; handleResume zeroes them.
+	modesTold atomic.Uint64
+	titleTold atomic.Uint64
+	gridTold  atomic.Uint64
+	// gridFrames: the socket's latest resume declared it decodes grid frames.
+	gridFrames atomic.Bool
 }
 
 // resumeBurst / resumeRefillEvery parameterize the per-socket resume
@@ -452,7 +466,10 @@ type Handler struct {
 	// dirty is 1-buffered so markDirty pokes coalesce; an idle flushLoop
 	// sleeps on it with no ticker.
 	dirty     chan struct{}
-	healTimer *time.Timer
+	replyWake chan struct{}
+	// pendingReplies holds device-query answers for replyLoop. Guarded by h.mu.
+	pendingReplies []byte
+	sizeHoldTimer  *time.Timer
 	// The redraw-settle hold's fields are guarded by h.mu; a zero
 	// redrawSettleUntil means the hold is inactive.
 	redrawSettleUntil time.Time
@@ -502,9 +519,10 @@ type Handler struct {
 	// session rather than once-per-sweep (see probeAutoTitle). Guarded by h.mu.
 	autoTitleWarned bool
 	// focusTold is the DEC 1004 state this session's process has been told, so
-	// the derivation writes on transitions only (see focusReportLocked).
-	// Guarded by h.mu.
-	focusTold toldFocus
+	// the derivation writes on transitions only (see focusReportLocked), and
+	// focusEnableSeen the screen's FocusEnableSeq it last saw. Guarded by h.mu.
+	focusTold       toldFocus
+	focusEnableSeen uint64
 }
 
 // NewHandler returns a terminal handler. command is the argv to spawn
@@ -537,6 +555,7 @@ func NewHandler(command []string, opts ...Option) *Handler {
 		bootEpoch:  time.Now().UnixNano(),
 		procExitCh: make(chan struct{}),
 		dirty:      make(chan struct{}, 1),
+		replyWake:  make(chan struct{}, 1),
 	}
 }
 
@@ -582,13 +601,13 @@ func (h *Handler) Close() {
 	h.closePTYLocked()
 }
 
-// closePTYLocked closes the PTY master once and stops the size heal; from then
-// on applySize and maybeHealSize do nothing. Caller holds h.mu. h.ptmx keeps
+// closePTYLocked closes the PTY master once and stops the size hold; from then
+// on resizeToOwner and armSizeHold do nothing. Caller holds h.mu. h.ptmx keeps
 // its value: readLoop and the input paths read it without the lock, so a nil
 // store here would race them.
 func (h *Handler) closePTYLocked() {
-	if h.healTimer != nil {
-		h.healTimer.Stop()
+	if h.sizeHoldTimer != nil {
+		h.sizeHoldTimer.Stop()
 	}
 	if h.ptmx == nil || h.ptyClosed {
 		return
@@ -949,6 +968,7 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	})
 	// Flush scheduler — sends screen updates to all clients.
 	h.wg.Go(func() { h.flushLoop(ctx) })
+	h.wg.Go(func() { h.replyLoop(ctx) })
 	// Periodic per-session cost line, when the consumer asked for one. Stopped
 	// explicitly by the monitor before teardown, not just by ctx.
 	stopSampler := h.startCostSampler(ctx)
@@ -958,9 +978,6 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	// exit so the scheduler goroutine does not leak after the process dies.
 	h.wg.Go(func() {
 		werr := cmd.Wait() // reap; werr carries the exit status
-		// os/exec is done with this pid, so the zombie sweep may stop excluding
-		// it. One mutex, no allocation, and ahead of anything that can block.
-		spawnForget(pid)
 		awaitReadDrain(readDone)
 		// Retain the outcome BEFORE procExitCh closes, so any reader that sees
 		// Exited() == true also sees the final exit error (the status sweep reads
@@ -1044,21 +1061,9 @@ func (h *Handler) childEnv(reap *sessionReap) []string {
 	return append(env, consumer...)
 }
 
-// startSessionPTY forks the session's process on a new PTY and records its pid as
-// os/exec-owned.
-//
-// The spawn lock is held across the fork itself, not merely the registration:
-// the zombie sweep must never be able to see a child that exists but is not yet
-// recorded as owned, or it could collect the head's exit status out from under
-// cmd.Wait and turn every session's exit into an unknown one (see zombiereap.go).
+// startSessionPTY forks the session's process on a new PTY.
 func startSessionPTY(cmd *exec.Cmd, cols, rows int) (*os.File, error) {
-	spawnLock()
-	defer spawnUnlock()
-	ptmx, err := pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}) // #nosec G115 -- cols/rows are floored above and bounded by the client protocol
-	if err == nil && cmd.Process != nil {
-		spawnRegister(cmd.Process.Pid)
-	}
-	return ptmx, err
+	return pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}) // #nosec G115 -- cols/rows are floored above and bounded by the client protocol
 }
 
 // markProgramExited tells the screen the process exited (vt.Screen.ProgramExited
@@ -1121,12 +1126,10 @@ func (h *Handler) readLoop(ctx context.Context) {
 	}
 }
 
-// handlePTYData feeds raw PTY output to the screen under h.mu and writes
-// any query response back outside the lock so a slow write never stalls
-// goroutines waiting on h.mu.
+// handlePTYData feeds raw PTY output to the screen under h.mu and hands any
+// query response to replyLoop, which owns PTY replies.
 func (h *Handler) handlePTYData(data []byte) {
 	h.lastActivity.Store(time.Now().UnixNano())
-	var resp []byte
 	h.mu.Lock()
 	if !h.redrawSettleUntil.IsZero() {
 		// Redraw-settle hold armed (post-resize): every PTY byte is redraw
@@ -1151,18 +1154,15 @@ func (h *Handler) handlePTYData(data []byte) {
 		// OSC 52 copy; hand it to the next frame as a clipboard message.
 		h.pendingClipboard = clip
 	}
-	resp = h.screen.TakeResponse()
-	// The screen write above may have changed the 1004 mode, so re-derive: on
-	// the enable edge this reports the session's CURRENT focus state. Read under
-	// h.mu like every other trigger (see reportFocus).
-	if seq := h.focusReportLocked(h.registry.AnyClientFocused()); len(seq) > 0 {
-		resp = append(resp, seq...)
-	}
+	resp := h.screen.TakeResponse()
+	h.queueReplyLocked(resp)
+	// A 1004 enable edge re-reports the session's current focus state.
+	reply := len(resp) > 0 || h.screen.FocusEnableSeq != h.focusEnableSeen
 	h.mu.Unlock()
 	// PTY output is the primary dirty source: wake the flush scheduler.
 	h.markDirty()
-	if len(resp) > 0 {
-		h.ptmx.Write(resp) //nolint:errcheck // best-effort
+	if reply {
+		h.wakeReplies()
 	}
 }
 
@@ -1182,9 +1182,8 @@ type flushFrame struct {
 	scrollLines      [][]vt.WireRun
 	scrollWrapped    []bool // per scrollLines entry, see scrollbackRing.Append
 	changed          []int
-	modesPayload     []byte
-	titlePayload     []byte
 	clipboardPayload []byte
+	announce         announcement
 	base             uint64 // absolute index of the top screen row (changed[y] -> base+y)
 	scrollFirstIdx   uint64 // absolute index of scrollLines[0]
 	curRow           int
@@ -1207,11 +1206,15 @@ func (h *Handler) retainSuspendedScrollback() {
 	if !h.sizeEstablished {
 		return
 	}
-	drained, wrapped := drainScrollback(h.screen)
-	if h.screen.InAltScreen || h.builder.altTransitionPending(h.screen) || len(drained) == 0 {
-		return
+	h.commitDrained()
+}
+
+// commitDrained appends the screen's pending drain to the retained ring. The
+// caller holds h.mu.
+func (h *Handler) commitDrained() {
+	if drained, wrapped := drainScrollback(h.screen); len(drained) > 0 {
+		h.scrollback.Append(drained, wrapped)
 	}
-	h.scrollback.Append(drained, wrapped)
 }
 
 // drainScrollback drains the screen's scrolled-off lines with their wrap flags.
@@ -1236,16 +1239,16 @@ func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 		// Zero-client suspension (P4): nobody to render for. Retain history
 		// but skip RenderRowWire/diff entirely. One-shot signals (palette
 		// repaint, ED3 clear, OSC 52 clipboard) stay pending for the next
-		// attach, whose builder reset forces their visible effect.
+		// attach, whose window repaint forces their visible effect.
 		h.retainSuspendedScrollback()
 		return nil, time.Time{}
 	}
 	// An OSC 4/104 palette change re-colors already-drawn cells; force a full
 	// repaint so every visible row re-resolves through the new palette. The
-	// Reset persists if Build produces no frame this pass (flush held / no
-	// resize yet), so the repaint still lands on the next frame.
+	// repaint persists if Build produces no frame this pass (flush held / no
+	// resize yet), so it still lands on the next frame.
 	if h.paletteChangedPending {
-		h.builder.Reset()
+		h.builder.RepaintWindow()
 		h.paletteChangedPending = false
 	}
 	if h.screen.IsFlushHeld() {
@@ -1263,10 +1266,10 @@ func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 			// A cap lapse's coalesced update is a full repaint, never a diff of a
 			// mid-redraw screen. Consumed here, not at the lapse, so an
 			// overlapping DEC 2026 hold cannot swallow it.
-			h.builder.Reset()
+			h.builder.RepaintWindow()
 			h.redrawCoalesceNow = false
 		}
-		frame = h.builder.Build(h.screen, h.sizeEstablished, clients, committedBefore)
+		frame = h.builder.Build(h.screen, h.sizeEstablished, clients, writers, committedBefore)
 	}
 	if frame != nil && len(frame.scrollLines) > 0 {
 		h.scrollback.Append(frame.scrollLines, frame.scrollWrapped)
@@ -1441,18 +1444,15 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 			encodeScrollMsg(0, frame.scrollFirstIdx+uint64(i), frame.scrollLines[i:end]))
 	}
 
-	// Assemble the per-client write sequence once, preserving the send order
-	// (modes, title, clipboard, screen, scroll chunks).
-	payloads := make([][]byte, 0, 4+len(scrollPayloads))
-	for _, p := range [][]byte{frame.modesPayload, frame.titlePayload, frame.clipboardPayload, screenPayload} {
+	// Assemble the shared write sequence once (clipboard, screen, scroll
+	// chunks); announceTo leads each socket's copy with what it was not told.
+	payloads := make([][]byte, 0, 2+len(scrollPayloads))
+	for _, p := range [][]byte{frame.clipboardPayload, screenPayload} {
 		if p != nil {
 			payloads = append(payloads, p)
 		}
 	}
 	payloads = append(payloads, scrollPayloads...)
-	if len(payloads) == 0 {
-		return
-	}
 	durable := durableSubset(frame.clipboardPayload, scrollPayloads)
 	// One goroutine per client, so a wedged client stalls only itself and the
 	// pass waits at most one 5 s write window. clientState.writeMu owns
@@ -1465,7 +1465,7 @@ func (h *Handler) dispatchFrame(frame *flushFrame) {
 	delivered := make(map[*websocket.Conn]uint64, len(frame.clients))
 	for ws, ack := range frame.clients {
 		wg.Go(func() {
-			if stamped, ok := writeClientPayloads(ws, ack, frame.writers[ws], frame.gens[ws], payloads, durable); ok {
+			if stamped, ok := writeClientPayloads(ws, ack, frame.writers[ws], frame.gens[ws], &frame.announce, payloads, durable); ok {
 				deliveredMu.Lock()
 				delivered[ws] = stamped
 				deliveredMu.Unlock()
@@ -1495,11 +1495,12 @@ func durableSubset(clipboardPayload []byte, scrollPayloads [][]byte) [][]byte {
 }
 
 // writeClientPayloads writes one dispatch pass's payloads to one client under
-// the resume gate. It returns the ack actually stamped on the written payloads
-// (restamped on a strip) and whether anything was written, so the caller's
-// delivered bookkeeping records what the wire carried. A nil state (test
-// frames built without a registry snapshot) is written ungated.
-func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen uint64, payloads, durable [][]byte) (uint64, bool) {
+// the resume gate, led by announceTo's frames. It returns the ack actually
+// stamped on the written payloads (restamped on a strip) and whether anything
+// was written, so the caller's delivered bookkeeping records what the wire
+// carried. A nil state (test frames built without a registry snapshot) is
+// written ungated, with any announcement.
+func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen uint64, ann *announcement, payloads, durable [][]byte) (uint64, bool) {
 	stripped := false
 	if st != nil {
 		// BLOCKING: a resume batch in flight delays this frame rather than
@@ -1516,7 +1517,11 @@ func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen ui
 			// the dropped screen payload and are lost for this client.
 			payloads = durable
 			stripped = true
+		} else {
+			payloads = announceTo(st, ann, payloads)
 		}
+	} else {
+		payloads = announceTo(nil, ann, payloads)
 	}
 	if len(payloads) == 0 {
 		// Nothing to write (a state-only frame stripped bare): report
@@ -1541,14 +1546,43 @@ func writeClientPayloads(ws *websocket.Conn, ack uint64, st *clientState, gen ui
 	return ack, true
 }
 
+// announceTo returns payloads led by the frames of ann that st has not been
+// told, and records them as told; the caller holds st.writeMu. A nil st gets
+// every frame ann carries except the grid, which only a declaring socket decodes.
+// The grid leads: the client releases queued input when the modes arrive, and
+// encodes it against the grid it holds by then.
+func announceTo(st *clientState, ann *announcement, payloads [][]byte) [][]byte {
+	var lead [][]byte
+	if ann.grid != nil && st != nil && st.gridFrames.Load() && st.gridTold.Load() != ann.gridVer {
+		lead = append(lead, ann.grid)
+		st.gridTold.Store(ann.gridVer)
+	}
+	if ann.modes != nil && (st == nil || st.modesTold.Load() != ann.modesVer) {
+		lead = append(lead, ann.modes)
+		if st != nil {
+			st.modesTold.Store(ann.modesVer)
+		}
+	}
+	if ann.title != nil && (st == nil || st.titleTold.Load() != ann.titleVer) {
+		lead = append(lead, ann.title)
+		if st != nil {
+			st.titleTold.Store(ann.titleVer)
+		}
+	}
+	if lead == nil {
+		return payloads
+	}
+	return append(lead, payloads...)
+}
+
 // controlMsg is a JSON control message from the client.
 //
 // Field ORDER is alignment-driven (govet fieldalignment), not semantic: the
 // slice and strings lead, then the pointer, then the 8-byte scalars, then the
 // machine ints. Read the comments for meaning, not the layout.
 type controlMsg struct {
-	// HaveThrough is the highest absolute line index the client holds; resume
-	// replays only indices above it. -1 asks for the full retained history.
+	// HaveThrough is the client's replay boundary (docs/wire-protocol.md, "The
+	// resume control"): the replay starts after it (replayStart); -1 holds none.
 	HaveThrough *int64    `json:"haveThrough"`
 	Type        string    `json:"type"`
 	SessionID   SessionID `json:"sessionId,omitempty"`
@@ -1582,6 +1616,9 @@ type controlMsg struct {
 	// focused. A plain bool, because the client always writes the field and a
 	// missing one reading as unfocused needs no separate arm.
 	Focused bool `json:"focused,omitempty"`
+	// GridFrames (resume only) declares the client decodes grid frames (type 8);
+	// a client that never declares it is never sent one.
+	GridFrames bool `json:"gridFrames,omitempty"`
 }
 
 // handleWS upgrades to WebSocket, spawns the configured command in a
@@ -1600,28 +1637,26 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Register this client.
 	state := h.registry.Add(ws)
-	// Force the next flush to send all rows so this client sees the
-	// current screen, even if no resize is sent.
+	// The next flush sends this client the whole window, even if it never
+	// resumes; its modes and title follow from its own record (announceTo).
 	h.mu.Lock()
-	h.builder.Reset()
+	h.builder.RepaintWindow()
 	h.mu.Unlock()
-	// Wake the scheduler for the attach itself: a client that never speaks
-	// resume or resize (a bare reader) must still receive the current screen
-	// — under the old ticker the next tick delivered it; the event-driven
-	// loop needs the poke (this also ends any zero-client suspension).
+	// A bare reader that never sends resume or resize still gets the screen,
+	// and the poke ends any zero-client suspension.
 	h.markDirty()
-	// Re-derive the DEC 1004 answer for the new attachment. It cannot change it
-	// today — a socket starts unfocused, so AnyClientFocused is unmoved — but the
-	// trigger set stays complete rather than resting on that invariant, and the
-	// write is transition-gated so a no-op costs no report.
+	// The first attach is the first derivation; later ones keep the trigger set
+	// complete, and the derivation reports transitions only.
 	h.reportFocus()
 
 	defer func() {
-		dCols, dRows := h.registry.Remove(ws)
+		hold := h.registry.Remove(ws)
 		// A departing client can drop the session's focus to nobody, and it
 		// emits no focus-out of its own on the way out.
 		h.reportFocus()
-		h.maybeHealSize(dCols, dRows)
+		if hold != 0 {
+			h.armSizeHold(hold)
+		}
 		ws.Close(h.exitAwareCloseCode(), "") // #nosec G104 -- best-effort
 	}()
 
@@ -1711,6 +1746,9 @@ func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg 
 	}
 	if !applied {
 		return armed, false
+	}
+	if h.registry.Claim(state) {
+		h.resizeToOwner("size owner typed")
 	}
 	// Wake the scheduler even though no PTY output may follow (a silent
 	// reader, e.g. `read -s`): the pass's ack sweep is what trims the
@@ -1817,6 +1855,7 @@ func (h *Handler) resumeControl(ws *websocket.Conn, state *clientState, c *contr
 		ht = *c.HaveThrough
 	}
 	replayMax := parseReplayMax(c.ReplayMax)
+	state.gridFrames.Store(c.GridFrames)
 	if h.handleResume(ws, state, c.SessionID, ht, c.SentBytes, replayMax) {
 		d.closed = true
 		return d
@@ -2015,17 +2054,16 @@ func parseReplayMax(raw json.RawMessage) *int64 {
 	return &bounded
 }
 
-// replayStart returns the absolute index the resume replay begins at: the first
-// line the client is missing (haveThrough + 1), clamped so the replay carries at
-// most maxReplayLines. The clamp is UNCONDITIONAL because the ring can hold
-// hundreds of thousands of lines, and replaying all of them is tens of megabytes
-// under one write lock inside a single 10s context; a client may only ask for
-// LESS. Clamping the START rather than the end is what lets the client detect
-// the jump: it sees a first index above what it holds.
-func replayStart(committed uint64, haveThrough int64, replayMax *int64) uint64 {
-	var from uint64
+// replayStart returns the index of the first line the resume replay carries:
+// haveThrough + 1, raised to the oldest retained line and to committed minus the
+// bound. The bound (at most maxReplayLines) is UNCONDITIONAL: replaying a deep
+// ring is tens of megabytes under one write lock in one 10s context. Clamping
+// the START, not the end, lets the client see the jump, and the client predicts
+// this same index (web/src/replay.ts; wire-golden/replay-start.json).
+func replayStart(committed, oldest uint64, haveThrough int64, replayMax *int64) uint64 {
+	from := oldest
 	if haveThrough >= 0 {
-		from = uint64(haveThrough) + 1
+		from = max(from, uint64(haveThrough)+1)
 	}
 	bound := uint64(maxReplayLines)
 	if replayMax != nil {
@@ -2044,8 +2082,8 @@ func replayStart(committed uint64, haveThrough int64, replayMax *int64) uint64 {
 // ledger-lost flag when the key missed the registry while sentBytes > 0), then
 // sends the window frame and replays lines after haveThrough (-1 = none),
 // bounded by replayMax. On the main screen the frame goes first so a stale-alt
-// client leaves alt before history lands; in alt the replay goes first, because
-// the client drops scroll frames while its alt flag is set. It reports
+// client leaves alt before history lands; in alt the replay goes first, ahead
+// of the alt flag and its frozen-base gate (store.ts applyScroll). It reports
 // superseded, sending nothing, when another socket already took the ledger.
 func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID SessionID, haveThrough int64, sentBytes uint64, replayMax *int64) (superseded bool) {
 	ack, created, displaced := h.registry.ResolveSession(state, sessionID)
@@ -2059,6 +2097,8 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	if state.fenced.Load() {
 		return true
 	}
+	// Linking may hand the size back to this sender; resize before the snapshot.
+	h.resizeToOwner("size owner resumed")
 	// Capability declaration for the resumeAck's historyPaging bit. It no longer
 	// gates the replay clamp: that bound is unconditional, so a shallow-ring
 	// server bounds its replay too.
@@ -2081,21 +2121,15 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 
 	h.mu.Lock()
 	state.resumeGen.Add(1)
-	// Reset inside the snapshot's h.mu section, so the first frame built after
+	// Repaint inside the snapshot's h.mu section, so the first frame built after
 	// it is a full repaint, never a diff against a cache this client lacks.
-	h.builder.Reset()
-	// Commit any pending drain to history at its absolute index before
-	// computing the replay, so lines that scrolled while the client was
-	// away are retained.
-	drained, wrapped := drainScrollback(h.screen)
-	// Match Build's guard: drain that straddles an alt-screen transition belongs to the
-	// buffer just left and must not enter main history.
-	if !h.screen.InAltScreen && !h.builder.altTransitionPending(h.screen) && len(drained) > 0 {
-		h.scrollback.Append(drained, wrapped)
-	}
+	h.builder.RepaintWindow()
+	// Commit the pending drain before computing the replay, so lines that
+	// scrolled while the client was away are in it.
+	h.commitDrained()
 	committed := h.scrollback.Committed()
 	oldest := h.scrollback.OldestIndex()
-	from := replayStart(committed, haveThrough, replayMax)
+	from := replayStart(committed, oldest, haveThrough, replayMax)
 	firstAbs, replay := h.scrollback.LinesFrom(from)
 	// Snapshot the current window under h.mu so it can be encoded into a
 	// full-repaint screen frame and sent relative to the replay (below; the
@@ -2113,13 +2147,7 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	winCursorStyle := h.screen.CursorStyle
 	winCursorHidden := h.screen.CursorHidden
 	winCursorBlink := h.screen.CursorBlink
-	// Encode modes straight from the screen, not builder.buildModesPayload:
-	// that mutates the shared announce state and would starve a client
-	// connecting concurrently of its own modes frame.
-	modesPayload := encodeModesMsg(h.screen.BracketedPaste, h.screen.AppCursorKeys,
-		h.screen.MouseSGR, h.screen.FocusReporting, h.screen.AppKeypad,
-		h.screen.ReverseVideo, h.screen.MousePixels, h.screen.MouseMode, h.screen.KeyboardFlags())
-	titlePayload := encodeTitleMsg(h.screen.Title)
+	ann := h.builder.refreshAnnouncement(h.screen)
 	h.mu.Unlock()
 
 	// Build the full-repaint changed list (every window row) and encode the
@@ -2141,12 +2169,12 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	ws.Write(ctx, websocket.MessageBinary, encodeResumeAck(ack, h.bootEpoch, committed, oldest, flags)) //nolint:errcheck // best-effort
 	state.lastAckSent.Store(ack)
 
-	// Resend current modes/title inline (before the window/replay) so input
-	// encoding is correct before the user can type; a fresh tab starts at
-	// default modes and would otherwise misencode arrows/mouse for one flush.
-	ws.Write(ctx, websocket.MessageBinary, withClientAck(modesPayload, ack)) //nolint:errcheck // best-effort
-	if titlePayload != nil {
-		ws.Write(ctx, websocket.MessageBinary, withClientAck(titlePayload, ack)) //nolint:errcheck // best-effort
+	// A resume announces every lead frame again, ahead of the window and replay.
+	state.gridTold.Store(0)
+	state.modesTold.Store(0)
+	state.titleTold.Store(0)
+	for _, f := range announceTo(state, &ann, nil) {
+		ws.Write(ctx, websocket.MessageBinary, withClientAck(f, ack)) //nolint:errcheck // best-effort
 	}
 
 	// replayHistory sends the missing committed lines in chunks, each tagged
@@ -2160,10 +2188,10 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 		}
 	}
 
-	// The client drops scroll lines while its alt flag is set (store.ts
-	// applyScroll), and the window frame sets that flag to winAlt. So in alt the
-	// main-screen replay goes first, and out of alt the window goes first to
-	// clear a stale alt flag before the replay lands.
+	// The window frame sets the client's alt flag to winAlt, and in alt the
+	// client keeps only scroll rows below its frozen main base (store.ts
+	// applyScroll). So in alt the replay lands before the flag is set, and out
+	// of alt the window goes first to clear a stale alt flag.
 	if winAlt {
 		replayHistory()
 		ws.Write(ctx, websocket.MessageBinary, windowPayload) //nolint:errcheck // best-effort
@@ -2180,7 +2208,7 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 	}
 
 	// A fresh attach ends any zero-client suspension: poke the scheduler so
-	// the full-repaint flush (against the builder reset taken with the
+	// the full-repaint flush (against the window repaint taken with the
 	// snapshot above) repaints the window idempotently on the first pass.
 	// The deferred writeMu.Unlock runs right after this poke; the pass it
 	// wakes blocks on the lock for at most that gap.
@@ -2199,25 +2227,26 @@ func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 	return clampedCols, clampedRows
 }
 
-// handleResize applies a client's requested size to the shared PTY + screen
-// (last-writer-wins: the most recent resize from any attached client sets the
-// size) and records the clamped size on that client's socket, so a later
-// disconnect can heal the screen to the smallest size the remaining clients
-// need (see maybeHealSize). It reports whether the start was refused because
-// Close has run: no process exit will close that client's socket, so the
-// caller must end it.
+// handleResize records a client's requested size on its socket and resizes
+// the shared PTY and screen to the size owner's (clientRegistry.OwnerSize), so
+// a resize from any other client changes nothing. It reports whether the start
+// was refused because Close has run: no process exit will close that client's
+// socket, so the caller must end it.
 func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool) {
 	cols, rows = clampResize(cols, rows)
+	h.registry.RecordSize(state, cols, rows)
 	// Start the child process on first resize so it knows the correct dimensions
 	// from the start (avoids initial paint at wrong size).
 	if !h.started.Load() {
+		if ownerCols, ownerRows, ok := h.registry.OwnerSize(); ok {
+			cols, rows = ownerCols, ownerRows
+		}
 		if err := h.ensureStarted(cols, rows); err != nil {
 			h.logStartFailure(err)
 			return errors.Is(err, errHandlerClosed)
 		}
 	}
-	h.registry.RecordSize(state, cols, rows)
-	h.applySize(cols, rows, "resize received")
+	h.resizeToOwner("resize received")
 	return false
 }
 
@@ -2280,26 +2309,23 @@ func (h *Handler) redrawHoldUntil(now time.Time) time.Time {
 	return quietAt
 }
 
-// applySize resizes the PTY and the shared VT screen and, when the dimensions
-// actually change, holds flushes over the SIGWINCH redraw window so clients
-// don't see the child's transient cleared-screen / mid-reprint states. The
-// hold releases when the redraw output settles (see armRedrawSettle). A
-// same-size call (a client reconnect re-sending its size) arms nothing: the
-// kernel suppresses SIGWINCH for an unchanged winsize, so there is no redraw
-// to hide and live output must not stall. Shared by the live resize path and
-// the disconnect heal.
-func (h *Handler) applySize(cols, rows int, reason string) {
+// resizeToOwner is the only writer of the PTY winsize and the screen size: it
+// sets both to the size owner's recorded size when that differs, and holds
+// flushes over the SIGWINCH redraw window so clients don't see the child's
+// transient cleared-screen / mid-reprint states (see armRedrawSettle). The
+// owner is read under h.mu, so two calls apply in the order they read it.
+func (h *Handler) resizeToOwner(reason string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !h.started.Load() || h.ptmx == nil || h.ptyClosed {
 		return
 	}
-	// Clamp again so applySize is safe regardless of caller (the heal path
-	// passes MinLiveSize values). Idempotent for the live path, which already
-	// clamped in handleResize.
-	cols, rows = clampResize(cols, rows)
+	cols, rows, ok := h.registry.OwnerSize()
+	if !ok || (cols == h.screen.Width && rows == h.screen.Height) {
+		return
+	}
 	if err := pty.Setsize(h.ptmx, &pty.Winsize{
-		// #nosec G115 -- clampResize bounds cols/rows to [minResize, maxResize<=1000], >0, just above; no uint16 overflow. gosec can't see through the helper.
+		// #nosec G115 -- handleResize records only clampResize'd sizes, within [minResize, maxResize<=1000]; no uint16 overflow.
 		Cols: uint16(cols), Rows: uint16(rows),
 	}); err != nil {
 		// The PTY keeps the winsize it had, so the child never learns the new one
@@ -2313,62 +2339,31 @@ func (h *Handler) applySize(cols, rows int, reason string) {
 			"requested_cols", cols, "requested_rows", rows)
 		return
 	}
-	sizeChanged := cols != h.screen.Width || rows != h.screen.Height
 	h.screen.Resize(rows, cols)
-	if sizeChanged {
-		h.armRedrawSettle(time.Now())
-	}
+	h.armRedrawSettle(time.Now())
 	h.cfg.logger.Info("terminal: "+reason, "rows", rows, "cols", cols)
 	h.sizeEstablished = true
-	h.builder.Reset()
+	h.builder.RepaintWindow()
 	// The resize hold suppresses passes until the app's redraw settles; the
 	// poke makes the scheduler arm the release deadline so the repaint
 	// flushes even if the app writes nothing after the hold window.
 	h.markDirty()
 }
 
-// maybeHealSize arms a debounced size recompute when the client that just
-// disconnected was the one dictating the current shared screen size (its last
-// reported size equals the screen's). Only that case can strand a survivor at a
-// departed client's size — e.g. a desktop left clamped to a phone's size after
-// the phone closes its tab. Any other departure is skipped: some other client,
-// or a live resize, still holds the current size, so there is nothing to relax.
-// Debounced via healDebounce so a brief reconnect at the same size is a no-op
-// rather than a grow-then-shrink flap.
-func (h *Handler) maybeHealSize(dCols, dRows int) {
-	if dCols <= 0 || dRows <= 0 {
-		return // the departed client never reported a size
-	}
+// armSizeHold keeps the departed size owner's sender as the owner for
+// sizeHoldGrace, then drops it and resizes to the next owner. A newer hold
+// replaces the timer; the registry ignores a stale one.
+func (h *Handler) armSizeHold(hold uint64) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if !h.started.Load() || h.ptyClosed {
+	if h.ptyClosed {
 		return
 	}
-	if dCols != h.screen.Width || dRows != h.screen.Height {
-		return // the departed client was not holding the current size
+	if h.sizeHoldTimer != nil {
+		h.sizeHoldTimer.Stop()
 	}
-	if h.healTimer != nil {
-		h.healTimer.Stop()
-	}
-	h.healTimer = time.AfterFunc(healDebounce, h.healSize)
-}
-
-// healSize relaxes the shared screen to the smallest size across the clients
-// still connected, so a survivor no longer stays clamped to a departed client's
-// size. Runs from the debounced healTimer. A no-op when no surviving client has
-// a known size, or when the smallest already equals the current screen (e.g.
-// the departed client reconnected within the debounce and re-reported the same
-// size, so it is counted again).
-func (h *Handler) healSize() {
-	cols, rows, ok := h.registry.MinLiveSize()
-	if !ok {
-		return
-	}
-	h.mu.Lock()
-	unchanged := !h.started.Load() || (cols == h.screen.Width && rows == h.screen.Height)
-	h.mu.Unlock()
-	if unchanged {
-		return
-	}
-	h.applySize(cols, rows, "size healed after client departure")
+	h.sizeHoldTimer = time.AfterFunc(sizeHoldGrace, func() {
+		h.registry.EndHold(hold)
+		h.resizeToOwner("size owner left")
+	})
 }

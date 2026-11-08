@@ -29,6 +29,9 @@ const (
 	// outbox trims promptly even with a silent app. Back-compatible new opcode
 	// (older clients ignore unknown message types), so no version bump.
 	wireMsgAckOnly byte = 7
+	// wireMsgGrid carries the screen's columns and rows, sent only to a socket
+	// whose resume declared gridFrames, so it needs no version bump.
+	wireMsgGrid byte = 8
 
 	// WireProtocolVersion is the current binary-protocol revision, mirroring
 	// WIRE_PROTOCOL_VERSION in web/src/wire-compatibility.ts. Bump it on any
@@ -339,6 +342,19 @@ func withClientAck(template []byte, ack uint64) []byte {
 	return out
 }
 
+// encodeGridMsg builds a frame announcing the screen's grid: after the header,
+// [2B] cols, [2B] rows.
+func encodeGridMsg(cols, rows int) []byte {
+	buf := make([]byte, 0, 13)
+	buf = append(buf, wireMsgGrid)
+	buf = binary.LittleEndian.AppendUint64(buf, 0)
+	// #nosec G115 -- the screen's size is clamped to maxResizeCols/Rows (1000).
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(cols))
+	// #nosec G115 -- as above.
+	buf = binary.LittleEndian.AppendUint16(buf, uint16(rows))
+	return buf
+}
+
 // encodePongMsg builds a liveness pong: the header alone, with a zero ack.
 func encodePongMsg() []byte {
 	buf := make([]byte, 0, 9)
@@ -387,9 +403,8 @@ func encodedRowSize(runs []vt.WireRun) int {
 
 // stripRowURIs returns a copy of runs with every hyperlink URI emptied and the
 // autolink bit cleared, so a stripped run reads as never linked; text and
-// styling are untouched. Above rowByteCeiling the client re-linkifies from
-// visible text, so a split autolink re-derives a prefix href and an OSC 8 link
-// whose text is not a URL loses its link: the accepted degradation.
+// styling are untouched. A row over rowByteCeiling therefore renders with no
+// links, the accepted degradation (the client never scans text for URLs).
 func stripRowURIs(runs []vt.WireRun) []vt.WireRun {
 	out := make([]vt.WireRun, len(runs))
 	copy(out, runs)

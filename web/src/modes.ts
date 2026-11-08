@@ -13,12 +13,10 @@ export interface ModeSnapshot {
 
 /**
  * The VT power-on mode state, frozen: copy it (`{ ...POWER_ON_MODES }`) before
- * changing a field. `bracketedPaste` starts true because modern shells enable
- * DEC 2004 at startup, and a paste delivered un-bracketed before the server's
- * first modes frame would be executed as typed input.
+ * changing a field. Equal to a fresh server screen's (wire-golden/modes-power-on.bin).
  */
 export const POWER_ON_MODES: Readonly<ModeSnapshot> = Object.freeze({
-  bracketedPaste: true,
+  bracketedPaste: false,
   applicationCursor: false,
   mouseSGR: false,
   focusReporting: false,
@@ -29,7 +27,11 @@ export const POWER_ON_MODES: Readonly<ModeSnapshot> = Object.freeze({
   keyboardFlags: 0,
 });
 
-/** The DEC private-mode state of one terminal instance. */
+/**
+ * The DEC private-mode state of one terminal instance. The server's screen owns
+ * the modes; a connection marks them known only once its current socket's
+ * server has announced them, and input must not be encoded while they are not.
+ */
 export interface ModeState {
   /** True when the server has DEC 2004 (bracketed paste) enabled. */
   isBracketedPaste(): boolean;
@@ -54,9 +56,17 @@ export interface ModeState {
   getKeyboardFlags(): number;
   /** Replaces every mode bit with the snapshot's; no field is left at its previous value. */
   applySnapshot(s: Readonly<ModeSnapshot>): void;
+  /** Whether the values are the current socket's server's (true until a connection says otherwise). */
+  isKnown(): boolean;
+  setKnown(known: boolean): void;
+  /**
+   * Calls `cb` after every `applySnapshot` and every change of `isKnown()`;
+   * returns the unsubscribe. A throwing subscriber does not stop the others.
+   */
+  subscribe(cb: () => void): () => void;
   /** The current mode state as a snapshot value (a copy; safe to retain). */
   snapshot(): ModeSnapshot;
-  /** Resets every field to `POWER_ON_MODES` and makes `applySnapshot` a no-op. */
+  /** Resets every field to `POWER_ON_MODES`, drops the subscribers and makes every write a no-op. */
   dispose(): void;
 }
 
@@ -71,7 +81,19 @@ export function createModeState(initial: Readonly<ModeSnapshot> = POWER_ON_MODES
   let reverseVideo = initial.reverseVideo;
   let mousePixels = initial.mousePixels;
   let keyboardFlags = initial.keyboardFlags;
+  let known = true;
   let disposed = false;
+  const subscribers = new Set<() => void>();
+
+  function notify(): void {
+    for (const cb of [...subscribers]) {
+      try {
+        cb();
+      } catch (err) {
+        console.error("vterm: mode subscriber threw", err);
+      }
+    }
+  }
 
   function assign(s: Readonly<ModeSnapshot>): void {
     bracketedPaste = s.bracketedPaste;
@@ -100,6 +122,24 @@ export function createModeState(initial: Readonly<ModeSnapshot> = POWER_ON_MODES
         return;
       }
       assign(s);
+      notify();
+    },
+    isKnown: () => known,
+    setKnown(next: boolean): void {
+      if (disposed || next === known) {
+        return;
+      }
+      known = next;
+      notify();
+    },
+    subscribe(cb: () => void): () => void {
+      if (disposed) {
+        return () => undefined;
+      }
+      subscribers.add(cb);
+      return () => {
+        subscribers.delete(cb);
+      };
     },
     snapshot(): ModeSnapshot {
       return {
@@ -116,6 +156,7 @@ export function createModeState(initial: Readonly<ModeSnapshot> = POWER_ON_MODES
     },
     dispose(): void {
       disposed = true;
+      subscribers.clear();
       assign(POWER_ON_MODES);
     },
   };

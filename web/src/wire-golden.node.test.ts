@@ -9,6 +9,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { decodeWireBinary } from "./wire-binary.js";
+import { POWER_ON_MODES } from "./modes.js";
 
 const goldenDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "wire-golden");
 
@@ -154,6 +155,16 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     expect(m.keyboardFlags).toBe(1);
   });
 
+  it("assumes the modes a fresh server screen announces", () => {
+    const m = decodeWireBinary(load("modes-power-on"));
+    expect(m?.type).toBe("modes");
+    if (m?.type !== "modes") {
+      return;
+    }
+    const { type: _type, inputAck: _ack, ...announced } = m;
+    expect(announced).toEqual(POWER_ON_MODES);
+  });
+
   it("decodes the title frame", () => {
     const m = decodeWireBinary(load("title"));
     expect(m?.type).toBe("title");
@@ -161,6 +172,15 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
       return;
     }
     expect(m.title).toBe("hello world");
+  });
+
+  it("decodes the grid frame", () => {
+    expect(decodeWireBinary(load("grid"))).toEqual({
+      type: "grid",
+      cols: 132,
+      rows: 43,
+      inputAck: 0,
+    });
   });
 
   it("treats the pong frame as a no-op (decodes to null)", () => {

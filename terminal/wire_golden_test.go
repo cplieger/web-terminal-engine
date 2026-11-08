@@ -48,8 +48,13 @@ func goldenFrames() map[string][]byte {
 		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002,
 		// kitty disambiguate flag (1).
 		"modes": encodeModesMsg(true, false, true, false, false, true, false, 1002, 1),
-		"title": encodeTitleMsg("hello world"),
-		"pong":  encodePongMsg(),
+		// modes-power-on: a fresh screen's announcement, the modes a client
+		// assumes (POWER_ON_MODES) before its socket's first modes frame.
+		"modes-power-on": new(flushFrameBuilder).refreshAnnouncement(vt.New(24, 80)).modes,
+		"title":          encodeTitleMsg("hello world"),
+		"pong":           encodePongMsg(),
+		// grid: 132 columns, 43 rows.
+		"grid": encodeGridMsg(132, 43),
 	}
 }
 

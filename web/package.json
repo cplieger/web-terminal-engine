@@ -43,7 +43,8 @@
   "license": "MPL-2.0",
   "exports": {
     ".": "./src/index.ts",
-    "./wire-compatibility.json": "./wire-compatibility.json"
+    "./wire-compatibility.json": "./wire-compatibility.json",
+    "./layout-shapes.json": "./layout-shapes.json"
   },
   "types": "./src/index.ts",
   "publishConfig": {
@@ -80,6 +81,7 @@
     "jsr.json",
     "LICENSE",
     "wire-compatibility.json",
+    "layout-shapes.json",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md"
   ]

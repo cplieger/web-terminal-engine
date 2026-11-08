@@ -1,0 +1,178 @@
+[
+  {
+    "name": "a closed split with no sessions",
+    "layout": {
+      "left": null,
+      "right": null,
+      "selected": "left",
+      "handle": 0.5,
+      "open": false
+    },
+    "valid": true
+  },
+  {
+    "name": "a closed split showing one session",
+    "layout": {
+      "left": "a",
+      "right": null,
+      "selected": "left",
+      "handle": 0.5,
+      "open": false
+    },
+    "valid": true
+  },
+  {
+    "name": "a closed split keeps any handle in range",
+    "layout": {
+      "left": "a",
+      "right": null,
+      "selected": "left",
+      "handle": 0.2,
+      "open": false
+    },
+    "valid": true
+  },
+  {
+    "name": "a closed split with a right pane",
+    "layout": {
+      "left": "a",
+      "right": "b",
+      "selected": "left",
+      "handle": 0.5,
+      "open": false
+    },
+    "valid": false
+  },
+  {
+    "name": "a closed split selecting the right",
+    "layout": {
+      "left": "a",
+      "right": null,
+      "selected": "right",
+      "handle": 0.5,
+      "open": false
+    },
+    "valid": false
+  },
+  {
+    "name": "an open split with two sessions selecting either side",
+    "layout": {
+      "left": "a",
+      "right": "b",
+      "selected": "right",
+      "handle": 0.3,
+      "open": true
+    },
+    "valid": true
+  },
+  {
+    "name": "an open split with one session on both sides",
+    "layout": {
+      "left": "a",
+      "right": "a",
+      "selected": "left",
+      "handle": 0.5,
+      "open": true
+    },
+    "valid": false
+  },
+  {
+    "name": "an open split selecting its empty right pane",
+    "layout": {
+      "left": "a",
+      "right": null,
+      "selected": "right",
+      "handle": 0.5,
+      "open": true
+    },
+    "valid": false
+  },
+  {
+    "name": "an open split selecting its shown right pane",
+    "layout": {
+      "left": null,
+      "right": "b",
+      "selected": "right",
+      "handle": 0.5,
+      "open": true
+    },
+    "valid": true
+  },
+  {
+    "name": "an open split selecting its empty left pane",
+    "layout": {
+      "left": null,
+      "right": "b",
+      "selected": "left",
+      "handle": 0.5,
+      "open": true
+    },
+    "valid": false
+  },
+  {
+    "name": "an open split with both panes empty",
+    "layout": {
+      "left": null,
+      "right": null,
+      "selected": "right",
+      "handle": 0.5,
+      "open": true
+    },
+    "valid": true
+  },
+  {
+    "name": "a handle at 0",
+    "layout": {
+      "left": "a",
+      "right": "b",
+      "selected": "left",
+      "handle": 0,
+      "open": true
+    },
+    "valid": true
+  },
+  {
+    "name": "a handle at 1",
+    "layout": {
+      "left": "a",
+      "right": "b",
+      "selected": "left",
+      "handle": 1,
+      "open": true
+    },
+    "valid": true
+  },
+  {
+    "name": "a handle below 0",
+    "layout": {
+      "left": "a",
+      "right": "b",
+      "selected": "left",
+      "handle": -0.1,
+      "open": true
+    },
+    "valid": false
+  },
+  {
+    "name": "a handle above 1",
+    "layout": {
+      "left": "a",
+      "right": "b",
+      "selected": "left",
+      "handle": 1.5,
+      "open": true
+    },
+    "valid": false
+  },
+  {
+    "name": "a selected side that is neither left nor right",
+    "layout": {
+      "left": "a",
+      "right": "b",
+      "selected": "middle",
+      "handle": 0.5,
+      "open": true
+    },
+    "valid": false
+  }
+]

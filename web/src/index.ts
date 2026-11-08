@@ -7,8 +7,14 @@ export { createRenderer } from "./render.js";
 export type { Renderer, RendererOptions, ViewMemory } from "./render.js";
 export { createScrollController } from "./scroll.js";
 export type { ScrollController, ScrollControllerOptions } from "./scroll.js";
-export { createConnection, MAX_REPLAY_LINES, MAX_OUTBOX_BYTES } from "./connection.js";
-export type { Connection, ConnectionOptions, ConnectionCallbacks } from "./connection.js";
+export { createConnection, MAX_OUTBOX_BYTES } from "./connection.js";
+export { MAX_REPLAY_LINES } from "./replay.js";
+export type {
+  Connection,
+  ConnectionOptions,
+  ConnectionCallbacks,
+  DeferredInput,
+} from "./connection.js";
 export { createMouseController, encodeSGR } from "./mouse.js";
 export type { MouseController, MouseControllerOptions, MouseInputHandler } from "./mouse.js";
 export { createModeState, POWER_ON_MODES } from "./modes.js";
@@ -22,8 +28,9 @@ export type { ModeState, ModeSnapshot } from "./modes.js";
 export * as keyboard from "./keyboard.js";
 /**
  * The on-screen mobile key toolbar, the one DOM widget in the engine:
- * `bindMobileToolbar` wires an existing container's buttons to a send sink and
- * a mode state and returns a controller owning sticky-Ctrl state and tear-down.
+ * `bindMobileToolbar` wires an existing container's buttons to a send sink,
+ * which encodes each press under the modes it passes, and returns a controller
+ * owning sticky-Ctrl state and tear-down.
  * A missing button is skipped rather than fatal.
  */
 export * as toolbar from "./toolbar.js";

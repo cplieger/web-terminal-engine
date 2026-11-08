@@ -482,7 +482,7 @@ func TestReapMarkerSurvivesADuplicateKeyFromWithEnv(t *testing.T) {
 	if h.reap.marker == "consumer-supplied" {
 		t.Fatal("the consumer's value became the domain's marker")
 	}
-	members := reapFindByMarker(h.reap.marker)
+	members := waitForMembers(t, h.reap, 1)
 	if !slices.Contains(members, h.cmd.Process.Pid) {
 		t.Fatalf("a consumer setting %s displaced the engine's marker: session pid %d is outside its own domain (members=%v)",
 			reapMarkerEnv, h.cmd.Process.Pid, members)
@@ -507,7 +507,7 @@ func TestReapMarkerSurvivesAnInheritedMarker(t *testing.T) {
 	if h.reap.marker == "inherited-from-an-outer-session" {
 		t.Fatal("the inherited value became the domain's marker")
 	}
-	members := reapFindByMarker(h.reap.marker)
+	members := waitForMembers(t, h.reap, 1)
 	if !slices.Contains(members, h.cmd.Process.Pid) {
 		t.Fatalf("an inherited %s displaced the engine's marker: session pid %d is outside its own domain (members=%v)",
 			reapMarkerEnv, h.cmd.Process.Pid, members)

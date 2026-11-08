@@ -40,9 +40,9 @@ const AttrAutolink = 1024
 // documents for consumers.
 const maxAutolinkRows = 4
 
-// urlRE follows the client's autolink pattern (render.ts URL_RE, the xterm.js
-// addon-web-links shape) with one deliberate narrowing: URL characters are
-// ASCII-only (RFC 3986), so a match terminates at any non-ASCII rune. This
+// urlRE is the one bare-URL rule (the client never scans text): the xterm.js
+// addon-web-links shape with URL characters ASCII-only (RFC 3986), so a match
+// terminates at any non-ASCII rune. This
 // keeps a wide glyph — and its U+FFFF continuation placeholder, which is an
 // internal sentinel that must never leak into an href — out of stamped links,
 // and never splits a wide pair across an anchor boundary.

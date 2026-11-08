@@ -7,12 +7,31 @@ The two halves share a protocol over WebSocket, not code. The code is the author
 ## Frames
 
 - Server-to-client frames are binary messages with little-endian integers.
-- Client-to-server control messages are text frames that carry bare JSON. They cover resize, resume, ping, the protocol upgrade and the `history` page request.
+- Client-to-server control messages are text frames that carry bare JSON. They cover resize, [resume](#the-resume-control), ping, the protocol upgrade and the `history` page request.
 - Binary client frames carry raw terminal input with the full byte range.
+- A client message is at most 64 KiB, and the server closes the socket with 1009 above that, so the client splits input into messages of at most that size. `wire-golden/limits.json` holds this limit and the others both halves share: the resize floor, the replay ceiling and the history page size. A test on each side reads it.
 
 A control sent in the wrong encoding is not a control. After the upgrade, the server reads a binary frame as terminal input, so it reaches the program's standard input. Every socket first sends a resume that an older revision 3 server understands, a binary frame starting with `0x00`. It upgrades only after the server's resume reply proves revision 4.
 
-The TypeScript keyboard and mouse code encodes input for DEC modes, such as SGR 1006 mouse reports and the application keypad. The server writes those bytes to the PTY. The `vt` screen reads the program output that turns those modes on. The DEC 1004 focus answer is the exception. The server derives it from the focus each client reports through `connection.setClientFocus`.
+The TypeScript keyboard and mouse code encodes input for DEC modes, such as SGR 1006 mouse reports and the application keypad. The server writes those bytes to the PTY. The `vt` screen reads the program output that turns those modes on, so the server owns the modes: the client knows them only from the modes frame on its current socket, sent on every resume. Until that frame arrives (or the socket's first screen frame, from a server that sends none) the client's `ModeState.isKnown()` is false and the connection holds every input whose bytes depend on the modes (`DeferredInput`). `POWER_ON_MODES` equals a fresh screen's announcement, pinned by `wire-golden/modes-power-on.bin`. The DEC 1004 focus answer is the exception. The server derives it from the focus each client reports through `connection.setClientFocus`.
+
+## The resume control
+
+A socket's first control is the resume, which binds the socket to a session's input ledger and asks for the history the client lacks. When the client knows its size, it sends one resize before the resume, so the snapshot comes back at that size. The client sends no input on a socket before that socket's first resize, so the PTY has the client's size before it reads a byte from it. Its fields:
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `type` | string | `"resume"`. |
+| `sessionId` | string | The input ledger's key. The TypeScript client sends the session id and an id per connection instance, so two connections to one session keep separate ledgers. |
+| `sentBytes` | integer | Input bytes the client has put on the wire for this ledger. The resumeAck's `inputAck` answers how many the server received, and the client retransmits the rest. |
+| `haveThrough` | integer | The client's replay boundary: the highest line index it holds as committed history, or -1 for none. The TypeScript client sends `renderer.getReplayBoundary()`, never `getHighestIndex()`, which also counts rows the application drew that the server has not committed. Claiming those rows leaves a stale copy of the last screen in scrollback. |
+| `replayMax` | integer, optional | The most replay lines the client wants. The server clamps it to 2000 (`maxReplayLines`, in `wire-golden/limits.json`) and reads an absent or malformed value as 2000. |
+| `protocolVersion` | integer, optional | The client's wire revision; absent is version-silent ([Revisions and floors](#revisions-and-floors)). |
+| `gridFrames` | boolean, optional | The client decodes grid frames ([grid (8)](#grid-8)). |
+
+The replay starts at the largest of `haveThrough + 1`, the oldest retained line, and `committed` minus the clamped `replayMax`. The client predicts that start to tell a clamped replay from missing history. `wire-golden/replay-start.json` holds worked cases that both halves test against.
+
+The server answers with a resumeAck frame ([resumeAck (2)](#resumeack-2)), then, when declared, the grid, then the modes and the title. Then it sends the screen frame and the replay as scroll frames. On the main screen the screen frame goes first, and on the alternate screen the replay does.
 
 ## Byte layout
 
@@ -21,7 +40,7 @@ Every server-to-client frame starts with the same header. Integers are fixed-wid
 ### Common header
 
 ```text
-[1B] msg_type   0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard, 7=ackOnly
+[1B] msg_type   0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard, 7=ackOnly, 8=grid
 [8B] inputAck   uint64  server-confirmed received count on the socket's input ledger
 ```
 
@@ -61,13 +80,13 @@ The header's inputAck carries the ack value. The body:
 [1B] ackFlags           uint8   capability and condition bits
 ```
 
-The client compares `serverEpoch` against the last epoch it saw. A mismatch means the server restarted and holds no record of input the client thinks is acked, so the client reports the loss instead of hiding it.
+`serverEpoch` identifies one server process, and 0 means the server reports none. The client compares it twice. The bound `LineStore` compares it with the epoch its content came from and discards content from another process. The connection drops the session's queued input when it was meant for another process: the one the session's last answer named or, before the first answer, the one whose content the store showed, so input typed at discarded content goes with it. Either loss is reported instead of hidden.
 
 `serverWireVersion` and `ackFlags` form a length-gated optional tail: a frame from a server that predates them is shorter, and the client reads a short frame as version-silent with every flag clear. `serverWireVersion` lets the client report a stale-bundle skew.
 
 | Bit | Name | Meaning |
 | --- | --- | --- |
-| 0 | `ledgerLost` | The resume key missed the registry while the client claimed `sentBytes > 0`, so the client drops its outbox and notifies instead of replaying. |
+| 0 | `ledgerLost` | The resume key missed the registry while the client claimed `sentBytes > 0`, so the client drops its in-flight input and notifies instead of replaying. |
 | 1 | `historyPaging` | Demand-paged scrollback is served ([Scrollback and reconnect](scrollback.md)). |
 | 2 | `serverFocus` | The server derives the DEC 1004 answer from the `focus` control. |
 | 3 | `ephemeralInput` | The `ephemeralInput` control is served. |
@@ -77,6 +96,15 @@ An older client ignores the tail. A client that reads it masks only the bits it 
 ### ackOnly (7)
 
 The header's inputAck carries the value and there is no body. The flush tick sends it when input was applied but no content frame carried the advanced ack (input into a read that echoes nothing), so acks never depend on output. Older clients ignore the unknown opcode.
+
+### grid (8)
+
+```text
+[2B] cols  uint16  the server screen's columns
+[2B] rows  uint16  the server screen's rows
+```
+
+Sent only to a socket whose resume carried `gridFrames: true`: before the modes and the window on every resume, and before the next modes and screen frame after each size change. The client releases input typed while the modes were unknown as soon as the modes arrive, so the grid it encodes that input against must already be this socket's. A client that never declares it is never sent one, so the frame needs no revision bump. The client predicts and hit-tests against this grid, not its own measured box, which can differ when several clients share a session.
 
 ### Row payload
 

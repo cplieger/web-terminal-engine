@@ -1,14 +1,8 @@
-// The alternate-screen state transitions: entering, resizing and leaving the
-// ephemeral grid, what each of those tells the renderer to repaint, and how the
-// FROZEN main window behaves while an alt session is up.
-//
-// The alt grid is the one part of the store that is not addressed by absolute
-// index, and the main window descriptor deliberately keeps the MAIN screen's
-// base and height throughout an alt session — that frozen region is what alt
-// exit restores, what the retention bound is defined over, and what an
-// alt-time history frame is not allowed to overwrite.
-//
-// Pure data structure, no DOM.
+// Entering, resizing and leaving the alternate screen, what each repaints, and
+// the frozen main window during it. The main window descriptor keeps the main
+// screen's base and height through an alt session: alt exit restores it, the
+// retention bound is defined over it, and an alt-time history frame must not
+// overwrite it.
 
 import { describe, it, expect } from "vitest";
 import { LineStore } from "./store.js";
@@ -166,6 +160,56 @@ describe("LineStore: history arriving while the alternate screen is up", () => {
 
     expect(textAt(s, 100)).toBe("W100");
     expect(textAt(s, 99)).toBe("H99");
+  });
+
+  it("keeps the lines the server committed in the pass that entered alt", () => {
+    // `seq 1 200; vim` in one read: the server commits the scrolled main lines
+    // in the same pass as the alt enter, and the alt frame's base is the
+    // committed count, then the scroll chunk follows.
+    const s = new LineStore();
+    s.applyScreen(screenMsg(100, 3));
+    s.applyScreen(screenMsg(118, 5, { altActive: true, changed: [] }));
+
+    s.applyScroll(
+      scrollMsg(
+        100,
+        Array.from({ length: 19 }, (_, i) => `H${100 + i}`),
+      ),
+    );
+
+    expect(textAt(s, 100)).toBe("H100");
+    expect(textAt(s, 117)).toBe("H117");
+    expect(textAt(s, 118)).toBeUndefined();
+    expect(s.getWindow().base).toBe(118);
+    expect(s.getWindow().height).toBe(3);
+  });
+
+  it("raises the frozen base to a resumeAck's committed count before its replay", () => {
+    // Lines committed while no client watched, with the session back in alt
+    // at the reconnect: the replay precedes the alt window frame.
+    const s = new LineStore();
+    s.applyScreen(screenMsg(100, 3));
+    s.applyScreen(screenMsg(100, 5, { altActive: true, changed: [] }));
+    s.applyResumeAck({
+      serverEpoch: null,
+      committed: 130,
+      serverOldest: 0,
+      paging: false,
+      sentHaveThrough: 99,
+      sentReplayMax: null,
+      viewportAbs: 100,
+      following: true,
+    });
+
+    s.applyScroll(
+      scrollMsg(
+        100,
+        Array.from({ length: 30 }, (_, i) => `R${100 + i}`),
+      ),
+    );
+
+    expect(textAt(s, 100)).toBe("R100");
+    expect(textAt(s, 129)).toBe("R129");
   });
 
   it("stores a solicited page during an alt session that never saw a main window", () => {

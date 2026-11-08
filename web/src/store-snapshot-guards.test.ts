@@ -1,17 +1,11 @@
-// The store's two data boundaries: a persisted snapshot coming back in from
-// OUTSIDE the program's memory, and the absolute index on an incoming frame.
-//
-// Everything the wire decoder produces is typed by construction; a snapshot
-// inherits nothing, so `fromSnapshot` is the only path that admits
-// externally-sourced run objects and the only place a bad field can reach the
-// renderer's per-character loop. These tests drive that boundary with payloads
-// a truncated write or a hand edit produces, and pin the write side of the same
-// pair (what `snapshot` records about what it actually wrote).
-//
-// Pure data structure, no DOM.
+// The store's two data boundaries: a persisted snapshot read back from storage,
+// and the absolute index on an incoming frame. `fromSnapshot` is the only path
+// that admits run objects the wire decoder did not type, so these tests feed it
+// truncated and hand-edited payloads, and pin what `snapshot` records it wrote.
 
 import { describe, it, expect } from "vitest";
 import { LineStore } from "./store.js";
+import { ackEpoch } from "./test-helpers/store-epoch.js";
 import type { ScrollMessage, WireRun } from "./types.js";
 
 function row(text: string): WireRun[] {
@@ -30,12 +24,13 @@ function scrollMsg(firstIndex: number, count: number): ScrollMessage {
 function filled(firstIndex: number, count: number): LineStore {
   const s = new LineStore();
   s.applyScroll(scrollMsg(firstIndex, count));
+  ackEpoch(s, 7);
   return s;
 }
 
 /** A version-1 snapshot envelope around a hand-built `lines` payload. */
 function envelope(lines: unknown): Record<string, unknown> {
-  return { v: 1, serverEpoch: 0, oldest: 0, highest: 0, lines };
+  return { v: 1, serverEpoch: 7, oldest: 0, highest: 0, lines };
 }
 
 function textAt(s: LineStore, abs: number): string | undefined {
@@ -80,7 +75,7 @@ describe("LineStore.fromSnapshot: the untrusted payload boundary", () => {
     // staleness guard refuses a re-delivery there. The tail's oldest row is not
     // below the tail: an app rewriting it (a progress line at the top of the
     // restored screen) has to land.
-    const snap = filled(100, 3).snapshot(0);
+    const snap = filled(100, 3).snapshot();
     const store = LineStore.fromSnapshot(snap);
     expect(store).not.toBeNull();
     store?.applyScroll({ type: "scroll", firstIndex: 100, lines: [row("rewritten")] });
@@ -93,17 +88,17 @@ describe("LineStore.snapshot: what it records about what it wrote", () => {
     // A caller computing its bound can hand over 0. That is not "persist
     // nothing" — it is no decision at all, so the store's cap decides, exactly
     // as an omitted argument would.
-    const snap = filled(0, 3).snapshot(7, 0);
+    const snap = filled(0, 3).snapshot(0);
     expect(snap?.lines.length).toBe(3);
   });
 
   it("keeps only the newest lines under a smaller explicit bound", () => {
-    const snap = filled(0, 5).snapshot(7, 2);
+    const snap = filled(0, 5).snapshot(2);
     expect(snap?.lines.map(([abs]) => abs)).toEqual([3, 4]);
   });
 
   it("reports the bounds of the tail it wrote, down to index 0", () => {
-    const snap = filled(0, 3).snapshot(7);
+    const snap = filled(0, 3).snapshot();
     expect(snap?.oldest).toBe(0);
     expect(snap?.highest).toBe(2);
   });

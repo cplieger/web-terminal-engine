@@ -383,7 +383,7 @@ describe("render: the resume transition", () => {
     render.handleScreen(screenMsg(3000, 4));
     await flush();
     render.applyResumeTransition({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 8000,
       serverOldest: 6000,
       paging: true,
@@ -484,7 +484,7 @@ describe("render: the top-of-store marker", () => {
     render.handleScroll(scrollMsg(5000, 100));
     render.handleScreen(screenMsg(5100, 4));
     render.applyResumeTransition({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 5104,
       serverOldest: opts.serverOldest,
       paging: opts.paging,
@@ -526,7 +526,7 @@ describe("render: the top-of-store marker", () => {
     render.handleScroll(scrollMsg(0, 100));
     render.handleScreen(screenMsg(100, 4));
     render.applyResumeTransition({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 104,
       serverOldest: 0,
       paging: true,

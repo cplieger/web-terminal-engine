@@ -70,7 +70,7 @@ func TestOSC52ClipboardSurvivesLaterOutput(t *testing.T) {
 
 // TestOSC4ForcesRepaintPending verifies an OSC 4 palette change raises the
 // handler's repaint-pending flag, which buildFrame consumes (calling
-// builder.Reset() so already-drawn cells re-resolve to the new palette).
+// builder.RepaintWindow so already-drawn cells re-resolve to the new palette).
 func TestOSC4ForcesRepaintPending(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"})
 

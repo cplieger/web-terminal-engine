@@ -340,7 +340,7 @@ describe("the top-of-history notice", () => {
       cursorStyle: 0,
       cursorBlink: false,
     });
-    render.noteResumeBounds(12, 10);
+    render.noteResumeBounds(10);
 
     const marker = output.querySelector<HTMLElement>(".term-trim-marker");
     expect(marker, "the trim marker must be rendered").not.toBeNull();

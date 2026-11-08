@@ -1,8 +1,6 @@
-// The two link paths at their edges. The AUTOLINKER (linkifySpans) splits a bare
-// http(s) URL out of a run with no OSC 8 URI into an anchor, and the text on
-// either side must survive in its own span with the run's styling: eating the
-// surrounding text or dropping its color corrupts the screen to add a link. The
-// OSC 8 gate joins the scheme allow-list (hyperlink-safety.fuzz.test.ts) with
+// The link path at its edges. Links are the server's: a run carries a URI (OSC 8,
+// or a bare URL the server stamped with attr bit 1024) or it renders as text.
+// The OSC 8 gate joins the scheme allow-list (hyperlink-safety.fuzz.test.ts) with
 // the link-TEXT rule: an application may hold one hyperlink open across a table
 // cell, so runs of only whitespace, Box Drawing (U+2500..U+257F) and Block
 // Elements (U+2580..U+259F) are not anchored and the decoration hugs the text.
@@ -73,44 +71,36 @@ function anchors(): HTMLAnchorElement[] {
   return Array.from(output.querySelectorAll("a"));
 }
 
-describe("autolinking a bare URL in plain text", () => {
-  it("keeps the text on each side of the URL in its own span", () => {
-    // The row must read back exactly as the application printed it, with the
-    // URL — and only the URL — carved out as the anchor.
+describe("links are the server's", () => {
+  it("renders a bare URL the server did not mark as plain text", () => {
+    // A row the server stripped at the row ceiling carries no link marks, and
+    // re-scanning it here would link a prefix of a URL that wraps past it.
     const spans = renderRow([run("see https://example.com/x now")]);
-    expect(spans.map((s) => s.textContent)).toEqual(["see ", "https://example.com/x", " now"]);
-    expect(spans[1]!.tagName).toBe("A");
+    expect(anchors().length).toBe(0);
+    expect(spans.map((s) => s.textContent).join("")).toBe("see https://example.com/x now");
   });
 
-  it("emits only the anchor when the URL is the whole run", () => {
-    // No text before or after it, so no empty filler spans either.
-    const spans = renderRow([run("https://example.com/x")]);
-    expect(spans.map((s) => s.textContent)).toEqual(["https://example.com/x"]);
-    expect(spans[0]!.tagName).toBe("A");
+  it("carves no https anchor out of an OSC 8 link to another scheme", () => {
+    // The program's link wins: its non-http target renders inert, and the URL
+    // in its text is not the program's target.
+    renderRow([run("docs at https://example.com/x", { u: "mailto:a@b.example" })]);
+    expect(anchors().length).toBe(0);
   });
 
-  it("anchors each of two URLs and keeps the separator between them", () => {
-    const spans = renderRow([run("https://a.example https://b.example")]);
-    expect(spans.map((s) => s.textContent)).toEqual([
-      "https://a.example",
-      " ",
-      "https://b.example",
+  it("anchors a run the server marked, carrying the run's styling", () => {
+    const url = "https://example.com/x";
+    const spans = renderRow([
+      run("see ", {}),
+      run(url, { u: url, a: 1024 | 1, f: 0xff0000 }),
+      run(" now", {}),
     ]);
-    expect(anchors().map((a) => a.getAttribute("href"))).toEqual([
-      "https://a.example",
-      "https://b.example",
-    ]);
-  });
-
-  it("carries the run's own styling onto the anchor", () => {
-    // A URL printed inside colored, bold output is still that output: the
-    // anchor replaces the span, so it has to take the span's inline properties
-    // with it or the link renders in the terminal's default appearance.
-    const spans = renderRow([run("https://example.com/x", { f: 0xff0000, a: 1 })]);
-    const anchor = spans[0]!;
+    expect(spans.map((s) => s.textContent)).toEqual(["see ", url, " now"]);
+    const anchor = spans[1]!;
     expect(anchor.tagName).toBe("A");
-    expect(anchor.style.color).toBe(cssColor(0xff0000));
-    expect(anchor.style.fontWeight).toBe("bold");
+    expect(anchor.className).toBe("term-link term-autolink");
+    const inner = anchor.firstElementChild as HTMLElement;
+    expect(inner.style.color).toBe(cssColor(0xff0000));
+    expect(inner.style.fontWeight).toBe("bold");
   });
 });
 

@@ -9,10 +9,13 @@
 
 import { describe, it, expect, beforeEach } from "vitest";
 import {
+  bracketPaste,
   bracketTextForPaste,
   ctrlByteFor,
+  isInterruptInput,
   kittyCtrlCharSeq,
   mapKeyboardEvent as mapKeyboardEventRaw,
+  keyActionBeforeModes,
   prepareTextForTerminal,
   type KeyboardResult,
 } from "./keyboard.js";
@@ -442,8 +445,19 @@ describe("ctrlByteFor", () => {
 
 describe("bracketed paste", () => {
   it("wraps with DEC 2004 sentinels and sanitises embedded ESC", () => {
+    modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: true });
     expect(bracketTextForPaste("hello", modes)).toBe("\x1b[200~hello\x1b[201~");
     expect(bracketTextForPaste("a\x1b[201~b", modes)).toBe(`\x1b[200~a\u241B[201~b\x1b[201~`);
+  });
+
+  it("splits a paste into a body that may be cut and a closing tail", () => {
+    modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: true });
+    expect(bracketPaste("a\x1b[201~b", modes)).toEqual({
+      body: "\x1b[200~a\u241B[201~b",
+      tail: "\x1b[201~",
+    });
+    modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: false });
+    expect(bracketPaste("a\x1bb", modes)).toEqual({ body: "a\x1bb", tail: "" });
   });
 
   it("normalises CR/LF to CR", () => {
@@ -452,6 +466,53 @@ describe("bracketed paste", () => {
     // never meaningful paste content, and a leading NUL would otherwise
     // interact with the v3 wire framing.
     expect(prepareTextForTerminal("\x00lead\x00mid\x00")).toBe("leadmid");
+  });
+});
+
+describe("isInterruptInput", () => {
+  it("is an unmodified Escape or a Ctrl+C in either keyboard mode, and nothing else", () => {
+    for (const text of ["\x1b", "\x1b[27u", "\x03", "\x1b[99;5u"]) {
+      expect(isInterruptInput(text)).toBe(true);
+    }
+    for (const text of ["", "c", "\x1b\x1b", "\x1b[27;2u", "\x1b[99;6u", "\x04", "\x03\x03"]) {
+      expect(isInterruptInput(text)).toBe(false);
+    }
+  });
+});
+
+describe("keyActionBeforeModes", () => {
+  // DECKPAM sends a numpad key as SS3 (xterm ctlseqs, "PC-Style Function
+  // Keys", keypad table); kitty disambiguate sends Ctrl+digit as CSI u (kitty
+  // keyboard protocol, "Disambiguate escape codes"); legacy Ctrl has no byte
+  // for a digit. A chord one state leaves unsent stays the browser's (Ctrl+=
+  // zooms), since a cancelled keydown cannot be handed back.
+  it.each([
+    ["Numpad5, SS3 under DECKPAM and typed otherwise", { key: "5", code: "Numpad5" }, "send"],
+    [
+      "Shift+Numpad9 as PageUp, SS3 under DECKPAM and a scroll otherwise",
+      { key: "PageUp", code: "Numpad9", shiftKey: true },
+      "send",
+    ],
+    ["Ctrl+1, sent only under kitty", { key: "1", code: "Digit1", ctrlKey: true }, "ignore"],
+    ["Ctrl+=, sent only under kitty", { key: "=", code: "Equal", ctrlKey: true }, "ignore"],
+    ["Ctrl+C, sent in every mode", { key: "c", code: "KeyC", ctrlKey: true }, "send"],
+    ["an arrow in every mode", { key: "ArrowUp", code: "ArrowUp" }, "send"],
+    ["Escape in every mode", { key: "Escape", code: "Escape" }, "send"],
+    ["a plain letter, text in every mode", { key: "a", code: "KeyA" }, "ignore"],
+    ["Cmd+C, the browser's in every mode", { key: "c", code: "KeyC", metaKey: true }, "ignore"],
+    ["a bare modifier", { key: "Shift", code: "ShiftLeft", shiftKey: true }, "ignore"],
+    [
+      "Shift+PageUp, a scroll in every mode",
+      { key: "PageUp", code: "PageUp", shiftKey: true },
+      "scroll-up",
+    ],
+    [
+      "Shift+PageDown, a scroll in every mode",
+      { key: "PageDown", code: "PageDown", shiftKey: true },
+      "scroll-down",
+    ],
+  ])("%s", (_name, init, expected) => {
+    expect(keyActionBeforeModes(ev(init))).toBe(expected);
   });
 });
 

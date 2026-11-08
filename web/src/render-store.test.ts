@@ -194,7 +194,7 @@ describe("render (store-backed, brick 3)", () => {
     // there, so the client legitimately can't show 0..99.
     render.handleScroll(scrollMsg(100, ["h100", "h101"]));
     render.handleScreen(screenMsg(102, [row("w0")], [0]));
-    render.noteResumeBounds(110, 100);
+    render.noteResumeBounds(100);
     await tick();
 
     const first = outputEl.firstElementChild as HTMLElement;
@@ -206,7 +206,7 @@ describe("render (store-backed, brick 3)", () => {
     expect(rowAbs).toEqual([100, 101, 102]);
 
     // A later resume where the server still has everything clears the marker.
-    render.noteResumeBounds(110, 0);
+    render.noteResumeBounds(0);
     await tick();
     expect(outputEl.querySelector(".term-trim-marker")).toBeNull();
     expect(absList(outputEl)).toEqual([100, 101, 102]);

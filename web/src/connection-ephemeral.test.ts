@@ -106,12 +106,12 @@ function resumeAckFrame(opts: { received?: number; flags?: number }): ArrayBuffe
 }
 
 /** A modes frame, mirroring encodeModesMsg: flags byte, mouseMode, kbdFlags. */
-function modesFrame(opts: { focusReporting: boolean }): ArrayBuffer {
+function modesFrame(opts: { focusReporting: boolean; mouseSGR?: boolean }): ArrayBuffer {
   const buf = new ArrayBuffer(13);
   const v = new DataView(buf);
   v.setUint8(0, 3); // MSG_MODES
   v.setBigUint64(1, 0n, true); // inputAck
-  v.setUint8(9, opts.focusReporting ? 8 : 0); // bit3 = DEC 1004
+  v.setUint8(9, (opts.focusReporting ? 8 : 0) | (opts.mouseSGR === true ? 4 : 0)); // bit3 = DEC 1004, bit2 = SGR
   v.setUint16(10, 1002, true); // mouseMode
   v.setUint8(12, 0); // kbdFlags
   return buf;
@@ -422,7 +422,7 @@ describe("connection: the transport fires the gesture resync", () => {
     vi.unstubAllGlobals();
   });
 
-  it("cancels a gesture recorded before the gap, on the reconnect's resumeAck", () => {
+  it("cancels a gesture recorded before the gap, once the new socket's modes are known", () => {
     const term = document.createElement("div");
     // A known box at the viewport origin, so the press below resolves to a cell
     // rather than being refused for landing above the element (body's default
@@ -461,9 +461,7 @@ describe("connection: the transport fires the gesture resync", () => {
     conn.setClientFocus(false);
     try {
       const first = openSession(ACK_FLAG_EPHEMERAL_INPUT);
-      // setSession applies the incoming session's mode mirror, so tracking is armed
-      // after the attach, as the server's own modes frame would.
-      modes.applySnapshot({ ...POWER_ON_MODES, mouseSGR: true, mouseMode: 1002 });
+      first.fireMessage(modesFrame({ focusReporting: false, mouseSGR: true }));
       term.dispatchEvent(
         new MouseEvent("mousedown", {
           bubbles: true,
@@ -488,6 +486,8 @@ describe("connection: the transport fires the gesture resync", () => {
       ]);
 
       const sock = reconnectAcking(0, ACK_FLAG_EPHEMERAL_INPUT);
+      expect(controlsOfType(sock, "ephemeralInput")).toEqual([]);
+      sock.fireMessage(modesFrame({ focusReporting: false, mouseSGR: true }));
 
       // The release carries the PRESS's coordinates, per xterm's report grammar.
       const released = controlsOfType(sock, "ephemeralInput").map((c) => c["data"]);

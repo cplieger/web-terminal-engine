@@ -11,6 +11,9 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import type { Renderer } from "./render.js";
 import { createEngineFixture } from "./test-helpers/engine-fixture.js";
 import type { ScreenMessage, WireRun } from "./types.js";
+import limitsRaw from "../../wire-golden/limits.json?raw";
+
+const limits = JSON.parse(limitsRaw) as { minResizeCols: number; minResizeRows: number };
 
 // The stubbed glyph advance, in px. Mutable so a test can restyle the terminal
 // and re-measure: a fixed advance cannot exercise a cache invalidation.
@@ -110,11 +113,14 @@ describe("computeSize reports the terminal's grid", () => {
     expect(render.computeSize()).toEqual({ cols: 60, rows: 16 });
   });
 
-  it("never asks for fewer than 20 columns or 5 rows", () => {
+  it("never asks for less than the server's resize floor", () => {
     // A collapsed or mid-layout element measures near zero. A pty sized from
-    // that is unusable, so the size is floored.
+    // that is unusable, so the size is floored where the server floors it.
     attachSized({ clientWidth: 40, clientHeight: 20, padding: "0px" });
-    expect(render.computeSize()).toEqual({ cols: 20, rows: 5 });
+    expect(render.computeSize()).toEqual({
+      cols: limits.minResizeCols,
+      rows: limits.minResizeRows,
+    });
   });
 });
 
@@ -186,9 +192,32 @@ describe("gridSize reports the grid on screen, not the one this client measured"
     expect(render.gridSize().rows).toBe(6);
   });
 
-  it("keeps the measured column count, which only bounds a report", () => {
-    // Columns feed the clamp and nothing else, and the store has no column count
-    // to answer with (a row's trailing blank cells are trimmed off the wire).
+  it("answers the server's columns once a grid frame came, not the measured ones", () => {
+    // A phone set the shared screen to 40 columns; this box measures 62.
+    attachSized({ clientWidth: 500, clientHeight: 300, padding: "0px" });
+    render.handleScreen(screenFrame(8, false));
+    render.handleGrid({ type: "grid", cols: 40, rows: 8 });
+    expect(render.gridSize()).toEqual({ cols: 40, rows: 8 });
+  });
+
+  it("answers the grid frame's rows, not the window's", () => {
+    // The window is the last screen frame; the grid frame is the size the
+    // server holds now, sent before the screen frame that will match it.
+    attachSized({ clientWidth: 500, clientHeight: 300, padding: "0px" });
+    render.handleScreen(screenFrame(8, false));
+    render.handleGrid({ type: "grid", cols: 40, rows: 10 });
+    expect(render.gridSize()).toEqual({ cols: 40, rows: 10 });
+  });
+
+  it("forgets the grid frame on clearGrid, falling back to the measured columns", () => {
+    attachSized({ clientWidth: 500, clientHeight: 300, padding: "0px" });
+    render.handleScreen(screenFrame(8, false));
+    render.handleGrid({ type: "grid", cols: 40, rows: 10 });
+    render.clearGrid();
+    expect(render.gridSize()).toEqual({ cols: 62, rows: 8 });
+  });
+
+  it("falls back to the measured column count from a server that sends no grid frame", () => {
     // 480/8 = 60, stated rather than read back out of computeSize().
     attachSized({ clientWidth: 500, clientHeight: 300, padding: "10px" });
     render.handleScreen(screenFrame(8, false));

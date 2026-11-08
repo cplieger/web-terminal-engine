@@ -1,0 +1,14 @@
+[
+  { "name": "a fresh client gets all of a short history", "committed": 3, "oldest": 0, "haveThrough": -1, "replayMax": 2000, "start": 0 },
+  { "name": "a client holding line 0 starts at line 1", "committed": 3, "oldest": 0, "haveThrough": 0, "replayMax": 2000, "start": 1 },
+  { "name": "a caught-up client starts at committed", "committed": 3, "oldest": 0, "haveThrough": 2, "replayMax": 2000, "start": 3 },
+  { "name": "a client ahead of the server starts after its boundary", "committed": 3, "oldest": 0, "haveThrough": 5, "replayMax": 2000, "start": 6 },
+  { "name": "an absent replayMax is the server ceiling", "committed": 10000, "oldest": 0, "haveThrough": 99, "replayMax": null, "start": 8000 },
+  { "name": "a smaller replayMax raises the start", "committed": 10000, "oldest": 0, "haveThrough": 99, "replayMax": 500, "start": 9500 },
+  { "name": "a replayMax above the ceiling is the ceiling", "committed": 10000, "oldest": 0, "haveThrough": 99, "replayMax": 5000, "start": 8000 },
+  { "name": "a boundary inside the bound wins over the clamp", "committed": 10000, "oldest": 0, "haveThrough": 9000, "replayMax": 2000, "start": 9001 },
+  { "name": "history trimmed past the boundary starts at the oldest line", "committed": 5000, "oldest": 4000, "haveThrough": 99, "replayMax": 2000, "start": 4000 },
+  { "name": "a fresh client of a trimmed deep ring gets the newest replayMax lines", "committed": 50000, "oldest": 30000, "haveThrough": -1, "replayMax": 1000, "start": 49000 },
+  { "name": "committed below the bound leaves the start alone", "committed": 1500, "oldest": 0, "haveThrough": -1, "replayMax": 2000, "start": 0 },
+  { "name": "committed equal to the bound leaves the start alone", "committed": 2000, "oldest": 0, "haveThrough": -1, "replayMax": null, "start": 0 }
+]

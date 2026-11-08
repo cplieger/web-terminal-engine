@@ -9,6 +9,7 @@
 
 import { describe, it, expect, vi } from "vitest";
 import { LineStore, PREFETCH_THRESHOLD } from "./store.js";
+import { ackEpoch } from "./test-helpers/store-epoch.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
 function row(text: string): WireRun[] {
@@ -80,7 +81,7 @@ function ack(over: {
   following?: boolean;
 }): Parameters<LineStore["applyResumeAck"]>[0] {
   return {
-    epochChanged: false,
+    serverEpoch: null,
     committed: over.committed,
     serverOldest: over.serverOldest,
     paging: over.paging ?? true,
@@ -117,16 +118,10 @@ describe("LineStore.replayBoundary: the value that goes on the wire", () => {
 
 describe("LineStore: the provisional floor and malformed frames", () => {
   it("moves no floor and retains no negative index for a frame based below zero", () => {
-    // Two guards over one hostile frame. markUnconfirmedFrom's: a base that is
-    // not a non-negative integer cannot be a screen position, and moving the
-    // floor there puts a negative value on the wire as `haveThrough`. Guard 1
-    // of applyLine: `base + y` is not addressable while it is negative — the
-    // renderer orders rows by that index and the snapshot writer validates it
-    // away — while the rows that land at or above zero are ordinary content.
-    //
-    // The window is 20 rows so its bottom row stays above what the store holds;
-    // a shorter one strands every retained line below the window instead, which
-    // is a separate path (truncateBelowWindow) with its own effect.
+    // markUnconfirmedFrom refuses a negative base (it would go on the wire as
+    // `haveThrough`), and applyLine drops rows whose `base + y` is negative while
+    // rows at or above zero apply. The 20-row window keeps its bottom above every
+    // held line, so truncateBelowWindow (the next test) is not reached.
     const s = new LineStore();
     s.applyScreen(screenMsg(10, 3));
     expect(s.replayBoundary()).toBe(9);
@@ -140,15 +135,9 @@ describe("LineStore: the provisional floor and malformed frames", () => {
   });
 
   it("keeps the transcript when a screen frame is based below zero", () => {
-    // The path the test above deliberately steps around, with a window short
-    // enough to reach it. A base below zero puts the window BOTTOM
-    // (`base + height - 1`) below every retained index, and truncateBelowWindow
-    // reads that as "every line is stranded past the live window" and forgets
-    // all of them. Nothing records it: the eviction watermark only moves on a
-    // trim, so `hasTrimmedHistory()` stays false and the renderer draws no
-    // "earlier output trimmed" marker — the transcript just disappears. Same
-    // class as the rows-less guard one branch up, whose comment records the same
-    // measurement (a 3024-line store wiped to 0 rows, silently).
+    // A base below zero puts the window bottom (`base + height - 1`) below every
+    // retained index, and truncateBelowWindow would forget them all with no trim
+    // marker (`hasTrimmedHistory()` stays false): the transcript silently vanishes.
     const s = new LineStore();
     s.applyScreen(screenMsg(10, 3));
     s.applyScroll(scrollMsg(10, 3, "H")); // committed history, not a drawn screen
@@ -287,7 +276,7 @@ describe("LineStore.absentEdgesNear: the bottom frontier", () => {
     // floor, which is the client teaching itself its own history was trimmed.
     const s = new LineStore();
     s.applyScroll(scrollMsg(22, 3, "H"));
-    s.noteResumeBounds(25, 22); // the server's oldest IS our lowest
+    s.noteResumeBounds(22); // the server's oldest IS our lowest
     expect(s.serverOldestIndex()).toBe(22);
 
     expect(s.absentEdgesNear(22, 500)).toEqual([]);
@@ -298,7 +287,7 @@ describe("LineStore.absentEdgesNear: the bottom frontier", () => {
     // frontier is real, and it runs from the floor up to the lowest line held.
     const s = new LineStore();
     s.applyScroll(scrollMsg(22, 3, "H"));
-    s.noteResumeBounds(25, 5);
+    s.noteResumeBounds(5);
 
     expect(s.absentEdgesNear(22, 500)).toEqual([{ lo: 0, hi: 22 }]);
   });
@@ -718,8 +707,9 @@ describe("LineStore.snapshot: the bounded tail", () => {
     // kept is reported after hydration by the trim marker instead.
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, 10, "H"));
+    ackEpoch(s, 7);
 
-    const snap = s.snapshot(7, 3);
+    const snap = s.snapshot(3);
 
     expect(snap).not.toBeNull();
     expect(snap?.lines).toHaveLength(3);
@@ -738,7 +728,7 @@ describe("LineStore.fromSnapshot: payloads from outside the program", () => {
     runs[1] = undefined; // the hole, after one perfectly good run
     const snap = {
       v: 1,
-      serverEpoch: 0,
+      serverEpoch: 1,
       oldest: 0,
       highest: 0,
       lines: [[0, runs]],

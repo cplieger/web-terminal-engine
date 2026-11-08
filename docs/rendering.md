@@ -35,7 +35,7 @@ The `vt` screen follows Unicode's East Asian Width rules, [UAX #11](https://www.
 
 A bare `http://` or `https://` URL in a program's output reaches the browser already linked. The `vt` package finds it on the server while it renders a row, and marks the covered runs with the full URL and the `AttrAutolink` bit, 1024. A URL the terminal wrapped across rows, or one the program wrapped itself with its own indent, is one link with one target rather than a fragment per row.
 
-A link the program set itself with OSC 8 wins and is never overwritten. The client underlines the two differently. An automatic link covers exactly the matched text, so it is underlined all the time. An OSC 8 link is underlined on hover.
+A link the program set itself with OSC 8 wins and is never overwritten. The server alone decides what is a link: the client anchors only runs that carry a URI and never scans text itself, so a row the server sends without link marks (a row over the size ceiling) renders as plain text, and a server older than wire revision 4 sends bare URLs unlinked. The client underlines the two kinds differently. An automatic link covers exactly the matched text, so it is underlined all the time. An OSC 8 link is underlined on hover.
 
 The scan looks at the four rows of a wrap chain nearest the row it renders, which keeps the work per row constant. Four rows cover any real URL down to about 40 columns.
 
@@ -43,7 +43,7 @@ A longer URL links imperfectly rather than not at all. Rows near its start link 
 
 ## Keyboard
 
-The `keyboard` namespace turns a `KeyboardEvent` into the bytes a PTY expects. `mapKeyboardEvent(ev, modes)` returns either bytes to send or a local action, such as a scroll. `bracketTextForPaste(text, modes)` and `prepareTextForTerminal` do the same for pasted text. Every function that depends on a mode takes the mode state as an argument, and an engine's `modes` satisfies it. The module touches no DOM and sends nothing.
+The `keyboard` namespace turns a `KeyboardEvent` into the bytes a PTY expects. `mapKeyboardEvent(ev, modes)` returns either bytes to send or a local action, such as a scroll, and `keyActionBeforeModes(ev)` gives the action for a caller that must decide at keydown before the modes are known. It reads no modes: a key every mode state treats alike gets that action, an unmodified key some state sends is the terminal's, and a Ctrl, Alt or Meta chord some state leaves unsent stays the browser's. `bracketPaste(text, modes)` and `prepareTextForTerminal` do the same for pasted text: `bracketPaste` answers a body and a closing tail, so a sender that cancels the rest of a long paste still closes the bracket (`bracketTextForPaste` joins the two). `isInterruptInput(text)` says whether bytes from a sink with no `KeyboardEvent`, such as the toolbar, are an Escape or a Ctrl+C. Every function that depends on a mode takes the mode state as an argument, and an engine's `modes` satisfies it. The module touches no DOM and sends nothing.
 
 It honors application cursor keys, application keypad, bracketed paste, and the kitty keyboard protocol's disambiguate flag. When an application turns that protocol on, keys that type nothing arrive as kitty escape codes: Escape, the Ctrl and Alt combinations, function keys and the keypad's navigation keys. A key that types a character, an AltGr character included, still arrives as text. [Unsupported VT features](non-goals.md#the-kitty-keyboard-protocol) lists which kitty flags are honored.
 
@@ -71,7 +71,7 @@ Caps Lock changes no code where the capital it types lowercases back to the same
 
 ## Mobile key toolbar
 
-The `toolbar` namespace is the engine's one DOM widget. `bindMobileToolbar({ toolbar, send, modes, ids? })` wires an existing container's Ctrl, arrow, Tab, Enter and Esc buttons to a send function. Ctrl is sticky. The arrows read the mode state, so a toolbar arrow sends the same bytes as the physical key. It returns a `MobileToolbarController`, and `DEFAULT_TOOLBAR_IDS` names the default button ids.
+The `toolbar` namespace is the engine's one DOM widget. `bindMobileToolbar({ toolbar, send, ids? })` wires an existing container's Ctrl, arrow, Tab, Enter and Esc buttons to a send function, which receives each press as an encoder to call, with the mode state, when it sends. Ctrl is sticky and is consumed when the next character is typed. The arrows follow the mode state they are encoded under, so a toolbar arrow sends the same bytes as the physical key. It returns a `MobileToolbarController`, and `DEFAULT_TOOLBAR_IDS` names the default button ids.
 
 ## Mouse
 
@@ -92,7 +92,12 @@ Focus is not mouse input. `connection.setClientFocus(focused)` reports whether t
 
 ## Scrolling
 
-`createScrollController` follows the output while the reader is at the bottom and holds the view while they read scrollback. It also has two seams for the renderer:
+`createScrollController` follows the output while the reader is at the bottom and holds the view while they read scrollback. It owns the container's offset, so a page moves the view through it rather than by writing `scrollTop`:
+
+- `scrollToBottom({ smooth })` follows the output again from the moment it is called. With `smooth: true` the browser animates the move, and the output that arrives during the animation is pinned when the animation ends.
+- `scrollByPage(-1)` moves one viewport up and stops following. `scrollByPage(1)` moves one viewport down and follows again if it reaches the bottom.
+
+It also has two seams for the renderer:
 
 - `noteContentShrink(scrollTopBefore)` says that a removed row, not a gesture, caused the scroll event about to arrive.
 - `reconcileScrollRange()` moves the offset back inside the container's range when the browser did not do it after the content shrank.

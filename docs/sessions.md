@@ -174,7 +174,7 @@ A host can give a session a better name with `(*SessionManager).SetSessionAlias(
 
 ### Several clients on one session
 
-When several clients share a session, a live resize goes to the last writer. When a client disconnects, the screen relaxes to the smallest size among the clients that remain.
+When several clients share a session, the screen takes the size of the client that most recently sent input, typed text or a mouse report. Until anyone has, it takes the size of the client that attached first. A resize from any other client is recorded and changes nothing, so a device reconnecting after sleep does not take the size from the one in use. When the size's client leaves, it keeps the size for 3 seconds, so a quick reconnect moves nothing; then the size passes to the next client by the same rule.
 
 ## The processes a session starts
 
@@ -202,14 +202,8 @@ The engine's value is the only assignment to `WT_SESSION_REAP` in the child envi
 
 ### Zombie processes
 
-`StartZombieReaper(log, interval)` solves a separate problem and is also opt-in. Session reaping stops processes that are still alive. The zombie reaper collects the exit status of finished processes nobody waited for.
-
-A server running as its container's PID 1 inherits every orphan in the container. Go's `os/exec` waits only on the children it created, so every language server and every `git` a session started stays behind as a zombie on the server. One container measured 17,323 zombies.
-
-Call `StartZombieReaper` from the composition root of a server that is, or may become, PID 1. It sets `PR_SET_CHILD_SUBREAPER`, so orphans arrive even behind an init shim. It then sweeps every `interval`, 30 seconds when you pass 0 and never less than 1 second, and returns a stop function.
-
-It is a periodic sweep rather than a `SIGCHLD` handler, because `signal.Notify` is process-wide state and the Go runtime uses `SIGCHLD` for `os/exec`. It never waits on a process the engine spawned. A lock held across each spawn guards the list of those processes, so a generic `wait(-1)` cannot take a session's exit status.
+The engine waits on the processes it spawns, and nothing else. A server running as its container's PID 1 inherits every orphan in the container, and Go's `os/exec` waits only on the children it created, so every language server and every `git` a session started would stay behind as a zombie. Run such a server under an init process, such as Docker's `init: true` or `tini`, which collects them.
 
 ### Platforms
 
-The PTY needs a Unix-like system such as Linux or macOS. Session reaping and the zombie reaper do nothing outside Linux. `NewContainment` returns an error there, and the process-based title falls back to the command's name.
+The PTY needs a Unix-like system such as Linux or macOS. Session reaping does nothing outside Linux. `NewContainment` returns an error there, and the process-based title falls back to the command's name.

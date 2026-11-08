@@ -61,7 +61,7 @@ describe("resume-ack budget pass: containment for a following reader", () => {
     // following reader is looking at. A band that stopped below the window would
     // not contain them and the bug would not reproduce.
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 10000,
       serverOldest: 6000,
       paging: true,
@@ -83,16 +83,10 @@ describe("resume-ack budget pass: containment for a following reader", () => {
   });
 
   it("keeps the full cache for a reader in history whose anchor row is NOT held", () => {
-    // The case that killed the inference. Two doors reach it, both ordinary: a
-    // HOLE inside the cache, and an ARMED RESTORE whose remembered row the store
-    // has since dropped — which is the anchor the renderer deliberately prefers
-    // over the live measurement during a rebuild.
-    //
-    // A membership-based answer says "not on cache, so drain", and the reader
-    // loses their depth: measured 801 rows kept instead of the cap. Where the
-    // reader IS does not depend on whether that one row is currently resident.
-    // Two retained runs with a genuine hole between them, and the anchor IN the
-    // hole — the shape a prior budget pass or cap trim leaves behind.
+    // The reader's anchor sits in a hole between two retained runs (a cache hole,
+    // or an armed restore whose row was since dropped). Where the reader is does
+    // not depend on that row being resident: answering by membership drains the
+    // cache and loses the reader's depth (801 rows kept instead of the cap).
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, 1200));
     s.applyScroll(scrollMsg(1400, 1600));
@@ -101,7 +95,7 @@ describe("resume-ack budget pass: containment for a following reader", () => {
     expect(s.getLine(anchorAbs)).toBeUndefined(); // the reader's row is not held
 
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 10000,
       serverOldest: 6000,
       paging: true,
@@ -121,7 +115,7 @@ describe("resume-ack budget pass: containment for a following reader", () => {
     const viewportAbs = 1200; // parked in history, inside [0, 3000)
 
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 10000,
       serverOldest: 6000,
       paging: true,

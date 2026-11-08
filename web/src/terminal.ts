@@ -12,7 +12,7 @@ export interface TerminalEngineOptions {
   termWrap: HTMLElement;
   /**
    * The consumer's connection callbacks. `onMessage` receives every frame after
-   * the engine has routed `screen`, `scroll` and `modes` frames to its renderer.
+   * the engine has routed `screen`, `scroll` and `grid` frames to its renderer.
    */
   callbacks: ConnectionCallbacks;
   /** WebSocket endpoint path (default "/ws"). */
@@ -96,8 +96,8 @@ export function createTerminalEngine(opts: TerminalEngineOptions): TerminalEngin
           renderer.handleScreen(msg);
         } else if (msg.type === "scroll") {
           renderer.handleScroll(msg);
-        } else if (msg.type === "modes") {
-          renderer.updateReverseVideo();
+        } else if (msg.type === "grid") {
+          renderer.handleGrid(msg);
         }
         consumer.onMessage(msg);
       },

@@ -84,7 +84,7 @@ The engine routes screen frames to the renderer for you, and `engine.dispose()` 
 ## API
 
 - `vt` is the VT100/VT500 screen buffer: `New`, `Write`, `Resize`, row rendering to the wire format, and one-shot reads of replies, clipboard writes, the bell and palette changes.
-- `terminal` serves sessions: `NewHandler` and its options, `NewSessionManager`, `MountSessionRoutes`, `NewOriginPolicy`, `StartZombieReaper`, `LogID`, and the wire compatibility constants with `WirePairIncompatibility`.
+- `terminal` serves sessions: `NewHandler` and its options, `NewSessionManager`, `MountSessionRoutes`, `NewOriginPolicy`, `LogID`, and the wire compatibility constants with `WirePairIncompatibility`.
 - The TypeScript package exports `createTerminalEngine` and the five factories it composes, the `keyboard` and `toolbar` namespaces, `decodeWireBinary`, `connectStatusStream`, `LineStore` and the wire types.
 
 The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/web-terminal-engine/v6) and [JSR](https://jsr.io/@cplieger/web-terminal-engine/doc).

@@ -64,15 +64,12 @@ describe("DECSCNM (reverse video) display effect (spec)", () => {
 
   it("marks the terminal reverse-video when DECSCNM is active", () => {
     fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: true });
-    fx.engine.renderer.updateReverseVideo();
     expect(fx.termWrap.classList.contains("term-reverse-video")).toBe(true);
   });
 
   it("clears the reverse-video mark when DECSCNM is turned off", () => {
     fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: true });
-    fx.engine.renderer.updateReverseVideo();
     fx.engine.modes.applySnapshot({ ...POWER_ON_MODES, reverseVideo: false });
-    fx.engine.renderer.updateReverseVideo();
     expect(fx.termWrap.classList.contains("term-reverse-video")).toBe(false);
   });
 });

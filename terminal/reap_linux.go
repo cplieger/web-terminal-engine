@@ -28,7 +28,7 @@ const (
 // reapFindByMarker returns every live pid whose environment carries marker.
 //
 // Skips this process (it would signal itself), anything unreadable (vanished
-// mid-scan, or another user's), and zombies (the zombie reaper's job). A pid
+// mid-scan, or another user's), and zombies, which are already dead. A pid
 // caught mid-execve is re-read until its new image settles, for at most
 // containGrace; one still unsettled then is left out, because only a proven
 // member may be signalled.

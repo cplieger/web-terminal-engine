@@ -13,7 +13,7 @@ import { mapKeyboardEvent } from "./keyboard.js";
 import { connectionDeps } from "./test-helpers/connection-fakes.js";
 import { createEngineFixture, registerForDispose } from "./test-helpers/engine-fixture.js";
 import type { ServerMessage } from "./types.js";
-import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
+import { WIRE_INCOMPATIBLE_CLOSE_CODE, WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
 
 let conn: Connection;
 
@@ -2142,5 +2142,133 @@ describe("connection: a socket's input waits for its first size", () => {
     sock.fireMessage(resumeAckFrame());
 
     expect(wireLog(sock)).toEqual(["resize", "resume", "a"]);
+  });
+});
+
+describe("connection: whether input sent now goes out", () => {
+  // A host deciding at an arbitrary moment whether to send or queue reads this;
+  // every socket end must read false at once, the ones that fire no callback too.
+  let readAtReady: boolean[];
+
+  beforeEach(() => {
+    allMockWebSockets.length = 0;
+    vi.useFakeTimers();
+    vi.stubGlobal("WebSocket", makeMockWebSocket());
+    readAtReady = [];
+    conn = registerForDispose(
+      createConnection({
+        ...connectionDeps(),
+        callbacks: {
+          onMessage: vi.fn(),
+          onOpen: () => undefined,
+          onClose: () => undefined,
+          onProcessExit: () => undefined,
+          onWireIncompatible: () => undefined,
+          onInputReady: () => {
+            readAtReady.push(conn.inputReady());
+          },
+          computeSize: () => ({ cols: 120, rows: 40 }),
+          initialSize: () => ({ cols: 120, rows: 40 }),
+        },
+      }),
+    );
+  });
+
+  afterEach(() => {
+    conn.disconnect();
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  function resumeAckFrame(): ArrayBuffer {
+    const ack = new ArrayBuffer(33); // received 0, no tail, epoch 0
+    new DataView(ack).setUint8(0, 2);
+    return ack;
+  }
+
+  function ready(id = freshSessionId()): MockWS {
+    conn.setSession(id);
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    sock.fireMessage(resumeAckFrame());
+    return sock;
+  }
+
+  it("reads false until the socket's input starts, and true inside onInputReady", () => {
+    expect(conn.inputReady()).toBe(false);
+    conn.setSession(freshSessionId());
+    const sock = allMockWebSockets.at(-1)!;
+    sock.fireOpen();
+    expect(conn.inputReady()).toBe(false);
+
+    sock.fireMessage(resumeAckFrame());
+
+    expect(readAtReady).toEqual([true]);
+    expect(conn.inputReady()).toBe(true);
+  });
+
+  it("reads false from a server close", () => {
+    ready().fireClose(1006);
+    expect(conn.inputReady()).toBe(false);
+  });
+
+  it("reads false from a process exit", () => {
+    ready().fireClose(4001);
+    expect(conn.inputReady()).toBe(false);
+  });
+
+  it("reads false from an incompatible server's close", () => {
+    ready().fireClose(WIRE_INCOMPATIBLE_CLOSE_CODE);
+    expect(conn.inputReady()).toBe(false);
+  });
+
+  it("reads false from a reconnect until the new socket's input starts", () => {
+    ready();
+    conn.reconnectNow();
+    expect(conn.inputReady()).toBe(false);
+
+    const next = allMockWebSockets.at(-1)!;
+    next.fireOpen();
+    expect(conn.inputReady()).toBe(false);
+    next.fireMessage(resumeAckFrame());
+    expect(conn.inputReady()).toBe(true);
+  });
+
+  it("reads false from a switch to another session", () => {
+    ready();
+    conn.setSession(freshSessionId());
+    expect(conn.inputReady()).toBe(false);
+  });
+
+  it("keeps reading true for a setSession of the session it serves", () => {
+    const id = freshSessionId();
+    ready(id);
+    conn.setSession(id);
+    expect(conn.inputReady()).toBe(true);
+  });
+
+  it("reads false once the shown session is forgotten, which fires no callback", () => {
+    const id = freshSessionId();
+    ready(id);
+    conn.forgetSession(id);
+    expect(conn.inputReady()).toBe(false);
+  });
+
+  it("keeps reading true when another session is forgotten", () => {
+    ready();
+    conn.forgetSession("not-shown");
+    expect(conn.inputReady()).toBe(true);
+  });
+
+  it("reads false after disconnect, which fires no callback", () => {
+    ready();
+    conn.disconnect();
+    expect(conn.inputReady()).toBe(false);
+  });
+
+  it("reads false once disposed", () => {
+    ready();
+    conn.dispose();
+    expect(conn.inputReady()).toBe(false);
   });
 });

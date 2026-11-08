@@ -524,6 +524,14 @@ export interface Connection {
    */
   lastAnnouncedSize(): { cols: number; rows: number } | null;
   /**
+   * True from the socket's onInputReady (its callback reads true) until that
+   * socket ends: closed, replaced, its session ended or incompatible, or torn
+   * down by forgetSession of the active id or disconnect, which fire no
+   * callback. False once disposed. Input sent while it is true goes out at
+   * once, unless held (holdInput).
+   */
+  inputReady(): boolean;
+  /**
    * Replace whatever socket exists with a fresh one immediately, skipping the
    * backoff: the wake path. A no-op once the session has ended (onProcessExit)
    * or the server is incompatible.
@@ -1046,6 +1054,10 @@ export function createConnection(opts: ConnectionOptions): Connection {
 
   function lastAnnouncedSize(): { cols: number; rows: number } | null {
     return isDisposed() || announcedSize === null ? null : { ...announcedSize };
+  }
+
+  function inputReady(): boolean {
+    return connState.status === "connected" && connState.inputReady;
   }
 
   // A boot-epoch change: every queued byte, sent or not, was meant for the old
@@ -1865,6 +1877,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
     setClientFocus,
     sendResize,
     lastAnnouncedSize,
+    inputReady,
     reconnectNow,
     setSession,
     forgetSession,

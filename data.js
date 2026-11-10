@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793745405049,
-  "repoUrl": "https://github.com/cplieger/web-terminal-engine",
+  "lastUpdate": 1794349670948,
+  "repoUrl": "https://github.com/cplieger/ci",
   "entries": {
     "Benchmark": [
       {
@@ -766,6 +766,70 @@ window.BENCHMARK_DATA = {
             "name": "BenchmarkScreenWrite",
             "value": 29153.5,
             "range": "± 493",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Christopher Plieger",
+            "username": "cplieger",
+            "email": "917744+cplieger@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "username": "web-flow",
+            "email": "noreply@github.com"
+          },
+          "id": "f40d4941f84982c89b2289176113db1edfb4bffe",
+          "message": "feat: publish each bundled Grafana dashboard, not only the first (#1032)\n\n## Release note\n\nA repository can now ship more than one Grafana dashboard. Beside `grafana-dashboard.json`, each root `grafana-dashboard-<suffix>.json` is checked on every pull request and published with the release as `ghcr.io/<owner>/<repo>/dashboard-<suffix>:<version>`. The suffix is lowercase letters and digits joined by single hyphens, and any other `grafana-dashboard-*.json` fails the check and the release with an error naming the file. A repository with one dashboard sees no change.",
+          "timestamp": "2026-11-10T21:51:58Z",
+          "url": "https://github.com/cplieger/ci/commit/f40d4941f84982c89b2289176113db1edfb4bffe"
+        },
+        "date": 1794349670694,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "BenchmarkRenderRowWire - B/op",
+            "value": 592,
+            "range": "± 0",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkRenderRowWire - allocs/op",
+            "value": 11,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkRenderRowWire",
+            "value": 2008,
+            "range": "± 13.5",
+            "unit": "ns/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkScreenWrite - B/op",
+            "value": 4590,
+            "range": "± 3",
+            "unit": "B/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkScreenWrite - allocs/op",
+            "value": 9,
+            "range": "± 0",
+            "unit": "allocs/op",
+            "extra": "10 samples, median"
+          },
+          {
+            "name": "BenchmarkScreenWrite",
+            "value": 30217.5,
+            "range": "± 182",
             "unit": "ns/op",
             "extra": "10 samples, median"
           }

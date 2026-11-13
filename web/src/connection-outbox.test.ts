@@ -1,18 +1,27 @@
-// The connection's RELIABLE-INPUT half: the outbox, the acked-byte window and
-// what a reconnect replays over the new socket. The outbox is the only copy of
+// The connection's RELIABLE-INPUT half: the pending queue, the in-flight window
+// and what a reconnect replays over the new socket. inFlight is the only copy of
 // input the server has not confirmed and applyAck the only thing that removes
 // bytes from it, so an off-by-one there is silent: keystrokes vanish on a
 // reconnect (trimmed too far) or run twice (trimmed too little). The observable
-// is the WIRE, the frames the replacement socket sends after its resumeAck,
-// never the instance's counters.
+// is the WIRE, the frames each socket sends, never the instance's counters.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { type Connection, createConnection, MAX_OUTBOX_BYTES } from "./connection.js";
+import {
+  type Connection,
+  createConnection,
+  type DeferredInput,
+  MAX_OUTBOX_BYTES,
+} from "./connection.js";
+import { createModeState, type ModeState } from "./modes.js";
 import { connectionDeps } from "./test-helpers/connection-fakes.js";
 import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";
+import limitsRaw from "../../wire-golden/limits.json?raw";
+
+const limits = JSON.parse(limitsRaw) as { maxInputMessageBytes: number };
 
 let conn: Connection;
+let modes: ModeState;
 
 interface MockWS {
   readyState: number;
@@ -87,16 +96,33 @@ function makeMockWebSocket(): typeof WebSocket {
  * leaves the socket in sentinel mode, which is where the leading-NUL split
  * lives.
  */
-function resumeAckFrame(opts: { received?: number; version?: number | undefined }): ArrayBuffer {
+function resumeAckFrame(opts: {
+  received?: number;
+  version?: number | undefined;
+  ledgerLost?: boolean;
+  serverEpoch?: number;
+}): ArrayBuffer {
   const buf = new ArrayBuffer(35);
   const v = new DataView(buf);
   v.setUint8(0, 2); // MSG_RESUME_ACK
   v.setBigUint64(1, BigInt(opts.received ?? 0), true);
-  v.setBigUint64(9, 0n, true); // serverEpoch 0: no restart detection
+  v.setBigUint64(9, BigInt(opts.serverEpoch ?? 0), true); // 0: no restart detection
   v.setBigUint64(17, 0n, true); // committed
   v.setBigUint64(25, 0n, true); // oldestIndex
   v.setUint8(33, opts.version ?? WIRE_PROTOCOL_VERSION);
-  v.setUint8(34, 0); // ackFlags: no ledgerLost, no paging
+  v.setUint8(34, opts.ledgerLost === true ? 1 : 0); // ackFlags bit0: ledgerLost
+  return buf;
+}
+
+/** A modes frame, mirroring encodeModesMsg: flags byte (bit0 DEC 2004), mouseMode, kbdFlags. */
+function modesFrame(opts: { bracketedPaste?: boolean } = {}): ArrayBuffer {
+  const buf = new ArrayBuffer(13);
+  const v = new DataView(buf);
+  v.setUint8(0, 3); // MSG_MODES
+  v.setBigUint64(1, 0n, true); // inputAck
+  v.setUint8(9, opts.bracketedPaste === true ? 1 : 0);
+  v.setUint16(10, 0, true);
+  v.setUint8(12, 0);
   return buf;
 }
 
@@ -139,9 +165,32 @@ function inputFrameSizes(sock: MockWS): number[] {
   return out;
 }
 
-const enc = new TextEncoder();
+/** Every input byte the socket was asked to send, in order. */
+function inputBytes(sock: MockWS): Uint8Array {
+  const calls = (sock.send as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+  const parts = calls.flatMap((c) => (c[0] instanceof ArrayBuffer ? [new Uint8Array(c[0])] : []));
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
 
-let outboxFull: ReturnType<typeof vi.fn<() => void>>;
+/** A paste of `n` bytes whose every byte depends on its offset, so order shows. */
+function paste(n: number): Uint8Array {
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = 0x21 + (i % 89);
+  }
+  return out;
+}
+
+const enc = new TextEncoder();
+const MiB = 1 << 20;
+
+let pendingReports: ReturnType<typeof vi.fn<(bytes: number, cancelable: boolean) => void>>;
 let serverRestart: ReturnType<typeof vi.fn<() => void>>;
 let computeSize: ReturnType<typeof vi.fn<() => { cols: number; rows: number }>>;
 let session = 0;
@@ -154,6 +203,11 @@ function openSession(opts: { version?: number | undefined } = {}): MockWS {
   sock.fireOpen();
   sock.fireMessage(resumeAckFrame({ received: 0, version: opts.version }));
   return sock;
+}
+
+/** A paste as a sender queues it: its body and closing tail, encoded when sent. */
+function pasteInput(body: Uint8Array, tail = new Uint8Array(0)): DeferredInput {
+  return { paste: true, size: body.length, encode: () => ({ body, tail }) };
 }
 
 /** Reconnect and answer the new socket's resume with `received`. */
@@ -170,18 +224,20 @@ describe("connection: the outbox and the acked-byte window", () => {
     sockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
-    outboxFull = vi.fn<() => void>();
+    pendingReports = vi.fn<(bytes: number, cancelable: boolean) => void>();
     serverRestart = vi.fn<() => void>();
     computeSize = vi.fn<() => { cols: number; rows: number }>(() => ({ cols: 80, rows: 24 }));
+    modes = createModeState();
     conn = registerForDispose(
       createConnection({
         ...connectionDeps(),
+        modes,
         callbacks: {
           onMessage: () => undefined,
           onOpen: () => undefined,
           onClose: () => undefined,
           computeSize,
-          onOutboxFull: outboxFull,
+          onPendingInput: pendingReports,
           onServerRestart: serverRestart,
         },
       }),
@@ -194,28 +250,437 @@ describe("connection: the outbox and the acked-byte window", () => {
     vi.unstubAllGlobals();
   });
 
-  describe("the cap", () => {
-    it("accepts input that fills the outbox to exactly the cap", () => {
-      openSession();
+  describe("streaming input", () => {
+    it("delivers a 5 MiB paste whole, at most 1 MiB in flight, in messages the server accepts", () => {
+      const sock = openSession();
+      const data = paste(5 * MiB);
 
-      // The boundary is `>`, not `>=`: a send that lands exactly on the cap is
-      // the largest legal one, and refusing it would drop input the client can
-      // still hold.
-      expect(conn.sendBinary(new Uint8Array(MAX_OUTBOX_BYTES))).toBe(true);
-      expect(outboxFull).not.toHaveBeenCalled();
+      expect(conn.sendBinary(data)).toBe(true);
+      expect(inputBytes(sock).length).toBe(MAX_OUTBOX_BYTES);
+      expect(conn.pendingInputBytes()).toBe(5 * MiB - MAX_OUTBOX_BYTES);
+      for (let acked = 0; acked < 5 * MiB;) {
+        acked = inputBytes(sock).length;
+        sock.fireMessage(ackOnlyFrame(acked));
+      }
+
+      expect(inputBytes(sock)).toEqual(data);
+      expect(Math.max(...inputFrameSizes(sock))).toBe(limits.maxInputMessageBytes);
+      expect(conn.pendingInputBytes()).toBe(0);
     });
 
-    it("refuses the byte that would exceed the cap, reports it, and sends nothing", () => {
+    it("sends a key typed during a paste after the paste's last byte", () => {
       const sock = openSession();
-      conn.sendBinary(new Uint8Array(MAX_OUTBOX_BYTES));
-      const framesBefore = inputFrameSizes(sock).length;
+      const data = paste(2 * MiB);
+      conn.sendBinary(data);
+      conn.sendBinary(enc.encode("\r"));
+
+      sock.fireMessage(ackOnlyFrame(MiB));
+      sock.fireMessage(ackOnlyFrame(2 * MiB));
+
+      const sent = inputBytes(sock);
+      expect(sent.length).toBe(2 * MiB + 1);
+      expect(sent.subarray(0, 2 * MiB)).toEqual(data);
+      expect(sent[2 * MiB]).toBe(0x0d);
+    });
+
+    it("cancel drops the unsent rest, still sends the tail, and keeps keys typed after", () => {
+      const sock = openSession();
+      sock.fireMessage(modesFrame());
+      const data = paste(3 * MiB);
+      conn.sendBinary(pasteInput(data, enc.encode("\x1b[201~")));
+      conn.sendBinary(enc.encode("k"));
+
+      expect(conn.cancelPendingInput()).toBe(true);
+      sock.fireMessage(ackOnlyFrame(MAX_OUTBOX_BYTES));
+
+      const sent = inputBytes(sock);
+      expect(sent.subarray(0, MAX_OUTBOX_BYTES)).toEqual(data.subarray(0, MAX_OUTBOX_BYTES));
+      expect(new TextDecoder().decode(sent.subarray(MAX_OUTBOX_BYTES))).toBe("\x1b[201~k");
+      expect(conn.cancelPendingInput()).toBe(false);
+    });
+
+    it("keeps a held session's input off the wire, in order, until the last hold is released", () => {
+      const sock = openSession();
+      sock.fireMessage(modesFrame());
+      const releaseA = conn.holdInput();
+      const releaseB = conn.holdInput();
+      conn.sendBinary(enc.encode("a"));
+      conn.sendBinary({ size: 1, encode: () => ({ body: enc.encode("b") }) });
+
+      releaseA();
+      releaseA(); // a second call does nothing
+      expect(inputSent(sock)).toEqual([]);
+      expect(conn.pendingInputBytes()).toBe(2);
+
+      releaseB();
+      expect(inputSent(sock)).toEqual(["a", "b"]);
+    });
+
+    it("holds only the session it was taken on", () => {
+      const sockA = openSession();
+      sockA.fireMessage(modesFrame());
+      const release = conn.holdInput();
+      conn.sendBinary(enc.encode("for A"));
+      const sockB = openSession();
+      sockB.fireMessage(modesFrame());
+      conn.sendBinary(enc.encode("for B"));
+      expect(inputSent(sockB)).toEqual(["for B"]);
+
+      release();
+      expect(inputSent(sockB)).toEqual(["for B"]);
+      conn.setSession(`outbox-${String(session - 1)}`);
+      const back = sockets[sockets.length - 1]!;
+      back.fireOpen();
+      back.fireMessage(resumeAckFrame({ received: 0 }));
+      expect(inputSent(back)).toEqual(["for A"]);
+    });
+
+    it("cuts a cancelable paste only between UTF-8 characters", () => {
+      const sock = openSession();
+      sock.fireMessage(modesFrame());
+      // 3-byte characters: 1 MiB is not a multiple of 3, so the window ends mid-character.
+      conn.sendBinary(pasteInput(enc.encode("€".repeat(MiB))));
+
+      conn.cancelPendingInput();
+
+      const sent = inputBytes(sock);
+      expect(sent.length).toBe(MAX_OUTBOX_BYTES - (MAX_OUTBOX_BYTES % 3));
+      expect(new TextDecoder("utf-8", { fatal: true }).decode(sent)).toBe(
+        "€".repeat(sent.length / 3),
+      );
+    });
+
+    it("delivers a cancelable entry that is not UTF-8 whole, cut at the window", () => {
+      const sock = openSession();
+      sock.fireMessage(modesFrame());
+      const data = new Uint8Array(2 * MiB).fill(0x80);
+      conn.sendBinary(pasteInput(data));
+      expect(inputBytes(sock).length).toBe(MAX_OUTBOX_BYTES);
+
+      sock.fireMessage(ackOnlyFrame(MAX_OUTBOX_BYTES));
+      sock.fireMessage(ackOnlyFrame(2 * MiB));
+
+      expect(inputBytes(sock)).toEqual(data);
+      expect(conn.pendingInputBytes()).toBe(0);
+    });
+
+    it("resends the in-flight bytes once after a reconnect mid-paste, then continues", () => {
+      const first = openSession();
+      const data = paste(2 * MiB);
+      conn.sendBinary(data);
+      first.fireMessage(ackOnlyFrame(MiB / 2));
+
+      const next = reconnectAcking(MiB / 2);
+      next.fireMessage(ackOnlyFrame((3 * MiB) / 2));
+
+      expect(inputBytes(next)).toEqual(data.subarray(MiB / 2));
+    });
+
+    it("sends a key typed before the resumeAck once, after the ack", () => {
+      openSession();
+      conn.reconnectNow();
+      const sock = sockets[sockets.length - 1]!;
+      sock.fireOpen();
+      conn.sendBinary(enc.encode("x"));
+
+      expect(inputSent(sock)).toEqual([]);
+      sock.fireMessage(resumeAckFrame({ received: 0 }));
+
+      expect(inputSent(sock)).toEqual(["x"]);
+    });
+
+    it("claims no sent bytes for input typed before the first socket, and delivers it", () => {
+      session++;
+      conn.setSession(`outbox-${String(session)}`);
+      conn.sendBinary(enc.encode("early"));
+      const sock = sockets[sockets.length - 1]!;
+      sock.fireOpen();
+
+      expect(controlsOfType(sock, "resume")[0]?.["sentBytes"]).toBe(0);
+      sock.fireMessage(resumeAckFrame({ received: 0 }));
+      expect(inputSent(sock)).toEqual(["early"]);
+    });
+
+    it("keeps unsent input across a lost ledger", () => {
+      const first = openSession();
+      conn.sendBinary(paste(MiB + 3));
+
+      conn.reconnectNow();
+      const next = sockets[sockets.length - 1]!;
+      next.fireOpen();
+      next.fireMessage(resumeAckFrame({ received: 0, ledgerLost: true }));
+
+      expect(serverRestart).toHaveBeenCalledTimes(1);
+      expect(inputBytes(next)).toEqual(paste(MiB + 3).subarray(MiB));
+      expect(inputBytes(first).length).toBe(MiB);
+    });
+
+    it("reports the pending count at each zero edge and at most every 250 ms between", () => {
+      const sock = openSession();
+      conn.sendBinary(paste(3 * MiB));
+      expect(pendingReports.mock.calls).toEqual([[2 * MiB, false]]);
+
+      sock.fireMessage(ackOnlyFrame(MiB));
+      expect(pendingReports).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(250);
+      expect(pendingReports.mock.calls.at(-1)).toEqual([MiB, false]);
+
+      sock.fireMessage(ackOnlyFrame(2 * MiB));
+      expect(pendingReports.mock.calls.at(-1)).toEqual([0, false]);
+    });
+
+    it("reports another session's pending count at once on a switch", () => {
+      openSession();
+      const first = conn.currentSessionId();
+      conn.sendBinary(paste(MiB + 5));
+      openSession();
+      conn.sendBinary(paste(MiB + 7));
+      expect(pendingReports.mock.calls).toEqual([
+        [5, false],
+        [0, false],
+        [7, false],
+      ]);
+
+      conn.setSession(first);
+
+      expect(pendingReports.mock.calls.at(-1)).toEqual([5, false]);
+    });
+
+    it("reports whether a cancel would drop part of the pending input", () => {
+      const sock = openSession();
+      sock.fireMessage(modesFrame());
+      conn.sendBinary(pasteInput(paste(2 * MiB), enc.encode("\x1b[201~")));
+      expect(pendingReports.mock.calls).toEqual([[MiB + 6, true]]);
+
+      conn.sendBinary(enc.encode("k"));
+      conn.cancelPendingInput();
+      expect(pendingReports.mock.calls.at(-1)).toEqual([7, false]);
+
+      sock.fireMessage(ackOnlyFrame(MiB));
+      expect(pendingReports.mock.calls.at(-1)).toEqual([0, false]);
+    });
+
+    it("refuses input only once disposed", () => {
+      openSession();
+      conn.dispose();
 
       expect(conn.sendBinary(enc.encode("x"))).toBe(false);
-      expect(outboxFull).toHaveBeenCalledTimes(1);
-      // Refused means refused on the wire too: a byte the outbox will not hold
-      // must not reach the server, or the server's ledger runs ahead of ours
-      // and every later ack trims bytes we never had confirmed.
-      expect(inputFrameSizes(sock).length).toBe(framesBefore);
+    });
+  });
+
+  describe("input whose bytes depend on the modes", () => {
+    /** A key whose bytes follow DEC 2004, so the modes it was encoded under show. */
+    function modeKey(): { encode: ReturnType<typeof vi.fn<DeferredInput["encode"]>> } {
+      return {
+        encode: vi.fn<DeferredInput["encode"]>(() => ({
+          body: enc.encode(modes.isBracketedPaste() ? "B" : "p"),
+        })),
+      };
+    }
+
+    it("encodes it once, under the modes frame's values, and sends what follows it after", () => {
+      const sock = openSession();
+      const key = modeKey();
+      conn.sendBinary(key);
+      conn.sendBinary(enc.encode("k"));
+
+      expect(key.encode).not.toHaveBeenCalled();
+      expect(inputSent(sock)).toEqual([]);
+      sock.fireMessage(modesFrame({ bracketedPaste: true }));
+
+      expect(key.encode).toHaveBeenCalledTimes(1);
+      expect(inputSent(sock)).toEqual(["B", "k"]);
+    });
+
+    it("drops input accepted while the link was down when the resumeAck reports a new process", () => {
+      const first = openSession();
+      first.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 111 }));
+      first.fireMessage(modesFrame());
+      conn.reconnectNow();
+      const key = modeKey();
+      conn.sendBinary(key);
+      conn.sendBinary(pasteInput(enc.encode("make deploy\r")));
+
+      const next = sockets[sockets.length - 1]!;
+      next.fireOpen();
+      next.fireMessage(resumeAckFrame({ received: 0, serverEpoch: 999 }));
+      next.fireMessage(modesFrame());
+
+      expect(serverRestart).toHaveBeenCalledTimes(1);
+      expect(key.encode).not.toHaveBeenCalled();
+      expect(inputSent(next)).toEqual([]);
+      expect(conn.pendingInputBytes()).toBe(0);
+    });
+
+    it("cancels a paste still waiting for its modes whole, and keeps the keys after it", () => {
+      const sock = openSession();
+      const encode = vi.fn(() => ({
+        body: enc.encode("\x1b[200~x"),
+        tail: enc.encode("\x1b[201~"),
+      }));
+      conn.sendBinary({ paste: true, size: 1, encode });
+      conn.sendBinary(enc.encode("k"));
+
+      expect(conn.cancelPendingInput()).toBe(true);
+      sock.fireMessage(modesFrame());
+
+      expect(encode).not.toHaveBeenCalled();
+      expect(inputSent(sock)).toEqual(["k"]);
+    });
+
+    it("reports a paste waiting for its modes as cancelable, at its declared size", () => {
+      openSession();
+      conn.sendBinary(pasteInput(paste(5000)));
+
+      expect(pendingReports.mock.calls).toEqual([[5000, true]]);
+      expect(conn.pendingInputBytes()).toBe(5000);
+    });
+
+    it("keeps it with its session across a switch and encodes it under that session's modes", () => {
+      const a = openSession();
+      const aId = conn.currentSessionId();
+      const key = modeKey();
+      conn.sendBinary(key);
+      const b = openSession();
+      b.fireMessage(modesFrame({ bracketedPaste: true }));
+
+      expect(key.encode).not.toHaveBeenCalled();
+      conn.setSession(aId);
+      const a2 = sockets[sockets.length - 1]!;
+      a2.fireOpen();
+      a2.fireMessage(resumeAckFrame({ received: 0 }));
+      a2.fireMessage(modesFrame());
+
+      expect(inputSent(a)).toEqual([]);
+      expect(inputSent(b)).toEqual([]);
+      expect(inputSent(a2)).toEqual(["p"]);
+    });
+
+    it("sends nothing for an empty body, its tail included", () => {
+      const sock = openSession();
+      sock.fireMessage(modesFrame());
+      conn.sendBinary(pasteInput(new Uint8Array(0), enc.encode("\x1b[201~")));
+      conn.sendBinary(enc.encode("k"));
+
+      expect(inputSent(sock)).toEqual(["k"]);
+    });
+
+    it("drops an input whose encoder throws and sends the rest", () => {
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      const sock = openSession();
+      sock.fireMessage(modesFrame());
+      conn.sendBinary({
+        encode: () => {
+          throw new Error("boom");
+        },
+      });
+      conn.sendBinary(enc.encode("k"));
+
+      expect(inputSent(sock)).toEqual(["k"]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      warn.mockRestore();
+    });
+
+    it("leaves input queued by an encoder's consumer to the same pass, in order", () => {
+      const sock = openSession();
+      conn.sendBinary({
+        encode: () => {
+          conn.sendBinary(enc.encode("2"));
+          return { body: enc.encode("1") };
+        },
+      });
+      sock.fireMessage(modesFrame());
+
+      expect(inputSent(sock)).toEqual(["1", "2"]);
+    });
+
+    it("encodes once an input whose encoder cancels an encoded paste queued ahead of it", () => {
+      const sock = openSession();
+      conn.sendBinary(pasteInput(enc.encode("rm -rf build\r")));
+      const encode = vi.fn<DeferredInput["encode"]>(() => {
+        conn.cancelPendingInput();
+        return { body: enc.encode("\x03") };
+      });
+      conn.sendBinary({ encode });
+      sock.fireMessage(modesFrame());
+      conn.sendBinary(enc.encode("k"));
+
+      expect(encode).toHaveBeenCalledTimes(1);
+      expect(inputSent(sock)).toEqual(["\x03", "k"]);
+    });
+
+    it("drops a paste whose own encoder cancels it", () => {
+      const sock = openSession();
+      conn.sendBinary({
+        paste: true,
+        size: 4,
+        encode: () => {
+          conn.cancelPendingInput();
+          return { body: enc.encode("text"), tail: enc.encode("\x1b[201~") };
+        },
+      });
+      conn.sendBinary(enc.encode("k"));
+      sock.fireMessage(modesFrame());
+
+      expect(inputSent(sock)).toEqual(["k"]);
+      expect(conn.pendingInputBytes()).toBe(0);
+    });
+
+    it("calls no later encoder once an encoder forgets the shown session", () => {
+      const sock = openSession();
+      const id = conn.currentSessionId();
+      conn.sendBinary({
+        encode: () => {
+          conn.forgetSession(id);
+          return { body: enc.encode("1") };
+        },
+      });
+      const later = modeKey();
+      conn.sendBinary(later);
+      sock.fireMessage(modesFrame());
+
+      expect(later.encode).not.toHaveBeenCalled();
+      expect(inputSent(sock)).toEqual([]);
+    });
+
+    it("keeps an encoder's result for its session when the encoder switches away, and encodes the rest there", () => {
+      const a = openSession();
+      const aId = conn.currentSessionId();
+      conn.sendBinary({
+        encode: () => {
+          conn.setSession("outbox-elsewhere");
+          return { body: enc.encode("1") };
+        },
+      });
+      const later = modeKey();
+      conn.sendBinary(later);
+      a.fireMessage(modesFrame({ bracketedPaste: true }));
+
+      expect(later.encode).not.toHaveBeenCalled();
+      conn.setSession(aId);
+      const a2 = sockets[sockets.length - 1]!;
+      a2.fireOpen();
+      a2.fireMessage(resumeAckFrame({ received: 0 }));
+      a2.fireMessage(modesFrame());
+
+      expect(later.encode).toHaveBeenCalledTimes(1);
+      expect(inputSent(a2)).toEqual(["1", "p"]);
+    });
+
+    it("sends nothing and calls no later encoder once an encoder disposes the connection", () => {
+      const sock = openSession();
+      conn.sendBinary({
+        encode: () => {
+          conn.dispose();
+          return { body: enc.encode("1") };
+        },
+      });
+      const later = modeKey();
+      conn.sendBinary(later);
+      sock.fireMessage(modesFrame());
+
+      expect(later.encode).not.toHaveBeenCalled();
+      expect(inputSent(sock)).toEqual([]);
     });
   });
 
@@ -322,6 +787,17 @@ describe("connection: the outbox and the acked-byte window", () => {
       conn.sendBinary(new Uint8Array([0x00, 0x00]));
 
       expect(inputFrameSizes(sock)).toEqual([1, 1]);
+    });
+
+    it("splits a NUL that a message-size cut leaves at the front of the next message", () => {
+      const sock = openSession({ version: 3 });
+      const data = new Uint8Array(limits.maxInputMessageBytes + 2);
+      data.fill(0x61);
+      data[limits.maxInputMessageBytes] = 0x00;
+
+      conn.sendBinary(data);
+
+      expect(inputFrameSizes(sock)).toEqual([limits.maxInputMessageBytes, 1, 1]);
     });
 
     it("sends the remainder after a leading NUL as one frame", () => {

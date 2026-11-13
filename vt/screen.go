@@ -2,20 +2,15 @@
 // is a rows by cols cell grid that the program's output updates one byte at a
 // time, and lines that scroll off the top are captured as scrollback.
 //
-// [New] builds a Screen and [Screen.Write] feeds it PTY output. Its accessors
-// read the grid, the cursor, the modes, the title and the per-row style runs
-// ([WireRun]) that the browser renderer draws.
+// [New] builds a Screen and [Screen.Write] feeds it PTY output; its accessors
+// read the grid, cursor, modes, title and per-row style runs ([WireRun]).
 //
-// Supported OSC sequences: the window and icon titles (OSC 0, 1 and 2), the
-// palette and special colors (OSC 4, 5, 104 and 105), hyperlinks (OSC 8),
-// desktop notifications and ConEmu progress (OSC 9), the dynamic colors
-// answered from the configured theme (OSC 10 to 19 and 110 to 119), the
-// clipboard (OSC 52) and program status (OSC 7501, [Screen.ProgramStatus]).
-// Of OSC 133, only the prompt-start mark A acts: it ends the unfinished
-// OSC 7501 records. Other OSC numbers, such as 7 and 777, are read and
-// ignored. The OSC 52 read-back and the DECRQCRA checksum answer only when
-// [Screen.AllowScreenReport] is on, because both write into the program's
-// input. The features left out on purpose are listed in docs/non-goals.md.
+// Supported OSC sequences: titles (0, 1, 2), palette and special colors (4, 5,
+// 104, 105), hyperlinks (8), notifications and progress (9), theme colors (10
+// to 19, 110 to 119), the clipboard (52) and program status (7501). Of OSC 133
+// only mark A acts, ending unfinished OSC 7501 records; others are ignored. The
+// OSC 52 read-back and DECRQCRA answer only with [Screen.AllowScreenReport] on.
+// docs/non-goals.md lists what is left out on purpose.
 //
 // The screen buffer derives from github.com/tonistiigi/vt100 (MIT license).
 package vt
@@ -49,26 +44,24 @@ type Screen struct {
 	// maps it (see NotificationSeq for edge detection).
 	Notification string
 	tabStops     []bool
-	Drained      [][]WireRun
+	// Drained holds the main-screen lines scrolled off since the last
+	// DrainScrollback, all of them main-screen history: alternate-screen rows
+	// never enter it, and only a scrollback erase (ED 3, RIS) drops it.
+	Drained [][]WireRun
 	// drainedWrapped[i] is the wrapped flag Drained[i] carried as it left the
 	// screen: whether it soft-wraps from the line drained before it.
 	drainedWrapped []bool
 	Cells          [][]Cell
-	// wrapped[y] marks row y as a soft-wrap CONTINUATION of row y-1 (autowrap,
-	// not a hard newline) — the row-chain signal the URL autolinker joins rows
-	// with (wire.go stampAutolinks). It travels with row IDENTITY: every site
-	// that shifts whole rows (scroll, drain, IL/DL, resize, alt switch) mirrors
-	// its move here; a row replaced wholesale gets false. In-place content
-	// edits deliberately leave it stale-safe: a stale true only fails a later
-	// regex match, while a missing true would break a real wrapped URL.
-	// Cleared with history on ED2/ED3/RIS.
+	// wrapped[y] marks row y as a soft-wrap continuation of row y-1, for
+	// stampAutolinks. Every site that moves whole rows must move it too. In-place
+	// edits leave it alone: a stale true only fails a later URL match.
 	wrapped []bool
 	// drainTail retains the text of the most recently drained (scrolled-off)
 	// rows while the row now at the top of the screen still continues them,
 	// so a URL chain that straddles the scrollback boundary can still be
 	// joined when stamping live rows and later drains. nil when the top row
 	// starts its own chain. Bounded to maxAutolinkRows-1 entries. Main screen
-	// only (alt drains are discarded by the flush builder).
+	// only, like Drained.
 	drainTail []string
 	// pendingClipboard holds an OSC 52 copy payload queued for the consumer;
 	// drained atomically via TakeClipboard.
@@ -102,19 +95,18 @@ type Screen struct {
 	// 4 paused). Set only by an OSC 9;4 sequence; a program that never emits
 	// one leaves it at -1.
 	Progress int
-	// ProgressValue holds the percentage carried by the last OSC 9;4 progress
-	// sequence: -1 when absent or unknown (no sequence seen yet, a state that
-	// does not carry one — 0 clear and 3 indeterminate — or state 2 in its
-	// indeterminate-error form), else 0-100 (a numeric value outside that range
-	// is clamped into it). iTerm2 states 1 (value) and 4 (warning) require it;
-	// state 2 may carry it. -1 is deliberately distinct from 0: a session that
-	// has reported no percentage is not a session at 0%.
+	// ProgressValue is the last OSC 9;4 percentage, clamped to 0-100, or -1
+	// when the state carried none: no percentage is not 0%.
 	ProgressValue int
 	// NotificationSeq rises each time a new OSC 9 notification is captured,
 	// so a reader (the status layer) detects a fresh notification even when the
 	// message text repeats. Starts at 0 (no notification seen). It shares its
 	// counter with ProgramReportSeq.
 	NotificationSeq uint64
+	// FocusEnableSeq counts DEC 1004 off-to-on transitions, so a reader that
+	// samples FocusReporting once per Write still sees a disable and re-enable
+	// inside it.
+	FocusEnableSeq uint64
 	// minContrast is the minimum WCAG contrast ratio enforced between a run's
 	// text and its background (contrast.go). 1 disables the floor and is the
 	// default; WithMinimumContrast raises it. Sits between two 8-byte-aligned
@@ -288,13 +280,9 @@ const MinimumContrastOff = 1.0
 // black until it reaches it (contrast.go); backgrounds and a DEFAULT foreground
 // (owned by the client's CSS) are never changed.
 //
-// Clamped to 1..21. 1 is off and the default, matching xterm.js's
-// minimumContrastRatio, so an engine upgrade never silently recolors an
-// existing consumer. 4.5 is the WCAG AA floor for body text (also VS Code's
-// integrated-terminal default); pass it when your client renders on a dark
-// background and your users read output they do not control. Use this in
-// addition to, not instead of, a suitable palette: it covers an application's
-// OSC 4 overrides, the 256-color cube's dark corners, and blind truecolor.
+// Clamped to 1..21; 1, the default, is off, as in xterm.js. 4.5 is the WCAG
+// AA floor for body text. It complements a suitable palette, covering OSC 4
+// overrides, the 256-color cube's dark corners and truecolor.
 func WithMinimumContrast(ratio float64) Option {
 	return func(s *Screen) {
 		if math.IsNaN(ratio) {
@@ -401,13 +389,8 @@ func (s *Screen) MainScreenText() (rows []string, wrapped []bool) {
 	return rows, wrapped
 }
 
-// HoldFlush requests that the flush loop skip flushing the screen until
-// the given time. Used to hide partial state during atomic batches —
-// the caller is CSI ?2026h ("synchronized output mode"). Subsequent calls
-// extend the hold but never shorten it. (The resize/SIGWINCH redraw window
-// is hidden by the terminal handler's own settle hold, not this one: this
-// hold is cleared by the child's next CSI ?2026l, which would expose the
-// rest of a bracketed multi-chunk redraw.)
+// HoldFlush asks the flush loop to skip flushing until the given time, for
+// DEC 2026 synchronized output. A later call extends the hold, never shortens it.
 func (s *Screen) HoldFlush(until time.Time) {
 	if until.After(s.FlushHoldUntil) {
 		s.FlushHoldUntil = until
@@ -460,13 +443,10 @@ func (s *Screen) Resize(rows, cols int) {
 }
 
 // resizeHeight adjusts the buffer to the new row count, preserving content.
-// Growth is mode-aware. On the alt screen (vim, htop) empty rows go on TOP and
-// the cursor moves down with the content, so the screen stays pinned to the
-// bottom until the app's SIGWINCH repaint lands; appending below would show a
-// blank gap above the input bar. On the normal screen (a shell) rows go at the
-// BOTTOM, cursor unmoved: a shell does not repaint on SIGWINCH, so prepending
-// would strand its prompt mid-screen. The client trims trailing empty rows
-// (render.ts) in both modes. Shrinking drops rows from the bottom.
+// On the alt screen, growth adds rows on top and moves the cursor with the
+// content until the app's SIGWINCH repaint; on the main screen it adds them
+// below, since a shell does not repaint on resize. Shrinking drops rows from
+// the bottom.
 func (s *Screen) resizeHeight(rows int) {
 	if rows > s.Height {
 		grow := rows - s.Height
@@ -529,12 +509,8 @@ func (s *Screen) resizeWidth(cols int) {
 // while in alt-screen mode, so exiting alt-screen restores correctly at the new
 // size. rows and cols are the already-clamped target dimensions.
 //
-// Returns early when the saved buffer already has these dimensions, avoiding a
-// same-size reconnect or second-viewer attach copying the whole saved screen
-// for a byte-identical result (25 allocations on a 24-row screen otherwise).
-// The check compares the SAVED buffer's own dimensions, not s.Height/s.Width:
-// the live screen has already been resized by the time this runs, so
-// comparing against it would skip the rebuild exactly when it is needed.
+// The same-size early return compares the saved buffer's own dimensions:
+// s.Height and s.Width are already the new size.
 func (s *Screen) resizeSavedMain(rows, cols int) {
 	if s.savedMainCells == nil {
 		return
@@ -754,13 +730,16 @@ func (s *Screen) markWrapContinuation() {
 	}
 }
 
-// drainTopRow commits row 0 to the pending scrollback drain (stamping any
-// detected URLs first, chain-joined across the drain boundary) and maintains
-// drainTail: when the row about to become the new top row soft-continues the
-// drained one, the drained row's text is retained so the chain can still be
-// joined; otherwise the retained tail is dropped. Alt-screen drains are
-// discarded by the flush builder, so the tail only tracks the main screen.
+// drainTopRow commits main-screen row 0 to the pending scrollback drain
+// (stamping any detected URLs first, chain-joined across the drain boundary)
+// and maintains drainTail: when the row about to become the new top row
+// soft-continues the drained one, the drained row's text is retained so the
+// chain can still be joined; otherwise the retained tail is dropped. An
+// alternate-screen row scrolls away with no history, as in xterm.
 func (s *Screen) drainTopRow() {
+	if s.InAltScreen {
+		return
+	}
 	// Row 0's trailing blanks are content, not padding, when row 1 soft-wraps
 	// from it — the same flag that decides whether the drain tail is retained
 	// for chain joining, read once for both.
@@ -768,9 +747,6 @@ func (s *Screen) drainTopRow() {
 	runs := s.stampAutolinks(0, s.cellsToRuns(s.Cells[0], continuesBelow))
 	s.Drained = append(s.Drained, runs)
 	s.drainedWrapped = append(s.drainedWrapped, len(s.wrapped) > 0 && s.wrapped[0])
-	if s.InAltScreen {
-		return
-	}
 	if continuesBelow {
 		s.drainTail = append(s.drainTail, rowMatchText(s.Cells[0]))
 		if len(s.drainTail) > maxAutolinkRows-1 {
@@ -855,25 +831,16 @@ func (s *Screen) blankCols(y, x1, x2 int) {
 }
 
 // enterAltScreen saves the main-screen state and switches to the alternate
-// buffer. The three DECSET modes differ (matching xterm):
-//   - 47 / 1047: the cursor and SGR are shared with the main screen (not moved
-//     or reset); the alt buffer is NOT cleared on entry, and mode 47 preserves
-//     it across switches.
-//   - 1049: saves the cursor (restored on exit), clears the alt buffer, and
-//     homes the cursor in it.
-//
-// Idempotent: a second set while already in alt is a no-op.
+// buffer, as xterm does: 47 and 1047 share the cursor and SGR and keep the alt
+// buffer, while 1049 saves the cursor, clears the alt buffer and homes. A set
+// while already in alt is a no-op.
 func (s *Screen) enterAltScreen(mode int) {
 	if s.InAltScreen {
 		return
 	}
-	// End any open hyperlink before the switch. The pen's link belongs to the
-	// screen the application was drawing on, so carrying it across would attach
-	// that href to unrelated alt-screen text; ghostty ends hyperlink state on
-	// every screen switch for the same reason and asserts the new screen starts
-	// with none. Deliberately NOT part of savedMainStyle: an application that
-	// wants the link back re-opens it, which is one sequence, while restoring it
-	// would resurrect a link whose close may have been written on the alt screen.
+	// An open hyperlink belongs to the screen it was drawn on, as in ghostty,
+	// and is not restored with savedMainStyle: its close may land on the alt
+	// screen.
 	s.hyperlink = ""
 	// Save main-screen cells (deep copy — the alt buffer mutates in place) and
 	// the main cursor/scroll region for restore on exit.

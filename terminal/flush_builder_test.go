@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bytes"
 	"slices"
 	"strings"
 	"testing"
@@ -13,20 +14,9 @@ import (
 // about the frame contents, not its fan-out.
 var noClients = map[*websocket.Conn]uint64{}
 
-// TestBuild_CursorOnlyMoveAddsRowToChanged drives the bug from the
-// "cursor visually doesn't move on left/right arrow or space-over-space"
-// report:
-//
-//   - First Build is a full repaint (all rows in changed) — establishes
-//     the prev cache.
-//   - Second Build with no PTY input at all: must return nil.
-//   - Third Build after CSI D (cursor back): row content unchanged but
-//     cursor moved, so the cursor row must appear in changed so the
-//     wire frame carries its payload and the client can repaint the
-//     inline cursor span at the new column. Without this fix the
-//     server emits a non-nil frame but flushLoop drops the screen
-//     payload (it gates on len(changed) > 0) and the client never
-//     sees the move.
+// TestBuild_CursorOnlyMoveAddsRowToChanged pins that a cursor move with no
+// content change puts the cursor row in changed: the screen payload needs a
+// changed row, or the client never sees the move.
 func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 	screen := vt.New(10, 40)
 	// Establish some content so the cursor is on a row that has runs.
@@ -36,7 +26,7 @@ func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 	b := &flushFrameBuilder{}
 
 	// First frame: full repaint baseline.
-	frame := b.Build(screen, true, noClients, 0)
+	frame := b.Build(screen, true, noClients, nil, 0)
 	if frame == nil {
 		t.Fatalf("first Build returned nil; expected full repaint")
 	}
@@ -49,7 +39,7 @@ func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 	}
 
 	// Second frame with no input: nothing to send.
-	if frame := b.Build(screen, true, noClients, 0); frame != nil {
+	if frame := b.Build(screen, true, noClients, nil, 0); frame != nil {
 		t.Fatalf("idle Build returned non-nil frame: changed=%v", frame.changed)
 	}
 
@@ -63,7 +53,7 @@ func TestBuild_CursorOnlyMoveAddsRowToChanged(t *testing.T) {
 		t.Fatalf("CSI D did not move cursor: still at row=%d col=%d", curRow, curCol)
 	}
 
-	frame = b.Build(screen, true, noClients, 0)
+	frame = b.Build(screen, true, noClients, nil, 0)
 	if frame == nil {
 		t.Fatalf("post-cursor-move Build returned nil; expected a frame so the client can repaint")
 	}
@@ -90,7 +80,7 @@ func TestBuild_CursorBetweenRowsTouchesBothRows(t *testing.T) {
 		t.Fatalf("screen write: %v", err)
 	}
 	b := &flushFrameBuilder{}
-	if frame := b.Build(screen, true, noClients, 0); frame == nil {
+	if frame := b.Build(screen, true, noClients, nil, 0); frame == nil {
 		t.Fatal("baseline Build returned nil")
 	}
 	prevRow, _ := screen.CursorPos()
@@ -107,7 +97,7 @@ func TestBuild_CursorBetweenRowsTouchesBothRows(t *testing.T) {
 		t.Fatalf("post-CUP cursor row = %d, want 7", curRow)
 	}
 
-	frame := b.Build(screen, true, noClients, 0)
+	frame := b.Build(screen, true, noClients, nil, 0)
 	if frame == nil {
 		t.Fatal("inter-row cursor move Build returned nil")
 	}
@@ -131,7 +121,7 @@ func TestBuild_scrollbackProducesScrollLines(t *testing.T) {
 	}
 
 	b := &flushFrameBuilder{}
-	frame := b.Build(screen, true, noClients, 0)
+	frame := b.Build(screen, true, noClients, nil, 0)
 	if frame == nil {
 		t.Fatalf("Build returned nil; expected a full-repaint baseline frame")
 	}
@@ -140,26 +130,24 @@ func TestBuild_scrollbackProducesScrollLines(t *testing.T) {
 	}
 }
 
-// TestBuildTitlePayload_changeDetection verifies buildTitlePayload emits a
-// frame on first announce and whenever the title changes, and suppresses
-// (returns nil) when the title is unchanged.
-func TestBuildTitlePayload_changeDetection(t *testing.T) {
+// TestRefreshAnnouncement_titleVersion pins that the title's version moves
+// when, and only when, the title does.
+func TestRefreshAnnouncement_titleVersion(t *testing.T) {
 	screen := vt.New(5, 20)
 	b := &flushFrameBuilder{}
 
 	screen.Title = "first"
-	// First call: not yet announced -> must emit a payload.
-	if got := b.buildTitlePayload(screen); len(got) == 0 {
-		t.Fatalf("first buildTitlePayload = empty, want a title frame")
+	first := b.refreshAnnouncement(screen)
+	if first.titleVer == 0 || !bytes.Equal(first.title, encodeTitleMsg("first")) {
+		t.Fatalf("first announcement title = %q version %d, want the title frame at a nonzero version", first.title, first.titleVer)
 	}
-	// Same title, now announced -> suppressed (nil).
-	if got := b.buildTitlePayload(screen); len(got) != 0 {
-		t.Errorf("unchanged-title buildTitlePayload = %d bytes, want 0 (suppress when title unchanged)", len(got))
+	if again := b.refreshAnnouncement(screen); again.titleVer != first.titleVer {
+		t.Errorf("unchanged title moved the version %d -> %d", first.titleVer, again.titleVer)
 	}
-	// Changed title -> emit again.
 	screen.Title = "second"
-	if got := b.buildTitlePayload(screen); len(got) == 0 {
-		t.Errorf("changed-title buildTitlePayload = empty, want a title frame")
+	changed := b.refreshAnnouncement(screen)
+	if changed.titleVer == first.titleVer || !bytes.Equal(changed.title, encodeTitleMsg("second")) {
+		t.Errorf("changed title = %q version %d, want the new title at a new version", changed.title, changed.titleVer)
 	}
 }
 
@@ -193,7 +181,7 @@ func TestBuild_AbsoluteIndexIntegrity(t *testing.T) {
 
 	apply := func() {
 		committedBefore := ring.Committed()
-		frame := b.Build(screen, true, noClients, committedBefore)
+		frame := b.Build(screen, true, noClients, nil, committedBefore)
 		if frame == nil {
 			return
 		}
@@ -279,7 +267,7 @@ func TestBuild_bellOnlyStillEmitsFrame(t *testing.T) {
 	b := &flushFrameBuilder{}
 
 	// Prime the prev-window cache with a full-repaint baseline.
-	if frame := b.Build(screen, true, noClients, 0); frame == nil {
+	if frame := b.Build(screen, true, noClients, nil, 0); frame == nil {
 		t.Fatal("baseline Build returned nil; expected full repaint")
 	}
 
@@ -288,7 +276,7 @@ func TestBuild_bellOnlyStillEmitsFrame(t *testing.T) {
 		t.Fatalf("write BEL: %v", err)
 	}
 
-	frame := b.Build(screen, true, noClients, 0)
+	frame := b.Build(screen, true, noClients, nil, 0)
 	if frame == nil {
 		t.Fatal("bell-only Build returned nil; the bell fold must emit a frame so the bell reaches the client")
 	}
@@ -301,78 +289,97 @@ func TestBuild_bellOnlyStillEmitsFrame(t *testing.T) {
 	}
 }
 
-// TestBuildModesPayload_kittyKeyboardFlag closes the flag->wire loop: enabling
-// the kitty disambiguate flag on the screen (CSI > 1 u) must make
-// buildModesPayload emit a modes frame whose trailing kbdFlags byte is 1, and an
-// unchanged flag afterwards must be suppressed. (The wire->client half is proven
-// by the cross-language golden test.)
-func TestBuildModesPayload_kittyKeyboardFlag(t *testing.T) {
+// TestRefreshAnnouncement_kittyKeyboardFlag closes the flag->wire loop:
+// enabling the kitty disambiguate flag (CSI > 1 u) moves the modes version and
+// the modes frame's kbdFlags byte becomes 1; an unchanged screen keeps the
+// version. The wire->client half is the cross-language golden test.
+func TestRefreshAnnouncement_kittyKeyboardFlag(t *testing.T) {
 	screen := vt.New(5, 20)
 	b := &flushFrameBuilder{}
 
-	// First announce (modes not yet announced) -> emits; kbdFlags byte (index
-	// 12 = type1 + ack8 + flags1 + mouseMode2) starts at 0.
-	first := b.buildModesPayload(screen)
-	if len(first) < 13 {
-		t.Fatalf("first buildModesPayload = %d bytes, want >= 13 (incl. kbdFlags)", len(first))
+	// kbdFlags is byte 12: type 1 + ack 8 + flags 1 + mouseMode 2.
+	first := b.refreshAnnouncement(screen)
+	if len(first.modes) < 13 || first.modesVer == 0 {
+		t.Fatalf("first modes frame = %d bytes at version %d, want >= 13 bytes at a nonzero version", len(first.modes), first.modesVer)
 	}
-	if first[12] != 0 {
-		t.Errorf("initial kbdFlags byte = %d, want 0", first[12])
+	if first.modes[12] != 0 {
+		t.Errorf("initial kbdFlags byte = %d, want 0", first.modes[12])
 	}
-
-	// App enables the disambiguate flag; the next payload carries kbdFlags = 1.
 	if _, err := screen.Write([]byte("\x1b[>1u")); err != nil {
 		t.Fatalf("screen write: %v", err)
 	}
-	changed := b.buildModesPayload(screen)
-	if len(changed) < 13 {
-		t.Fatalf("after CSI >1u buildModesPayload = %d bytes, want a frame", len(changed))
+	changed := b.refreshAnnouncement(screen)
+	if changed.modesVer == first.modesVer {
+		t.Errorf("CSI >1u left the modes version at %d, want it moved", first.modesVer)
 	}
-	if changed[12] != 1 {
-		t.Errorf("kbdFlags byte after CSI >1u = %d, want 1", changed[12])
+	if len(changed.modes) < 13 || changed.modes[12] != 1 {
+		t.Errorf("modes frame after CSI >1u = %v, want kbdFlags byte 1", changed.modes)
 	}
-
-	// Unchanged -> suppressed (nil).
-	if got := b.buildModesPayload(screen); got != nil {
-		t.Errorf("unchanged buildModesPayload = %d bytes, want nil (suppressed)", len(got))
+	if again := b.refreshAnnouncement(screen); again.modesVer != changed.modesVer {
+		t.Errorf("unchanged modes moved the version %d -> %d", changed.modesVer, again.modesVer)
 	}
 }
 
-// TestReset_reAnnouncesTitleAndModes pins the resume / second-client
-// redelivery contract of flushFrameBuilder.Reset: after the window title and
-// DEC modes have been announced to one client, Reset (called on resize, a new
-// client connect, a resume, or an alt-screen transition) must clear the
-// announced flags so the NEXT Build re-emits both even though the screen state
-// is unchanged. Without it, titleStable/modesStable suppress the re-announce
-// and a resuming or second-tab client keeps a stale title and default modes
-// (breaking mouse/arrow-key input encoding).
-func TestReset_reAnnouncesTitleAndModes(t *testing.T) {
-	screen := vt.New(5, 20)
-	screen.Title = "session title"
+// TestBuild_announcesOnlyToSocketsBehind pins the per-socket announcement: an
+// idle screen makes a frame while some socket has not been told the current
+// modes or title, the frame leads only that socket's payloads with them, and a
+// window repaint re-announces nothing.
+func TestBuild_announcesOnlyToSocketsBehind(t *testing.T) {
+	screen := vt.New(3, 20)
+	screen.Title = "shell"
 	b := &flushFrameBuilder{}
+	told, fresh := &clientState{}, &clientState{}
+	toldConn, freshConn := &websocket.Conn{}, &websocket.Conn{}
+	only := map[*websocket.Conn]*clientState{toldConn: told}
+	both := map[*websocket.Conn]*clientState{toldConn: told, freshConn: fresh}
 
-	// Announce title and modes to the first client.
-	if got := b.buildTitlePayload(screen); len(got) == 0 {
-		t.Fatal("first buildTitlePayload = empty, want a title frame")
+	first := b.Build(screen, true, noClients, only, 0)
+	if first == nil {
+		t.Fatal("first Build = nil, want the baseline frame")
 	}
-	if got := b.buildModesPayload(screen); len(got) == 0 {
-		t.Fatal("first buildModesPayload = empty, want a modes frame")
+	if got := announceTo(told, &first.announce, nil); len(got) != 2 {
+		t.Fatalf("first frame led the socket with %d frames, want modes and title", len(got))
 	}
-	// Unchanged screen state: both are suppressed.
-	if got := b.buildTitlePayload(screen); got != nil {
-		t.Fatalf("unchanged buildTitlePayload = %d bytes, want nil", len(got))
-	}
-	if got := b.buildModesPayload(screen); got != nil {
-		t.Fatalf("unchanged buildModesPayload = %d bytes, want nil", len(got))
+	if frame := b.Build(screen, true, noClients, only, 0); frame != nil {
+		t.Errorf("idle Build with every socket told = %+v, want nil", frame)
 	}
 
-	// Resume / second client / resize: Reset must force a re-announce of both.
-	b.Reset()
-	if got := b.buildTitlePayload(screen); len(got) == 0 {
-		t.Error("after Reset, buildTitlePayload = empty; a resuming client must be re-sent the current title")
+	frame := b.Build(screen, true, noClients, both, 0)
+	if frame == nil {
+		t.Fatal("idle Build with an untold socket = nil, want a frame for it")
 	}
-	if got := b.buildModesPayload(screen); len(got) == 0 {
-		t.Error("after Reset, buildModesPayload = empty; a resuming client must be re-sent the current DEC modes")
+	if got := announceTo(told, &frame.announce, nil); got != nil {
+		t.Errorf("the told socket was led with %d frames, want none", len(got))
+	}
+	if got := announceTo(fresh, &frame.announce, nil); len(got) != 2 {
+		t.Errorf("the untold socket was led with %d frames, want modes and title", len(got))
+	}
+
+	b.RepaintWindow()
+	repaint := b.Build(screen, true, noClients, both, 0)
+	if repaint == nil || len(repaint.changed) != screen.Height {
+		t.Fatalf("Build after RepaintWindow = %+v, want a full repaint", repaint)
+	}
+	if got := announceTo(fresh, &repaint.announce, nil); got != nil {
+		t.Errorf("a window repaint re-announced %d frames, want none", len(got))
+	}
+}
+
+// TestAnnounceTo_gridLeadsModes: a declaring socket behind on both the grid and
+// the modes gets the grid first, so the client holds this grid when the modes
+// release its queued input.
+func TestAnnounceTo_gridLeadsModes(t *testing.T) {
+	screen := vt.New(10, 40)
+	b := &flushFrameBuilder{}
+	st := &clientState{}
+	st.gridFrames.Store(true)
+	frame := b.Build(screen, true, noClients, map[*websocket.Conn]*clientState{{}: st}, 0)
+	if frame == nil {
+		t.Fatal("Build = nil, want the baseline frame")
+	}
+	got := announceTo(st, &frame.announce, nil)
+	if len(got) != 3 || got[0][0] != wireMsgGrid || got[1][0] != wireMsgModes {
+		t.Fatalf("lead frame types = %v, want grid, modes, title", frameTypes(got))
 	}
 }
 
@@ -391,7 +398,7 @@ func TestBuild_WrapExtensionResendsFirstURLRow(t *testing.T) {
 		t.Fatalf("screen write: %v", err)
 	}
 	b := &flushFrameBuilder{}
-	if frame := b.Build(screen, true, noClients, 0); frame == nil {
+	if frame := b.Build(screen, true, noClients, nil, 0); frame == nil {
 		t.Fatalf("baseline Build returned nil")
 	}
 
@@ -400,7 +407,7 @@ func TestBuild_WrapExtensionResendsFirstURLRow(t *testing.T) {
 	if _, err := screen.Write([]byte("bbb")); err != nil {
 		t.Fatalf("screen write 2: %v", err)
 	}
-	frame := b.Build(screen, true, noClients, 0)
+	frame := b.Build(screen, true, noClients, nil, 0)
 	if frame == nil {
 		t.Fatalf("Build after wrap extension returned nil")
 	}

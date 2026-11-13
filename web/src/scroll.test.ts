@@ -1554,3 +1554,148 @@ describe("follow classification against the library's own writes", () => {
     expect(scroll.isUserScrolledUp()).toBe(true);
   });
 });
+
+describe("moves a page asks the controller for", () => {
+  let s: LiveScroller | undefined;
+  let animations: ScrollToOptions[];
+
+  // The browser's smooth animation is the platform's: this double records the
+  // request and moves nothing, and each test plays the frames it needs.
+  function heldMidStream(): LiveScroller {
+    const live = makeLiveScroller(6000, 600);
+    s = live;
+    animations = [];
+    live.el.scrollTo = ((o: ScrollToOptions) => {
+      animations.push(o);
+    }) as HTMLElement["scrollTo"];
+    scroll = registerForDispose(createScrollController({ scrollEl: live.el }));
+    live.userScrollTo(5400);
+    live.fire();
+    live.userScrollTo(2000);
+    live.fire();
+    return live;
+  }
+
+  afterEach(() => {
+    s?.el.remove();
+    s = undefined;
+    vi.useRealTimers();
+  });
+
+  it("a smooth scrollToBottom follows from the press and pins the output that arrived meanwhile", () => {
+    const f = heldMidStream();
+    expect(scroll.isUserScrolledUp()).toBe(true);
+
+    scroll.scrollToBottom({ smooth: true });
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(animations).toEqual([{ top: 5400, behavior: "smooth" }]);
+    expect(f.el.scrollTop).toBe(2000);
+
+    f.userScrollTo(4000); // an animation frame
+    f.fire();
+    f.grow(300); // output arrives under the animation
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(4000);
+
+    f.userScrollTo(5400); // the animation lands on its target, 300px short
+    f.fire();
+    scrollend(f.el);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(f.el.scrollTop).toBe(5700);
+  });
+
+  it("a smooth scrollToBottom pins once the animation goes quiet where scrollend never fires", () => {
+    vi.useFakeTimers();
+    const f = heldMidStream();
+    scroll.scrollToBottom({ smooth: true });
+    f.userScrollTo(5400);
+    f.fire();
+    f.grow(300);
+    scroll.stickToBottom();
+    vi.advanceTimersByTime(199);
+    expect(f.el.scrollTop).toBe(5400);
+    vi.advanceTimersByTime(1);
+    expect(f.el.scrollTop).toBe(5700);
+  });
+
+  it("a reader who scrolls up during the smooth scroll keeps holding", () => {
+    const f = heldMidStream();
+    scroll.scrollToBottom({ smooth: true });
+    f.userScrollTo(4000);
+    f.fire();
+    wheel(f.child, { deltaY: -100 });
+    f.userScrollTo(3000);
+    f.fire();
+    f.grow(300);
+    scroll.stickToBottom();
+    scrollend(f.el);
+
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    expect(f.el.scrollTop).toBe(3000);
+  });
+
+  it("a smooth scrollToBottom at the bottom while holding follows again with no animation", () => {
+    const f = heldMidStream();
+    scroll.restoreView({ top: 5400, following: false });
+
+    scroll.scrollToBottom({ smooth: true });
+    expect(scroll.isUserScrolledUp()).toBe(false);
+    expect(animations).toEqual([]);
+    f.grow(300);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(5700);
+  });
+
+  it("scrollByPage(-1) moves one viewport up and stops following", () => {
+    const f = heldMidStream();
+    scroll.scrollToBottom();
+
+    scroll.scrollByPage(-1);
+    expect(f.el.scrollTop).toBe(4800);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    f.grow(300);
+    scroll.stickToBottom();
+    expect(f.el.scrollTop).toBe(4800);
+  });
+
+  it("scrollByPage(1) keeps holding short of the bottom and follows again on reaching it", () => {
+    const f = heldMidStream();
+    f.userScrollTo(4000);
+    f.fire();
+
+    scroll.scrollByPage(1);
+    expect(f.el.scrollTop).toBe(4600);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    scroll.scrollByPage(1);
+    expect(f.el.scrollTop).toBe(5200);
+    expect(scroll.isUserScrolledUp()).toBe(true);
+    scroll.scrollByPage(1);
+    expect(f.el.scrollTop).toBe(5400);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("scrollByPage(-1) with nothing above the view keeps following", () => {
+    const live = makeLiveScroller(500, 600);
+    s = live;
+    scroll = registerForDispose(createScrollController({ scrollEl: live.el }));
+
+    scroll.scrollByPage(-1);
+    expect(scroll.isUserScrolledUp()).toBe(false);
+  });
+
+  it("a page move reports the position, so history paging sees it", () => {
+    const live = makeLiveScroller(6000, 600);
+    s = live;
+    let reports = 0;
+    scroll = registerForDispose(
+      createScrollController({ scrollEl: live.el, onScrollPosition: () => reports++ }),
+    );
+    scroll.scrollToBottom();
+    live.fire();
+    reports = 0;
+
+    scroll.scrollByPage(-1);
+    live.fire();
+    expect(reports).toBe(1);
+  });
+});

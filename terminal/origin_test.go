@@ -363,18 +363,9 @@ func TestOriginPolicy_defaultIsSameOriginOnly(t *testing.T) {
 	}
 }
 
-// TestAcceptWSIsTheOnlyUpgradePath is the anti-drift guard the whole design
-// rests on.
-//
-// When a policy is active, acceptOptions sets InsecureSkipVerify, because
-// acceptWS has already made the stricter decision. That is only safe while
-// acceptWS is the SOLE route to websocket.Accept: a new upgrade site that called
-// the library directly with an active policy's options would have no origin check
-// at all, and one that passed nil would silently ignore a configured policy —
-// which is exactly the drift this file was written to end.
-//
-// Source-level rather than behavioural because the property is "no other call
-// site exists", which no runtime assertion can observe.
+// TestAcceptWSIsTheOnlyUpgradePath keeps acceptWS the sole websocket.Accept
+// caller, which acceptOptions' InsecureSkipVerify depends on. It reads source
+// because no runtime assertion can observe a missing call site.
 func TestAcceptWSIsTheOnlyUpgradePath(t *testing.T) {
 	entries, err := os.ReadDir(".")
 	if err != nil {
@@ -404,27 +395,11 @@ func TestAcceptWSIsTheOnlyUpgradePath(t *testing.T) {
 	}
 }
 
-// TestAcceptWSRefusalIsLogSafe guards the refusal path's log line. acceptWS
-// builds its error from two request-supplied values, Origin and Host, and both
-// callers log that error.
-//
-// The hostile input is deliberately the REACHABLE set, not the textbook one.
-// CR/LF record forgery cannot arrive this way: net/http's header parser ends a
-// value at CRLF and its client refuses to send one, so a case built around
-// "\r\nlevel=ERROR" fails on the dial and proves nothing. What net/http passes
-// through is every byte from 0x80 up, plus unbounded length.
-//
-// Only the BOUND assertion below is non-vacuous on this sink, and that is worth
-// knowing rather than hiding: the caller's %q already escapes the C1, bidi and
-// U+2028 runes for a TextHandler, so removing the sanitizer leaves the rune
-// checks green and fails on length alone (verified by doing exactly that). The
-// rune checks are kept as the guard for a sink that does not quote; the direct,
-// non-vacuous coverage of the class stripping is TestLogSafeHeader.
-//
-// Driven end to end rather than by calling logSafeHeader directly, because the
-// property is "nothing unsanitized reaches the logger" and only the full path
-// shows that. The logger is the handler's own (WithLogger), so nothing here
-// touches the global default and the test needs no serialization.
+// TestAcceptWSRefusalIsLogSafe drives hostile Origin and Host values end to end
+// into the refusal log. The input is what net/http lets through (bytes from
+// 0x80 up, unbounded length), never CR/LF. Here %q already escapes the runes,
+// so only the length bound fails without the sanitizer; TestLogSafeHeader
+// covers rune stripping directly.
 func TestAcceptWSRefusalIsLogSafe(t *testing.T) {
 	var buf bytes.Buffer
 	h := NewHandler([]string{"/bin/cat"},

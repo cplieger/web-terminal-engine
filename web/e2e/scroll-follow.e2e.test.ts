@@ -92,6 +92,33 @@ test.describe("the reader holds while output streams", () => {
       expect(after.max - after.top).toBeGreaterThan(30);
     });
   }
+
+  test("a smooth scrollToBottom mid-stream animates and ends following the tail", async ({
+    page,
+  }) => {
+    await startStream(page, bundle);
+    await page.mouse.move(300, 170);
+    await page.mouse.wheel(0, -600);
+    await page.waitForTimeout(500);
+    expect((await readState(page)).scrolledUp).toBe(true);
+
+    const atPress = await page.evaluate(() => {
+      window.__engine!.scroll.scrollToBottom({ smooth: true });
+      const wrap = document.getElementById("wrap")!;
+      return {
+        gap: wrap.scrollHeight - wrap.clientHeight - wrap.scrollTop,
+        scrolledUp: window.__engine!.scroll.isUserScrolledUp(),
+      };
+    });
+    expect(atPress.scrolledUp).toBe(false);
+    expect(atPress.gap).toBeGreaterThan(100);
+
+    await page.waitForTimeout(1500);
+    const after = await readState(page);
+    await stopStream(page);
+    expect(after.scrolledUp).toBe(false);
+    expect(after.max - after.top).toBeLessThanOrEqual(17);
+  });
 });
 
 test.describe("a touch-only reader", () => {

@@ -13,7 +13,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -322,7 +324,6 @@ func TestClose_callsCancel(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh"})
 	called := false
 	h.cancel = func() { called = true }
-	h.started.Store(true) // Close returns early unless started
 
 	h.Close()
 
@@ -507,7 +508,7 @@ func TestHandleResize_colsAboveMinNotFloored(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Close()
 
-	h.handleResize(&clientState{}, 100, 40)
+	h.handleResize(soleClientOf(t, h), 100, 40)
 
 	h.mu.Lock()
 	w := h.screen.Width
@@ -523,7 +524,7 @@ func TestHandleResize_rowsAboveMinNotFloored(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Close()
 
-	h.handleResize(&clientState{}, 100, 40)
+	h.handleResize(soleClientOf(t, h), 100, 40)
 
 	h.mu.Lock()
 	ht := h.screen.Height
@@ -543,7 +544,7 @@ func TestApplySize_sizeChangeArmsRedrawSettle(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Close()
 
-	h.handleResize(&clientState{}, 100, 40)
+	h.handleResize(soleClientOf(t, h), 100, 40)
 	h.mu.Lock()
 	afterFirst := h.redrawHoldUntil(time.Now())
 	h.mu.Unlock()
@@ -551,7 +552,7 @@ func TestApplySize_sizeChangeArmsRedrawSettle(t *testing.T) {
 		t.Errorf("first resize (size seeded by ensureStarted): redrawHoldUntil = %v, want zero (same-size applySize must not arm)", afterFirst)
 	}
 
-	h.handleResize(&clientState{}, 90, 30)
+	h.handleResize(soleClientOf(t, h), 90, 30)
 	h.mu.Lock()
 	afterChange := h.redrawHoldUntil(time.Now())
 	h.mu.Unlock()
@@ -564,7 +565,7 @@ func TestApplySize_sizeChangeArmsRedrawSettle(t *testing.T) {
 	h.mu.Lock()
 	h.redrawSettleUntil = time.Time{} // settle
 	h.mu.Unlock()
-	h.handleResize(&clientState{}, 90, 30)
+	h.handleResize(soleClientOf(t, h), 90, 30)
 	h.mu.Lock()
 	afterSame := h.redrawHoldUntil(time.Now())
 	h.mu.Unlock()
@@ -589,8 +590,8 @@ func TestApplySize_ptyAndScreenAgreeOnTheAppliedSize(t *testing.T) {
 		// The first resize starts the process, so pty.StartWithSize sets the
 		// winsize and pty.Setsize is never exercised. The second is the one
 		// under test.
-		h.handleResize(&clientState{}, 100, 40)
-		h.handleResize(&clientState{}, 90, 30)
+		h.handleResize(soleClientOf(t, h), 100, 40)
+		h.handleResize(soleClientOf(t, h), 90, 30)
 
 		h.mu.Lock()
 		ws, err := pty.GetsizeFull(h.ptmx)
@@ -612,7 +613,7 @@ func TestApplySize_ptyAndScreenAgreeOnTheAppliedSize(t *testing.T) {
 	})
 
 	t.Run("refused", func(t *testing.T) {
-		// Hand-built state: applySize reads h.ptmx under h.mu but readLoop reads
+		// Hand-built state: resizeToOwner reads h.ptmx under h.mu but readLoop reads
 		// it without the lock, so swapping the field on a started handler is a
 		// data race. An ioctl on a regular file returns ENOTTY.
 		h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
@@ -629,13 +630,14 @@ func TestApplySize_ptyAndScreenAgreeOnTheAppliedSize(t *testing.T) {
 		h.mu.Unlock()
 		h.started.Store(true)
 
-		h.applySize(100, 40, "test")
+		h.registry.RecordSize(h.registry.Add(&websocket.Conn{}), 100, 40)
+		h.resizeToOwner("test")
 
 		h.mu.Lock()
 		gotW, gotH := h.screen.Width, h.screen.Height
 		h.mu.Unlock()
 		if gotW != wantW || gotH != wantH {
-			t.Errorf("applySize(100, 40) with a PTY that cannot take the ioctl: screen = %dx%d, want %dx%d unchanged",
+			t.Errorf("resizeToOwner to 100x40 with a PTY that cannot take the ioctl: screen = %dx%d, want %dx%d unchanged",
 				gotW, gotH, wantW, wantH)
 		}
 	})
@@ -651,8 +653,8 @@ func TestRedrawSettle_ESUDoesNotRelease(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Close()
 
-	h.handleResize(&clientState{}, 100, 40)
-	h.handleResize(&clientState{}, 90, 30) // size change: arms the settle hold
+	h.handleResize(soleClientOf(t, h), 100, 40)
+	h.handleResize(soleClientOf(t, h), 90, 30) // size change: arms the settle hold
 
 	// Child starts its redraw: one small synchronized bracket, then more
 	// output between brackets.
@@ -677,8 +679,8 @@ func TestRedrawSettle_releasesOnQuietAndExtendsOnOutput(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Close()
 
-	h.handleResize(&clientState{}, 100, 40)
-	h.handleResize(&clientState{}, 90, 30)
+	h.handleResize(soleClientOf(t, h), 100, 40)
+	h.handleResize(soleClientOf(t, h), 90, 30)
 
 	h.handlePTYData([]byte("redraw output"))
 	h.mu.Lock()
@@ -783,16 +785,9 @@ func TestRedrawSettle_buildFrameHeldThenSettles(t *testing.T) {
 	}
 }
 
-// TestRedrawSettle_capLapseCoalescesThenDisarms pins the lapse ladder, which is
-// what stops a redraw LONGER than the cap from streaming its remainder. A cap
-// lapse while the child is still writing must not fall back to per-flush
-// streaming (the churn the hold exists to prevent); it must let one FULL repaint
-// through and re-arm, a bounded number of times, and only then give up so a
-// genuinely streaming program is not throttled forever.
-//
-// Driven through redrawHoldUntil's explicit `now` rather than sleeps: the cap is
-// a whole second, and a real-time version of this test would be both slow and
-// flaky under load.
+// TestRedrawSettle_capLapseCoalescesThenDisarms pins that a cap lapse lets one
+// full repaint through and re-arms, a bounded number of times, then disarms. It
+// drives redrawHoldUntil's explicit now instead of sleeping a second per lapse.
 func TestRedrawSettle_capLapseCoalescesThenDisarms(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
 	defer h.Close()
@@ -1059,17 +1054,16 @@ func TestDispatchFrame_changedOnlyEmitsScreenNotScroll(t *testing.T) {
 	}
 }
 
-// TestDispatchFrame_modesPayloadIsWritten verifies a non-nil modes payload is
-// actually written to the client (the nil-guard must send when the payload is
-// present).
-func TestDispatchFrame_modesPayloadIsWritten(t *testing.T) {
+// TestDispatchFrame_announcedModesAreWritten verifies a frame whose announcement
+// carries modes writes one modes frame to a socket that was not told them.
+func TestDispatchFrame_announcedModesAreWritten(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	server, client, cleanup := dualConn(t)
 	defer cleanup()
 
 	frame := &flushFrame{
 		clients:      map[*websocket.Conn]uint64{server: 0},
-		modesPayload: encodeModesMsg(true, false, false, false, false, false, false, 0, 0),
+		announce:     announcement{modes: encodeModesMsg(true, false, false, false, false, false, false, 0, 0), modesVer: 1},
 		screenHeight: 1,
 	}
 	h.dispatchFrame(frame)
@@ -1158,57 +1152,6 @@ func TestHandleResume_commitsScrolledLinesToHistory(t *testing.T) {
 
 	if got := h.scrollback.Committed(); got == 0 {
 		t.Errorf("handleResume committed %d lines to history; want > 0 (scrolled lines must be retained)", got)
-	}
-}
-
-// TestHandleResume_altStraddleDrainNotCommitted pins the alt-straddle guard in
-// handleResume (the !altTransitionPending term, the resume-side twin of Build's
-// guard): drain that straddles an alt-screen transition must NOT be committed to
-// main history on resume. TestHandleResume_commitsScrolledLinesToHistory covers
-// only the no-transition path (fresh builder => altTransitionPending false =>
-// commit). The two cases below share identical pending drain on the main screen
-// and differ ONLY in the builder's last-observed alt state, so the flipped commit
-// outcome proves the guard (not an empty drain) does the gating; a mutant dropping
-// the !altTransitionPending term commits alt lines as main history and is caught.
-func TestHandleResume_altStraddleDrainNotCommitted(t *testing.T) {
-	tests := []struct {
-		name          string
-		prevAltValid  bool
-		prevAlt       bool
-		wantCommitted bool
-	}{
-		{"transition pending (just left alt) drops straddling drain", true, true, false},
-		{"no pending transition commits drain", false, false, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
-			server, cleanup := serverSideConn(t)
-			defer cleanup()
-
-			// Tiny screen + many newlines leaves lines in the pending (uncommitted)
-			// drain; the screen stays on the MAIN buffer (InAltScreen == false).
-			h.screen = vt.New(3, 20)
-			for range 20 {
-				if _, err := h.screen.Write([]byte("scrolled\r\n")); err != nil {
-					t.Fatalf("screen write: %v", err)
-				}
-			}
-			// With prevAlt=true and the screen now on main, altTransitionPending
-			// reports a not-yet-folded alt->main exit (Reset does not clear it).
-			h.builder.prevAltValid = tc.prevAltValid
-			h.builder.prevAlt = tc.prevAlt
-
-			if before := h.scrollback.Committed(); before != 0 {
-				t.Fatalf("precondition: committed=%d, want 0 before resume", before)
-			}
-			h.handleResume(server, &clientState{}, "sid", -1, 0, nil)
-
-			if gotCommitted := h.scrollback.Committed() > 0; gotCommitted != tc.wantCommitted {
-				t.Errorf("after resume: committed-history-present=%v, want %v (alt-straddle drain must be dropped; plain main-screen drain must commit)",
-					gotCommitted, tc.wantCommitted)
-			}
-		})
 	}
 }
 
@@ -1313,7 +1256,7 @@ func TestHandleResize_belowMinimumIsFlooredUp(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	defer h.Close()
 
-	h.handleResize(&clientState{}, 1, 1)
+	h.handleResize(soleClientOf(t, h), 1, 1)
 
 	if !h.started.Load() {
 		t.Fatalf("handleResize(1,1): process not started; a floored resize must still start the child")
@@ -1364,14 +1307,11 @@ func TestEnsureStarted_reaperInvokesOnProcessExitWithStatus(t *testing.T) {
 	}
 }
 
-// TestHandlePTYData_writesDeviceQueryResponseToPTY pins the writeback half of
-// the handlePTYData refactor: a device-status query in the PTY output makes the
-// VT screen produce a Response, which handlePTYData must write back to the PTY
-// (outside h.mu). CSI 6 n (DSR cursor-position) on a fresh screen with the cursor
-// at home yields ESC[1;1R. No terminal-level test drove this path (handlePTYData
-// was 66.7%), so a mutant dropping the `resp = h.screen.TakeResponse()` capture or the
-// `h.ptmx.Write(resp)` writeback survived. The read deadline is required so the
-// red case fails instead of blocking forever.
+// TestHandlePTYData_writesDeviceQueryResponseToPTY pins the writeback: a
+// device-status query in the PTY output makes the VT screen produce a Response,
+// which replyLoop writes back to the PTY. CSI 6 n (DSR cursor-position) on a
+// fresh screen with the cursor at home yields ESC[1;1R. The read deadline makes
+// the red case fail instead of blocking forever.
 func TestHandlePTYData_writesDeviceQueryResponseToPTY(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
 	pr, pw, err := os.Pipe()
@@ -1380,6 +1320,7 @@ func TestHandlePTYData_writesDeviceQueryResponseToPTY(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = pr.Close(); _ = pw.Close() })
 	h.ptmx = pw
+	startReplyLoop(t, h)
 
 	// DSR cursor-position query; the fresh 30x120 screen's cursor is at home.
 	h.handlePTYData([]byte("\x1b[6n"))
@@ -1492,86 +1433,139 @@ func TestHandleResume_frameOrderByAltState(t *testing.T) {
 	}
 }
 
-// TestHealSize_growsSurvivorAfterBindingClientLeaves verifies the disconnect
-// heal: when the client whose size the shared screen currently holds departs,
-// healSize relaxes the screen to the smallest size the remaining clients need
-// (here the lone desktop), so a survivor is not left clamped to a departed
-// phone's size. healSize is called directly (the debounce timer is a stdlib
-// wrapper over it, exercised via maybeHealSize in the test below).
-func TestHealSize_growsSurvivorAfterBindingClientLeaves(t *testing.T) {
-	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
-	defer h.Close()
+// lockedBuffer is a log sink the size-hold timer's goroutine and the test can share.
+type lockedBuffer struct {
+	b  bytes.Buffer
+	mu sync.Mutex
+}
 
-	// Real (throwaway-server) conns, not zero-value fakes: the handler is
-	// started, so its flush scheduler is live and may dispatch to every
-	// registered conn at any moment — a write to a zero-value websocket.Conn
-	// segfaults. (The old unconditional 1s resize hold merely masked this.)
-	phoneConn, _, cleanupPhone := dualConn(t)
-	defer cleanupPhone()
-	deskConn, _, cleanupDesk := dualConn(t)
-	defer cleanupDesk()
+func (l *lockedBuffer) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.Write(p)
+}
+
+func (l *lockedBuffer) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.b.String()
+}
+
+// healAfterCloseFixture is a started handler on a real, child-less PTY master
+// whose 40x20 screen is held by "phone", the earliest-attached client, with a
+// 120x40 "desk" also attached. No reader or flush loop runs, so it fits a
+// synctest bubble, and the zero-value conns are never written to.
+func healAfterCloseFixture(t *testing.T) (h *Handler, logs *lockedBuffer, phoneConn *websocket.Conn, desk *clientState) {
+	t.Helper()
+	logs = &lockedBuffer{}
+	h = NewHandler([]string{"/bin/cat"}, WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+	master, slave, err := pty.Open()
+	if err != nil {
+		t.Fatalf("Setup: pty.Open: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = slave.Close()
+		_ = master.Close()
+	})
+	h.ptmx = master
+	h.cancel = func() {}
+	h.started.Store(true)
+
+	phoneConn = &websocket.Conn{}
 	phone := h.registry.Add(phoneConn)
-	desk := h.registry.Add(deskConn)
-
-	// Phone resizes last (last-writer-wins): starts the child at 40x20 and makes
-	// the shared screen 40x20. Desktop's larger size is recorded but not applied.
+	desk = h.registry.Add(&websocket.Conn{})
 	h.handleResize(phone, 40, 20)
 	h.registry.RecordSize(desk, 120, 40)
+	return h, logs, phoneConn, desk
+}
 
+// assertNoSizeChangeAfterClose fails t if a size change reached the closed PTY:
+// a size change logged, or the screen left 40x20.
+func assertNoSizeChangeAfterClose(t *testing.T, h *Handler, logs *lockedBuffer) {
+	t.Helper()
+	if out := logs.String(); strings.Contains(out, "size owner left") || strings.Contains(out, "not applied") {
+		t.Errorf("a size change ran against the closed PTY; log:\n%s", out)
+	}
 	h.mu.Lock()
 	w, ht := h.screen.Width, h.screen.Height
 	h.mu.Unlock()
 	if w != 40 || ht != 20 {
-		t.Fatalf("setup: screen = %dx%d, want 40x20 (phone last-wrote)", w, ht)
-	}
-
-	// Phone departs; the desktop is the sole survivor.
-	h.registry.Remove(phoneConn)
-	h.healSize()
-
-	h.mu.Lock()
-	w, ht = h.screen.Width, h.screen.Height
-	h.mu.Unlock()
-	if w != 120 || ht != 40 {
-		t.Errorf("healSize after phone left: screen = %dx%d, want 120x40 (relaxed to the surviving desktop)", w, ht)
+		t.Errorf("screen = %dx%d after Close, want 40x20 unchanged", w, ht)
 	}
 }
 
-// TestMaybeHealSize_onlyArmsForTheBindingClient verifies the heal is armed only
-// when the departed client was holding the current screen size; a client at a
-// different size leaving arms nothing (some other client / a live resize still
-// holds the current size).
-func TestMaybeHealSize_onlyArmsForTheBindingClient(t *testing.T) {
-	h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
-	defer h.Close()
+// TestSizeHeal_closedPTY pins that no size change reaches a session's PTY once
+// it is closed, by Close or by the child exiting: Setsize on the closed master
+// fails, and its Warn on the consumer's logger would blame a session that ended
+// on purpose.
+func TestSizeHeal_closedPTY(t *testing.T) {
+	t.Run("binding client departs before Close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			h, logs, phoneConn, _ := healAfterCloseFixture(t)
+			h.armSizeHold(h.registry.Remove(phoneConn))
+			h.Close()
+			synctest.Sleep(sizeHoldGrace + time.Millisecond)
+			assertNoSizeChangeAfterClose(t, h, logs)
+		})
+	})
 
-	// No registered client: the started handler's flush scheduler dispatches
-	// to every registered conn, and a write to a zero-value websocket.Conn
-	// segfaults (the old unconditional 1s resize hold merely masked this).
-	// maybeHealSize needs none — it compares the departed size (its args)
-	// against the screen; handleResize accepts an unregistered state.
-	h.handleResize(&clientState{}, 40, 20) // shared screen is now 40x20
+	t.Run("binding client departs after Close", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			h, logs, phoneConn, _ := healAfterCloseFixture(t)
+			h.Close()
+			h.armSizeHold(h.registry.Remove(phoneConn))
+			synctest.Sleep(sizeHoldGrace + time.Millisecond)
+			assertNoSizeChangeAfterClose(t, h, logs)
+		})
+	})
 
-	// A non-binding departure (size != current screen) arms nothing.
-	h.maybeHealSize(120, 40)
-	h.mu.Lock()
-	armed := h.healTimer != nil
-	h.mu.Unlock()
-	if armed {
-		t.Errorf("maybeHealSize(120x40) armed a heal, but the screen is 40x20 (departed client was not binding)")
-	}
+	// A timer that fired before Close stopped it runs its body once Close
+	// releases h.mu.
+	t.Run("hold already expired when Close ran", func(t *testing.T) {
+		h, logs, phoneConn, _ := healAfterCloseFixture(t)
+		hold := h.registry.Remove(phoneConn)
+		h.Close()
+		h.registry.EndHold(hold)
+		h.resizeToOwner("size owner left")
+		assertNoSizeChangeAfterClose(t, h, logs)
+	})
 
-	// The binding departure (size == current screen) arms the debounced heal.
-	h.maybeHealSize(40, 20)
-	h.mu.Lock()
-	armed = h.healTimer != nil
-	if h.healTimer != nil {
-		h.healTimer.Stop() // don't let it fire during later tests
-	}
-	h.mu.Unlock()
-	if !armed {
-		t.Errorf("maybeHealSize(40x20) did not arm a heal, but the departed client held the current 40x20 screen")
-	}
+	t.Run("client resizes after Close", func(t *testing.T) {
+		h, logs, _, desk := healAfterCloseFixture(t)
+		h.Close()
+		h.handleResize(desk, 100, 30)
+		assertNoSizeChangeAfterClose(t, h, logs)
+	})
+
+	t.Run("child exited", func(t *testing.T) {
+		logs := &lockedBuffer{}
+		h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"),
+			WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+		shutdownOnCleanup(t, h)
+		if err := h.ensureStarted(40, 20); err != nil {
+			t.Fatalf("ensureStarted(40, 20): %v", err)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), waitPatience)
+		defer cancel()
+		if err := h.wait(ctx); err != nil {
+			t.Fatalf("child did not exit and tear down within %v: %v", waitPatience, err)
+		}
+		// Registered after the teardown, so no flush loop is left to write to it.
+		h.registry.RecordSize(h.registry.Add(&websocket.Conn{}), 120, 40)
+
+		h.resizeToOwner("size owner left")
+		h.armSizeHold(1)
+		h.mu.Lock()
+		armed := h.sizeHoldTimer != nil
+		if armed {
+			h.sizeHoldTimer.Stop()
+		}
+		h.mu.Unlock()
+		if armed {
+			t.Errorf("armSizeHold armed a timer on a session whose child had exited")
+		}
+		assertNoSizeChangeAfterClose(t, h, logs)
+	})
 }
 
 // TestHandleResume_ledgerLostFlag pins the resumeAck ledger-loss signal: the
@@ -1682,7 +1676,7 @@ func TestDispatchFrame_suppressesRedundantAckSweep(t *testing.T) {
 
 	frame := &flushFrame{
 		clients:      map[*websocket.Conn]uint64{server: 7},
-		modesPayload: encodeModesMsg(true, false, false, false, false, false, false, 0, 0),
+		announce:     announcement{modes: encodeModesMsg(true, false, false, false, false, false, false, 0, 0), modesVer: 1},
 		screenHeight: 1,
 	}
 	h.dispatchFrame(frame)
@@ -1740,15 +1734,9 @@ func readUntilClose(t *testing.T, ws *websocket.Conn, timeout time.Duration) web
 	}
 }
 
-// TestTypedFraming_latchSequence pins the v4 happy path end to end, including
-// a sentinel-shaped payload: after bootstrap (binary resume, arms) +
-// text upgrade (latches), a binary frame that IS a byte-exact v3 control frame
-// (0x00 + {"type":"ping"}) must reach the PTY as literal input — the latch
-// retired the sentinel, so nothing is consumed as control anymore. Delivery is
-// proven three ways: the echo carries the JSON, NO
-// pong frame is ever sent (a sentinel mis-parse would have answered the ping),
-// and the session ledger advances by EXACTLY len(payload) — every byte,
-// leading NUL included, counted as input.
+// TestTypedFraming_latchSequence pins that after the v4 latch a byte-exact v3
+// ping control reaches the PTY as input: the echo carries it, no pong is sent,
+// and the ledger advances by exactly len(payload), leading NUL included.
 func TestTypedFraming_latchSequence(t *testing.T) {
 	h := NewHandler([]string{"/bin/cat"}, WithWorkDir("/"))
 	shutdownOnCleanup(t, h)
@@ -1864,6 +1852,51 @@ func TestTypedFraming_textSizeLimits(t *testing.T) {
 		sendText(t, ws, pad(wsReadLimit+1))
 		if got := readUntilClose(t, ws, 2*time.Second); got != websocket.StatusMessageTooBig {
 			t.Errorf("close status = %v, want %v (transport-enforced read limit)", got, websocket.StatusMessageTooBig)
+		}
+	})
+}
+
+// TestBinaryInput_sizeLimit pins the read limit for PTY input, the size the
+// client splits input to: a binary message of exactly wsReadLimit bytes is
+// input, one byte more closes 1009.
+func TestBinaryInput_sizeLimit(t *testing.T) {
+	lines := func(total int) []byte {
+		return bytes.Repeat([]byte(strings.Repeat("x", 63)+"\n"), total/64)
+	}
+
+	t.Run("exactly at the limit is input", func(t *testing.T) {
+		ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+		defer cleanup()
+		ws.SetReadLimit(-1) // the echo of 64 KiB comes back in frames over the default 32 KiB
+		bootstrapResume(t, ws, "sid-binary-limit")
+
+		msg := lines(wsReadLimit)
+		if len(msg) != wsReadLimit {
+			t.Fatalf("test bug: payload is %d bytes, want %d", len(msg), wsReadLimit)
+		}
+		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+		defer cancel()
+		if err := ws.Write(ctx, websocket.MessageBinary, msg); err != nil {
+			t.Fatalf("write at the limit: %v", err)
+		}
+		if err := ws.Write(ctx, websocket.MessageBinary, []byte("OK9\n")); err != nil {
+			t.Fatalf("write after the limit: %v", err)
+		}
+		readUntil(t, ws, []byte("OK9"), 5*time.Second)
+	})
+
+	t.Run("one byte over closes 1009", func(t *testing.T) {
+		ws, cleanup := dialHandler(t, []string{"/bin/cat"})
+		defer cleanup()
+		bootstrapResume(t, ws, "sid-binary-limit-over")
+
+		ctx, cancel := context.WithTimeout(t.Context(), time.Second)
+		defer cancel()
+		if err := ws.Write(ctx, websocket.MessageBinary, append(lines(wsReadLimit), 'x')); err != nil {
+			t.Fatalf("write over the limit: %v", err)
+		}
+		if got := readUntilClose(t, ws, 2*time.Second); got != websocket.StatusMessageTooBig {
+			t.Errorf("close status = %v, want %v", got, websocket.StatusMessageTooBig)
 		}
 	})
 }
@@ -2039,58 +2072,6 @@ func TestWireCompatibility_declaredClientVersionPolicy(t *testing.T) {
 	}
 }
 
-// TestHealSize_relaxesWhenOnlyOneDimensionDiffers pins that the heal compares
-// the two dimensions independently. A phone and a desktop routinely differ in
-// exactly one of them — same rows in a maximised window, different columns — and
-// the heal has to fire on that, or the survivor stays clamped to a departed
-// client's width with no later event to correct it (the timer has already run).
-func TestHealSize_relaxesWhenOnlyOneDimensionDiffers(t *testing.T) {
-	tests := []struct {
-		name                  string
-		survivorCols          int
-		survivorRows          int
-		wantWidth, wantHeight int
-	}{
-		{name: "columns differ, rows match", survivorCols: 120, survivorRows: 20, wantWidth: 120, wantHeight: 20},
-		{name: "rows differ, columns match", survivorCols: 40, survivorRows: 40, wantWidth: 40, wantHeight: 40},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))
-			defer h.Close()
-
-			// Real conns: the handler is started below, so its flush scheduler may
-			// dispatch to every registered conn at any moment.
-			leavingConn, _, cleanupLeaving := dualConn(t)
-			defer cleanupLeaving()
-			survivorConn, _, cleanupSurvivor := dualConn(t)
-			defer cleanupSurvivor()
-			leaving := h.registry.Add(leavingConn)
-			survivor := h.registry.Add(survivorConn)
-
-			// The departing client wrote last, so the shared screen holds ITS size.
-			h.handleResize(leaving, 40, 20)
-			h.registry.RecordSize(survivor, tc.survivorCols, tc.survivorRows)
-			h.mu.Lock()
-			w, ht := h.screen.Width, h.screen.Height
-			h.mu.Unlock()
-			if w != 40 || ht != 20 {
-				t.Fatalf("setup: screen = %dx%d, want 40x20 (the departing client wrote last)", w, ht)
-			}
-
-			h.registry.Remove(leavingConn)
-			h.healSize()
-
-			h.mu.Lock()
-			w, ht = h.screen.Width, h.screen.Height
-			h.mu.Unlock()
-			if w != tc.wantWidth || ht != tc.wantHeight {
-				t.Errorf("healSize left the screen at %dx%d, want %dx%d (the survivor's size)", w, ht, tc.wantWidth, tc.wantHeight)
-			}
-		})
-	}
-}
-
 // TestProcessExit_logsNoPanicOnACleanExit pins the deferred exit block's error
 // path against its own ordinary case. The recover there guards a CONSUMER
 // callback, and the line it writes is Error level — the level an operator is
@@ -2154,9 +2135,9 @@ func TestHandleResize_firstResizeRecordsTheClientSize(t *testing.T) {
 
 	h.handleResize(state, 100, 30)
 
-	cols, rows, ok := h.registry.MinLiveSize()
+	cols, rows, ok := h.registry.OwnerSize()
 	if !ok || cols != 100 || rows != 30 {
-		t.Errorf("MinLiveSize() = (%d, %d, %v), want (100, 30, true) after the starting resize", cols, rows, ok)
+		t.Errorf("OwnerSize() = (%d, %d, %v), want (100, 30, true) after the starting resize", cols, rows, ok)
 	}
 	if got := buf.String(); strings.Contains(got, "process start failed") {
 		t.Errorf("a successful start logged a failure; log: %s", got)

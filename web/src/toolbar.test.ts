@@ -4,7 +4,7 @@
 // physical-key encoder byte for byte.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { bindMobileToolbar } from "./toolbar.js";
+import { bindMobileToolbar, type KeyEncoder, type MobileToolbarController } from "./toolbar.js";
 import { mapKeyboardEvent as mapKeyboardEventRaw, type KeyboardResult } from "./keyboard.js";
 import { createModeState, POWER_ON_MODES } from "./modes.js";
 
@@ -23,8 +23,20 @@ function sent(result: KeyboardResult): string {
   return result.bytes;
 }
 
+/** A sink that encodes each press at once, under `modes`. */
+function eager(sink: (bytes: string) => void): (encode: KeyEncoder) => void {
+  return (encode) => {
+    sink(encode(modes));
+  };
+}
+
+/** What typing `text` sends with the toolbar's sticky Ctrl applied, under `modes`. */
+function typed(ctrl: MobileToolbarController, text: string): string {
+  return ctrl.applyStickyCtrl(text)?.(modes) ?? text;
+}
+
 beforeEach(() => {
-  // Defaults: bracketed paste on (irrelevant here), app cursor off, no kitty.
+  // Defaults: app cursor off, no kitty.
   modes.applySnapshot(POWER_ON_MODES);
   document.body.innerHTML = "";
 });
@@ -74,7 +86,7 @@ describe("bindMobileToolbar: happy path", () => {
   });
 
   it("kb-up/down/right/left send arrow CSI sequences (default DECCKM off)", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
 
     fireDown(fixture.buttons["kb-up"]!);
     fireDown(fixture.buttons["kb-down"]!);
@@ -90,7 +102,7 @@ describe("bindMobileToolbar: happy path", () => {
   });
 
   it("kb-tab/enter/esc send the canonical bytes", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
 
     fireDown(fixture.buttons["kb-tab"]!);
     fireDown(fixture.buttons["kb-enter"]!);
@@ -104,7 +116,7 @@ describe("bindMobileToolbar: happy path", () => {
   });
 
   it("preventDefault is called on every toolbar press", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     for (const id of [
       "kb-toggle",
       "kb-ctrl",
@@ -123,7 +135,7 @@ describe("bindMobileToolbar: happy path", () => {
   });
 
   it("kb-toggle toggles .collapsed on the toolbar; does NOT clear armed Ctrl", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
     expect(fixture.toolbar.classList.contains("collapsed")).toBe(false);
 
@@ -142,8 +154,7 @@ describe("bindMobileToolbar: happy path", () => {
     const onChange = vi.fn();
     const ctrl = bindMobileToolbar({
       toolbar: fixture.toolbar,
-      modes,
-      send,
+      send: eager(send),
       onCtrlChange: onChange,
     });
 
@@ -166,7 +177,7 @@ describe("bindMobileToolbar: happy path", () => {
   });
 
   it("arrow / Tab / Enter / Esc presses clear armed Ctrl", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     for (const id of ["kb-up", "kb-down", "kb-left", "kb-right", "kb-tab", "kb-enter", "kb-esc"]) {
       ctrl.setCtrlArmed(true);
       fireDown(fixture.buttons[id]!);
@@ -178,8 +189,8 @@ describe("bindMobileToolbar: happy path", () => {
   it("missing toolbar buttons are skipped silently", () => {
     const empty = document.createElement("div");
     document.body.appendChild(empty);
-    const ctrl = bindMobileToolbar({ toolbar: empty, modes, send });
-    expect(() => ctrl.applyStickyCtrl("a")).not.toThrow();
+    const ctrl = bindMobileToolbar({ toolbar: empty, send: eager(send) });
+    expect(() => typed(ctrl, "a")).not.toThrow();
     ctrl.dispose();
     expect(send).not.toHaveBeenCalled();
   });
@@ -196,33 +207,33 @@ describe("bindMobileToolbar: applyStickyCtrl", () => {
   });
 
   it("not armed → returns text unchanged", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
-    expect(ctrl.applyStickyCtrl("a")).toBe("a");
-    expect(ctrl.applyStickyCtrl("hello")).toBe("hello");
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
+    expect(typed(ctrl, "a")).toBe("a");
+    expect(typed(ctrl, "hello")).toBe("hello");
     expect(ctrl.isCtrlArmed()).toBe(false);
     ctrl.dispose();
   });
 
   it("armed + 1-char input → ctrl byte and disarms", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("c")).toBe("\x03");
+    expect(typed(ctrl, "c")).toBe("\x03");
     expect(ctrl.isCtrlArmed()).toBe(false);
     ctrl.dispose();
   });
 
   it("armed + 1-char unmapped input → original char and disarms", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("é")).toBe("é");
+    expect(typed(ctrl, "é")).toBe("é");
     expect(ctrl.isCtrlArmed()).toBe(false);
     ctrl.dispose();
   });
 
   it("armed + paste (multi-char) → text unchanged and disarms", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("hello")).toBe("hello");
+    expect(typed(ctrl, "hello")).toBe("hello");
     expect(ctrl.isCtrlArmed()).toBe(false);
     ctrl.dispose();
   });
@@ -234,7 +245,7 @@ describe("bindMobileToolbar: dispose", () => {
     const send = vi.fn<(bytes: string) => void>();
     const fixture = makeToolbar();
 
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.dispose();
 
     for (const id of ["kb-up", "kb-down", "kb-left", "kb-right", "kb-tab", "kb-enter", "kb-esc"]) {
@@ -248,7 +259,7 @@ describe("bindMobileToolbar: dispose", () => {
     const send = vi.fn<(bytes: string) => void>();
     const fixture = makeToolbar();
 
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
     expect(fixture.buttons["kb-ctrl"]!.classList.contains("armed")).toBe(true);
     expect(fixture.buttons["kb-ctrl"]!.getAttribute("aria-pressed")).toBe("true");
@@ -264,7 +275,7 @@ describe("bindMobileToolbar: dispose", () => {
     const send = vi.fn<(bytes: string) => void>();
     const fixture = makeToolbar();
 
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     expect(() => {
       ctrl.dispose();
       ctrl.dispose();
@@ -279,7 +290,7 @@ describe("bindMobileToolbar: DECCKM-aware arrows", () => {
     const fixture = makeToolbar();
 
     modes.applySnapshot({ ...POWER_ON_MODES, applicationCursor: true });
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
 
     fireDown(fixture.buttons["kb-up"]!);
     fireDown(fixture.buttons["kb-down"]!);
@@ -299,7 +310,7 @@ describe("bindMobileToolbar: DECCKM-aware arrows", () => {
     const send = vi.fn<(bytes: string) => void>();
     const fixture = makeToolbar();
 
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
 
     fireDown(fixture.buttons["kb-up"]!);
     expect(send).toHaveBeenLastCalledWith("\x1b[A");
@@ -312,7 +323,7 @@ describe("bindMobileToolbar: DECCKM-aware arrows", () => {
     const send = vi.fn<(bytes: string) => void>();
     const fixture = makeToolbar();
 
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     fireDown(fixture.buttons["kb-up"]!);
     expect(send).toHaveBeenLastCalledWith("\x1b[A");
 
@@ -320,6 +331,42 @@ describe("bindMobileToolbar: DECCKM-aware arrows", () => {
     fireDown(fixture.buttons["kb-up"]!);
     expect(send).toHaveBeenLastCalledWith("\x1bOA");
 
+    ctrl.dispose();
+  });
+
+  it("a held press encodes under the modes the sink gives it when it sends", () => {
+    document.body.innerHTML = "";
+    const held: KeyEncoder[] = [];
+    const fixture = makeToolbar();
+    const ctrl = bindMobileToolbar({
+      toolbar: fixture.toolbar,
+      send: (encode) => {
+        held.push(encode);
+      },
+    });
+
+    fireDown(fixture.buttons["kb-up"]!);
+    fireDown(fixture.buttons["kb-esc"]!);
+    modes.applySnapshot({ ...POWER_ON_MODES, applicationCursor: true });
+    expect(held[0]?.(modes)).toBe("\x1bOA");
+    modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
+    expect(held[1]?.(modes)).toBe("\x1b[27u");
+    ctrl.dispose();
+  });
+
+  it("consumes sticky Ctrl when the text is typed, and encodes the chord under the modes given later", () => {
+    document.body.innerHTML = "";
+    const fixture = makeToolbar();
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
+    ctrl.setCtrlArmed(true);
+
+    const chord = ctrl.applyStickyCtrl("c");
+    expect(ctrl.isCtrlArmed()).toBe(false);
+    expect(ctrl.applyStickyCtrl("d")).toBeNull();
+
+    expect(chord?.(modes)).toBe("\x03");
+    modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
+    expect(chord?.(modes)).toBe("\x1b[99;5u");
     ctrl.dispose();
   });
 });
@@ -340,23 +387,23 @@ describe("bindMobileToolbar: applyStickyCtrl under kitty disambiguate", () => {
   });
 
   it("unshifted char → CSI cp;5u matching the physical path", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("s")).toBe("\x1b[115;5u");
+    expect(typed(ctrl, "s")).toBe("\x1b[115;5u");
     ctrl.dispose();
   });
 
   it("shifted symbol → unshifted base codepoint + shift modifier (':' = 59;6u, not 58;5u)", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl(":")).toBe("\x1b[59;6u");
+    expect(typed(ctrl, ":")).toBe("\x1b[59;6u");
     ctrl.dispose();
   });
 
   it("uppercase letter → lowercase codepoint + shift modifier", () => {
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("A")).toBe("\x1b[97;6u");
+    expect(typed(ctrl, "A")).toBe("\x1b[97;6u");
     ctrl.dispose();
   });
 });
@@ -393,7 +440,7 @@ describe("toolbar buttons emit exactly the physical-key bytes (equivalence fixtu
       document.body.innerHTML = "";
       const send = vi.fn<(bytes: string) => void>();
       const fixture = makeToolbar();
-      const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send });
+      const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: eager(send) });
 
       for (const { btn, key } of arrows) {
         send.mockClear();

@@ -13,6 +13,7 @@ import {
   PREFETCH_THRESHOLD,
   RESIDENT_TAIL_CAP,
 } from "./store.js";
+import { ackEpoch } from "./test-helpers/store-epoch.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
 function row(text: string): WireRun[] {
@@ -81,7 +82,7 @@ describe("LineStore paging: capability and the cap flip", () => {
     // target first would discard history no fetch could bring back.
     expect(s.tailCap()).toBe(COMPATIBILITY_TAIL_CAP);
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -96,7 +97,7 @@ describe("LineStore paging: capability and the cap flip", () => {
   it("an unsupported server leaves the cap alone", () => {
     const s = new LineStore();
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 100,
       serverOldest: 0,
       paging: false,
@@ -115,7 +116,7 @@ describe("LineStore paging: capability and the cap flip", () => {
     const s = new LineStore(300);
     expect(s.tailCap()).toBe(300);
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -136,7 +137,7 @@ describe("LineStore paging: capability and the cap flip", () => {
     const explicit = new LineStore(COMPATIBILITY_TAIL_CAP);
     expect(explicit.tailCap()).toBe(COMPATIBILITY_TAIL_CAP);
     explicit.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -149,7 +150,7 @@ describe("LineStore paging: capability and the cap flip", () => {
 
     const omitted = new LineStore();
     omitted.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -172,7 +173,7 @@ describe("LineStore paging: capability and the cap flip", () => {
 
     // A reader parked deep in the reclassified band keeps the full cache.
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -202,7 +203,7 @@ describe("LineStore paging: capability and the cap flip", () => {
     fillTail(s, RESIDENT_TAIL_CAP + 300);
     s.applyScreen(screenMsg(RESIDENT_TAIL_CAP + 300, 24));
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -226,7 +227,7 @@ describe("LineStore paging: capability and the cap flip", () => {
     s.applyScreen(screenMsg(RESIDENT_TAIL_CAP + 900, 24));
     const win = s.getWindow();
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -258,7 +259,7 @@ describe("LineStore paging: the replay jump", () => {
     // The socket said it had through 999; the server's oldest is now 2000, so
     // the replay begins there and everything held is an island below the hole.
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 5000,
       serverOldest: 2000,
       paging: true,
@@ -287,7 +288,7 @@ describe("LineStore paging: the replay jump", () => {
     expect(s.highestIndex()).toBe(2199);
 
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 5000,
       serverOldest: 2000, // above sentHaveThrough+1, but BELOW highest+1
       paging: true,
@@ -302,14 +303,14 @@ describe("LineStore paging: the replay jump", () => {
     expect(s.browseCacheSize()).toBe(HELD);
   });
 
-  it("predicts the jump from the SENT replayMax, and does not without it", () => {
+  it("predicts the jump from the SENT replayMax, and none when the bound covers the gap", () => {
     // The server clamps the replay start to committed - replayMax. The client
     // must predict from the value it SENT: with a server-side-only clamp the
     // stranded band would stay classified as tail, where enforceCap eats it.
     const withMax = new LineStore();
     fillTail(withMax, HELD);
     withMax.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 5000,
       serverOldest: 0, // the server retains everything: no eviction gap
       paging: true,
@@ -320,12 +321,30 @@ describe("LineStore paging: the replay jump", () => {
     });
     expect(withMax.browseCacheSize()).toBe(HELD);
 
-    // The identical ack with no replayMax: the replay resumes at haveThrough+1,
-    // so there is no hole and nothing is stranded.
-    const without = new LineStore();
-    fillTail(without, HELD);
-    without.applyResumeAck({
-      epochChanged: false,
+    // A gap the bound covers: the replay resumes at haveThrough+1, so there is no
+    // hole and nothing is stranded.
+    const wide = new LineStore();
+    fillTail(wide, HELD);
+    wide.applyResumeAck({
+      serverEpoch: null,
+      committed: 2500,
+      serverOldest: 0,
+      paging: true,
+      sentHaveThrough: HELD - 1,
+      sentReplayMax: 2000,
+      viewportAbs: 100,
+      following: false,
+    });
+    expect(wide.browseCacheSize()).toBe(0);
+  });
+
+  it("predicts the server's ceiling for a resume that sent no replayMax", () => {
+    // The server reads an absent replayMax as MAX_REPLAY_LINES (2000), so 5000
+    // committed lines start the replay at 3000, above the 1000 held.
+    const s = new LineStore();
+    fillTail(s, HELD);
+    s.applyResumeAck({
+      serverEpoch: null,
       committed: 5000,
       serverOldest: 0,
       paging: true,
@@ -334,7 +353,7 @@ describe("LineStore paging: the replay jump", () => {
       viewportAbs: 100,
       following: false,
     });
-    expect(without.browseCacheSize()).toBe(0);
+    expect(s.browseCacheSize()).toBe(HELD);
   });
 
   it("runs the budget pass when the JUMP alone reclassified (no flip band)", () => {
@@ -348,7 +367,7 @@ describe("LineStore paging: the replay jump", () => {
     s.applyScroll(pageMsg(0, 900));
     expect(s.browseCacheSize()).toBe(0);
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 100_000,
       serverOldest: 90_000, // above what this socket holds: a jump
       paging: true,
@@ -369,7 +388,7 @@ describe("LineStore paging: the replay jump", () => {
     s.applyScreen(screenMsg(HELD, 24));
     const base = s.getWindow().base;
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: HELD,
       serverOldest: 0,
       paging: true,
@@ -391,7 +410,7 @@ describe("LineStore paging: the replay jump", () => {
     fillTail(s, 1000);
     s.raisePagingFloor(2000);
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -410,7 +429,7 @@ describe("LineStore paging: the replay jump", () => {
     const s = new LineStore();
     fillTail(s, 2000);
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: 1,
       committed: null,
       serverOldest: null,
       paging: true,
@@ -421,8 +440,8 @@ describe("LineStore paging: the replay jump", () => {
     });
     expect(s.tailCap()).toBe(RESIDENT_TAIL_CAP);
 
-    s.applyResumeAck({
-      epochChanged: true,
+    const foreign = s.applyResumeAck({
+      serverEpoch: 2,
       committed: null,
       serverOldest: null,
       paging: false,
@@ -431,6 +450,7 @@ describe("LineStore paging: the replay jump", () => {
       viewportAbs: -1,
       following: true,
     });
+    expect(foreign).toBe(true);
     // A different server process shares no absolute indices AND no declared
     // capability, so the cap reverts to the compatibility value.
     expect(heldKeys(s).length).toBe(0);
@@ -507,22 +527,17 @@ describe("LineStore paging: solicited ranges and the browse cache", () => {
   });
 
   it("counts cache in RETAINED lines when a reclassified band spans holes", () => {
-    // A repeated jump ack over a band that already spans holes. Cache size must
-    // equal the RETAINED rows in it, never the width of the range: the band
-    // covers [oldest, haveThrough] whatever holes that range has, and a size
-    // derived from the range makes the store report a live tail it does not
-    // have — the tail budget then evicts against a number nothing holds.
-    //
-    // Deterministic because the generated residency property only produces this
-    // shape (a SECOND jump ack over an already-hole-spanning band) in a minority
-    // of runs, which is not a regression guard.
+    // A second jump ack over a band that already spans holes. Cache size counts
+    // the retained rows, never the range's width, or the tail budget evicts
+    // against rows nothing holds. Written out because the residency property
+    // reaches this shape only in a minority of runs.
     const s = new LineStore();
     s.applyScroll(pageMsg(0, 1)); // a sparse tail: two lines, 99 holes between
     s.applyScroll(pageMsg(100, 1));
 
     const jumpAck = (sentHaveThrough: number): void => {
       s.applyResumeAck({
-        epochChanged: false,
+        serverEpoch: 7,
         committed: sentHaveThrough + 200,
         serverOldest: sentHaveThrough + 100, // above the sent base: a jump
         paging: true,
@@ -547,7 +562,7 @@ describe("LineStore paging: solicited ranges and the browse cache", () => {
       retained++;
     });
     expect(retained).toBe(3);
-    expect(s.snapshot(1)).toBeNull(); // every line is cache, so nothing persists
+    expect(s.snapshot()).toBeNull(); // every line is cache, so nothing persists
   });
 
   it("counts rows fetched INTO a band that already covers their indices", () => {
@@ -561,7 +576,7 @@ describe("LineStore paging: solicited ranges and the browse cache", () => {
     s.applyScroll(pageMsg(0, 50));
     s.applyScroll(pageMsg(40_000_000, 50));
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 60_000_000,
       serverOldest: 50_000_000,
       paging: true,
@@ -593,18 +608,10 @@ describe("LineStore paging: solicited ranges and the browse cache", () => {
   });
 
   it("evicts the end FARTHER from the reader, whichever end that is", () => {
-    // The regression guard for a real defect: the old code asked
-    // `iv.lo >= viewportAbs` to find an interval's far edge, which is false
-    // whenever the reader sits INSIDE the interval — the normal deep-scroll
-    // shape, since the cache grows as one contiguous run and the reader scrolls
-    // up into it. So it always took victims from the LOW end: the direction an
-    // up-scrolling reader is heading, re-fetching what it had just dropped,
-    // while the pages behind the reader were never freed at all.
-    //
-    // This test's earlier version asserted the resulting overshoot as if it were
-    // the intended "never evict under the reader" behavior, which is how the bug
-    // survived a red-check: its fixture parked the reader exactly at `iv.lo`, the
-    // one position a real reader never occupies.
+    // The reader sits inside the cached run, the normal deep-scroll shape (not at
+    // its low edge, where a far-edge test of `iv.lo >= viewportAbs` happens to
+    // pass). Victims must come from behind the reader, never from the low end it
+    // is scrolling toward.
     const s = new LineStore();
     fillTail(s, 100);
     const readerAt = 10_100; // near the LOW edge of what we are about to cache
@@ -649,7 +656,7 @@ describe("LineStore paging: solicited ranges and the browse cache", () => {
     s.applyScroll(pageMsg(0, 400));
     s.applyScroll(pageMsg(600, 400)); // the reader's position, 500, is the hole
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 5000,
       serverOldest: 4000,
       paging: true,
@@ -727,7 +734,8 @@ describe("LineStore paging: retained-range geometry is memoized", () => {
     // HYDRATE, which writes keys directly rather than through applyLine.
     const src = new LineStore(60);
     src.applyScroll(pageMsg(700, 20));
-    const snap = src.snapshot(1);
+    ackEpoch(src, 7);
+    const snap = src.snapshot();
     expect(snap).not.toBeNull();
     const hydrated = LineStore.fromSnapshot(snap, 60);
     expect(hydrated).not.toBeNull();
@@ -765,7 +773,7 @@ describe("LineStore paging: the paging floor", () => {
     // re-established (or the client's floor came from a different socket).
     const s = new LineStore();
     s.raisePagingFloor(900);
-    s.noteResumeBounds(5000, 100);
+    s.noteResumeBounds(100);
     expect(s.pagingFloorIndex()).toBe(100);
     expect(s.serverOldestIndex()).toBe(100);
   });
@@ -773,7 +781,7 @@ describe("LineStore paging: the paging floor", () => {
   it("stops offering a frontier the floor has closed", () => {
     const s = new LineStore();
     s.applyScroll(pageMsg(1000, 50)); // holds [1000,1050)
-    s.noteResumeBounds(1050, 500); // the server has older history
+    s.noteResumeBounds(500); // the server has older history
     expect(s.absentEdgesNear(1000, 600).length).toBeGreaterThan(0);
     // The server proved nothing at or below 1000 survives.
     s.raisePagingFloor(1000);
@@ -819,11 +827,12 @@ describe("LineStore paging: the two exclusions", () => {
     // construction (recovery is one fetch), and persisting it would also
     // hydrate interior holes into a fresh store.
     const s = new LineStore();
+    ackEpoch(s, 7);
     fillTail(s, 100); // tail [0,100)
     s.applyScreen(screenMsg(100, 5));
     fetchPage(s, 0, 40, 0); // reclassifies [0,40) as cache: FLUSH against the tail
 
-    const snap = s.snapshot(7);
+    const snap = s.snapshot();
     expect(snap).not.toBeNull();
     expect(snap!.oldest).toBe(40);
     expect(snap!.lines.every(([abs]) => abs >= 40)).toBe(true);
@@ -835,11 +844,12 @@ describe("LineStore paging: the two exclusions", () => {
 
   it("snapshot returns null when everything held is cache", () => {
     const s = new LineStore();
+    ackEpoch(s, 7);
     s.noteSolicited(0, 50);
     s.applyHistoryScroll(pageMsg(0, 50), 0);
     s.clearSolicited();
     expect(s.browseCacheSize()).toBe(50);
-    expect(s.snapshot(7)).toBeNull();
+    expect(s.snapshot()).toBeNull();
   });
 
   it("evicting cache does not advance the eviction watermark", () => {
@@ -907,19 +917,11 @@ describe("LineStore paging: dropBrowseCache", () => {
 });
 
 describe("LineStore paging: classification survives every removal path", () => {
-  // Classification lives in a second container keyed by the same indices
-  // (`browse`), so it is only as correct as its least-maintained deletion path.
-  // Two paths are easy to miss: ED3's applyScrollbackCleared, and
-  // truncateBelowWindow — which
-  // fires on every soft-keyboard resize, the most common event on the device
-  // this design exists for. Every removal now goes through one private
-  // forget(); these cases pin the OUTCOME at each entry point so the next path
-  // added cannot quietly skip it.
-  //
-  // The observable is `tailCount` — not exported, but derived: the tail cap is
-  // enforced against `lines.size - browse.size`, so cache entries outliving
-  // their rows understate the tail and the cap stops trimming. A store holding
-  // far more than its cap after one of these operations IS the corruption.
+  // `browse` classifies rows keyed by the same indices as `lines`, so every
+  // removal path (ED3's applyScrollbackCleared, truncateBelowWindow on each
+  // soft-keyboard resize) must forget() its entries. The tail cap counts
+  // `lines.size - browse.size`, so a stale cache entry stops the cap trimming:
+  // a store far over its cap after one of these operations is the corruption.
 
   /** Every retained index, and how many of them the store calls cache. */
   function census(s: LineStore): { total: number; browse: number; tail: number } {
@@ -1002,7 +1004,7 @@ describe("LineStore paging: classification survives every removal path", () => {
     s.applyScroll(pageMsg(0, 50));
     s.applyScroll(pageMsg(40_000_000, 50)); // a 40M-index hole between the two runs
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 60_000_000,
       serverOldest: 50_000_000, // above what this socket holds: a jump
       paging: true,
@@ -1025,18 +1027,10 @@ describe("LineStore paging: classification survives every removal path", () => {
 });
 
 describe("LineStore paging: the budget walk terminates over a hole-spanning band", () => {
-  // Termination of the budget walk, over the shape that broke it: a cache whose
-  // low edge sits above a wide hole. A range-based victim pool picks an EDGE, and
-  // an edge that is a hole holds no line, so removing it changes nothing and the
-  // walk re-picks it forever while the count never moves — an infinite loop, on
-  // the main thread, reachable from an ordinary reconnect. The key-set model
-  // cannot express that (every victim is a held row and every removal shrinks the
-  // set), so this pins the contract against a range-based reintroduction.
-  //
-  // NOTE the failure mode this pins is a HANG, not a wrong value, so a
-  // regression here shows up as a timed-out test rather than an assertion. That
-  // is the honest shape for it; a synchronous loop cannot be interrupted by the
-  // test runner, which is also why it would freeze a browser tab.
+  // A cache whose low edge sits above a wide hole: a range-based victim pool
+  // re-picks the empty edge forever, an infinite loop on the main thread after an
+  // ordinary reconnect. Every victim must be a held row, so each removal shrinks
+  // the set. A regression shows as a timed-out (hung) test, not an assertion.
   it("completes a budget pass when the band's edge is all holes", () => {
     const s = new LineStore();
     // Two small runs separated by a wide hole, then a jump ack that reclassifies
@@ -1045,7 +1039,7 @@ describe("LineStore paging: the budget walk terminates over a hole-spanning band
     s.applyScroll(pageMsg(0, 5));
     s.applyScroll(pageMsg(500_000, 5));
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 900_000,
       serverOldest: 800_000, // above what this socket holds: a jump
       paging: true,
@@ -1093,7 +1087,7 @@ describe("LineStore paging: the ED3 (scrollbackCleared) lifecycle", () => {
   it("snaps the paging floor to the cleared bound, so the trigger stops asking", () => {
     const s = new LineStore();
     fillTail(s, 300);
-    s.noteResumeBounds(300, 0); // the server still retains from 0
+    s.noteResumeBounds(0); // the server still retains from 0
     expect(s.pagingFloorIndex()).toBe(0);
     expect(s.absentEdgesNear(280, PREFETCH_THRESHOLD).length).toBe(0); // nothing absent yet
 
@@ -1120,15 +1114,10 @@ describe("LineStore paging: the ED3 (scrollbackCleared) lifecycle", () => {
   });
 
   it("runs the whole lifecycle on an ALT-active frame", () => {
-    // The server raises the ED3 flag in the PTY path and attaches it to whatever
-    // frame it builds next, with no alt gate — it even force-appends a row so the
-    // flag cannot be dropped, which on an alt tick forces an ALT payload carrying
-    // it. `clear; vim foo` as one line is enough: both land in one flush interval.
-    //
-    // Handling ED3 inside the main-screen branch made every alt-active ED3 a total
-    // no-op, and the erased history then spliced CONTIGUOUSLY into later output —
-    // the ring's Clear() preserves `committed`, so there is no index gap, no gap
-    // marker, and no trim marker to show for it.
+    // The server attaches ED3 to its next frame with no alt gate, so `clear; vim
+    // foo` delivers it on an alt payload. The store must apply it there too: the
+    // ring's Clear() keeps `committed`, so erased history ignored here would
+    // splice into later output with no gap or trim marker.
     const s = new LineStore();
     fillTail(s, 300);
     s.applyScreen(screenMsg(300, 20));
@@ -1156,17 +1145,12 @@ describe("LineStore paging: the ED3 (scrollbackCleared) lifecycle", () => {
   });
 
   it("refuses an erased index from an UNCORRELATED frame, but not the app's reprint", () => {
-    // A page request whose data timeout already released single-flight comes back
-    // uncorrelated, so it arrives through the ordinary scroll path — classified
-    // TAIL, outside the cache budget and the TTL both, so it never leaves. ED3
-    // deliberately does not advance the trim watermark (the marker would be
-    // permanent noise on an app that clears every redraw), so a SECOND watermark
-    // records what the application erased.
-    //
-    // It tracks what was DROPPED, not the cleared bound, and the second half of
-    // this test is why: an app reprinting its transcript after the clear commits
-    // at NEW indices that are still BELOW the new window base, and that content
-    // must apply. Snapping the refusal to the bound instead refuses it.
+    // A page reply after its data timeout arrives uncorrelated, through the scroll
+    // path, as TAIL that never leaves. ED3 does not move the trim watermark (the
+    // marker would be noise on an app that clears every redraw), so a second
+    // watermark records what was erased. It tracks what was dropped, not the
+    // cleared bound: an app's reprint after the clear lands at new indices still
+    // below the window base, and must apply.
     const s = new LineStore();
     fillTail(s, 400); // holds [0, 400)
     s.applyScreen(screenMsg(700, 4)); // window far above: base 700

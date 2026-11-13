@@ -136,15 +136,8 @@ func TestMountAPIWiresManagerHandlers(t *testing.T) {
 	}
 }
 
-// TestMountSessionRoutesNoStore pins the cache policy at the MOUNT, which is the
-// half RESTHandler's own wrapper cannot reach.
-//
-// A create gate wraps the REST handler (see WithCreateGate), so a refusal is
-// written BY the gate and the REST handler never runs. The gate refuses on the
-// same token-bearing paths as every other response, with the same cache-key
-// exposure, so the mount wraps OUTSIDE the gate. The scope half matters as much:
-// ws is a WebSocket handshake and events states its own stricter policy, so
-// neither may be touched.
+// TestMountSessionRoutesNoStore pins no-store on a create gate's own refusal,
+// which RESTHandler's wrapper never sees, and that ws and events are untouched.
 func TestMountSessionRoutesNoStore(t *testing.T) {
 	// refuseGate is the shape of a real throttle: it answers 429 itself and
 	// never calls through, so nothing downstream can set the header for it.

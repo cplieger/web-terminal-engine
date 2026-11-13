@@ -53,14 +53,9 @@ func TestResolveSession_retainsRecentSession(t *testing.T) {
 // default for the test's duration and returns the buffer. Callers must be
 // serial (no t.Parallel): the default logger is a process global.
 //
-// slog.SetDefault also points the standard log package at the installed
-// handler, and it skips that redirect when the logger being installed carries
-// slog's own default handler. Reinstalling the previous logger therefore does
-// not undo the redirect, so the writer and flags are saved and restored
-// explicitly. slog goes back first: reinstalling a previous handler that is not
-// slog's default re-runs the redirect and would overwrite a log restore done
-// before it. The cleanup is t.Cleanup rather than defer so it also runs when a
-// subtest of the caller fails.
+// slog.SetDefault also redirects package log, and reinstalling the old logger
+// does not undo that, so log's writer and flags are restored explicitly, after
+// slog, whose reinstall would otherwise redo the redirect.
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	buf := &bytes.Buffer{}
@@ -446,53 +441,6 @@ func TestResolveSession_evictsOldestWhenOverCap(t *testing.T) {
 	}
 }
 
-// TestMinLiveSize_minsEachDimensionAndSkipsSizeless verifies MinLiveSize
-// returns the per-dimension minimum across connected clients that reported a
-// size, skipping any that never sent one, so the result fits inside every
-// connected client's viewport.
-func TestMinLiveSize_minsEachDimensionAndSkipsSizeless(t *testing.T) {
-	r := newClientRegistry(slog.Default())
-	r.clients[new(websocket.Conn)] = &clientState{cols: 120, rows: 40}
-	r.clients[new(websocket.Conn)] = &clientState{cols: 80, rows: 24}
-	r.clients[new(websocket.Conn)] = &clientState{} // never reported a size -> skipped
-
-	cols, rows, ok := r.MinLiveSize()
-	if !ok || cols != 80 || rows != 24 {
-		t.Errorf("MinLiveSize() = (%d, %d, %v), want (80, 24, true) [min per dimension]", cols, rows, ok)
-	}
-}
-
-// TestMinLiveSize_falseWhenNoSizedClient verifies MinLiveSize reports ok=false
-// when no connected client has a known size, so the heal becomes a no-op.
-func TestMinLiveSize_falseWhenNoSizedClient(t *testing.T) {
-	r := newClientRegistry(slog.Default())
-	r.clients[new(websocket.Conn)] = &clientState{} // connected but no size yet
-	if _, _, ok := r.MinLiveSize(); ok {
-		t.Errorf("MinLiveSize() ok=true with no sized client; want false")
-	}
-}
-
-// TestRemove_returnsDepartedSize verifies Remove returns the size the removed
-// socket had reported (so the caller can decide whether the departure should
-// heal the shared screen) and drops it from the registry.
-func TestRemove_returnsDepartedSize(t *testing.T) {
-	r := newClientRegistry(slog.Default())
-	ws := new(websocket.Conn)
-	st := r.Add(ws)
-	r.RecordSize(st, 100, 30)
-
-	cols, rows := r.Remove(ws)
-	if cols != 100 || rows != 30 {
-		t.Errorf("Remove() = (%d, %d), want (100, 30) [the departed socket's recorded size]", cols, rows)
-	}
-	r.mu.Lock()
-	_, present := r.clients[ws]
-	r.mu.Unlock()
-	if present {
-		t.Errorf("Remove: connection still registered after removal")
-	}
-}
-
 // TestRemove_stampsLastSeenOnDetach pins the retention semantics the iOS-sleep
 // resume depends on: the 60-minute window measures time since a client last
 // HELD the ledger, not time since the last keystroke. A session whose last
@@ -732,35 +680,6 @@ func TestPerSenderResumeKeysKeepIndependentLedgers(t *testing.T) {
 	if ack, created, _ := r.ResolveSession(stateB, "sess-1#instance-B"); created || ack != 50 {
 		t.Errorf("B's resume = (ack %d, created %v), want (50, false)", ack, created)
 	}
-}
-
-// TestMinLiveSize_skipsAClientMissingEitherDimension verifies each dimension is
-// screened on its own: a client whose cols or rows is still unknown is not a
-// sized client, so it must not enter the minimum. A single unscreened zero would
-// pull the shared screen to a zero width or height — the whole screen, for every
-// attached client, on one half-initialised socket.
-func TestMinLiveSize_skipsAClientMissingEitherDimension(t *testing.T) {
-	t.Run("rows reported without cols", func(t *testing.T) {
-		r := newClientRegistry(slog.Default())
-		r.clients[new(websocket.Conn)] = &clientState{cols: 80, rows: 24}
-		r.clients[new(websocket.Conn)] = &clientState{rows: 24} // cols never reported
-
-		cols, rows, ok := r.MinLiveSize()
-		if !ok || cols != 80 || rows != 24 {
-			t.Errorf("MinLiveSize() = (%d, %d, %v), want (80, 24, true): a client with no cols is not sized", cols, rows, ok)
-		}
-	})
-
-	t.Run("cols reported without rows", func(t *testing.T) {
-		r := newClientRegistry(slog.Default())
-		r.clients[new(websocket.Conn)] = &clientState{cols: 80, rows: 24}
-		r.clients[new(websocket.Conn)] = &clientState{cols: 80} // rows never reported
-
-		cols, rows, ok := r.MinLiveSize()
-		if !ok || cols != 80 || rows != 24 {
-			t.Errorf("MinLiveSize() = (%d, %d, %v), want (80, 24, true): a client with no rows is not sized", cols, rows, ok)
-		}
-	})
 }
 
 // TestResolveSession_retainsExactlyTheCap pins the other side of the cap

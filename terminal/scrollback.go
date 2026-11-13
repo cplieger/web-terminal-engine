@@ -5,27 +5,10 @@ import "github.com/cplieger/web-terminal-engine/v6/vt"
 // scrollbackRing is a capacity-bounded ring buffer of scrollback lines,
 // addressed by absolute line index.
 //
-// Every line that scrolls off the top of the VT screen is appended here
-// and assigned a monotonic absolute index: the first line ever committed
-// is index 0, the next is 1, and so on, growing without bound for the
-// life of the session. The ring retains only the most recent `capacity`
-// lines; older lines are evicted, but their indices are never reused. The
-// absolute index of the current top screen row equals Committed().
-//
-// The buffer GROWS to `capacity` rather than being allocated at it, so a
-// deep capacity costs a session nothing until it has actually produced that
-// much history. This matters because capacity is an operator-set number
-// (SCROLLBACK) whose whole point is that it can be set absurdly high:
-// preallocating charged every session 24 bytes per configured line up front
-// — 2.3 MB at the 100k default before a single line was printed, and 240 MB
-// for an operator who asked for 10 million.
-//
-// Absolute indexing is the backbone of the engine. It makes resume
-// alignment exact (the client asks for
-// "everything after index H") and makes duplicate delivery structurally
-// impossible (writing the same index twice overwrites the same row),
-// replacing the old count-based scheme whose two independently-capped
-// buffers drifted into overlaps and gaps.
+// Each line scrolled off the screen gets the next absolute index, never reused
+// after eviction; the top screen row's index is Committed(). The buffer grows
+// to capacity instead of preallocating, since an operator may set capacity
+// absurdly high.
 type scrollbackRing struct {
 	buf [][]vt.WireRun
 	// wrap[i] mirrors buf[i]: the line soft-wraps from the line before it.
@@ -95,11 +78,8 @@ func (r *scrollbackRing) OldestIndex() uint64 {
 	return r.committed - uint64(r.count) // #nosec G115 -- count is non-negative and bounded by len(buf)
 }
 
-// copyLine returns a fresh copy of one retained line. The rings hand lines to
-// replay and paging paths whose callers serialize or transform them; without
-// the copy the returned inner []vt.WireRun still aliases ring history, so one
-// mutating caller would rewrite what every LATER replay sees. The outer slices
-// are fresh already; this copies the inner layer too.
+// copyLine returns a fresh copy of one retained line, so a caller mutating it
+// cannot rewrite what later replays see.
 func copyLine(line []vt.WireRun) []vt.WireRun {
 	if line == nil {
 		return nil
@@ -130,13 +110,8 @@ func (r *scrollbackRing) LinesFrom(abs uint64) (firstAbs uint64, lines [][]vt.Wi
 	return start, out
 }
 
-// LinesRange returns at most maxLines retained lines starting at absolute
-// index abs, in order, along with the absolute index of the first returned
-// line. It is LinesFrom with a count bound, so a page request copies a page
-// rather than the ring. Clamping is identical — abs older than the retained
-// range clamps up to OldestIndex, so the caller compares the returned firstAbs
-// against the requested abs to detect an eviction gap — and abs at or beyond
-// Committed, or maxLines <= 0, returns no lines.
+// LinesRange is LinesFrom bounded to maxLines, so a page request copies a page
+// rather than the ring. maxLines <= 0 returns no lines.
 func (r *scrollbackRing) LinesRange(abs uint64, maxLines int) (firstAbs uint64, lines [][]vt.WireRun) {
 	if r.count == 0 || abs >= r.committed || maxLines <= 0 {
 		return r.committed, nil
@@ -171,14 +146,9 @@ func (r *scrollbackRing) Lines() [][]vt.WireRun {
 // Clear discards all retained lines. committed is preserved so absolute
 // indices never repeat within a session.
 //
-// The buffer is RELEASED, not logically emptied, and both halves matter on a
-// growing ring. Leaving it untouched would put the ring in an impossible state
-// — length intact, count zero — where Append's growth branch writes past index
-// 0 while the readers still index from 0, so the next line committed would read
-// back as a pre-Clear row. And dropping the array (rather than reslicing it to
-// zero length) frees the rows it holds, which is what an application clearing
-// its scrollback is asking for; at the 100k default that array is 2.3 MB of
-// pointers keeping every retained row alive.
+// The array is dropped, not resliced or kept: a kept one makes Append's growth
+// branch write past index 0 while readers start at 0, and dropping it frees
+// the retained rows.
 func (r *scrollbackRing) Clear() {
 	r.buf = nil
 	r.wrap = nil

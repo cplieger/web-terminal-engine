@@ -40,9 +40,9 @@ const AttrAutolink = 1024
 // documents for consumers.
 const maxAutolinkRows = 4
 
-// urlRE follows the client's autolink pattern (render.ts URL_RE, the xterm.js
-// addon-web-links shape) with one deliberate narrowing: URL characters are
-// ASCII-only (RFC 3986), so a match terminates at any non-ASCII rune. This
+// urlRE is the one bare-URL rule (the client never scans text): the xterm.js
+// addon-web-links shape with URL characters ASCII-only (RFC 3986), so a match
+// terminates at any non-ASCII rune. This
 // keeps a wide glyph — and its U+FFFF continuation placeholder, which is an
 // internal sentinel that must never leak into an href — out of stamped links,
 // and never splits a wide pair across an anchor boundary.
@@ -71,33 +71,16 @@ func (s *Screen) softWrapsBelow(y int) bool {
 // trimmableBlank reports whether a cell is a trailing blank the wire may drop:
 // a WRITTEN space (Ch == ' ') carrying no style and no hyperlink.
 //
-// The three exclusions are each load-bearing. A styled blank is content: an
-// erase writes the application's current background into the cells it clears,
-// so a colored tail is a painted region and dropping it would repaint it in the
-// theme default. A blank inside an OSC 8 link is part of the app's own anchor.
-// And Ch == 0 is not a space at all — it is a wide glyph's second half (or an
-// unwritten cell), encoded as the U+FFFF continuation sentinel, so trimming it
-// would strand the wide glyph's first half without its spacer.
-//
-// Cell.Protected/IsoProtected are deliberately NOT consulted: they govern which
-// erases spare the cell in the GRID, which stays authoritative, and the wire
-// carries neither.
+// A styled blank is painted background, a linked blank is part of an anchor,
+// and Ch == 0 is a wide glyph's second half, so none of them may be trimmed.
 func trimmableBlank(c Cell) bool {
 	return c.Ch == ' ' && c.Style == (Style{}) && c.Hyperlink == ""
 }
 
 // trimTrailingBlanks returns row without its trailing run of trimmable blanks.
 //
-// Without this, a `$ ` prompt row ships ~118 spaces the application never
-// printed, selectable in the DOM and landing in a copy. Right-trimming the
-// wire representation matches what xterm.js and tmux already do on their own
-// string/copy paths; an INTENDED trailing default-style space is
-// indistinguishable from padding in any cell grid, xterm.js included.
-//
-// Mid-line and leading whitespace are untouched, and paste INTO the terminal
-// is unaffected. A fully-blank row trims to zero runs, which the client
-// renders as a single non-breaking-space filler (render.ts buildRowSpans) so
-// the row keeps full line height instead of collapsing the grid.
+// Padding would otherwise land in a copy, as xterm.js and tmux also avoid. A
+// blank row trims to zero runs.
 func trimTrailingBlanks(row []Cell) []Cell {
 	n := len(row)
 	for n > 0 && trimmableBlank(row[n-1]) {
@@ -111,9 +94,6 @@ func trimTrailingBlanks(row []Cell) []Cell {
 // continuesBelow suppresses the trim: the caller passes true when this row
 // soft-wrapped onto the row below, where the trailing blanks are mid-line
 // content of one logical line (xterm.js #1286) rather than grid padding.
-//
-// A method (not a free function) so color resolution can consult the Screen's
-// OSC 4 palette overrides.
 func (s *Screen) cellsToRuns(row []Cell, continuesBelow bool) []WireRun {
 	var runs []WireRun
 	if !continuesBelow {
@@ -303,14 +283,8 @@ func (s *Screen) chainRowFor(r, start int) chainRow {
 // boundChain caps a chain at maxAutolinkRows entries, dropping from whichever
 // end is farther from the focus row, and from the NEWER end on a tie.
 //
-// The tie-break is asymmetric on purpose. A URL's scheme sits at its start, so
-// the older end is what a match needs at all: drop it and the joined text holds
-// no "://", autolinkSpans returns nothing, and the row the user is looking at
-// carries no anchor. Dropping the newer end only truncates the href of a URL
-// that outruns the window, which still leaves the row clickable. Measured at 20
-// columns on a chain of five rows whose URL opens the chain, focus in the
-// middle: dropping the newer row yields the URL's first 80 characters, dropping
-// the older row yields no link. What that costs is stated on maxAutolinkRows.
+// A URL's scheme sits at its start: dropping the older end can lose the
+// match, while dropping the newer one only truncates the href.
 func boundChain(rows []chainRow, focus int) (bounded []chainRow, focusOut int) {
 	for len(rows) > maxAutolinkRows {
 		if focus > len(rows)-1-focus {
@@ -328,12 +302,8 @@ func boundChain(rows []chainRow, focus int) (bounded []chainRow, focusOut int) {
 // already-drained history. It returns the chain's rows and the index of row y
 // within them.
 //
-// The drain tail carries SOFT-wrap continuations only (drainTopRow retains it
-// on the wrapped flag), so a hard-wrapped chain whose first row has already
-// scrolled into history joins only its on-screen rows. That window is narrow in
-// practice: an application that lays out its own text emits the whole wrapped
-// run in one frame, so the rows below are present when the first one drains,
-// which is when its stamp is computed.
+// The drain tail carries soft-wrap continuations only, so a hard-wrapped
+// chain whose first row already drained joins only its on-screen rows.
 func (s *Screen) chainRows(y int) (rows []chainRow, focus int) {
 	start := y
 	for start > 0 && s.continuesRow(start) {
@@ -360,12 +330,8 @@ func (s *Screen) chainRows(y int) (rows []chainRow, focus int) {
 // stampAutolinks detects bare URLs in the wrap chain containing row y and
 // stamps the overlap with row y into the given runs: the affected cells get
 // the FULL matched URL in U plus the AttrAutolink bit, splitting runs at link
-// boundaries. Derived at render time, never stored into cells, so edits are
-// picked up on the next render with no invalidation. App-provided OSC 8 links
-// (runs already carrying U) are authoritative and never overwritten. This is
-// what makes a URL that wraps across rows fully clickable: every row segment
-// gets an anchor with the complete href, where the old client-side per-row
-// regex left row 2 unlinked and row 1's href truncated at the wrap column.
+// boundaries. Derived at render time, never stored, so edits need no
+// invalidation. OSC 8 links (runs already carrying U) are never overwritten.
 func (s *Screen) stampAutolinks(y int, runs []WireRun) []WireRun {
 	rows, focus := s.chainRows(y)
 	spans := autolinkSpans(rows, focus)
@@ -508,18 +474,9 @@ func (s *Screen) colorToWire(c Color) int32 {
 	return wireDefaultColor
 }
 
-// basic16RGB resolves palette indices 0-15 (SGR 30-37 / 90-97 and their 40-47 /
-// 100-107 background forms) to RGB. These 16 slots are TERMINAL-DEFINED: no spec
-// assigns them values, so this is a palette choice, and the choice is kitty's
-// published default (kitty/options/definition.py color0-color15) — chosen
-// because kitty is the only widely-used terminal whose default background is
-// pure black, matching web-terminal-ui's default, so its slot values are
-// chosen against the background this engine actually renders on. (The classic
-// VGA / Linux-console table's blue reads at 1.58:1 against black, far under
-// the WCAG AA floor of 4.5:1; kitty's slots clear that floor in 13 of 16.)
-//
-// An application can still override any slot with OSC 4, and a consumer can put
-// a contrast floor over the whole palette with WithMinimumContrast.
+// basic16RGB resolves palette indices 0-15 to RGB with kitty's default palette
+// (kitty/options/definition.py), whose default background is pure black like
+// the client's; the VGA table's blue reads at 1.58:1 there.
 func basic16RGB(idx uint8) int32 {
 	pal := [16]int32{
 		0x000000, 0xcc0403, 0x19cb00, 0xcecb00,

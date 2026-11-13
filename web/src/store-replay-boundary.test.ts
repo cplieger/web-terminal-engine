@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import { LineStore } from "./store.js";
+import { ackEpoch } from "./test-helpers/store-epoch.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
 function row(text: string): WireRun[] {
@@ -153,8 +154,9 @@ describe("replayBoundary: across persistence", () => {
     s.applyScroll(scrollMsg(0, 100));
     s.applyScreen(screenMsg(100, 24));
     expect(s.replayBoundary()).toBe(99);
+    ackEpoch(s, 7);
 
-    const snap = s.snapshot(7);
+    const snap = s.snapshot();
     expect(snap).not.toBeNull();
     const back = LineStore.fromSnapshot(JSON.parse(JSON.stringify(snap)) as unknown);
     expect(back).not.toBeNull();
@@ -170,7 +172,8 @@ describe("replayBoundary: across persistence", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, 20));
     s.applyScreen(screenMsg(20, 4));
-    const snap = JSON.parse(JSON.stringify(s.snapshot(7))) as Record<string, unknown>;
+    ackEpoch(s, 7);
+    const snap = JSON.parse(JSON.stringify(s.snapshot())) as Record<string, unknown>;
     delete snap["unconfirmedFrom"];
 
     const back = LineStore.fromSnapshot(snap);
@@ -185,8 +188,9 @@ describe("replayBoundary: across persistence", () => {
     const s = new LineStore();
     s.applyScroll(scrollMsg(0, 20));
     s.applyScreen(screenMsg(20, 4));
+    ackEpoch(s, 7);
     for (const bad of ["12", -1, 1.5, Number.NaN, null, {}]) {
-      const snap = JSON.parse(JSON.stringify(s.snapshot(7))) as Record<string, unknown>;
+      const snap = JSON.parse(JSON.stringify(s.snapshot())) as Record<string, unknown>;
       snap["unconfirmedFrom"] = bad;
       const back = LineStore.fromSnapshot(snap);
       expect(
@@ -272,7 +276,7 @@ describe("replayBoundary: interaction with the replay-jump prediction", () => {
     const cacheBefore = s.browseCacheSize();
 
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 9000,
       serverOldest: 8000, // a real eviction gap: the replay will start far above
       paging: true,
@@ -292,7 +296,7 @@ describe("replayBoundary: interaction with the replay-jump prediction", () => {
     expect(s.replayBoundary()).toBe(99);
 
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 9000,
       serverOldest: 8000,
       paging: true,

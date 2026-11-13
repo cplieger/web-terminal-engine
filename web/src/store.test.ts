@@ -5,6 +5,7 @@
 
 import { describe, it, expect } from "vitest";
 import { LineStore } from "./store.js";
+import { ackEpoch } from "./test-helpers/store-epoch.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
 function row(text: string): WireRun[] {
@@ -399,15 +400,9 @@ describe("LineStore", () => {
   });
 
   it("forEachLine iterates retained keys across a huge index gap without an integer walk", () => {
-    // The absolute-index DoS guard (bounded key-scan, not a walk over the
-    // integer range [oldest, highest]) is applied at four sites in store.ts;
-    // only enforceCap's is regression-pinned. forEachLine is the hottest of
-    // the four -- the renderer calls it every frame to order DOM rows -- yet
-    // its only gap test ("skips holes") uses a 3-index gap that a naive
-    // range walk would survive. With both a low block and a far block
-    // retained (no cap eviction), a range-walk regression loops ~1e9 times
-    // and times out; the bounded key-scan yields the four lines in
-    // ascending order instantly.
+    // forEachLine runs every frame, so it must scan retained keys, never walk the
+    // integer range [oldest, highest]. Across this gap a range walk loops ~1e9
+    // times and times out; the key scan yields the lines in order at once.
     const s = new LineStore(1000); // cap high enough that nothing is evicted
     s.applyScroll(scrollMsg(0, ["a", "b"]));
     const far = 1_000_000_000;
@@ -540,18 +535,18 @@ describe("LineStore", () => {
     // Fresh client; nothing evicted locally.
     expect(s.hasTrimmedHistory()).toBe(false);
     // Resume: the server's oldest retained line is 100 and it replays from there.
-    s.noteResumeBounds(150, 100);
+    s.noteResumeBounds(100);
     s.applyScroll(scrollMsg(100, ["x", "y"]));
     // The client cannot show lines 0..99 — they were trimmed server-side.
     expect(s.hasTrimmedHistory()).toBe(true);
     // A later resume where the server still has everything clears the flag.
-    s.noteResumeBounds(150, 0);
+    s.noteResumeBounds(0);
     expect(s.hasTrimmedHistory()).toBe(false);
   });
 
   it("ignores invalid resume bounds", () => {
     const s = new LineStore();
-    s.noteResumeBounds(10, -1); // negative oldest ignored
+    s.noteResumeBounds(-1); // negative oldest ignored
     s.applyScroll(scrollMsg(5, ["a"]));
     expect(s.hasTrimmedHistory()).toBe(false);
   });
@@ -632,14 +627,7 @@ describe("LineStore", () => {
 });
 
 // --- Persistence: snapshot / fromSnapshot -----------------------------------
-//
-// The store can be serialized as plain data so a consumer may keep scrollback
-// across a page discard (on iOS, a backgrounded tab being evicted is routine,
-// and a reloaded page otherwise resumes with haveThrough = -1 and pulls the
-// server's whole ring).
-//
-// The load-bearing part is what a snapshot deliberately does NOT carry, and the
-// epoch it does; see StoreSnapshot's doc comment.
+// StoreSnapshot's doc owns what a snapshot carries and what it leaves out.
 
 describe("LineStore persistence", () => {
   function seeded(n: number, from = 0): LineStore {
@@ -650,6 +638,7 @@ describe("LineStore persistence", () => {
         Array.from({ length: n }, (_, i) => `L${from + i}`),
       ),
     );
+    ackEpoch(store, 7);
     return store;
   }
 
@@ -660,8 +649,9 @@ describe("LineStore persistence", () => {
       { t: "plain" },
     ];
     store.applyScroll({ type: "scroll", firstIndex: 7, lines: [fancy], inputAck: 0 });
+    ackEpoch(store, 1234);
 
-    const snap = store.snapshot(1234);
+    const snap = store.snapshot();
     expect(snap).not.toBeNull();
     // Survives a structured clone, which is what an IndexedDB write does: no
     // class instances, no functions, no cycles.
@@ -675,7 +665,7 @@ describe("LineStore persistence", () => {
 
   it("reports the depth a bounded tail does not have, so the trim marker is honest", () => {
     const store = seeded(10);
-    const snap = store.snapshot(0, 4); // keep only the newest 4 of 10
+    const snap = store.snapshot(4); // keep only the newest 4 of 10
     expect(snap!.lines.length).toBe(4);
     expect(snap!.oldest).toBe(6);
     expect(snap!.highest).toBe(9);
@@ -689,30 +679,23 @@ describe("LineStore persistence", () => {
   });
 
   it("hydrates every line as dirty so the renderer actually paints them", () => {
-    const back = LineStore.fromSnapshot(seeded(3).snapshot(0))!;
+    const back = LineStore.fromSnapshot(seeded(3).snapshot())!;
     const changes = back.drainChanges();
     expect(changes.dirtyLines.sort((a, b) => a - b)).toEqual([0, 1, 2]);
   });
 
-  it("carries the server boot epoch, which is what makes hydrating safe at all", () => {
-    // Absolute indices are only meaningful within one server process. Without
-    // this field a consumer cannot tell the connection layer which epoch its
-    // restored content belongs to, and a hydrate across a server restart would
-    // present stale content as live AND then have the new session's low-index
-    // output refused by the staleness guard.
-    expect(seeded(2).snapshot(987654321)!.serverEpoch).toBe(987654321);
-    expect(seeded(2).snapshot(Number.NaN)!.serverEpoch).toBe(0);
-  });
-
   it("refuses to snapshot an empty store, so it cannot overwrite a good one", () => {
-    expect(new LineStore().snapshot(1)).toBeNull();
+    const empty = new LineStore();
+    ackEpoch(empty, 7);
+    expect(empty.snapshot()).toBeNull();
   });
 
   it("does not persist the window, the server bound, or the alternate screen", () => {
     const store = new LineStore();
     store.applyScreen(screenMsg(0, 2, { 0: "a", 1: "b" }));
-    store.noteResumeBounds(50, 10);
-    const snap = store.snapshot(1)!;
+    store.noteResumeBounds(10);
+    ackEpoch(store, 7);
+    const snap = store.snapshot()!;
     // Only the documented keys. A future field must be added to StoreSnapshot
     // deliberately, with its own reasoning, rather than leaking in.
     //
@@ -738,18 +721,19 @@ describe("LineStore persistence", () => {
     // appear at all rather than carrying a sentinel JSON cannot express.
     const store = new LineStore();
     store.applyScroll(scrollMsg(0, ["a", "b", "c"]));
-    const snap = store.snapshot(1)!;
+    ackEpoch(store, 7);
+    const snap = store.snapshot()!;
     expect(Object.keys(snap).sort()).toEqual(["highest", "lines", "oldest", "serverEpoch", "v"]);
     expect("unconfirmedFrom" in snap).toBe(false);
   });
 
   it("discards a snapshot of a different shape version", () => {
-    const snap = seeded(3).snapshot(1)!;
+    const snap = seeded(3).snapshot()!;
     expect(LineStore.fromSnapshot({ ...snap, v: snap.v + 1 })).toBeNull();
   });
 
   it("discards malformed snapshots instead of half-restoring one", () => {
-    const good = seeded(3).snapshot(1)!;
+    const good = seeded(3).snapshot()!;
     const cases: unknown[] = [
       null,
       undefined,
@@ -797,7 +781,7 @@ describe("LineStore persistence", () => {
   it("keeps applying new lines above a hydrated tail", () => {
     // The restored store has to be a working store, not just a rendered one:
     // the session continues at indices above the tail.
-    const back = LineStore.fromSnapshot(seeded(4).snapshot(0))!;
+    const back = LineStore.fromSnapshot(seeded(4).snapshot())!;
     back.applyScroll(scrollMsg(4, ["L4"]));
     expect(back.highestIndex()).toBe(4);
     expect(lineTexts(back).map((l) => l.text)).toEqual(["L0", "L1", "L2", "L3", "L4"]);
@@ -807,7 +791,7 @@ describe("LineStore persistence", () => {
     // A bounded tail means everything below it was deliberately dropped. A late
     // re-delivery of one of those lines must not reappear underneath the
     // restored content (apply-line guard 2, via everEvictedThrough).
-    const back = LineStore.fromSnapshot(seeded(10).snapshot(0, 4))!;
+    const back = LineStore.fromSnapshot(seeded(10).snapshot(4))!;
     expect(back.oldestIndex()).toBe(6);
     back.applyScroll(scrollMsg(2, ["late"]));
     expect(back.getLine(2)).toBeUndefined();
@@ -815,21 +799,12 @@ describe("LineStore persistence", () => {
   });
 
   it("still paints the screen when the window arrives BELOW the hydrated tail", () => {
-    // The counterpart to the guard above, and the case that protects this feature's
-    // own stated worst case rather than its nice-to-have. A hydrated store starts
-    // with a HIGH everEvictedThrough (oldest - 1), so if a window frame then arrives
-    // at a low base without a restart having been detected — an index space
-    // recreated in place, a server downgraded to reporting no epoch — apply-line
-    // guard 2 would refuse every window row and the terminal would be wrong and
-    // then permanently blank, which is precisely the failure the persisted epoch
-    // exists to avoid. Guard 2's live-window exemption is what makes it degrade to
-    // "working screen, no scrollback for a while" instead.
-    //
-    // The exemption belongs to the store's eviction/window rules, not to
-    // persistence, but only persistence can CREATE a store whose everEvictedThrough
-    // is high at construction — so the test belongs here, where it will fail if
-    // that exemption is ever narrowed.
-    const back = LineStore.fromSnapshot(seeded(1000, 3200).snapshot(1))!;
+    // A hydrated store starts with a high everEvictedThrough (oldest - 1). A window
+    // frame at a low base under the same epoch (an index space recreated in place)
+    // must still paint: without guard 2's live-window exemption every window row is
+    // refused and the screen stays blank. Only hydration builds such a store, so
+    // the exemption is pinned here.
+    const back = LineStore.fromSnapshot(seeded(1000, 3200).snapshot())!;
     expect(back.oldestIndex()).toBe(3200);
     expect(back.hasTrimmedHistory()).toBe(true);
 
@@ -840,7 +815,7 @@ describe("LineStore persistence", () => {
   });
 
   it("honors a smaller retention cap on the hydrated store", () => {
-    const back = LineStore.fromSnapshot(seeded(6).snapshot(0), 3);
+    const back = LineStore.fromSnapshot(seeded(6).snapshot(), 3);
     expect(back).not.toBeNull();
     // Appending past the cap evicts from the top rather than growing forever.
     back!.applyScroll(scrollMsg(6, ["L6", "L7", "L8", "L9"]));
@@ -862,7 +837,8 @@ describe("LineStore persistence", () => {
       ],
       inputAck: 0,
     });
-    const back = LineStore.fromSnapshot(store.snapshot(1));
+    ackEpoch(store, 7);
+    const back = LineStore.fromSnapshot(store.snapshot());
     expect(back).not.toBeNull();
     expect(back!.getLine(1)).toEqual([{ t: "bare" }]);
   });
@@ -873,7 +849,7 @@ describe("LineStore persistence", () => {
     // store that kept 5000 lines and then evicted almost all of them on the next
     // append.
     for (const bad of [0, -1, 1.5, Number.NaN]) {
-      const back = LineStore.fromSnapshot(seeded(6).snapshot(0), bad);
+      const back = LineStore.fromSnapshot(seeded(6).snapshot(), bad);
       expect(back).not.toBeNull();
       // Appending must not collapse the buffer: the default cap is in force.
       back!.applyScroll(scrollMsg(6, ["L6", "L7"]));
@@ -887,7 +863,7 @@ describe("LineStore persistence", () => {
     // line — and the same snapshot outlives a consumer lowering it, so a restore
     // must respect the cap on the way in rather than waiting for eviction to
     // claw it back after the rows are already built.
-    const back = LineStore.fromSnapshot(seeded(20).snapshot(0), 8)!;
+    const back = LineStore.fromSnapshot(seeded(20).snapshot(), 8)!;
     expect(back.oldestIndex()).toBe(12);
     expect(back.highestIndex()).toBe(19);
     expect(lineTexts(back).length).toBe(8);
@@ -898,7 +874,7 @@ describe("LineStore persistence", () => {
   it("validates the whole payload before trimming, so a corrupt head still rejects", () => {
     // Trimming first would let a snapshot whose head is garbage restore its tail
     // as though nothing were wrong.
-    const good = seeded(20).snapshot(0)!;
+    const good = seeded(20).snapshot()!;
     const corruptHead: [number, WireRun[]][] = [...good.lines];
     corruptHead[0] = ["nope" as unknown as number, []];
     expect(LineStore.fromSnapshot({ ...good, lines: corruptHead }, 8)).toBeNull();

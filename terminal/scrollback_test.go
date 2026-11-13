@@ -210,12 +210,8 @@ func lineTexts(lines [][]vt.WireRun) []string {
 // TestScrollbackRing_GrowsOnDemand pins the allocation shape: the buffer grows
 // toward capacity instead of being allocated at it.
 //
-// This is load-bearing rather than cosmetic. Capacity is an operator-set number
-// (SCROLLBACK) that is meant to be settable absurdly high — the answer to
-// "I want unlimited history" is a huge number, not a sentinel — so allocating
-// at it charges every session 24 bytes per CONFIGURED line before it prints
-// anything: 2.3 MB at the 100k default, 240 MB for an operator who asks for
-// ten million.
+// Preallocating would charge 24 bytes per configured line up front: 240 MB for
+// a capacity of ten million.
 func TestScrollbackRing_GrowsOnDemand(t *testing.T) {
 	const capacity = 100_000
 	r := newScrollbackRing(capacity)
@@ -279,15 +275,8 @@ func TestScrollbackRing_GrowsThenWraps(t *testing.T) {
 // TestScrollbackRing_ClearReleasesAndRegrows pins both halves of Clear on a
 // GROWING buffer.
 //
-// Correctness: a buffer left untouched by Clear (length intact, count zeroed)
-// puts the ring in an impossible state where Append's growth branch writes past
-// index 0 while the readers still index from 0 — so the next line committed
-// reads back as a pre-Clear one. Zeroing the length fixes that.
-//
-// Memory: `nil` rather than `buf[:0]`, because only releasing the array frees
-// the retained rows, and freeing them is precisely what an application clearing
-// its scrollback (ED3) is asking for. At the 100k default that array is 2.3 MB
-// of pointers holding every row alive.
+// A kept buffer would make the next line read back as a pre-Clear one, and only
+// nil, not buf[:0], frees the retained rows.
 func TestScrollbackRing_ClearReleasesAndRegrows(t *testing.T) {
 	r := newScrollbackRing(10)
 	r.Append([][]vt.WireRun{makeLine("old1"), makeLine("old2"), makeLine("old3")}, nil)

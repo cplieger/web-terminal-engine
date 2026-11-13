@@ -2,17 +2,9 @@
 
 package terminal
 
-// Tests for the marker reap domain. Like the containment tests, these use the
-// real kernel and real child processes rather than a fake /proc: the claim under
-// test is about what the kernel does with an inherited environment across
-// setsid() and re-parenting, and a fake would assert the author's model instead
-// of the platform's behaviour.
-//
-// "Gone" is always decided by the domain's own scan, which reads
-// /proc/<pid>/environ. A zombie's mm is gone, so its environ reads empty and it
-// never matches — which is the correct reading (an uncollected exit status is
-// the zombie reaper's problem, not a process to signal) and it also keeps these
-// tests independent of whether anything reaps in the ambient environment.
+// These tests use real processes, not a fake /proc: the claim is what the
+// kernel does with an inherited environment across setsid() and re-parenting.
+// A zombie's environ reads empty, so "gone" never depends on ambient reaping.
 
 import (
 	"log/slog"
@@ -57,19 +49,9 @@ func requireSetsid(t *testing.T) {
 // startMarked spawns a shell carrying the domain's marker and returns the head.
 // The caller reaps the head itself, exactly as the engine's monitor does.
 //
-// The environment is composed by the PRODUCTION path rather than by hand.
-// childEnv is what prepends the marker AND strips every other assignment to that
-// key, and a fixture restating either rule can drift from it. It did: this
-// fixture used to build `append([]string{s.envPair()}, os.Environ()...)` and
-// claimed to mirror the spawn path, which silently staged an UNMARKED tree
-// whenever the ambient environment already carried the key — os/exec keeps the
-// LAST value for a repeated key, so the ambient assignment won. Every process
-// running inside one of these very sessions carries it, which is where this suite
-// is developed, so the whole file failed there and passed on CI.
-//
-// A bare Handler is the right receiver: it carries no WithEnv, so the domain's
-// own marker is the only assignment to the key, which is precisely the state
-// these tests need staged.
+// The environment comes from production childEnv, never a hand-built copy,
+// which drifts: an ambient marker would win and stage an unmarked tree. A bare
+// Handler has no WithEnv, so the domain's marker is the key's only assignment.
 func startMarked(t *testing.T, s *sessionReap, script string) *exec.Cmd {
 	t.Helper()
 	cmd := exec.Command("/bin/sh", "-c", script)
@@ -500,23 +482,16 @@ func TestReapMarkerSurvivesADuplicateKeyFromWithEnv(t *testing.T) {
 	if h.reap.marker == "consumer-supplied" {
 		t.Fatal("the consumer's value became the domain's marker")
 	}
-	members := reapFindByMarker(h.reap.marker)
+	members := waitForMembers(t, h.reap, 1)
 	if !slices.Contains(members, h.cmd.Process.Pid) {
 		t.Fatalf("a consumer setting %s displaced the engine's marker: session pid %d is outside its own domain (members=%v)",
 			reapMarkerEnv, h.cmd.Process.Pid, members)
 	}
 }
 
-// The INHERITED environment can carry this key too, and it is the source the
-// engine controls least: a server started from inside one of these sessions
-// inherits that session's live marker, so without the strip every session it
-// spawns would carry a marker the engine never minted — the scan would match
-// nothing and reaping would be silently off for the whole process. That is not
-// hypothetical; it is how this suite's own failures were found.
-//
-// Uses t.Setenv (hence no t.Parallel: the two are incompatible) so the ambient
-// value is a fixture rather than a property of the machine — this test must fail
-// on a clean CI runner too, not only inside one of these sessions.
+// A server started inside a session inherits its live marker, which without
+// the strip would silently disable reaping. t.Setenv (so no t.Parallel) makes
+// the ambient marker a fixture, so the test also fails on a clean runner.
 func TestReapMarkerSurvivesAnInheritedMarker(t *testing.T) {
 	t.Setenv(reapMarkerEnv, "inherited-from-an-outer-session")
 
@@ -532,7 +507,7 @@ func TestReapMarkerSurvivesAnInheritedMarker(t *testing.T) {
 	if h.reap.marker == "inherited-from-an-outer-session" {
 		t.Fatal("the inherited value became the domain's marker")
 	}
-	members := reapFindByMarker(h.reap.marker)
+	members := waitForMembers(t, h.reap, 1)
 	if !slices.Contains(members, h.cmd.Process.Pid) {
 		t.Fatalf("an inherited %s displaced the engine's marker: session pid %d is outside its own domain (members=%v)",
 			reapMarkerEnv, h.cmd.Process.Pid, members)
@@ -619,14 +594,7 @@ func TestReapNilDomainIsNoop(t *testing.T) {
 }
 
 // TestReapingIsUnconditional pins that a zero-configured handler mints a reap
-// domain: reaping has no configuration surface at all. Through v4 an opt-out
-// existed (WithoutSessionReap set handlerConfig.noReap, and newSessionReap
-// answered nil for it); both were removed at v5 because leaving a closed
-// session's tree alive is the defect, not a feature. The zero config below is
-// therefore not "the default of a knob" but the only shape a handler can be
-// in — the compile-time absence of any opt-out option is the other half of
-// the guarantee, and this test documents it: the sole nil answer left in
-// newSessionReap is a failed marker mint, never a configuration.
+// domain: newSessionReap returns nil only for a failed marker mint.
 func TestReapingIsUnconditional(t *testing.T) {
 	t.Parallel()
 	s := (&Handler{cfg: handlerConfig{}}).newSessionReap()

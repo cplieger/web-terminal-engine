@@ -48,14 +48,10 @@ func (h *Handler) collectTextLocked(t *textTail) {
 			return
 		}
 	}
-	// Build discards a drain that is alt content or straddles an alt
-	// transition, so it never becomes history and is not text either.
-	if !h.screen.InAltScreen && !h.builder.altTransitionPending(h.screen) {
-		drainedWrapped := h.screen.DrainedWrapped()
-		for i, line := range slices.Backward(h.screen.Drained) {
-			if !t.push(runsText(line), drainedWrapped[i]) {
-				return
-			}
+	drainedWrapped := h.screen.DrainedWrapped()
+	for i, line := range slices.Backward(h.screen.Drained) {
+		if !t.push(runsText(line), drainedWrapped[i]) {
+			return
 		}
 	}
 	for i := h.scrollback.Len() - 1; i >= 0; i-- {

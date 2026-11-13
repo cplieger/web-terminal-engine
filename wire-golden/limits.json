@@ -1,0 +1,7 @@
+{
+  "maxInputMessageBytes": 65536,
+  "minResizeCols": 20,
+  "minResizeRows": 5,
+  "maxReplayLines": 2000,
+  "historyPageSize": 1000
+}

@@ -1,11 +1,11 @@
 // WebSocket lifecycle with reliable input delivery across reconnects: the
-// client → server half of the protocol (wire-binary.ts decodes the other). The
-// client keeps an `outbox` of input bytes sent but not yet acknowledged and a
-// `bytesSent` counter; on open it sends {type:"resume", sessionId, sentBytes},
-// the server answers {type:"resumeAck", received} and every later frame carries
-// inputAck, and the client trims the outbox by the acked count and retransmits
-// the rest, which covers a ws.send() that reported success before TCP failed.
-// The outbox is bounded at MAX_OUTBOX_BYTES; sendBinary refuses beyond it.
+// client → server half of the protocol (wire-binary.ts decodes the other). Each
+// session's input is one ordered queue: `pending` (accepted, not yet sent) and
+// `inFlight` (sent, not yet acknowledged, at most MAX_OUTBOX_BYTES). On open the
+// client sends the resume control (docs/wire-protocol.md, "The resume control");
+// the binary resumeAck and every later inputAck trim `inFlight`, the resume
+// retransmits the rest (a ws.send() can succeed before TCP fails), and acks make
+// room for `pending`.
 
 import { wsURL } from "./wsurl.js";
 import { WS_PATH } from "./routes.js";
@@ -22,6 +22,7 @@ import { type ModeSnapshot, type ModeState, POWER_ON_MODES } from "./modes.js";
 // the STORE's value while the transport clamps the length, so two literals would
 // let a shrunken page carry a full-size anchor.
 import { PAGE_SIZE } from "./store.js";
+import { MAX_REPLAY_LINES } from "./replay.js";
 import type { Renderer } from "./render.js";
 import type { MouseController } from "./mouse.js";
 import type { ControlMessage, ScrollMessage, ServerMessage } from "./types.js";
@@ -39,9 +40,26 @@ type ConnState =
   // is replaced on every transition, so it cannot leak across a reconnect).
   // false: controls are 0x00-sentinel binary frames and input is leading-NUL-
   // split. true: controls are text frames and input is raw binary.
-  | { status: "connected"; sock: WebSocket; abort: AbortController; upgraded: boolean }
+  // `resumed`: this socket's resumeAck was handled. `size`: the last size it
+  // announced, null before its first. Input goes out once both hold
+  // (`inputReady`): a byte before the resume is counted and retransmitted too,
+  // and a byte before the size reaches the PTY at a fresh PTY's default size.
+  | {
+      status: "connected";
+      sock: WebSocket;
+      abort: AbortController;
+      upgraded: boolean;
+      resumed: boolean;
+      size: { cols: number; rows: number } | null;
+      inputReady: boolean;
+      gestureResynced: boolean;
+      st: ResumeState;
+    }
   | { status: "reconnecting"; timer: ReturnType<typeof setTimeout> }
-  | { status: "incompatible" };
+  | { status: "incompatible" }
+  // The server closed with a definitive code (4001, 4004) and onProcessExit is
+  // wired: no wake path reconnects, only connect(), setSession() or forgetSession().
+  | { status: "ended" };
 
 // The server's close code for "the child process has exited"
 // (terminal/terminal.go statusProcessExited): definitive, so no reconnect.
@@ -53,25 +71,49 @@ const PROCESS_EXITED_CLOSE_CODE = 4001;
 // like 4001 it is definitive and takes the no-reconnect path.
 const SESSION_UNKNOWN_CLOSE_CODE = 4004;
 
+/**
+ * An input whose bytes depend on the mode state (a key press, a bracketed
+ * paste), encoded by the connection when it is sent.
+ */
+export interface DeferredInput {
+  /**
+   * Called at most once, when every input queued before it is encoded and the
+   * shown session's modes are known (at once when they already are). When
+   * `paste` is set, cancelPendingInput may drop the body's unsent rest; a `tail`
+   * is always sent after what was. Null or an empty body sends nothing; a throw
+   * drops the input.
+   */
+  encode(): { body: Uint8Array; tail?: Uint8Array } | null;
+  /** A paste: cancelPendingInput drops it whole while it waits to be encoded. */
+  readonly paste?: boolean;
+  /** What it counts in pendingInputBytes until it is encoded (default 0). */
+  readonly size?: number;
+}
+
+// One queued input: bytes, or an input still waiting for its modes. Only a
+// cancelable entry may be dropped.
+interface PendingInput {
+  data: Uint8Array;
+  deferred: DeferredInput | null;
+  cancelable: boolean;
+}
+
 // Per-session reliable-input accounting, so a tab switch reconnects to another
 // session without replaying the previous tab's unacked bytes onto it and
 // without a false restart reset (each epoch is compared only against its own).
 interface ResumeState {
   id: string; // server session id: the routing id (?session=); resumeKey derives the ledger key
-  bytesSent: number; // total bytes ever passed to sendBinary for this session
+  bytesSent: number; // bytes put on the wire for this session's server ledger
   bytesAcked: number; // confirmed by server inputAck/resumeAck
-  outbox: Uint8Array[]; // unacked chunks (sum of lengths = bytesSent - bytesAcked)
-  outboxBytes: number; // running sum of outbox chunk lengths; keeps applyAck O(n) not O(n²)
-  lastServerEpoch: number | null; // process-start nanos last seen for this session
-  // A SEEDED epoch is a claim about content restored from storage, worth
-  // something only once a server confirms or contradicts it, so a resume that
-  // reports no epoch leaves it unverifiable and is handled as a restart. A
-  // learned epoch must not get that treatment: an ack without an epoch from a
-  // server that never reports one is ordinary operation.
-  epochSeeded: boolean;
-  // Restored synchronously into the ModeState by setSession, so a keystroke in
-  // the switch window encodes under THIS session's modes, never the previous tab's.
-  modes: ModeSnapshot;
+  inFlight: Uint8Array[]; // sent, unacked chunks (sum of lengths = bytesSent - bytesAcked)
+  inFlightBytes: number; // running sum of inFlight lengths; keeps applyAck O(n) not O(n²)
+  pending: PendingInput[]; // accepted, not yet sent, in acceptance order
+  pendingBytes: number;
+  holds: number; // live holdInput() calls; while above 0 nothing pending is encoded or sent
+  // The server process this session's queued input was meant for; null before
+  // the first ack, while the bound LineStore's content stands in for it. The
+  // content's epoch is the store's: a store moves between connections, this does not.
+  lastServerEpoch: number | null;
 }
 
 function newResumeState(id: string): ResumeState {
@@ -79,11 +121,12 @@ function newResumeState(id: string): ResumeState {
     id,
     bytesSent: 0,
     bytesAcked: 0,
-    outbox: [],
-    outboxBytes: 0,
+    inFlight: [],
+    inFlightBytes: 0,
+    pending: [],
+    pendingBytes: 0,
+    holds: 0,
     lastServerEpoch: null,
-    epochSeeded: false,
-    modes: { ...POWER_ON_MODES },
   };
 }
 
@@ -116,15 +159,6 @@ const HISTORY_DATA_TIMEOUT_MS = 8_000;
 
 /** The smallest request the adaptive budget will shrink to. */
 const HISTORY_MIN_PAGE = 125;
-
-/**
- * The server's clamp on `replayMax`, mirrored here so the client sends the
- * value the server will actually honor. The equality is load-bearing: the
- * replay-jump prediction computes `committed - sentReplayMax`, so a server
- * honoring something smaller would place the real replay start above the
- * prediction and leave a genuine jump undetected.
- */
-export const MAX_REPLAY_LINES = 2000;
 
 // Everything the fetch controller owns for ONE socket, replaced wholesale on
 // reconnect: a surviving empty bucket would stall against a fresh server
@@ -184,12 +218,17 @@ const WS_OPEN = 1;
 const ephemeralEncoder = new TextEncoder();
 
 /**
- * Maximum bytes we keep in the outbox before refusing new input. 1
- * MiB at typical typing rates is hours of held keys; fast enough to
- * accept any normal disconnect, low enough that an offline tab can't
- * silently grow memory unbounded.
+ * The most input bytes in flight (sent, not yet acknowledged) per session, so
+ * the most a reconnect retransmits. Input beyond it waits, in order, unbounded.
  */
 export const MAX_OUTBOX_BYTES = 1 << 20;
+
+// The server's read limit for one message (wire-golden/limits.json); a larger
+// message closes the socket 1009.
+const MAX_INPUT_MESSAGE_BYTES = 64 * 1024;
+
+// How often onPendingInput may report a count between two non-zero values.
+const PENDING_REPORT_INTERVAL_MS = 250;
 
 // The session id is a resume token the server trusts to re-attach a client, so
 // it must not be predictable: `crypto.randomUUID` where it exists (it needs a
@@ -207,22 +246,38 @@ function generateSessionId(): string {
   throw new Error("vterm: no cryptographically secure RNG available for session id");
 }
 
-// The ONE encoder for PTY input bytes, shared by sendBinary and
-// retransmitOutbox so the two cannot disagree on framing. On a v4-upgraded
-// socket the bytes go out verbatim; on a v3-mode socket each leading 0x00 byte
-// is its own 1-byte message so no client frame can be misread as a control
-// frame. Splitting alters message count, never byte count or order.
+// The ONE encoder for PTY input bytes, shared by the pump and the retransmit so
+// the two cannot disagree on framing. Messages are at most
+// MAX_INPUT_MESSAGE_BYTES; on a v3-mode socket each message's leading 0x00 is
+// its own 1-byte message so none can be misread as a control frame. Splitting
+// alters message count, never byte count or order.
 function sendInputFrames(sock: WebSocket, upgraded: boolean, chunk: Uint8Array): void {
   let rest = chunk;
-  if (!upgraded) {
-    while (rest.length > 0 && rest[0] === 0x00) {
+  while (rest.length > 0) {
+    if (!upgraded && rest[0] === 0x00) {
       sock.send(new Uint8Array([0x00]).buffer);
       rest = rest.subarray(1);
+      continue;
+    }
+    const part = rest.subarray(0, MAX_INPUT_MESSAGE_BYTES);
+    sock.send(part.buffer.slice(part.byteOffset, part.byteOffset + part.byteLength) as ArrayBuffer);
+    rest = rest.subarray(part.length);
+  }
+}
+
+// The largest n <= limit such that data[0..n) ends on a UTF-8 character
+// boundary, so a cancel after a partial send never leaves half a character.
+// The caller passes limit < data.length. A boundary is at most 3 bytes back;
+// bytes that are not UTF-8 are cut at limit, or a full window of them would
+// return 0 with nothing in flight and no ack to wait for.
+function utf8Cut(data: Uint8Array, limit: number): number {
+  for (let n = limit; n >= Math.max(0, limit - 3); n--) {
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- n <= limit < data.length
+    if (n === 0 || (data[n]! & 0xc0) !== 0x80) {
+      return n;
     }
   }
-  if (rest.length > 0) {
-    sock.send(rest.buffer.slice(rest.byteOffset, rest.byteOffset + rest.byteLength) as ArrayBuffer);
-  }
+  return limit;
 }
 
 // A control for a v4-upgraded socket: bare JSON in a TEXT frame, the message
@@ -233,41 +288,69 @@ function textControl(msg: ControlMessage): string {
 
 // Called whenever the server no longer holds the ledger these counters were
 // keyed to: its replacement counts from zero, so non-zero counters would make
-// every later ack read as stale and the outbox would never trim again.
+// every later ack read as stale and inFlight would never trim again. Pending
+// input was never sent, so no ledger covers it and it stays.
 function resetLedger(st: ResumeState): void {
   st.bytesSent = 0;
   st.bytesAcked = 0;
-  st.outbox.length = 0;
-  st.outboxBytes = 0;
+  st.inFlight.length = 0;
+  st.inFlightBytes = 0;
 }
 
-// Drops chunks from the front of the outbox until the unacked total matches
-// (bytesSent - newAck); O(chunks dropped) through the running outboxBytes.
+// Copies the bytes: the caller may reuse its buffer.
+function enqueue(st: ResumeState, data: Uint8Array): void {
+  if (data.length > 0) {
+    st.pending.push({ data: new Uint8Array(data), deferred: null, cancelable: false });
+    st.pendingBytes += data.length;
+  }
+}
+
+function deferredSize(input: DeferredInput): number {
+  const size = input.size ?? 0;
+  return Number.isSafeInteger(size) && size > 0 ? size : 0;
+}
+
+function encodedParts(
+  input: DeferredInput,
+  encoded: ReturnType<DeferredInput["encode"]>,
+): PendingInput[] {
+  if (encoded === null || encoded.body.length === 0) {
+    return [];
+  }
+  const parts: PendingInput[] = [
+    { data: new Uint8Array(encoded.body), deferred: null, cancelable: input.paste === true },
+  ];
+  if (encoded.tail !== undefined && encoded.tail.length > 0) {
+    parts.push({ data: new Uint8Array(encoded.tail), deferred: null, cancelable: false });
+  }
+  return parts;
+}
+
+function dropPending(st: ResumeState): void {
+  st.pending.length = 0;
+  st.pendingBytes = 0;
+}
+
+// Drops chunks from the front of inFlight until the unacked total matches
+// (bytesSent - newAck); O(chunks dropped) through the running inFlightBytes.
 function applyAck(st: ResumeState, received: number): void {
   if (received <= st.bytesAcked) {
     return;
   }
   st.bytesAcked = Math.min(received, st.bytesSent);
   const targetUnacked = st.bytesSent - st.bytesAcked;
-  while (st.outbox.length > 0 && st.outboxBytes > targetUnacked) {
+  while (st.inFlight.length > 0 && st.inFlightBytes > targetUnacked) {
     // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- length checked above
-    const head = st.outbox[0]!;
-    const dropFromHead = st.outboxBytes - targetUnacked;
+    const head = st.inFlight[0]!;
+    const dropFromHead = st.inFlightBytes - targetUnacked;
     if (head.length <= dropFromHead) {
-      st.outbox.shift();
-      st.outboxBytes -= head.length;
+      st.inFlight.shift();
+      st.inFlightBytes -= head.length;
     } else {
-      st.outbox[0] = head.subarray(dropFromHead);
-      st.outboxBytes -= dropFromHead;
+      st.inFlight[0] = head.subarray(dropFromHead);
+      st.inFlightBytes -= dropFromHead;
       break;
     }
-  }
-}
-
-// After the resumeAck adjusted bytesAcked, replay what is still unacked.
-function retransmitOutbox(sock: WebSocket, upgraded: boolean, st: ResumeState): void {
-  for (const chunk of st.outbox) {
-    sendInputFrames(sock, upgraded, chunk);
   }
 }
 
@@ -286,20 +369,27 @@ export interface ConnectionCallbacks {
   onOpen(): void;
   onClose(): void;
   onConnecting?(): void;
-  onOutboxFull?(): void;
+  /**
+   * The active session's count of accepted input bytes not yet sent, and
+   * whether cancelPendingInput would drop some of them: fired when the count
+   * moves between zero and non-zero or `cancelable` changes, at most every
+   * 250 ms in between, and at once when a session switch changes either.
+   */
+  onPendingInput?(bytes: number, cancelable: boolean): void;
   /**
    * Fired instead of onClose when the server closes with a DEFINITIVE code:
-   * process-exited (4001) or unknown-session (4004). When wired, the connection
-   * does NOT auto-reconnect that socket and does not call onClose for it; the
-   * consumer may still reconnect explicitly. When absent, every close keeps
-   * the transient treatment (onClose plus backoff reconnect).
+   * process-exited (4001) or unknown-session (4004). When wired, the session
+   * has ended: no onClose, no backoff reconnect, and `reconnectNow()` is
+   * refused until `connect()`, `setSession()` or `forgetSession()`. When absent,
+   * every close keeps the transient treatment (onClose plus backoff reconnect).
    */
   onProcessExit?(): void;
   /**
-   * Fired when the client's queued input can no longer be trusted: the server's
-   * boot-epoch changed, or the server no longer holds this session's input
-   * ledger AND the outbox still held unacked bytes. The ledger has been reset
-   * by the time it fires, so subsequent input starts from zero.
+   * Fired at most once per resumeAck when the server restarted under something
+   * this client held: the bound store discarded its content (another process's,
+   * or restored and not confirmed, see `LineStore.applyResumeAck`), input queued
+   * for the old process was dropped, or the server lost this session's ledger
+   * with bytes in flight.
    */
   onServerRestart?(): void;
   /**
@@ -330,13 +420,19 @@ export interface ConnectionCallbacks {
    */
   onResumeBounds?(committed: number, oldest: number): void;
   /**
-   * The size to announce BEFORE asking to resume, or null while the client
-   * cannot measure itself trustworthily (web fonts loading). Announcing first
-   * makes the resume snapshot arrive at this client's own geometry, with the
-   * app's SIGWINCH redraw after a coherent snapshot instead of interleaved with
-   * the replay. Null is identical to omitting the callback.
+   * The size each socket announces BEFORE asking to resume, so the snapshot
+   * arrives at this client's own geometry; absent, `computeSize` answers. Null
+   * (the client cannot measure itself yet, web fonts loading) announces
+   * nothing: that socket's input then waits for its first `sendResize`.
    */
   initialSize?(): { cols: number; rows: number } | null;
+  /**
+   * Fired once per socket, with the size it announced, when its input starts:
+   * after its first size and its resumeAck, so a restart's input drop and
+   * `onServerRestart` come first. Input sent from here reaches the process this
+   * socket attached to; none goes on the socket before it.
+   */
+  onInputReady?(size: { cols: number; rows: number }): void;
 }
 
 /** What `createConnection` drives and reads. */
@@ -350,10 +446,15 @@ export interface ConnectionOptions {
     | "handleHistoryReply"
     | "noteSolicited"
     | "clearSolicited"
+    | "clearGrid"
     | "maybeFetchHistory"
   >;
-  /** Receives every inbound modes frame and the restored snapshot on setSession. */
-  modes: Pick<ModeState, "applySnapshot">;
+  /**
+   * Known only from the current socket's modes frame (or its first screen frame,
+   * from a server that sends none): unknown from creation, from every connect,
+   * close and teardown, and reset to `POWER_ON_MODES` on a session switch.
+   */
+  modes: Pick<ModeState, "applySnapshot" | "setKnown" | "isKnown">;
   mouse: Pick<MouseController, "resyncGesture">;
   callbacks: ConnectionCallbacks;
   /** WebSocket endpoint path (default "/ws"). */
@@ -374,16 +475,33 @@ export interface ConnectionOptions {
  */
 export interface Connection {
   /**
-   * Queue input for reliable delivery. Returns false when the outbox is full
-   * (onOutboxFull has fired) or the connection is disposed. Any byte sequence is
-   * deliverable, leading NULs included.
+   * Queue input for the active session's reliable, in-order delivery, of any
+   * size and any bytes. Returns false only once disposed. Input stays with its
+   * session across a switch; a server restart drops it, encoded or not. It
+   * goes on a socket only after that socket's resume and first size.
    */
-  sendBinary(data: Uint8Array): boolean;
+  sendBinary(input: Uint8Array | DeferredInput): boolean;
   /**
-   * Deliver BEST-EFFORT input (a mouse report): sent only on a live socket, never
-   * queued or retransmitted. Returns whether it was sent; on false the caller
-   * FORGETS the event. Falls back to reliable input against a server that did
-   * not declare `ephemeralInput`, because total silence is a worse failure.
+   * Drop every paste of the active session not yet encoded and the unsent body
+   * of every one that is, keeping their tails and every other entry. Returns
+   * whether anything was dropped.
+   */
+  cancelPendingInput(): boolean;
+  /** The active session's accepted input bytes not yet sent (DeferredInput.size before encoding). */
+  pendingInputBytes(): number;
+  /**
+   * Keep the active session's queued input off the wire, encoded or not, until
+   * the returned release runs (once; a second call does nothing). Holds nest,
+   * input still queues in order with its session, and a server restart still
+   * drops it.
+   */
+  holdInput(): () => void;
+  /**
+   * Deliver BEST-EFFORT input (a mouse report): sent only on a live socket
+   * that announced its size, never queued or retransmitted. Returns whether
+   * it was sent; on false the caller FORGETS the event. Falls back to reliable
+   * input against a server that did not declare `ephemeralInput`, because
+   * total silence is a worse failure.
    */
   sendEphemeral(text: string): boolean;
   /**
@@ -394,26 +512,39 @@ export interface Connection {
    */
   setClientFocus(focused: boolean): void;
   /**
-   * Measure through `computeSize` and announce the size; a size equal to the last
-   * one SENT is dropped, and nothing is queued while no socket is connected.
+   * Announce the size `computeSize` answers. Dropped when this socket already
+   * announced that size, and nothing is queued while no socket is connected.
+   * A socket's first announce lets its waiting input go.
    */
   sendResize(): void;
-  /** Replace whatever socket exists with a fresh one immediately, skipping the backoff. */
+  /**
+   * The last size announced on any socket of this connection (the open
+   * handler's `initialSize` included), kept across reconnects; null before the
+   * first announce and once disposed.
+   */
+  lastAnnouncedSize(): { cols: number; rows: number } | null;
+  /**
+   * True from the socket's onInputReady (its callback reads true) until that
+   * socket ends: closed, replaced, its session ended or incompatible, or torn
+   * down by forgetSession of the active id or disconnect, which fire no
+   * callback. False once disposed. Input sent while it is true goes out at
+   * once, unless held (holdInput).
+   */
+  inputReady(): boolean;
+  /**
+   * Replace whatever socket exists with a fresh one immediately, skipping the
+   * backoff: the wake path. A no-op once the session has ended (onProcessExit)
+   * or the server is incompatible.
+   */
   reconnectNow(): void;
   /**
    * Switch the live socket to server session `id`, keeping every session's resume
    * state; marks the connection managed (the URL carries `?session=`). A no-op
-   * when `id` is already the active, connected session.
+   * when `id` is already the active, connected session; an ended one reconnects.
    */
   setSession(id: string): void;
   /** Drop a session's resume state; tears the socket down without reconnecting if it was active. */
   forgetSession(id: string): void;
-  /**
-   * Seed the server boot epoch a session's PERSISTED content belongs to, before
-   * connecting, so the first resumeAck can detect a restart. A zero or non-finite
-   * epoch, or a session that already knows its epoch, is ignored.
-   */
-  adoptPersistedEpoch(sessionId: string, epoch: number): void;
   /** The current adaptive page budget; read it for both a request's length and its anchor. */
   historyBudget(): number;
   /**
@@ -422,14 +553,12 @@ export interface Connection {
    * paced, and a paced denial arms a coalesced retry.
    */
   requestHistory(fromAbs: number, maxLines: number): boolean;
-  /** The server boot epoch last observed for a session, or 0 when none is known. */
-  serverEpochOf(sessionId: string): number;
   /** The session id the socket serves, minting the unmanaged id if none is set; "" once disposed. */
   currentSessionId(): string;
   /** Tear down the live socket without reconnecting; resume state is kept. */
   disconnect(): void;
   /**
-   * Open the WebSocket; readiness is reported through onOpen, and a connect that
+   * Open the WebSocket, an ended session's included; readiness is reported through onOpen, and a connect that
    * never opens fails after 10 s with onClose and a scheduled retry. At most one
    * socket exists per connection whatever the call pattern.
    */
@@ -454,6 +583,7 @@ const DISPOSED_CALLBACKS: ConnectionCallbacks = {
 export function createConnection(opts: ConnectionOptions): Connection {
   // Invariant: `renderer`, `modes` and `mouse` are read by member call at each call site, never as captured methods.
   const { renderer, modes, mouse } = opts;
+  modes.setKnown(false);
   const wsPath = opts.wsPath ?? WS_PATH;
   const sessionIdKey = opts.sessionIdKey ?? DEFAULT_SESSION_ID_KEY;
   let cb: ConnectionCallbacks = opts.callbacks;
@@ -464,8 +594,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
   const isDisposed = (): boolean => disposed;
   let connState: ConnState = { status: "disconnected" };
   let reconnectDelay = INITIAL_DELAY_MS;
-  let lastSentCols = 0;
-  let lastSentRows = 0;
+  let announcedSize: { cols: number; rows: number } | null = null;
 
   const sessions = new Map<string, ResumeState>();
   // The session the live socket serves; null until the first connect or
@@ -479,7 +608,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
   // Several live pages can share one routing id (every device on a managed
   // session; a duplicated tab copies sessionStorage), but the server's input
   // ledger is per sender, so the resume key carries this page-lifetime suffix.
-  // Never persisted: a reloaded page has an empty outbox and nothing to resume.
+  // Never persisted: a reloaded page has no input in flight and nothing to resume.
   // Lazy so a cryptoless environment throws on first connect, not at init.
   let clientInstanceId: string | null = null;
 
@@ -518,6 +647,15 @@ export function createConnection(opts: ConnectionOptions): Connection {
   let history: HistoryState = newHistoryState();
 
   let caps: ServerCaps = { ephemeralInput: false, serverFocus: false };
+
+  // onPendingInput's throttle: a zero edge or another session's count reports at
+  // once, one session's count between two non-zero values at most every
+  // PENDING_REPORT_INTERVAL_MS.
+  let reportedPending = 0;
+  let reportedCancelable = false;
+  let reportedPendingFor: string | null = null;
+  let pendingReportAt = 0;
+  let pendingReportTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Per PAGE, not per socket: the widget's own state, which a new socket must be told.
   let clientFocused = false;
@@ -580,30 +718,215 @@ export function createConnection(opts: ConnectionOptions): Connection {
     }
   }
 
-  function sendBinary(data: Uint8Array): boolean {
+  function sendBinary(input: Uint8Array | DeferredInput): boolean {
     if (isDisposed()) {
       return false;
     }
     const st = activeState();
-    if (st.outboxBytes + data.length > MAX_OUTBOX_BYTES) {
-      cb.onOutboxFull?.();
+    if (input instanceof Uint8Array) {
+      enqueue(st, input);
+    } else {
+      st.pending.push({
+        data: new Uint8Array(0),
+        deferred: input,
+        cancelable: input.paste === true,
+      });
+      st.pendingBytes += deferredSize(input);
+    }
+    pumpInput();
+    reportPending();
+    return true;
+  }
+
+  // An encoder calls back into its consumer, which may queue more input: the
+  // nested call leaves the queue to the outer pump.
+  let pumping = false;
+
+  // The one writer of input to the wire. Bytes leave `inFlight` only when the
+  // server acks them.
+  function pumpInput(): void {
+    if (pumping) {
+      return;
+    }
+    pumping = true;
+    try {
+      const active = activeId === null ? undefined : sessions.get(activeId);
+      if (activeId !== null && active?.holds === 0 && modes.isKnown()) {
+        encodeDeferred(activeId, active);
+      }
+      if (!isDisposed()) {
+        sendPending();
+      }
+    } finally {
+      pumping = false;
+    }
+    reportPending();
+  }
+
+  // Each entry is taken before its encoder runs, so a cancel inside it drops the
+  // result and no later pass encodes it again; a switch, teardown, forget, hold
+  // or dispose inside an encoder ends the pass.
+  function encodeDeferred(id: string, st: ResumeState): void {
+    for (let i = 0; i < st.pending.length; i++) {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- i < length
+      const entry = st.pending[i]!;
+      const input = entry.deferred;
+      if (input === null) {
+        continue;
+      }
+      entry.deferred = null;
+      st.pendingBytes -= deferredSize(input);
+      let encoded: ReturnType<DeferredInput["encode"]> = null;
+      try {
+        encoded = input.encode();
+      } catch (err) {
+        console.warn("vterm: an input encoder threw; the input is dropped", err);
+      }
+      if (isDisposed() || sessions.get(id) !== st) {
+        return;
+      }
+      const at = st.pending.indexOf(entry);
+      if (at === -1) {
+        i = -1; // a cancel rebuilt the queue: rescan it, encoded entries skip
+      } else {
+        const parts = encodedParts(input, encoded);
+        st.pending.splice(at, 1, ...parts);
+        for (const p of parts) {
+          st.pendingBytes += p.data.length;
+        }
+        i = at + parts.length - 1;
+      }
+      if (activeId !== id || !modes.isKnown() || st.holds > 0) {
+        return;
+      }
+    }
+  }
+
+  function sendPending(): void {
+    if (connState.status !== "connected" || !connState.inputReady) {
+      return;
+    }
+    const { sock, upgraded, st } = connState;
+    while (st.holds === 0 && st.pending.length > 0 && st.inFlightBytes < MAX_OUTBOX_BYTES) {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- length checked above
+      const head = st.pending[0]!;
+      if (head.deferred !== null) {
+        break; // its modes are not known yet
+      }
+      let n = Math.min(head.data.length, MAX_OUTBOX_BYTES - st.inFlightBytes);
+      if (head.cancelable && n < head.data.length) {
+        n = utf8Cut(head.data, n);
+        if (n === 0) {
+          break; // less than one character of room: the next ack makes more
+        }
+      }
+      const chunk = head.data.subarray(0, n);
+      if (n === head.data.length) {
+        st.pending.shift();
+      } else {
+        head.data = head.data.subarray(n);
+      }
+      st.pendingBytes -= n;
+      st.inFlight.push(chunk);
+      st.inFlightBytes += n;
+      st.bytesSent += n;
+      sendInputFrames(sock, upgraded, chunk);
+    }
+  }
+
+  function cancelPendingInput(): boolean {
+    if (isDisposed() || activeId === null) {
       return false;
     }
-    // Bytes leave the outbox only when the server acks them, so a network blip
-    // after a successful ws.send() still retransmits.
-    const copy = new Uint8Array(data); // defensive copy (caller may reuse buffer)
-    st.outbox.push(copy);
-    st.outboxBytes += copy.length;
-    st.bytesSent += copy.length;
-    if (connState.status === "connected") {
-      sendInputFrames(connState.sock, connState.upgraded, copy);
+    const st = sessions.get(activeId);
+    if (st === undefined) {
+      return false;
     }
+    const kept = st.pending.filter((e) => !e.cancelable);
+    if (kept.length === st.pending.length) {
+      return false;
+    }
+    st.pending = kept;
+    st.pendingBytes = kept.reduce(
+      (sum, e) => sum + (e.deferred === null ? e.data.length : deferredSize(e.deferred)),
+      0,
+    );
+    reportPending();
     return true;
+  }
+
+  function holdInput(): () => void {
+    if (isDisposed()) {
+      return noop;
+    }
+    const st = activeState();
+    st.holds++;
+    let held = true;
+    return () => {
+      if (!held) {
+        return;
+      }
+      held = false;
+      st.holds--;
+      if (!isDisposed() && st.holds === 0) {
+        pumpInput();
+      }
+    };
+  }
+
+  function pendingInputBytes(): number {
+    if (isDisposed() || activeId === null) {
+      return 0;
+    }
+    return sessions.get(activeId)?.pendingBytes ?? 0;
+  }
+
+  function reportPending(): void {
+    if (isDisposed()) {
+      return;
+    }
+    const bytes = pendingInputBytes();
+    const cancelable =
+      activeId !== null && (sessions.get(activeId)?.pending.some((e) => e.cancelable) ?? false);
+    if (bytes === reportedPending && cancelable === reportedCancelable) {
+      return;
+    }
+    const now = Date.now();
+    const sinceLast = now - pendingReportAt;
+    if (
+      bytes !== 0 &&
+      reportedPending !== 0 &&
+      cancelable === reportedCancelable &&
+      activeId === reportedPendingFor &&
+      sinceLast < PENDING_REPORT_INTERVAL_MS
+    ) {
+      pendingReportTimer ??= setTimeout(() => {
+        pendingReportTimer = null;
+        reportPending();
+      }, PENDING_REPORT_INTERVAL_MS - sinceLast);
+      return;
+    }
+    if (pendingReportTimer !== null) {
+      clearTimeout(pendingReportTimer);
+      pendingReportTimer = null;
+    }
+    reportedPending = bytes;
+    reportedCancelable = cancelable;
+    reportedPendingFor = activeId;
+    pendingReportAt = now;
+    cb.onPendingInput?.(bytes, cancelable);
   }
 
   // Refusing on a closing socket is what xterm.js's AttachAddon and ttyd both do.
   function sendEphemeral(text: string): boolean {
-    if (isDisposed() || connState.status !== "connected" || connState.sock.readyState !== WS_OPEN) {
+    // Before the socket's first size the server's grid is not this client's,
+    // so a report's coordinates mean nothing there.
+    if (
+      isDisposed() ||
+      connState.status !== "connected" ||
+      connState.size === null ||
+      connState.sock.readyState !== WS_OPEN
+    ) {
       return false;
     }
     if (!connState.upgraded || !caps.ephemeralInput) {
@@ -656,9 +979,9 @@ export function createConnection(opts: ConnectionOptions): Connection {
   function readInitialSize(): { cols: number; rows: number } | null {
     let size: { cols: number; rows: number } | null;
     try {
-      size = cb.initialSize?.() ?? null;
+      size = cb.initialSize === undefined ? cb.computeSize() : cb.initialSize();
     } catch (err) {
-      console.warn("vterm: initialSize provider threw; announcing no size", err);
+      console.warn("vterm: measuring the size at open threw; announcing no size", err);
       return null;
     }
     if (
@@ -673,39 +996,88 @@ export function createConnection(opts: ConnectionOptions): Connection {
     return { cols: size.cols, rows: size.rows };
   }
 
-  // A fresh socket clears the dedup baseline as it opens, so the consumer's next
-  // call after a reconnect always goes out.
   function sendResize(): void {
     if (isDisposed() || connState.status !== "connected") {
       return;
     }
+    const live = connState;
     const { cols, rows } = cb.computeSize();
-    if (isDisposed() || (cols === lastSentCols && rows === lastSentRows)) {
+    if (
+      isDisposed() ||
+      connState !== live ||
+      (live.size?.cols === cols && live.size.rows === rows)
+    ) {
       return;
     }
-    lastSentCols = cols;
-    lastSentRows = rows;
+    announcedSize = { cols, rows };
     sendControl({ type: "resize", cols, rows });
+    live.size = { cols, rows };
+    releaseInput(live);
   }
 
-  // Reserved for a boot-epoch change, the one cause where "the server
-  // restarted" is literally true.
-  function resetSessionAfterRestart(st: ResumeState): void {
+  // The one place a socket's input starts: the unacked rest is retransmitted
+  // ahead of everything queued since. The host hears it last, so input it
+  // sends from onInputReady queues behind the retransmit.
+  function releaseInput(live: Extract<ConnState, { status: "connected" }>): void {
+    if (live.inputReady || !live.resumed || live.size === null) {
+      return;
+    }
+    for (const chunk of live.st.inFlight) {
+      sendInputFrames(live.sock, live.upgraded, chunk);
+    }
+    live.inputReady = true;
+    pumpInput();
+    resyncGestureWhenReady();
+    if (!isDisposed() && connState === live) {
+      cb.onInputReady?.({ ...live.size });
+    }
+  }
+
+  // A gesture recorded before the gap is cancelled once per socket, or the
+  // application holds that button for the rest of the session. It waits for
+  // BOTH the modes (before them the program may not be tracking) and the
+  // socket's input start (before the resumeAck `upgraded` and `caps` are
+  // unset, so the release would fall back to reliable, retransmittable input).
+  function resyncGestureWhenReady(): void {
+    if (
+      isDisposed() ||
+      !modes.isKnown() ||
+      connState.status !== "connected" ||
+      !connState.inputReady ||
+      connState.gestureResynced
+    ) {
+      return;
+    }
+    connState.gestureResynced = true;
+    mouse.resyncGesture();
+  }
+
+  function lastAnnouncedSize(): { cols: number; rows: number } | null {
+    return isDisposed() || announcedSize === null ? null : { ...announcedSize };
+  }
+
+  function inputReady(): boolean {
+    return connState.status === "connected" && connState.inputReady;
+  }
+
+  // A boot-epoch change: every queued byte, sent or not, was meant for the old
+  // process. Returns whether any input was dropped.
+  function dropInputForDeadProcess(st: ResumeState): boolean {
+    const lost = st.bytesSent > st.bytesAcked || st.pendingBytes > 0;
     resetLedger(st);
-    cb.onServerRestart?.();
+    dropPending(st);
+    reportPending();
+    return lost;
   }
 
   // A forgotten ledger is not a restart and not by itself a loss: only the
   // UNACKED remainder was at risk, so a session whose every byte was acked
-  // resets silently. Reporting that common case was a real defect: an iPad that
-  // slept for half an hour woke to a "server restarted" banner with an empty
-  // outbox and a fully applied session.
-  function resetForgottenLedger(st: ResumeState): void {
+  // resets silently (an iPad waking from a long sleep has nothing in flight).
+  // Returns whether unacked input was dropped.
+  function resetForgottenLedger(st: ResumeState): boolean {
     const lostUnacked = st.bytesSent > st.bytesAcked;
     resetLedger(st);
-    if (lostUnacked) {
-      cb.onServerRestart?.();
-    }
+    return lostUnacked;
   }
 
   function scheduleReconnect(): void {
@@ -799,6 +1171,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
     renderer.clearSolicited();
     cancelScheduledReconnect();
     connState = { status: "disconnected" };
+    modes.setKnown(false);
   }
 
   // Unconditional teardown, whatever connState says: on iOS wake the socket
@@ -807,7 +1180,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
   // manual refresh. The resume protocol aligns by absolute index, so a
   // reconnect over a healthy socket costs one handshake and no duplicate output.
   function reconnectNow(): void {
-    if (isDisposed() || connState.status === "incompatible") {
+    if (isDisposed() || connState.status === "incompatible" || connState.status === "ended") {
       return;
     }
     teardown();
@@ -819,7 +1192,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
       return;
     }
     managed = true;
-    const target = ensureState(id);
+    ensureState(id);
     if (
       id === activeId &&
       (connState.status === "connected" || connState.status === "connecting")
@@ -827,10 +1200,17 @@ export function createConnection(opts: ConnectionOptions): Connection {
       return; // already serving this session
     }
     activeId = id;
-    // SYNCHRONOUSLY, so a keystroke in the switch window (before the new
-    // session's modes frame arrives) encodes under the target's modes.
-    modes.applySnapshot(target.modes);
-    reconnectNow();
+    // Another session's modes never carry over, and neither does an old
+    // snapshot of this one: the server may have changed them since.
+    modes.setKnown(false);
+    modes.applySnapshot(POWER_ON_MODES);
+    reportPending();
+    if (isDisposed() || connState.status === "incompatible") {
+      return;
+    }
+    // A deliberate attach, so an ended session is shown again.
+    teardown();
+    connect();
   }
 
   function forgetSession(id: string): void {
@@ -841,26 +1221,8 @@ export function createConnection(opts: ConnectionOptions): Connection {
     if (id === activeId) {
       activeId = null;
       teardown();
+      reportPending();
     }
-  }
-
-  // Restart detection is otherwise in-memory, which is wrong for a store
-  // hydrated from disk: a restarted server begins its indices at 0 again and the
-  // hydrated store would refuse the new session's output. Zero or non-finite
-  // means "never recorded"; a session that already knows its epoch is left
-  // alone, or a genuine restart could read as agreement.
-  function adoptPersistedEpoch(sessionId: string, epoch: number): void {
-    if (isDisposed() || !Number.isFinite(epoch) || epoch === 0) {
-      return;
-    }
-    const st = ensureState(sessionId);
-    if (st.lastServerEpoch !== null) {
-      return;
-    }
-    st.lastServerEpoch = epoch;
-    // A CLAIM, not an observation: a server that reports no epoch never
-    // contradicts it, so the resume handler treats an unconfirmed seed as a restart.
-    st.epochSeeded = true;
   }
 
   // An anchor computed from the full page size while the length is shrunken
@@ -985,12 +1347,6 @@ export function createConnection(opts: ConnectionOptions): Connection {
     return { correlated: true, raiseFloorTo, contained };
   }
 
-  // 0 is deliberately the value `adoptPersistedEpoch` ignores, so a snapshot taken
-  // without an epoch cannot later be mistaken for one taken under a known epoch.
-  function serverEpochOf(sessionId: string): number {
-    return isDisposed() ? 0 : (sessions.get(sessionId)?.lastServerEpoch ?? 0);
-  }
-
   function currentSessionId(): string {
     if (isDisposed()) {
       return "";
@@ -1024,6 +1380,8 @@ export function createConnection(opts: ConnectionOptions): Connection {
     // A pending backoff timer would otherwise fire later and spawn a SECOND
     // socket beside the one created below, with the first one's listeners bound.
     cancelScheduledReconnect();
+    modes.setKnown(false);
+    renderer.clearGrid();
 
     cb.onConnecting?.();
     if (isDisposed()) {
@@ -1051,6 +1409,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
       if (!isDisposed() && connState.status === "connecting" && connState.sock === sock) {
         stopHeartbeat();
         connState = { status: "disconnected" };
+        modes.setKnown(false);
         cb.onClose();
         if (isDisposed()) {
           return;
@@ -1075,9 +1434,6 @@ export function createConnection(opts: ConnectionOptions): Connection {
       "open",
       () => {
         clearTimeout(timeoutId);
-        // A new socket has no size on record with the server.
-        lastSentCols = 0;
-        lastSentRows = 0;
         // The size goes BEFORE the resume: the server applies a resize the
         // moment it decodes it, so the snapshot and replay come back at THIS
         // client's geometry. The resume still precedes every TEXT frame (the
@@ -1090,8 +1446,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
         }
         if (size !== null) {
           sock.send(controlFrame({ type: "resize", cols: size.cols, rows: size.rows }));
-          lastSentCols = size.cols;
-          lastSentRows = size.rows;
+          announcedSize = size;
         }
         // The server's reply is a function of the exact haveThrough and
         // replayMax sent, so the replay-jump prediction is computed from the
@@ -1122,10 +1477,22 @@ export function createConnection(opts: ConnectionOptions): Connection {
             haveThrough: sentHaveThrough,
             replayMax: sentReplayMax,
             protocolVersion: WIRE_PROTOCOL_VERSION,
+            gridFrames: true,
           }),
         );
         // Every socket starts in v3 mode; the resumeAck decides the upgrade.
-        connState = { status: "connected", sock, abort: connectAbort, upgraded: false };
+        const live: Extract<ConnState, { status: "connected" }> = {
+          status: "connected",
+          sock,
+          abort: connectAbort,
+          upgraded: false,
+          resumed: false,
+          size,
+          inputReady: false,
+          gestureResynced: false,
+          st,
+        };
+        connState = live;
         reconnectDelay = INITIAL_DELAY_MS;
         cb.onOpen();
         if (isDisposed()) {
@@ -1186,6 +1553,24 @@ export function createConnection(opts: ConnectionOptions): Connection {
       { signal: connectAbort.signal },
     );
 
+    function markModesKnown(): void {
+      if (modes.isKnown()) {
+        return;
+      }
+      modes.setKnown(true);
+      if (isDisposed()) {
+        return;
+      }
+      pumpInput();
+      resyncGestureWhenReady();
+    }
+
+    // An ack frees window room, so the pump runs after it.
+    function ack(received: number): void {
+      applyAck(st, received);
+      pumpInput();
+    }
+
     function handleDecoded(msg: ServerMessage | null): void {
       if (msg === null) {
         return;
@@ -1202,6 +1587,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
           console.warn("vterm: refusing incompatible server wire protocol", reason);
           stopHeartbeat();
           connState = { status: "incompatible" };
+          modes.setKnown(false);
           try {
             sock.close(WIRE_INCOMPATIBLE_CLOSE_CODE, reason);
           } finally {
@@ -1246,96 +1632,88 @@ export function createConnection(opts: ConnectionOptions): Connection {
           sock.send(textControl({ type: "upgrade" }));
           connState.upgraded = true;
         }
-        // Server-restart detection: an epoch that differs from the recorded one
-        // means the new process has no record of the previous boot's input.
-        const epoch = msg.serverEpoch;
-        let epochChanged = false;
-        if (epoch !== undefined && epoch !== 0) {
-          if (st.lastServerEpoch !== null && st.lastServerEpoch !== epoch) {
-            epochChanged = true;
-            resetSessionAfterRestart(st);
-            if (isDisposed()) {
-              return;
-            }
-          }
+        // 0 is the wire's "no epoch" (a server that does not report one).
+        const epoch =
+          msg.serverEpoch !== undefined && msg.serverEpoch !== 0 ? msg.serverEpoch : null;
+        // Queued input was typed against the process this session last acked
+        // or, before its first ack, against the bound store's content.
+        const ackedEpochGone =
+          epoch !== null && st.lastServerEpoch !== null && st.lastServerEpoch !== epoch;
+        const typedAgainstStore = st.lastServerEpoch === null;
+        if (epoch !== null) {
           st.lastServerEpoch = epoch;
-          st.epochSeeded = false;
-        } else if (st.epochSeeded) {
-          // A SEEDED epoch this server will not confirm: unverifiable restored
-          // content is handled as a restart, because the alternative is
-          // presenting a previous run's output as live and then refusing the new
-          // session's low absolute indices.
-          epochChanged = true;
-          resetSessionAfterRestart(st);
-          if (isDisposed()) {
-            return;
-          }
-          st.lastServerEpoch = null;
-          st.epochSeeded = false;
         }
         // An absent flags tail (an older server) reads as unset bits.
         history.paging = msg.historyPaging === true;
         history.acked = true;
-        // Capabilities, the focus re-report and the store's ONE ack transition
-        // all run BEFORE the ledger-lost returns below: a ledger loss is not a
-        // capability event, and the long-absence attach that loses its ledger
-        // is exactly the one that needs its focus asserted and carries a replay
-        // jump.
-        caps = {
-          ephemeralInput: msg.ephemeralInput === true,
-          serverFocus: msg.serverFocus === true,
-        };
-        focusReported = null;
-        setClientFocus(clientFocused);
-        renderer.applyResumeTransition({
-          epochChanged,
+        const contentLost = renderer.applyResumeTransition({
+          serverEpoch: epoch,
           committed: typeof msg.committed === "number" ? msg.committed : null,
           serverOldest: typeof msg.oldestIndex === "number" ? msg.oldestIndex : null,
           paging: history.paging,
           sentHaveThrough: history.sentHaveThrough,
           sentReplayMax: history.sentReplayMax,
         });
+        let inputLost = false;
+        if (ackedEpochGone || (typedAgainstStore && contentLost)) {
+          inputLost = dropInputForDeadProcess(st);
+          if (isDisposed()) {
+            return;
+          }
+        }
+        const restartReported = inputLost || contentLost;
+        if (restartReported) {
+          cb.onServerRestart?.();
+          if (isDisposed()) {
+            return;
+          }
+        }
+        // Capabilities and the focus re-report run whether or not the ledger
+        // was lost: a ledger loss is not a capability event, and the
+        // long-absence attach that loses its ledger is exactly the one that
+        // needs its focus asserted.
+        caps = {
+          ephemeralInput: msg.ephemeralInput === true,
+          serverFocus: msg.serverFocus === true,
+        };
+        focusReported = null;
+        setClientFocus(clientFocused);
         if (typeof msg.committed === "number" && typeof msg.oldestIndex === "number") {
-          renderer.noteResumeBounds(msg.committed, msg.oldestIndex);
+          renderer.noteResumeBounds(msg.oldestIndex);
           cb.onResumeBounds?.(msg.committed, msg.oldestIndex);
           if (isDisposed()) {
             return;
           }
         }
         // The server cannot vouch for ANY previously sent input once it lost the
-        // ledger, so replaying the outbox risks duplicate execution: drop it. The
+        // ledger, so replaying inFlight risks duplicate execution: drop it. The
         // explicit flag also covers bytesAcked === 0 (acks that never reached
         // us); the received=0 heuristic is the older server's form of the same
         // fact, skipped on a genuine first connect where bytesAcked is 0.
-        if (msg.ledgerLost) {
-          resetForgottenLedger(st);
+        if (msg.ledgerLost || (msg.received === 0 && st.bytesAcked > 0)) {
+          if (resetForgottenLedger(st) && !restartReported) {
+            cb.onServerRestart?.();
+            if (isDisposed()) {
+              return;
+            }
+          }
+        } else {
+          applyAck(st, msg.received);
+        }
+        if (connState.status !== "connected" || connState.sock !== sock) {
           return;
         }
-        if (msg.received === 0 && st.bytesAcked > 0) {
-          resetForgottenLedger(st);
-          return;
-        }
-        applyAck(st, msg.received);
-        retransmitOutbox(
-          sock,
-          connState.status === "connected" && connState.sock === sock && connState.upgraded,
-          st,
-        );
-        // The first instant a best-effort report can leave (`upgraded` and
-        // `caps` are both set); a gesture recorded before the gap is cancelled
-        // now or the application holds that button for the rest of the session.
-        mouse.resyncGesture();
+        connState.resumed = true;
+        releaseInput(connState);
         return;
       }
       if (msg.type === "ackOnly") {
         // Input was applied but no content frame carried the count (a silent
         // app, `read -s`). Transport-internal, never forwarded to onMessage.
-        applyAck(st, msg.inputAck);
+        ack(msg.inputAck);
         return;
       }
       if (msg.type === "modes") {
-        // The cached session and the ModeState are the same session by
-        // construction: a superseded socket's listeners are aborted.
         const snap: ModeSnapshot = {
           bracketedPaste: msg.bracketedPaste,
           applicationCursor: msg.applicationCursor,
@@ -1347,29 +1725,38 @@ export function createConnection(opts: ConnectionOptions): Connection {
           mousePixels: msg.mousePixels,
           keyboardFlags: msg.keyboardFlags,
         };
-        st.modes = snap;
         modes.applySnapshot(snap);
+        markModesKnown();
+        if (isDisposed()) {
+          return;
+        }
         if (typeof msg.inputAck === "number") {
-          applyAck(st, msg.inputAck);
+          ack(msg.inputAck);
         }
         cb.onMessage(msg);
         return;
       }
       if (typeof msg.inputAck === "number") {
-        applyAck(st, msg.inputAck);
+        ack(msg.inputAck);
       }
       // PRE-ACK CONTENT SUPPRESSION: on a busy session a live frame can arrive
-      // before this socket's resumeAck, and its
-      // rows would mutate the store under a stale residency cap. Field-aware:
-      // the inputAck was applied above, ED3 is a consumed one-shot the resume
-      // batch hard-codes false and is forwarded as a rows-less clear, `bell`
-      // announces a screen the batch is about to repaint and is dropped. The
-      // rows are lossless by supersession: the replay re-delivers them.
+      // before this socket's resumeAck, and its rows would mutate the store under
+      // a stale residency cap. Field-aware: the inputAck was applied above, ED3
+      // is a consumed one-shot the resume batch hard-codes false and is forwarded
+      // as a rows-less clear, `bell` announces a screen the batch is about to
+      // repaint and is dropped. The replay re-delivers the rows.
       if (!history.acked && (msg.type === "screen" || msg.type === "scroll")) {
         if (msg.type === "screen" && msg.scrollbackCleared) {
           cb.onMessage({ ...msg, changed: [], rows: [], bell: false });
         }
         return;
+      }
+      if (msg.type === "screen") {
+        // A server that sends no modes frame must not hold input forever.
+        markModesKnown();
+        if (isDisposed()) {
+          return;
+        }
       }
       if (msg.type === "scroll") {
         const { correlated, raiseFloorTo, contained } = correlateHistoryReply(msg);
@@ -1403,6 +1790,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
         stopHeartbeat();
         resetForNewSocket();
         renderer.clearSolicited();
+        modes.setKnown(false);
         if (ev.code === WIRE_INCOMPATIBLE_CLOSE_CODE) {
           const reason =
             ev.reason ||
@@ -1416,16 +1804,17 @@ export function createConnection(opts: ConnectionOptions): Connection {
           });
           return;
         }
-        connState = { status: "disconnected" };
         // A definitive close can only be collected again by a reconnect, an
         // endless churn that reads as a flapping "Reconnecting…" banner.
         if (
           (ev.code === PROCESS_EXITED_CLOSE_CODE || ev.code === SESSION_UNKNOWN_CLOSE_CODE) &&
           cb.onProcessExit
         ) {
+          connState = { status: "ended" };
           cb.onProcessExit();
           return;
         }
+        connState = { status: "disconnected" };
         cb.onClose();
         if (isDisposed()) {
           return;
@@ -1463,11 +1852,16 @@ export function createConnection(opts: ConnectionOptions): Connection {
     }
     stopHeartbeat();
     clearHistoryTimers();
+    if (pendingReportTimer !== null) {
+      clearTimeout(pendingReportTimer);
+      pendingReportTimer = null;
+    }
     renderer.clearSolicited();
     cancelScheduledReconnect();
     connState = { status: "disconnected" };
     for (const st of sessions.values()) {
       resetLedger(st);
+      dropPending(st);
     }
     sessions.clear();
     activeId = null;
@@ -1476,16 +1870,19 @@ export function createConnection(opts: ConnectionOptions): Connection {
 
   return {
     sendBinary,
+    cancelPendingInput,
+    pendingInputBytes,
+    holdInput,
     sendEphemeral,
     setClientFocus,
     sendResize,
+    lastAnnouncedSize,
+    inputReady,
     reconnectNow,
     setSession,
     forgetSession,
-    adoptPersistedEpoch,
     historyBudget,
     requestHistory,
-    serverEpochOf,
     currentSessionId,
     disconnect,
     connect,

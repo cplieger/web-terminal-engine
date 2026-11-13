@@ -16,24 +16,24 @@
   "devDependencies": {
     "@cplieger/web-terminal-engine-v3": "npm:@cplieger/web-terminal-engine@2.8.0",
     "@eslint/js": "10.0.1",
-    "@playwright/test": "1.64.1",
+    "@playwright/test": "1.65.0",
     "@stryker-mutator/core": "10.1.1",
     "@stryker-mutator/typescript-checker": "10.1.1",
     "@stryker-mutator/vitest-runner": "10.1.1",
     "@types/pngjs": "6.0.5",
     "@typescript/native": "npm:typescript@7.0.2",
-    "@vitest/browser-playwright": "5.0.5",
-    "@vitest/coverage-v8": "5.0.5",
+    "@vitest/browser-playwright": "5.1.0",
+    "@vitest/coverage-v8": "5.1.0",
     "esbuild": "0.28.2",
-    "eslint": "10.13.0",
+    "eslint": "10.14.0",
     "fast-check": "4.10.2",
-    "knip": "6.44.0",
-    "playwright": "1.64.1",
+    "knip": "6.44.2",
+    "playwright": "1.65.0",
     "pngjs": "7.0.0",
     "prettier": "3.9.10",
     "typescript": "npm:@typescript/typescript6@6.0.2",
-    "typescript-eslint": "8.72.1",
-    "vitest": "5.0.5"
+    "typescript-eslint": "8.72.2",
+    "vitest": "5.1.0"
   },
   "overrides": {
     "qs": "^6.15.2",
@@ -43,7 +43,8 @@
   "license": "MPL-2.0",
   "exports": {
     ".": "./src/index.ts",
-    "./wire-compatibility.json": "./wire-compatibility.json"
+    "./wire-compatibility.json": "./wire-compatibility.json",
+    "./layout-shapes.json": "./layout-shapes.json"
   },
   "types": "./src/index.ts",
   "publishConfig": {
@@ -80,6 +81,7 @@
     "jsr.json",
     "LICENSE",
     "wire-compatibility.json",
+    "layout-shapes.json",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md"
   ]

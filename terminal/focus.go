@@ -24,15 +24,15 @@ const (
 // focusReportLocked derives the DEC 1004 answer from clientFocused (does any
 // attached client report its widget focused), the session's own focus-reporting
 // mode, and the WithKeepUnfocused declaration, returning the sequence to write or
-// nil when nothing changed. The caller holds h.mu, reads clientFocused under it,
-// and writes outside it.
-//
-// A 1004 disable forgets the reported state, so the next enable re-reports the
-// CURRENT one rather than staying silent because it matches what the previous
-// enable was told. That is xterm.js's _reportFocus behaviour.
+// nil when nothing changed. The caller holds h.mu; replyLoop owns the write.
+// Every 1004 enable re-reports the current state, as xterm.js's _reportFocus
+// does.
 func (h *Handler) focusReportLocked(clientFocused bool) []byte {
-	if !h.screen.FocusReporting {
+	if h.screen.FocusEnableSeq != h.focusEnableSeen {
+		h.focusEnableSeen = h.screen.FocusEnableSeq
 		h.focusTold = focusUnknown
+	}
+	if !h.screen.FocusReporting {
 		return nil
 	}
 	want := focusToldOut
@@ -49,26 +49,10 @@ func (h *Handler) focusReportLocked(clientFocused bool) []byte {
 	return focusOutSeq
 }
 
-// reportFocus runs the derivation out of band — on a client's focus control, on
-// attach, and on detach — and writes any report to the PTY. handlePTYData runs
-// it inline instead, on the mode-change edge.
+// reportFocus asks replyLoop to re-derive the DEC 1004 answer: on a client's
+// focus control, on attach and on detach.
 func (h *Handler) reportFocus() {
-	if !h.started.Load() {
-		return
-	}
-	h.mu.Lock()
-	// The aggregate is read UNDER h.mu, which is what serializes one derivation
-	// against the next: read before the lock, a focus control and a detach can
-	// commit in the order that leaves focusTold describing the loser's reading,
-	// and no further trigger is queued to correct it. One atomic load, so this
-	// nests no registry lock inside h.mu.
-	seq := h.focusReportLocked(h.registry.AnyClientFocused())
-	ptmx := h.ptmx
-	h.mu.Unlock()
-	if len(seq) == 0 || ptmx == nil {
-		return
-	}
-	ptmx.Write(seq) //nolint:errcheck // best-effort
+	h.wakeReplies()
 }
 
 // focusControl applies one client's reported widget focus and re-derives the

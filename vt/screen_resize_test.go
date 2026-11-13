@@ -295,57 +295,14 @@ func TestResizeTo1ColMidCSI(t *testing.T) {
 	}
 }
 
-// --- Allocation contracts ---------------------------------------------------
-//
-// Resize is not the per-byte path, but it is not a startup-only path either: the
-// terminal handler calls it on every client resize message, a live resize
-// streams one per animation frame while a window edge is dragged, and when
-// several clients share a session the screen relaxes to the smallest remaining
-// client's size as each one disconnects. So the question is the same one the
-// write and wire contracts ask — which quantity does the cost track — and the
-// answer must be rows, not cells.
-//
-// The contract-writing mechanic that matters here is that Resize is IDEMPOTENT:
-// the second call at the same size does nothing. Measuring a single Resize in an
-// AllocsPerRun closure would therefore measure one real resize amortised over
-// hundreds of no-ops, which is a number that looks stable and means nothing. The
-// tests below measure a PAIR — resize away, resize back — which is genuinely
-// periodic, and they say so in each case.
-//
-// What the measurement found, including the one place the expected property does
-// not hold:
-//
-//   - A resize to the SAME size is free on the main screen. Nothing is
-//     reallocated, which is what a client reconnecting at its current size needs.
-//   - A width change costs exactly one allocation per ROW, at any width:
-//     resizeWidth rebuilds each row to the new column count and copies the old
-//     one in. 40 columns and 400 columns cost the same count.
-//   - A height change costs one allocation per ADDED row plus one, at any width,
-//     and shrinking is free (the row slice is truncated). Existing rows move as
-//     slice elements rather than being rebuilt.
-//   - A resize to the same size is NOT free while the alternate screen is
-//     active. resizeSavedMain rebuilds the whole saved main-screen buffer with no
-//     dimension check, so a no-op resize costs one allocation per saved row —
-//     measured 25 on a 24-row screen and 101 on a 100-row one. That is the
-//     reverse-direction defect this set was looking for, and it is pinned as
-//     measured rather than as zero, with the assertion written so that fixing it
-//     fails the test and says so.
+// Allocation contracts: a live resize runs once per animation frame, so its
+// cost must track rows, not cells. Resize is idempotent, so a changing-size test
+// measures a pair (away and back); one call would amortise a real resize over
+// no-ops.
 
-// TestResizeToTheSameSizeIsAllocationFree pins the no-op path on BOTH screens. A
-// client that reconnects at the size it already had, and a second client
-// attaching at the same dimensions, both land here; Resize's own doc comment
-// contemplates exactly that case ("a no-op resize (e.g. client reconnect at the
-// same size)").
-//
-// The alternate screen is covered because it used to be the expensive half:
-// resizeSavedMain had no dimension check, so a no-op resize rebuilt every row of
-// the saved main buffer while a full-screen program was running, which is most of
-// a session's life in this engine. The retired test that recorded that cost said
-// to extend this contract once the guard landed, so both modes are driven from one
-// table and neither can regress silently.
-//
-// A single Resize call is the right thing to measure for once, because at the
-// same size it IS the steady state: every iteration does the same nothing.
+// TestResizeToTheSameSizeIsAllocationFree pins the no-op path a reconnect at the
+// same size takes, on both screens; on the alt screen resizeSavedMain's early
+// return is what holds it. A single call is the steady state here.
 func TestResizeToTheSameSizeIsAllocationFree(t *testing.T) {
 	sizes := map[string]struct{ rows, cols int }{
 		"small_4x40":      {4, 40},

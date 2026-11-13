@@ -99,14 +99,12 @@ describe("OSC 8 hyperlink rendering", () => {
     await flushFrame(msg);
 
     const anchors = output.querySelectorAll("a.term-link");
-    // linkifySpans may detect URLs in text, but "plain text" has none
     expect(anchors.length).toBe(0);
   });
 
   it("keeps the OSC 8 href when the visible text is itself a URL fragment", async () => {
     // First row of a URL that wraps across lines: the visible text is only
-    // a fragment, but the full target is carried in `u`. The regex
-    // autolinker must NOT rebuild the link from the truncated visible text.
+    // a fragment, but the full target is carried in `u`, never the visible text.
     const full = "http://example.com/very/long/path/that/wraps/here";
     const runs: WireRun[] = [
       { t: "http://example.com/very/long/pa", f: -1, b: -1, a: 0, uc: -1, u: full },
@@ -178,21 +176,11 @@ describe("OSC 8 hyperlink rendering", () => {
     expect(output.textContent).toContain("mail me");
   });
 
-  it("autolinks a bare http(s) URL in plain text with the same safe-open attributes", async () => {
-    // render.ts builds anchors on TWO paths, the OSC 8 `u` field (asserted above)
-    // and linkifySpans over a bare URL in a run with no `u`, and both must set
-    // the reverse-tabnabbing guards. The autolinker path is asserted nowhere
-    // else: the safety fuzz file isolates the OSC 8 gate with non-URL text.
+  it("renders a bare URL in a run the server did not mark as plain text", async () => {
     const runs: WireRun[] = [{ t: "see https://example.com/x now", f: -1, b: -1, a: 0, uc: -1 }];
-    const msg = frame({ 0: runs }, [0, 0]);
-    await flushFrame(msg);
-    const anchors = output.querySelectorAll("a.term-link");
-    expect(anchors.length).toBe(1);
-    const a = anchors[0] as HTMLAnchorElement;
-    expect(a.getAttribute("href")).toBe("https://example.com/x");
-    expect(a.textContent).toBe("https://example.com/x");
-    expect(a.target).toBe("_blank");
-    expect(a.rel).toBe("noopener noreferrer");
+    await flushFrame(frame({ 0: runs }, [0, 0]));
+    expect(output.querySelectorAll("a").length).toBe(0);
+    expect(output.textContent).toContain("see https://example.com/x now");
   });
 
   it("distinguishes OSC 8 hyperlinks from auto-detected URLs by class", async () => {
@@ -207,7 +195,11 @@ describe("OSC 8 hyperlink rendering", () => {
     const osc8: WireRun[] = [
       { t: "click", f: -1, b: -1, a: 0, uc: -1, u: "https://example.com/x" },
     ];
-    const bare: WireRun[] = [{ t: "see https://example.com/y here", f: -1, b: -1, a: 0, uc: -1 }];
+    const bare: WireRun[] = [
+      { t: "see ", f: -1, b: -1, a: 0, uc: -1 },
+      { t: "https://example.com/y", f: -1, b: -1, a: 1024, uc: -1, u: "https://example.com/y" },
+      { t: " here", f: -1, b: -1, a: 0, uc: -1 },
+    ];
     await flushFrame(frame({ 0: osc8, 1: bare }, [2, 0]));
 
     const anchors = [...output.querySelectorAll("a.term-link")] as HTMLAnchorElement[];

@@ -461,16 +461,9 @@ func TestWebSocketUnknownSessionClosesDefinitively(t *testing.T) {
 	}
 }
 
-// TestSessionSurfaceRefusesCaching pins the cache policy on every session-surface
-// response that carries a session id. The id is the /ws attach + resume
-// credential, so a cache that stores one of these bodies holds a live credential
-// on disk; this package already refuses to log an id whole (LogID), and the
-// header is the same refusal aimed at caches.
-//
-// It is a CONTRACT test, not a coverage test: consumers were closing this gap
-// unevenly by hand (one wrapped the surface in its own middleware, one set no
-// directive at all) before the engine took the default, so a consumer that drops
-// its own middleware after upgrading is relying on these assertions holding.
+// TestSessionSurfaceRefusesCaching pins no-store on every response whose body
+// carries a session id, the /ws credential. Consumers rely on it in place of
+// their own middleware.
 func TestSessionSurfaceRefusesCaching(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
@@ -545,20 +538,9 @@ func snapHeader(rec *httptest.ResponseRecorder) http.Header {
 	return rec.Result().Header
 }
 
-// TestSessionRESTNoStoreCoversEveryResponse pins the cache policy on the
-// session REST responses that carry NO session id in their body — which is every
-// response except the two writeJSON bodies TestSessionSurfaceRefusesCaching
-// already covers.
-//
-// What these responses expose is the cache KEY, not the body: each of these URLs
-// carries a session id as a path segment, and that id is the /ws attach + resume
-// capability. A 404 or 405 with no cache directive at all is heuristically
-// cacheable under RFC 9110 §15.1, so a cache could retain an entry keyed by a
-// live token while the body itself is only net/http's constant error text.
-//
-// The synthesized rows are the point of the test. The inner mux writes its own
-// 404, 405 and path-cleaning redirect with no handler involved, so nothing in
-// the handler table could have covered them.
+// TestSessionRESTNoStoreCoversEveryResponse pins no-store on the REST responses
+// whose URL, not body, carries a session id (withNoStore owns why), above all
+// the mux's own 404, 405 and redirect, which no handler writes.
 func TestSessionRESTNoStoreCoversEveryResponse(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
@@ -639,15 +621,9 @@ func TestSessionRESTNoStoreCoversEveryResponse(t *testing.T) {
 	}
 }
 
-// TestSessionRESTNoStorePrecedence pins WHO wins when a Cache-Control is already
-// on the response, which is the reason the policy needs no opt-out option.
-//
-// The two halves differ deliberately. The wrapper YIELDS: the responses it
-// covers carry no credential, only a sensitive URL, so an outer stack that
-// states a policy stays that header's single writer — that is the documented
-// escape hatch for a consumer wanting something stricter, or genuinely wanting a
-// route cached. writeJSON OVERWRITES: its bodies contain the session id itself,
-// so that prohibition is not the consumer's to relax.
+// TestSessionRESTNoStorePrecedence pins that withNoStore yields to a
+// Cache-Control already set, while writeJSON, whose bodies hold the id,
+// overwrites it.
 func TestSessionRESTNoStorePrecedence(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })

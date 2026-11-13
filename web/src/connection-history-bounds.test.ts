@@ -7,7 +7,8 @@
 // store predicts the replay jump from.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { type Connection, createConnection, MAX_REPLAY_LINES } from "./connection.js";
+import { type Connection, createConnection } from "./connection.js";
+import { MAX_REPLAY_LINES } from "./replay.js";
 import { connectionDeps } from "./test-helpers/connection-fakes.js";
 import { registerForDispose } from "./test-helpers/engine-fixture.js";
 import { WIRE_PROTOCOL_VERSION } from "./wire-compatibility.js";

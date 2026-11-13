@@ -1,18 +1,11 @@
-// Residency accounting under the two operations that move lines between the
-// resident tail and the disposable browse cache without deleting anything — the
-// resume-ack transition and the cap-eviction walk — plus the bounds the store
-// reports afterwards.
-//
-// `oldestIndex()` and `highestIndex()` are not conveniences: the frontier
-// geometry reads the first and resume sends the second as `haveThrough`. A walk
-// that leaves either stale asks the server for the wrong range, and a budget
-// pass that runs when nothing was reclassified drains the depth the reader is
-// looking at.
-//
-// Pure data structure, no DOM.
+// Residency under the resume-ack transition and the cap-eviction walk, which move
+// lines between the resident tail and the browse cache, and the bounds reported
+// after. The frontier reads `oldestIndex()` and resume sends `highestIndex()` as
+// `haveThrough`, so a stale bound asks the server for the wrong range.
 
 import { describe, it, expect } from "vitest";
 import { BROWSE_CACHE_CAP, LineStore, RESIDENT_TAIL_CAP } from "./store.js";
+import { ackEpoch } from "./test-helpers/store-epoch.js";
 import type { ScreenMessage, ScrollMessage, WireRun } from "./types.js";
 
 function row(text: string): WireRun[] {
@@ -67,7 +60,7 @@ function ack(over: {
   following?: boolean;
 }): Parameters<LineStore["applyResumeAck"]>[0] {
   return {
-    epochChanged: false,
+    serverEpoch: null,
     committed: over.committed,
     serverOldest: over.serverOldest,
     paging: true,
@@ -112,7 +105,7 @@ describe("LineStore.applyResumeAck: a transition that reclassifies nothing", () 
     fetchPage(s, 0, 600, 0);
 
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 1000,
       serverOldest: 0,
       paging: false,
@@ -265,7 +258,7 @@ describe("LineStore: the browse budget's viewport exemption", () => {
     s.applyScroll(scrollMsg(0, 400));
     s.applyScroll(scrollMsg(600, 400));
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 5000,
       serverOldest: 2000,
       paging: true,
@@ -317,7 +310,7 @@ describe("LineStore: the browse budget's viewport exemption", () => {
     s.applyScroll(scrollMsg(600, 400));
     s.applyScroll(scrollMsg(0, 400));
     s.applyResumeAck({
-      epochChanged: false,
+      serverEpoch: null,
       committed: 5000,
       serverOldest: 2000,
       paging: true,
@@ -399,7 +392,7 @@ describe("LineStore: what the trim marker reads", () => {
     // below 50 is in the client's hands, not gone, so the marker must stay off.
     const s = new LineStore();
     s.applyScroll(scrollMsg(10, 5));
-    s.noteResumeBounds(200, 50);
+    s.noteResumeBounds(50);
 
     expect(s.hasTrimmedHistory()).toBe(false);
   });
@@ -410,7 +403,8 @@ describe("LineStore: the exact edges of the two staleness watermarks", () => {
   function hydrated(): LineStore {
     const source = new LineStore();
     source.applyScroll(scrollMsg(100, 5));
-    const store = LineStore.fromSnapshot(source.snapshot(0));
+    ackEpoch(source, 7);
+    const store = LineStore.fromSnapshot(source.snapshot());
     if (store === null) {
       throw new Error("fixture: the snapshot should hydrate");
     }

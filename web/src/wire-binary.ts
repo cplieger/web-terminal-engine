@@ -11,6 +11,7 @@ import type {
   ModesMessage,
   TitleMessage,
   ClipboardMessage,
+  GridMessage,
   ServerMessage,
 } from "./types.js";
 
@@ -23,6 +24,7 @@ const MSG_TITLE = 4;
 const MSG_PONG = 5;
 const MSG_CLIPBOARD = 6;
 const MSG_ACK_ONLY = 7;
+const MSG_GRID = 8;
 
 const MODE_FLAG_BRACKETED_PASTE = 1;
 const MODE_FLAG_APP_CURSOR_KEYS = 2;
@@ -62,16 +64,10 @@ class Cursor {
     return v;
   }
   u64(): number {
-    // Number(v) loses precision above 2^53. That is safe for every u64 this
-    // protocol decodes because of how each value is USED, not because they all fit:
-    //   - base / firstIndex / committed / oldestIndex / inputAck (bytesReceived)
-    //     stay well under 2^53 for any realistic session, so arithmetic is exact.
-    //   - serverEpoch is the server's time.Now().UnixNano() (~1.77e18, far ABOVE
-    //     2^53), so it DOES drop low bits here. That is harmless: it is only ever
-    //     equality-compared to detect a restart, and Number() is deterministic, so
-    //     one epoch always maps to one double and two distinct boots differ by far
-    //     more than the ~256ns rounding granularity at that magnitude.
-    // If a future u64 field needs exact values above 2^53, return BigInt instead.
+    // Number() drops bits above 2^53. The line and byte counters stay far below it.
+    // serverEpoch (UnixNano, ~1.8e18) does not, but it is only equality-compared:
+    // one epoch always maps to one double, and two boots differ by far more than
+    // its ~256 ns rounding. A field needing exact values above 2^53 decodes as BigInt.
     const v = this.view.getBigUint64(this.off, true);
     this.off += 8;
     return Number(v);
@@ -102,17 +98,10 @@ function readRowRuns(c: Cursor): WireRun[] {
 }
 
 /**
- * Decode a binary frame from the server's WebSocket into a `ServerMessage`.
- * Returns `null` for frames smaller than the minimum header (9 bytes) or for
- * truncated/invalid frames; the caller should drop such frames silently.
- *
- * Frame format mirrors the Go `vt` package's wire encoding:
- *   - 1 byte type tag
- *   - 8 bytes inputAck (u64 little-endian)
- *   - type-specific body (rows of styled runs for screen/scroll, etc.)
- *
- * @param buf  Raw binary frame received over WebSocket.
- * @returns    Decoded message, or `null` if the frame couldn't be parsed.
+ * Decode one binary WebSocket frame (the Go `vt` package's wire encoding: a
+ * 1-byte type tag, an 8-byte little-endian inputAck, then the type's body)
+ * into a `ServerMessage`. Returns `null` for an undersized (< 9 bytes),
+ * truncated or invalid frame, which the caller drops.
  */
 export function decodeWireBinary(buf: ArrayBuffer): ServerMessage | null {
   if (buf.byteLength < 9) {
@@ -288,6 +277,12 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     const textLen = c.u16();
     const text = c.utf8(textLen);
     const msg: ClipboardMessage = { type: "clipboard", text, inputAck };
+    return msg;
+  }
+  if (msgType === MSG_GRID) {
+    const cols = c.u16();
+    const rows = c.u16();
+    const msg: GridMessage = { type: "grid", cols, rows, inputAck };
     return msg;
   }
   if (msgType === MSG_PONG) {

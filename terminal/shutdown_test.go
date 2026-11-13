@@ -3,21 +3,20 @@ package terminal
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 // heldExitHandler returns a handler whose onProcessExit callback parks until the
 // returned release channel is closed, plus a channel that closes when the
 // callback is entered.
 //
-// The callback is the LAST statement of the process monitor's body, so parking in
-// it holds the monitor goroutine open at a point where the child is already
-// reaped and every other teardown step has run. That gives these tests a
-// teardown they control the duration of, which is the only way to tell "waited"
-// from "returned fast and got lucky": a fixed sleep would let a non-blocking
-// Shutdown pass whenever the runner was quick.
+// The callback is the monitor's last statement, so parking there holds a
+// finished teardown open for as long as the test wants.
 func heldExitHandler(t *testing.T) (h *Handler, entered <-chan struct{}, release chan struct{}) {
 	t.Helper()
 	enteredCh := make(chan struct{})
@@ -199,7 +198,7 @@ func TestManagerShutdownNamesTheOutstandingCount(t *testing.T) {
 // TestShutdownReportsSuccessAfterCompletion pins the answer a finished teardown
 // must give when the caller's budget has ALSO expired: success, every time.
 //
-// This is the fatal-path shape (webhttp's teardown hook runs mgr.Shutdown, then
+// This is the fatal-path shape (httpserver's teardown hook runs mgr.Shutdown, then
 // the error branch above it runs it again, often with the same spent context). A
 // bare two-case select would satisfy it about half the time, so the loop is the
 // assertion: 30 iterations put the odds of a broken implementation passing at
@@ -225,7 +224,7 @@ func TestShutdownReportsSuccessAfterCompletion(t *testing.T) {
 }
 
 // TestManagerShutdownIsIdempotent covers the double-call an app hits on its fatal
-// path: webhttp's teardown hook runs mgr.Shutdown, and the error branch above it
+// path: httpserver's teardown hook runs mgr.Shutdown, and the error branch above it
 // runs it again. The second call has no sessions and no live loops, so it must
 // report success rather than an expiry against an already-closed wait.
 func TestManagerShutdownIsIdempotent(t *testing.T) {
@@ -238,5 +237,78 @@ func TestManagerShutdownIsIdempotent(t *testing.T) {
 	defer cancel()
 	if err := m.Shutdown(ctx); err != nil {
 		t.Errorf("second Shutdown(ctx) = %v, want nil", err)
+	}
+}
+
+// TestStartAfterShutdown_spawnsNothing covers a handler shut down before its
+// first child: a later start path must spawn nothing, since Shutdown has
+// already reported every goroutine returned.
+func TestStartAfterShutdown_spawnsNothing(t *testing.T) {
+	// Unregistered client states: no flush loop writes to them.
+	starts := map[string]func(h *Handler) error{
+		"StartEager": (*Handler).StartEager,
+		"resize": func(h *Handler) error {
+			h.handleResize(&clientState{}, 80, 24)
+			return nil
+		},
+		"binary input": func(h *Handler) error {
+			h.handleBinaryFrame(nil, &clientState{}, []byte("x"), false, true, nil)
+			return nil
+		},
+	}
+	for name, start := range starts {
+		t.Run(name, func(t *testing.T) {
+			logs := &lockedBuffer{}
+			h := NewHandler([]string{"/bin/sleep", "30"}, WithWorkDir("/"),
+				WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+			ctx, cancel := context.WithTimeout(t.Context(), waitPatience)
+			defer cancel()
+			if err := h.Shutdown(ctx); err != nil {
+				t.Fatalf("Shutdown on an unstarted handler = %v, want nil", err)
+			}
+			// Kills the child a failing run spawned.
+			shutdownOnCleanup(t, h)
+
+			err := start(h)
+			if name == "StartEager" && err == nil {
+				t.Errorf("StartEager after Shutdown = nil, want an error")
+			}
+			if h.started.Load() {
+				t.Errorf("a child started after Shutdown returned")
+			}
+			if out := logs.String(); strings.Contains(out, "process start failed") {
+				t.Errorf("start after Shutdown logged an error:\n%s", out)
+			}
+		})
+	}
+}
+
+// TestResizeAfterShutdown_endsTheSocket covers a client attached to a handler
+// shut down before its first child: no process exit will ever close its socket,
+// so the refused start must.
+func TestResizeAfterShutdown_endsTheSocket(t *testing.T) {
+	h, wsURL := fenceHandler(t, []string{"/bin/sleep", "30"})
+	ctx, cancel := context.WithTimeout(t.Context(), waitPatience)
+	defer cancel()
+	if err := h.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown on an unstarted handler = %v, want nil", err)
+	}
+	ws := dialWS(t, wsURL)
+	resize := append([]byte{0x00}, `{"type":"resize","cols":80,"rows":24}`...)
+	if err := ws.Write(ctx, websocket.MessageBinary, resize); err != nil {
+		t.Fatalf("writing the resize: %v", err)
+	}
+	for {
+		_, _, err := ws.Read(ctx)
+		if err == nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("socket still open after %v; a resize refused after Shutdown must end it", waitPatience)
+		}
+		if got := websocket.CloseStatus(err); got != websocket.StatusNormalClosure {
+			t.Errorf("Read after a refused resize: close status %v (err %v), want %v", got, err, websocket.StatusNormalClosure)
+		}
+		return
 	}
 }

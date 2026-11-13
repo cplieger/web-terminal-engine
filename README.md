@@ -4,7 +4,7 @@
 
 web-terminal-engine puts a real terminal in a web page, with a Go server that runs each program in a PTY and a TypeScript renderer that draws it in the browser.
 
-The server keeps each terminal's screen and scrollback, so a browser that reconnects, reloads or opens a second tab gets the same screen back. A host can [restore sessions](docs/session-restore.md) after a restart. The Go module needs Go 1.27.2 or later and Linux, macOS or another Unix-like system, and depends on `coder/websocket`, `creack/pty`, `golang.org/x/sys` and `cplieger/runesafe/v3`. The TypeScript package has no runtime dependencies. web-terminal-engine is licensed under MPL-2.0.
+The server keeps each terminal's screen and scrollback, so a browser that reconnects, reloads or opens a second tab gets the same screen back. A host can [restore sessions](docs/session-restore.md) after a restart. The Go module needs Go 1.27.2 or later and Linux, macOS or another Unix-like system, and depends on `coder/websocket`, `creack/pty`, `golang.org/x/sys` and `cplieger/go/textsafe`. The TypeScript package has no runtime dependencies. web-terminal-engine is licensed under MPL-2.0.
 
 ## Why use it
 
@@ -84,7 +84,7 @@ The engine routes screen frames to the renderer for you, and `engine.dispose()` 
 ## API
 
 - `vt` is the VT100/VT500 screen buffer: `New`, `Write`, `Resize`, row rendering to the wire format, and one-shot reads of replies, clipboard writes, the bell and palette changes.
-- `terminal` serves sessions: `NewHandler` and its options, `NewSessionManager`, `MountSessionRoutes`, `NewOriginPolicy`, `StartZombieReaper`, `LogID`, and the wire compatibility constants with `WirePairIncompatibility`.
+- `terminal` serves sessions: `NewHandler` and its options, `NewSessionManager`, `MountSessionRoutes`, `NewOriginPolicy`, `LogID`, and the wire compatibility constants with `WirePairIncompatibility`.
 - The TypeScript package exports `createTerminalEngine` and the five factories it composes, the `keyboard` and `toolbar` namespaces, `decodeWireBinary`, `connectStatusStream`, `LineStore` and the wire types.
 
 The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/web-terminal-engine/v6) and [JSR](https://jsr.io/@cplieger/web-terminal-engine/doc).
@@ -150,7 +150,7 @@ Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
-This project was built with AI-assisted tooling using [Claude](https://claude.com), [GPT](https://openai.com), and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
+This project was built with AI assistance. The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
 ## License
 

@@ -2,47 +2,21 @@ package vt
 
 import "fmt"
 
-// Kitty keyboard protocol (progressive keyboard enhancement).
-//
-// The protocol lets a program running in the terminal opt into richer, more
-// unambiguous key reporting. It is negotiated entirely through CSI-u escape
-// codes written by the program to the PTY (parsed here); the actual key
-// *encoding* happens client-side, so the terminal layer syncs the current flags
-// to the client (see KeyboardFlags) and the client's keyboard encoder switches
-// between legacy and kitty CSI-u encoding accordingly.
-//
-// Negotiation sequences (all terminated by 'u'):
-//
-//	CSI ? u              query   -> reply CSI ? flags u
-//	CSI > flags u        push    (flags default 0)
-//	CSI < number u       pop     (number default 1)
-//	CSI = flags ; mode u set     (mode 1 set-all / 2 set-given / 3 reset-given)
-//
-// Spec: https://sw.kovidgoyal.net/kitty/keyboard-protocol/
-//
-// Honored flags: only disambiguate (0x1), the headline enhancement giving apps
-// unambiguous Esc/Ctrl/Alt key events. NOT honored: report-event-types (0x2,
-// needs key-release reporting our keydown-only input path lacks),
-// report-alternate-keys (0x4, needs codepoints the browser doesn't expose),
-// report-all-keys-as-escape-codes (0x8) and report-associated-text (0x10,
-// both incompatible with the client's hidden-textarea/IME input model).
-//
-// Incoming flags are masked to the honored subset on store, so CSI ? u
-// truthfully reports only what is honored; an app needing an unsupported flag
-// can detect the gap (set-then-query) and fall back — a partial implementation
-// the spec sanctions. Adding a flag later means extending both this mask and
-// the client encoder together.
+// Kitty keyboard protocol (https://sw.kovidgoyal.net/kitty/keyboard-protocol/):
+// negotiation is parsed here, and the client encodes keys from KeyboardFlags.
+// Only disambiguate (0x1) is honored: 0x2 needs key-release events, 0x4
+// codepoints the browser hides, and 0x8 and 0x10 conflict with the client's
+// IME input. Flags are masked on store, so a query reports only what is
+// honored, as the spec permits; a new flag needs this mask and the client
+// encoder together.
 const (
 	kbdDisambiguate uint8 = 1 << 0 // 0x1  disambiguate escape codes
 
-	// kbdHonoredMask is the set of progressive-enhancement flags this terminal
-	// implements. Flags outside it (0x2, 0x4, 0x8, 0x10) are masked off on
-	// store; see the comment above.
+	// kbdHonoredMask is the set of enhancement flags this terminal implements.
 	kbdHonoredMask = kbdDisambiguate // 0x01
 
-	// maxKbdStack bounds each screen's push/pop stack. The spec asks terminals
-	// to cap the stack against denial-of-service; when full the oldest entry is
-	// evicted on push.
+	// maxKbdStack caps each screen's stack, as the spec asks; a full push evicts
+	// the oldest entry.
 	maxKbdStack = 16
 )
 

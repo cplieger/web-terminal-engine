@@ -20,6 +20,7 @@ The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md
 
 ## Releases
 
-- One tag releases the Go module and the npm and JSR package. A breaking change in either half, TypeScript included, needs the next `/vN` module path in `go.mod` and every internal import, or the release stops before it tags.
-- Raising a floor, or any wire change a released peer cannot read, is a breaking change even when no API changes.
+- One tag releases the Go module and the npm and JSR package. A breaking change that reaches a consumer outside the first-party cplieger repositories needs the next `/vN` module path in `go.mod` and every internal import.
+- A change that breaks only first-party consumers, each updated in the same release train, ships as a minor. List each incompatible line gorelease reports for the Go half in `api-accept.txt` at the repository root, or the release stops before it tags. The TypeScript half has no API gate, so say each changed TypeScript signature in the commit body.
+- Raising a floor, or any wire change a released peer cannot read, is a breaking change even when no API changes, under the same two rules.
 - When the wire protocol changes, web-terminal-engine and [web-terminal-ui](https://github.com/cplieger/web-terminal-ui) release together.

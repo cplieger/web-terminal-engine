@@ -15,15 +15,9 @@ import (
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
-// TestConformance runs the esctest2 suite against the engine's VT and asserts
-// that the set of failing tests matches the checked-in known-deviations
-// allowlist (known_failures.txt). It is skipped unless ESCTEST2_DIR points at
-// an esctest2 checkout (run `bash scripts/esctest.sh` to fetch it and drive
-// this test), so a normal `go test ./...` stays fast and dependency-free.
-//
-// When known_failures.txt is absent the test runs in triage mode: it logs the
-// full failing set without asserting, so a first run can be inspected to seed
-// the allowlist.
+// TestConformance asserts that esctest2's failing set matches
+// known_failures.txt. It skips unless ESCTEST2_DIR is set (scripts/esctest.sh
+// sets it); without known_failures.txt it only logs the failing set.
 func TestConformance(t *testing.T) {
 	dir := os.Getenv("ESCTEST2_DIR")
 	if dir == "" {

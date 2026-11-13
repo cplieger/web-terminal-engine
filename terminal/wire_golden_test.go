@@ -9,17 +9,10 @@ import (
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
 
-// The golden frames are the cross-language wire contract. This Go encoder MUST
-// produce exactly these bytes, and the TypeScript decoder MUST decode them
-// (web/src/wire-golden.node.test.ts reads the same files). Keeping the Go encoder
-// and the TS decoder in one repo means a wire change is one PR; these fixtures
-// make a drift between the two halves a test failure rather than a runtime
-// mis-decode.
-//
-// After an INTENTIONAL wire change, regenerate the fixtures and update the TS
-// decoder + its assertions in the same PR:
-//
-//	UPDATE_GOLDEN=1 go test ./terminal/ -run TestWireGolden
+// goldenFrames are the cross-language wire contract: the Go encoder must emit
+// these bytes and web/src/wire-golden.node.test.ts must decode them. After an
+// intentional change, regenerate and update the TS side in the same change:
+// UPDATE_GOLDEN=1 go test ./terminal/ -run TestWireGolden
 func goldenFrames() map[string][]byte {
 	row := func(text string) []vt.WireRun {
 		return []vt.WireRun{{T: text, F: -1, B: -1, Uc: -1}}
@@ -55,8 +48,13 @@ func goldenFrames() map[string][]byte {
 		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002,
 		// kitty disambiguate flag (1).
 		"modes": encodeModesMsg(true, false, true, false, false, true, false, 1002, 1),
-		"title": encodeTitleMsg("hello world"),
-		"pong":  encodePongMsg(),
+		// modes-power-on: a fresh screen's announcement, the modes a client
+		// assumes (POWER_ON_MODES) before its socket's first modes frame.
+		"modes-power-on": new(flushFrameBuilder).refreshAnnouncement(vt.New(24, 80)).modes,
+		"title":          encodeTitleMsg("hello world"),
+		"pong":           encodePongMsg(),
+		// grid: 132 columns, 43 rows.
+		"grid": encodeGridMsg(132, 43),
 	}
 }
 

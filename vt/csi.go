@@ -424,16 +424,10 @@ func (s *Screen) backspace() {
 }
 
 // reportRectChecksum answers DECRQCRA with DCS Pid ! ~ hhhh ST, where hhhh is
-// the checksum of the requested rectangle. Gated behind AllowScreenReport (see
-// the field doc): the reply is written back into the PTY as input, so it is a
-// screen-scrape-and-inject vector unless explicitly enabled.
-//
-// The algorithm matches xterm at patch level < 279 (esctest's default
-// --xterm-checksum): the negation of the 16-bit sum of the cells' character
-// ordinals, counting blank/erased cells as space (0x20). esctest un-negates the
-// value and compares one cell at a time, so this lets AssertScreenCharsInRectEqual
-// recover the exact character present in each cell. Coordinates are 1-based and
-// origin-mode-relative, matching CUP.
+// the checksum of the requested rectangle, only with AllowScreenReport. It
+// matches xterm below patch 279, esctest's default: the negated 16-bit sum of
+// character ordinals, blanks as 0x20. Coordinates are 1-based and
+// origin-relative, as in CUP.
 func (s *Screen) reportRectChecksum() {
 	if !s.AllowScreenReport {
 		return
@@ -582,7 +576,6 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 			m = eraseSpareBoth
 		}
 		s.eraseRegionMode(0, 0, s.Height-1, s.Width-1, m)
-		s.dropDrained()
 		s.clearWrapState()
 	case 3:
 		// ED3 ("Erase Saved Lines"): clears scrollback only, screen untouched.
@@ -807,20 +800,9 @@ func (s *Screen) windowManipulation() {
 }
 
 // setTitleModes implements XTSMTITLE (CSI > Pm t, set=true) and XTRMTITLE
-// (CSI > Pm T, set=false): each parameter toggles one title-mode feature.
-//
-//	0 = set window/icon labels using hexadecimal
-//	1 = query window/icon labels using hexadecimal
-//	2 = set window/icon labels using UTF-8
-//	3 = query window/icon labels using UTF-8
-//
-// Only the hex features change behavior: the engine's titles are always UTF-8,
-// so the UTF-8 features (2, 3) are accepted as no-ops. A bare CSI > t / CSI > T
-// carries the engine's default parameter 0 (paramCount() is never 0 here:
-// parserClear seeds numGroups=1 on CSI entry and finalizeParams only grows the
-// group, never below 1; see parse.go), so it toggles the set-hex feature,
-// consistent with how applySGR and windowManipulation treat a bare CSI as an
-// explicit 0.
+// (CSI > Pm T, set=false): 0 and 1 set and query labels in hex, 2 and 3 in
+// UTF-8. Titles are always UTF-8, so 2 and 3 are no-ops. A bare CSI > t carries
+// parameter 0, as parse.go always seeds one group, so it toggles set-hex.
 func (s *Screen) setTitleModes(set bool) {
 	for i := range s.paramCount() {
 		switch s.paramVal(i, 0) {
@@ -998,6 +980,9 @@ func (s *Screen) setMode(mode int) {
 	case 1000, 1002, 1003:
 		s.MouseMode = uint16(mode) // #nosec G115 -- mode is one of 1000/1002/1003, fits uint16
 	case 1004:
+		if !s.FocusReporting {
+			s.FocusEnableSeq++
+		}
 		s.FocusReporting = true
 	case 1006:
 		s.MouseSGR = true
@@ -1053,7 +1038,6 @@ func (s *Screen) resetMode(mode int) {
 		s.noClearOnColumn = false
 	case 47, 1047, 1049:
 		s.exitAltScreen(mode)
-		s.dropDrained()
 	case 1048:
 		s.restoreCursor()
 	case 1000:
@@ -1130,17 +1114,10 @@ func (s *Screen) xtRestoreModes() {
 	}
 }
 
-// setColumnMode performs the DECCOLM (?3) column-mode side effects. Only the
-// 80<->132 RESIZE is gated on Allow80To132 (?40), and the engine declines it
-// regardless (the browser viewport owns the width). The other documented side
-// effects — reset the scroll region and left/right margins, home the cursor,
-// and erase the screen — happen on every column-mode change, independent of
-// ?40: DEC terminals have no Allow80To132 gate (an xterm safety resource for
-// the X-window resize), and the xterm-maintained esctest suite asserts the
-// clear even when ?40 is unset (test_DECSET_DECNCSM). The erase is suppressed
-// only when DECNCSM (?95) is set at conformance level 5 (a VT level-5 feature);
-// the cursor-home and margin reset still happen, per DECNCSM's definition
-// (it suppresses the clear alone).
+// setColumnMode performs DECCOLM's side effects except the resize, which the
+// browser viewport owns. Margin reset, homing and erase happen whatever ?40
+// says, as esctest's test_DECSET_DECNCSM asserts; DECNCSM (?95) at level 5
+// suppresses only the erase.
 func (s *Screen) setColumnMode() {
 	s.scrollTop = 0
 	s.scrollBottom = s.Height - 1
@@ -1153,7 +1130,6 @@ func (s *Screen) setColumnMode() {
 		return
 	}
 	s.eraseRegion(0, 0, s.Height-1, s.Width-1)
-	s.dropDrained()
 }
 
 // --- DECRQM handler (uses new param structure) ---

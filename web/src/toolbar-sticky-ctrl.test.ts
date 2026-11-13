@@ -6,10 +6,15 @@
 // normalises a scaffold whose kb-ctrl shipped with the wrong aria-pressed.
 
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { bindMobileToolbar } from "./toolbar.js";
+import { bindMobileToolbar, type MobileToolbarController } from "./toolbar.js";
 import { createModeState, POWER_ON_MODES } from "./modes.js";
 
 const modes = createModeState();
+
+/** What typing `text` sends with the toolbar's sticky Ctrl applied, under `modes`. */
+function typed(ctrl: MobileToolbarController, text: string): string {
+  return ctrl.applyStickyCtrl(text)?.(modes) ?? text;
+}
 
 /** A toolbar scaffold: the ctrl button is the only one these tests press. */
 function makeToolbar(): { toolbar: HTMLElement; ctrl: HTMLElement } {
@@ -34,7 +39,6 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
     const onCtrlChange = vi.fn();
     const ctrl = bindMobileToolbar({
       toolbar: fixture.toolbar,
-      modes,
       send: vi.fn(),
       onCtrlChange,
     });
@@ -59,7 +63,7 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
     // armed until the first real toggle.
     fixture.ctrl.setAttribute("aria-pressed", "true");
     fixture.ctrl.classList.add("armed");
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
 
     ctrl.setCtrlArmed(false);
 
@@ -76,10 +80,10 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
     // control character the user never pressed.
     modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
     const fixture = makeToolbar();
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
     ctrl.setCtrlArmed(true);
 
-    const out = ctrl.applyStickyCtrl("hello");
+    const out = typed(ctrl, "hello");
 
     expect(out).toBe("hello");
     // The armed state is still consumed: the user asked for one Ctrl press.
@@ -91,10 +95,10 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
   it("encodes a single char as CSI-u under kitty disambiguate", () => {
     modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
     const fixture = makeToolbar();
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
     ctrl.setCtrlArmed(true);
 
-    const out = ctrl.applyStickyCtrl("s");
+    const out = typed(ctrl, "s");
 
     // The single-char path is the one that MAY encode: 115;5u is Ctrl+s.
     expect(out).toBe("\x1b[115;5u");
@@ -105,26 +109,26 @@ describe("bindMobileToolbar: sticky Ctrl at its edges", () => {
   it("encodes one astral-plane character as CSI-u under kitty disambiguate", () => {
     modes.applySnapshot({ ...POWER_ON_MODES, keyboardFlags: 1 });
     const fixture = makeToolbar();
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
 
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("\u{1E922}")).toBe("\x1b[125218;5u");
+    expect(typed(ctrl, "\u{1E922}")).toBe("\x1b[125218;5u");
     expect(ctrl.isCtrlArmed()).toBe(false);
 
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("\u{1E922}a")).toBe("\u{1E922}a");
+    expect(typed(ctrl, "\u{1E922}a")).toBe("\u{1E922}a");
     ctrl.setCtrlArmed(true);
-    expect(ctrl.applyStickyCtrl("ab")).toBe("ab");
+    expect(typed(ctrl, "ab")).toBe("ab");
 
     ctrl.dispose();
   });
 
   it("passes one astral-plane character through in legacy mode, which has no Ctrl byte for it", () => {
     const fixture = makeToolbar();
-    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, modes, send: vi.fn() });
+    const ctrl = bindMobileToolbar({ toolbar: fixture.toolbar, send: vi.fn() });
     ctrl.setCtrlArmed(true);
 
-    expect(ctrl.applyStickyCtrl("\u{1E922}")).toBe("\u{1E922}");
+    expect(typed(ctrl, "\u{1E922}")).toBe("\u{1E922}");
     expect(ctrl.isCtrlArmed()).toBe(false);
 
     ctrl.dispose();

@@ -136,7 +136,7 @@ const pasteText = fc
 
 describe("bracketTextForPaste: paste-injection safety (property)", () => {
   beforeEach(() => {
-    modes.applySnapshot(POWER_ON_MODES);
+    modes.applySnapshot({ ...POWER_ON_MODES, bracketedPaste: true });
   });
 
   it("wraps in sentinels and the body never contains a raw ESC or a literal paste-end", () => {

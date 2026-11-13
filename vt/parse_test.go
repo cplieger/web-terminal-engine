@@ -411,13 +411,8 @@ func TestUTF8ValidationEmitsReplacement(t *testing.T) {
 
 // TestUTF8AcceptsShortestFormBoundaries is the other side of the overlong
 // rejection above: the SMALLEST code point each sequence length may legally
-// encode is well-formed, as is the highest code point Unicode defines. Rejecting
-// these would replace legitimate text (U+0800 opens the CJK-punctuation range,
-// U+10000 the supplementary planes) with U+FFFD.
-//
-// U+0080 is well-formed too, but it is a C1 CONTROL, so it is consumed rather
-// than printed: it takes no column and leaves the cell blank. That is the
-// distinction the case pins — a control, not ill-formed input.
+// encode is well-formed, as is the highest code point Unicode defines. U+0080
+// is well-formed but a C1 control, so it is consumed and leaves the cell blank.
 func TestUTF8AcceptsShortestFormBoundaries(t *testing.T) {
 	cases := []struct {
 		name     string

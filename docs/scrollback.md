@@ -37,21 +37,21 @@ Your code owns the cache's inactivity timeout, because the engine has no idea of
 
 ## How a reconnect resumes
 
-On reconnect, the client sends its session id, the highest line index it already holds and the number of input bytes it has sent. The server's reply carries its epoch, which identifies one server process.
+On reconnect, the client sends a resume control ([fields](wire-protocol.md#the-resume-control)). It names the session, the input bytes the client has sent, and its replay boundary, which is the last line it holds as committed history. The server's reply carries its epoch, which identifies one server process.
 
-- When the epoch differs from the one the client last saw, the server is a new process, and the client resets and repaints.
-- Otherwise the server sends every retained line after that index, then the current screen, cursor and modes.
+- When the epoch differs from the one the client's content came from, the server is a new process, and the client discards that content and repaints.
+- Otherwise the server sends the current modes and screen and replays the retained lines after the boundary. One replay carries at most `replayMax` lines, never more than 2000, so a client far behind gets the newest lines, and paging fetches the older ones on demand.
 - When the server has already dropped some of the lines the client needs, it says so, and the client shows that earlier output was trimmed.
 
 ## Restoring scrollback after a reload
 
 A browser can discard a background page. `LineStore` lets the page resume with only the missing lines instead of refilling its whole buffer over the network.
 
-- `LineStore.snapshot(serverEpoch, maxLines?)` returns the newest retained lines as plain data that `structuredClone` can copy. It returns `null` for an empty store, so a caller cannot overwrite a good snapshot with an empty one.
-- `LineStore.fromSnapshot(snap, maxLines?)` rebuilds a store. It returns `null` instead of throwing, and it never restores half a snapshot. Every failure has the same correct handling, which is to start empty and take a full resume.
+- `LineStore.snapshot(maxLines?)` returns the newest retained lines as plain data that `structuredClone` can copy, filed under the store's server epoch. It returns `null` for an empty store, so a caller cannot overwrite a good snapshot with an empty one, and for a store that has not yet heard a server report its epoch.
+- `LineStore.fromSnapshot(snap, maxLines?)` rebuilds a store. It returns `null` instead of throwing, and it never restores half a snapshot or one without an epoch. Every failure has the same correct handling, which is to start empty and take a full resume.
 
 Storage is yours. The engine only supplies the data.
 
-The `serverEpoch` argument is required, and it is the part to get right. Line indices only mean something within one server process. A restored store that is not checked against the live server shows old content as live, and then refuses the new session's low-index output as stale. Read the epoch with `connection.serverEpochOf(sessionId)` when you save. Seed it back with `connection.adoptPersistedEpoch(sessionId, epoch)` before you connect, which sends a mismatch through the usual `onServerRestart` path.
+Line indices only mean something within one server process, so each store records the epoch of the server process its content came from (`LineStore.serverEpoch()`), and a snapshot carries it. Bind a restored store to the renderer before its session connects. The first resume answer either confirms the epoch, or the store discards the content and the connection fires `onServerRestart`. A server that reports no epoch cannot confirm one, so restored content is discarded there too. The epoch travels with the store, so a store moved to another renderer or connection keeps it.
 
 `connection.currentSessionId()` returns the id of an unmanaged single terminal. That id is stored per browser tab in `sessionStorage`, and it is the key to save the snapshot under.

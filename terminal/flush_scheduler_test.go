@@ -304,7 +304,7 @@ func TestFlushScheduler_resizeReprintHeldUntilSettled(t *testing.T) {
 	readUntilQuiet(t, results, 200*time.Millisecond)
 
 	// The phone keyboard opens: a size CHANGE arms the settle hold.
-	h.handleResize(&clientState{}, 100, 24)
+	h.handleResize(soleClientOf(t, h), 100, 24)
 
 	// The TUI's redraw: ED3, then the transcript in small 2026 brackets with
 	// inter-bracket gaps well under redrawSettleQuiet. Each gap is asserted
@@ -356,7 +356,7 @@ func TestFlushScheduler_reprintLongerThanCapCoalesces(t *testing.T) {
 	readUntilQuiet(t, results, 200*time.Millisecond)
 
 	// The phone keyboard opens: a size CHANGE arms the hold.
-	h.handleResize(&clientState{}, 100, 24)
+	h.handleResize(soleClientOf(t, h), 100, 24)
 
 	// A reprint that outlasts the cap: small chunks with gaps well under
 	// redrawSettleQuiet, so the child never goes quiet, for longer than one cap

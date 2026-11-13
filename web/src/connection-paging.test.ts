@@ -7,7 +7,8 @@
 // resume batch is about to discard. A fake global WebSocket carries the wire.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { type Connection, createConnection, MAX_REPLAY_LINES } from "./connection.js";
+import { type Connection, createConnection } from "./connection.js";
+import { MAX_REPLAY_LINES } from "./replay.js";
 import { LineStore } from "./store.js";
 import { connectionDeps } from "./test-helpers/connection-fakes.js";
 import { registerForDispose } from "./test-helpers/engine-fixture.js";
@@ -180,7 +181,7 @@ interface Harness {
   messages: ServerMessage[];
   replies: { msg: ScrollMessage; raiseFloorTo: number | null }[];
   transitions: {
-    epochChanged: boolean;
+    serverEpoch: number | null;
     committed: number | null;
     serverOldest: number | null;
     paging: boolean;
@@ -215,7 +216,10 @@ function harnessRenderer(): Partial<ReturnType<typeof connectionDeps>["renderer"
       h.replies.push({ msg, raiseFloorTo });
       h.store?.applyHistoryScroll(msg, msg.firstIndex);
     },
-    applyResumeTransition: (t) => h.transitions.push(t),
+    applyResumeTransition: (t) => {
+      h.transitions.push(t);
+      return false;
+    },
     noteSolicited: (lo, hi) => {
       h.solicited.push([lo, hi]);
       h.windowOpen = true;

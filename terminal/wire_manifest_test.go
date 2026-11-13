@@ -7,23 +7,11 @@ import (
 	"github.com/coder/websocket"
 )
 
-// TestWireManifestMatchesGoConstants is the Go leg of the manifest's three-way
-// conformance guard. The TS leg (web/src/test-helpers/wire-manifest.node.test.ts) proves the
-// manifest is regenerable from the TypeScript constants; this proves the same
-// numbers match the Go constants a server actually enforces. Without it the
-// manifest could stay perfectly in sync with a TypeScript half that had itself
-// drifted from the server — the published artifact would then be confidently
-// wrong, which is worse than the `sed`-scraping it replaces.
-//
-// The manifest reports the CLIENT half's directional values, so the mapping is:
-//
-//	protocolVersion               == WireProtocolVersion (both halves emit the
-//	                                 same current revision, per CONTRIBUTING)
-//	minimumServerProtocolVersion  != a Go constant by definition (it is the TS
-//	                                 receiver's floor), but it must never exceed
-//	                                 the Go server's own revision, or the
-//	                                 published pair would refuse itself
-//	incompatibleCloseCode         == WireIncompatibleCloseCode
+// TestWireManifestMatchesGoConstants pins the manifest to the Go constants, as
+// web/src/test-helpers/wire-manifest.node.test.ts pins it to the TypeScript
+// ones: protocolVersion equals WireProtocolVersion, incompatibleCloseCode equals
+// WireIncompatibleCloseCode, and minimumServerProtocolVersion never exceeds
+// the server's revision.
 func TestWireManifestMatchesGoConstants(t *testing.T) {
 	// Read through the EXPORTED decoder rather than a local mirror of the struct.
 	// That is what makes this drift guard cover the code consumers actually call:

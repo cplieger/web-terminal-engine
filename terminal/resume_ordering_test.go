@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -23,8 +24,8 @@ import (
 // snapshot+batch with dispatchFrame's per-client payload loop; a frame built
 // before a resume snapshot is stripped by the resumeGen check to its durable
 // payloads (scroll chunks and clipboard, which the batch does not re-deliver);
-// and the batch resets the builder with its snapshot, so the next frame built is
-// a full repaint that supersedes anything stripped.
+// and the batch calls RepaintWindow with its snapshot, so the next frame built
+// is a full repaint that supersedes anything stripped.
 
 // wsPair returns a connected server-side and client-side WebSocket pair, so a
 // test can drive Handler internals against the server conn and observe what a
@@ -161,6 +162,14 @@ func testModesPayload() []byte {
 	return encodeModesMsg(false, false, false, false, false, false, false, 0, 0)
 }
 
+var testAnnounceVer atomic.Uint64
+
+// testAnnouncement returns default modes at a version no socket has been told,
+// so every dispatch of it writes a modes frame.
+func testAnnouncement() announcement {
+	return announcement{modes: testModesPayload(), modesVer: testAnnounceVer.Add(1)}
+}
+
 func TestDispatchFrame_DefersSocketWritesBehindResumeBatch(t *testing.T) {
 	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
 	sws, cws, cleanup := wsPair(t)
@@ -169,10 +178,10 @@ func TestDispatchFrame_DefersSocketWritesBehindResumeBatch(t *testing.T) {
 	state := h.registry.Add(sws)
 	mkFrame := func() *flushFrame {
 		return &flushFrame{
-			clients:      map[*websocket.Conn]uint64{sws: 0},
-			writers:      map[*websocket.Conn]*clientState{sws: state},
-			gens:         map[*websocket.Conn]uint64{sws: state.resumeGen.Load()},
-			modesPayload: testModesPayload(),
+			clients:  map[*websocket.Conn]uint64{sws: 0},
+			writers:  map[*websocket.Conn]*clientState{sws: state},
+			gens:     map[*websocket.Conn]uint64{sws: state.resumeGen.Load()},
+			announce: testAnnouncement(),
 		}
 	}
 
@@ -263,10 +272,10 @@ func newDispatchProbe(t *testing.T) *dispatchProbe {
 	p := &dispatchProbe{h: h, sws: sws, state: state, frames: frames}
 	p.mkFrame = func() *flushFrame {
 		return &flushFrame{
-			clients:      map[*websocket.Conn]uint64{sws: 0},
-			writers:      map[*websocket.Conn]*clientState{sws: state},
-			gens:         map[*websocket.Conn]uint64{sws: state.resumeGen.Load()},
-			modesPayload: testModesPayload(),
+			clients:  map[*websocket.Conn]uint64{sws: 0},
+			writers:  map[*websocket.Conn]*clientState{sws: state},
+			gens:     map[*websocket.Conn]uint64{sws: state.resumeGen.Load()},
+			announce: testAnnouncement(),
 		}
 	}
 	return p
@@ -293,7 +302,8 @@ func (p *dispatchProbe) staleFrame() *flushFrame {
 	f.changed = []int{0}
 	f.rows = [][]vt.WireRun{{{T: "STALE-SCREEN", F: -1, B: -1, Uc: -1}}}
 	f.screenHeight = 1
-	f.titlePayload = encodeTitleMsg("STALE-TITLE")
+	f.announce.title = encodeTitleMsg("STALE-TITLE")
+	f.announce.titleVer = testAnnounceVer.Add(1)
 	f.clipboardPayload = encodeClipboardMsg([]byte("STALE-CLIP"))
 	f.scrollLines = [][]vt.WireRun{{{T: "STALE-SCROLL", F: -1, B: -1, Uc: -1}}}
 	f.scrollFirstIdx = 41
@@ -382,15 +392,9 @@ func TestDispatchFrame_StaleFrameDropsStateKeepsDurable(t *testing.T) {
 	})
 
 	t.Run("a durable strip restamps the socket's freshest ack", func(t *testing.T) {
-		// A strip RESTAMPS its durable payloads with the socket's freshest ack
-		// (the batch's resumeAck), NOT the pre-resume ack captured at snapshot
-		// time: after a ledger-loss resume the captured value can exceed the
-		// client's reset outbox accounting, and applyAck's min(received,
-		// bytesSent) would then trim input the server never acked
-		// (connection.ts applyAck). The wire ack lives at bytes 1..9 of every
-		// payload (withClientAck). And the delivered bookkeeping must record
-		// exactly the stamped value — monotonic, so lastAckSent never regresses
-		// below the batch's store and never latches a value no frame carried.
+		// A strip restamps durable payloads with the batch's resumeAck, not the
+		// captured ack (writeClientPayloads owns why); the ack is at bytes 1..9.
+		// The bookkeeping must record exactly the stamped value.
 		p := newDispatchProbe(t)
 		p.state.lastAckSent.Store(11) // the resumeAck the batch wrote
 		restamp := p.mkFrame()
@@ -511,15 +515,9 @@ func soleClientState(t *testing.T, h *Handler) *clientState {
 }
 
 func TestResumeGate_LiveOutputDeferredThenFullRepaintFollows(t *testing.T) {
-	// End-to-end through a REAL handler: while the resume write lock is held
-	// (the batch stand-in — the very lock handleResume takes), live output
-	// produces NO content frames on the socket; after a builder reset taken
-	// under h.mu while the lock is still held (the invariant handleResume
-	// provides by resetting inside its snapshot's h.mu section) and the
-	// lock's release plus the dirty poke, the deferred output arrives —
-	// delayed, never dropped — AND a FULL repaint follows (the builder reset
-	// must not be removable: a plain diff also carries the text, so the
-	// full-frame assertion is what pins the reset).
+	// With writeMu held as handleResume holds it, live output sends nothing;
+	// after a RepaintWindow under h.mu and the release, the output arrives as
+	// a full repaint. The full-frame check is what pins the repaint.
 	h, ws, cleanup := dialOwnHandler(t, []string{"/bin/cat"})
 	defer cleanup()
 	frames := framePump(t, ws)
@@ -535,11 +533,11 @@ func TestResumeGate_LiveOutputDeferredThenFullRepaintFollows(t *testing.T) {
 	st.writeMu.Lock()
 	writeBinary(t, ws, []byte("BLOCKED\r"))
 	assertNoContentFrames(t, frames, 400*time.Millisecond, "resume write lock held")
-	// Batch end: full-repaint reset under h.mu while the write lock is still
+	// Batch end: RepaintWindow under h.mu while the write lock is still
 	// held (handleResume takes its reset even earlier, with the snapshot),
 	// then release and poke.
 	h.mu.Lock()
-	h.builder.Reset()
+	h.builder.RepaintWindow()
 	h.mu.Unlock()
 	st.writeMu.Unlock()
 	h.markDirty()
@@ -547,7 +545,7 @@ func TestResumeGate_LiveOutputDeferredThenFullRepaintFollows(t *testing.T) {
 		t.Fatal("output produced during the gate never arrived after the batch ended")
 	}
 	if awaitFrame(frames, isFullScreenFrame, 5*time.Second) == nil {
-		t.Fatal("no FULL repaint followed the batch: the builder reset did not take")
+		t.Fatal("no FULL repaint followed the batch: RepaintWindow did not take")
 	}
 }
 
@@ -873,7 +871,7 @@ drain:
 	}
 
 	// Release. The deferred pass delivers, in payload order (screen before
-	// scroll chunks): a FULL screen frame — the builder reset the snapshot
+	// scroll chunks): a FULL screen frame — the RepaintWindow the snapshot
 	// took, consumed by the during-hold build — then SCROLL frames that must
 	// carry the lines that scrolled off during the hold (SCROLLMARK-0 is ~7
 	// lines below the window bottom, so no repaint can carry it — only the
@@ -881,7 +879,7 @@ drain:
 	// history would be unreachable forever).
 	releaseBatch()
 	if awaitFrame(frames, isFullScreenFrame, 5*time.Second) == nil {
-		t.Fatal("no FULL repaint delivered after the batch: the snapshot's builder reset did not take")
+		t.Fatal("no FULL repaint delivered after the batch: the snapshot's RepaintWindow did not take")
 	}
 	scroll := awaitFrame(frames, func(msg []byte) bool {
 		return len(msg) > 0 && msg[0] == wireMsgScroll && bytes.Contains(msg, []byte("SCROLLMARK-0"))
@@ -891,15 +889,15 @@ drain:
 	}
 }
 
-func TestResume_SnapshotResetForcesFullPostBatchFrame(t *testing.T) {
-	// Pins that handleResume itself takes the builder reset (the gate test
-	// resets the builder by hand, and the seam test's whole-window burst
+func TestResume_SnapshotRepaintForcesFullPostBatchFrame(t *testing.T) {
+	// Pins that handleResume itself calls RepaintWindow (the gate test
+	// calls it by hand, and the seam test's whole-window burst
 	// makes any diff full vacuously). Oracle: on a QUIESCENT handler,
 	// a resume is followed by a second FULL screen frame — the flush pass
-	// handleResume's markDirty wakes, building against the reset cache, so
-	// every window row re-emits with no new PTY output. Without the reset
+	// handleResume's markDirty wakes, building against the cleared cache, so
+	// every window row re-emits with no new PTY output. Without the repaint
 	// that pass builds an empty diff and produces no screen frame at all:
-	// deleting the Reset() call turns this test red deterministically.
+	// deleting the RepaintWindow call turns this test red deterministically.
 	h, ws, cleanup := dialOwnHandler(t, []string{"/bin/cat"})
 	defer cleanup()
 	_ = h
@@ -907,7 +905,7 @@ func TestResume_SnapshotResetForcesFullPostBatchFrame(t *testing.T) {
 	sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 24})
 	// Prime the builder's last-flushed cache: echo once, then settle to
 	// idle, so the only thing that can make the post-resume pass emit a
-	// full frame is the reset (not residual dirt from the attach burst).
+	// full frame is the repaint (not residual dirt from the attach burst).
 	writeBinary(t, ws, []byte("prime\r"))
 	if awaitFrame(frames, containsBytes([]byte("prime")), 5*time.Second) == nil {
 		t.Fatal("prime echo never arrived; harness broken")
@@ -917,15 +915,15 @@ func TestResume_SnapshotResetForcesFullPostBatchFrame(t *testing.T) {
 
 	bootstrapResume(t, ws, "s-reset-pin")
 	// The batch's own window frame arrives first (full by construction:
-	// handleResume encodes every row itself, reset or no reset)...
+	// handleResume encodes every row itself, repaint or not)...
 	if awaitFrame(frames, isFullScreenFrame, 5*time.Second) == nil {
 		t.Fatal("resume batch window never arrived")
 	}
-	// ...then the reset-consuming flush pass must deliver a SECOND full
+	// ...then the repaint-consuming flush pass must deliver a SECOND full
 	// frame with zero new output. Tolerates interleaved transport frames
 	// (ackOnly/pong); fails on timeout if the pass built an empty diff.
 	if awaitFrame(frames, isFullScreenFrame, 5*time.Second) == nil {
-		t.Fatal("no full repaint followed the batch on a quiescent handler: handleResume's snapshot-section builder.Reset() did not take")
+		t.Fatal("no full repaint followed the batch on a quiescent handler: handleResume's snapshot-section RepaintWindow did not take")
 	}
 }
 

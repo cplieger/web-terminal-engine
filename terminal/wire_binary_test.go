@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"strings"
 	"testing"
 	"unicode/utf8"
 
@@ -300,35 +301,54 @@ func TestEncodeScreenMsgScrollbackClearedFlag(t *testing.T) {
 	}
 }
 
-// TestEncodeClipboardMsg verifies the OSC 52 clipboard frame layout:
-// [1B type=6][8B ack][2B len][text]. Both a short payload and one longer than
-// the 11-byte header, which is the ordinary shape of a copied selection.
+// TestEncodeClipboardMsg verifies the OSC 52 clipboard frame layout: text of
+// at most 65,535 bytes as [1B type=6][8B ack][2B len][text], which revision 3
+// and 4 clients decode, and longer text as [1B type=9][8B ack][4B len][text].
 func TestEncodeClipboardMsg(t *testing.T) {
 	cases := []struct {
-		name    string
-		text    string
-		wantLen int
+		name       string
+		text       string
+		wantOpcode byte
+		wantLen    int
 	}{
-		{name: "two bytes", text: "hi", wantLen: 13},                                            // 1 + 8 + 2 + 2
-		{name: "a copied line outgrows the header", text: "git log --oneline -20", wantLen: 32}, // 1 + 8 + 2 + 21
+		{name: "two bytes", text: "hi", wantOpcode: 6, wantLen: 13},                                            // 1 + 8 + 2 + 2
+		{name: "a copied line outgrows the header", text: "git log --oneline -20", wantOpcode: 6, wantLen: 32}, // 1 + 8 + 2 + 21
+		{name: "the largest 2-byte length", text: strings.Repeat("y", 0xFFFF), wantOpcode: 6, wantLen: 11 + 0xFFFF},
+		{name: "one byte past a 2-byte length", text: strings.Repeat("z", 0x10000), wantOpcode: 9, wantLen: 13 + 0x10000},
+		{name: "the largest text the OSC 52 cap admits", text: strings.Repeat("w", 786_429), wantOpcode: 9, wantLen: 13 + 786_429},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			buf := encodeClipboardMsg([]byte(c.text))
-			if buf[0] != wireMsgClipboard {
-				t.Fatalf("opcode = %d, want %d", buf[0], wireMsgClipboard)
+			if buf[0] != c.wantOpcode {
+				t.Fatalf("opcode = %d, want %d", buf[0], c.wantOpcode)
 			}
 			if len(buf) != c.wantLen {
-				t.Fatalf("encodeClipboardMsg(%q) frame len = %d, want %d", c.text, len(buf), c.wantLen)
+				t.Fatalf("encodeClipboardMsg(%d bytes) frame len = %d, want %d", len(c.text), len(buf), c.wantLen)
 			}
-			textLen := binary.LittleEndian.Uint16(buf[9:11])
-			if int(textLen) != len(c.text) {
+			textLen, body := int(binary.LittleEndian.Uint16(buf[9:11])), buf[11:]
+			if c.wantOpcode == 9 {
+				textLen, body = int(binary.LittleEndian.Uint32(buf[9:13])), buf[13:]
+			}
+			if textLen != len(c.text) {
 				t.Errorf("text len field = %d, want %d", textLen, len(c.text))
 			}
-			if got := string(buf[11 : 11+textLen]); got != c.text {
-				t.Errorf("text = %q, want %q", got, c.text)
+			if got := string(body); got != c.text {
+				t.Errorf("text is %d bytes, want the %d-byte copy", len(got), len(c.text))
 			}
 		})
+	}
+}
+
+// TestEncodeClipboardRefusedMsg verifies the refusal frame is the bare header:
+// [1B type=10][8B ack].
+func TestEncodeClipboardRefusedMsg(t *testing.T) {
+	buf := encodeClipboardRefusedMsg()
+	if want := []byte{10, 0, 0, 0, 0, 0, 0, 0, 0}; !bytes.Equal(buf, want) {
+		t.Errorf("encodeClipboardRefusedMsg() = % x, want % x", buf, want)
+	}
+	if got := withClientAck(buf, 7); got[0] != 10 || binary.LittleEndian.Uint64(got[1:9]) != 7 {
+		t.Errorf("withClientAck(refusal, 7) = % x, want the ack stamped at offset 1", got)
 	}
 }
 

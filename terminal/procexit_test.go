@@ -28,17 +28,15 @@ func TestExitedAttachServesReplayBefore4001(t *testing.T) {
 	if err := h.StartEager(); err != nil {
 		t.Fatalf("StartEager: %v", err)
 	}
-	// Poll the screen itself: it is the precondition the replay assertion needs.
+	// Poll both preconditions: the output reaches the screen before the exit is
+	// reaped, so seeing the marker does not yet mean the session is dead.
 	deadline := time.Now().Add(waitPatience)
-	for !screenContains(h, marker) {
+	for !screenContains(h, marker) || !h.Exited() {
 		if time.Now().After(deadline) {
-			t.Fatalf("child output %q never reached the screen within %v (exited=%v); screen holds %q",
+			t.Fatalf("child output %q and its exit not both seen within %v (exited=%v); screen holds %q",
 				marker, waitPatience, h.Exited(), screenText(h))
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	if !h.Exited() {
-		t.Fatal("child wrote its output but has not exited; the attach below would not be against a dead session")
 	}
 
 	mux := http.NewServeMux()

@@ -85,14 +85,11 @@ func (s *Screen) doAction(act action, b byte) {
 	case actUnhook:
 		s.dcsUnhook()
 	case actOscStart:
-		s.oscBuf = s.oscBuf[:0]
+		s.resetOscBuf()
 		s.oscOverflow = false
+		s.oscClipboard = false
 	case actOscPut:
-		if len(s.oscBuf) < maxOSCLen {
-			s.oscBuf = append(s.oscBuf, b)
-		} else {
-			s.oscOverflow = true
-		}
+		s.oscPut(b)
 	case actOscEnd:
 		s.dispatchOsc()
 	case actIgnore:

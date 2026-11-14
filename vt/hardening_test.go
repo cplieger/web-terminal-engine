@@ -1,6 +1,9 @@
 package vt
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // --- Unbounded buffer growth ---
 
@@ -16,6 +19,22 @@ func TestOSCBufferBounded(t *testing.T) {
 	}
 	if len(s.oscBuf) > maxOSCLen {
 		t.Errorf("oscBuf grew to %d bytes, want <= %d", len(s.oscBuf), maxOSCLen)
+	}
+	s.Write([]byte("\x07"))
+	if s.pState != stGround {
+		t.Errorf("parser not back to ground after BEL")
+	}
+}
+
+func TestOSC52BufferBounded(t *testing.T) {
+	s := New(24, 80)
+	s.Write([]byte("\x1b]52;c;"))
+	chunk := []byte(strings.Repeat("A", 64*1024))
+	for range 2 * MaxOSC52Len / len(chunk) {
+		s.Write(chunk)
+	}
+	if len(s.oscBuf) > MaxOSC52Len {
+		t.Errorf("oscBuf grew to %d bytes, want <= %d", len(s.oscBuf), MaxOSC52Len)
 	}
 	s.Write([]byte("\x07"))
 	if s.pState != stGround {

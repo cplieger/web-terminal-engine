@@ -57,7 +57,7 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     expect(m.serverEpoch).toBe(1234567890);
     expect(m.committed).toBe(200);
     expect(m.oldestIndex).toBe(10);
-    expect(m.serverWireVersion).toBe(4);
+    expect(m.serverWireVersion).toBe(5);
     expect(m.ledgerLost).toBe(false);
     expect(m.historyPaging).toBe(false); // neither bit set
   });
@@ -69,7 +69,7 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
       return;
     }
     expect(m.received).toBe(7);
-    expect(m.serverWireVersion).toBe(4);
+    expect(m.serverWireVersion).toBe(5);
     expect(m.ledgerLost).toBe(true);
     expect(m.historyPaging).toBe(false); // bit1 clear while bit0 is set
   });
@@ -86,7 +86,7 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     if (m?.type !== "resumeAck") {
       return;
     }
-    expect(m.serverWireVersion).toBe(4);
+    expect(m.serverWireVersion).toBe(5);
     expect(m.historyPaging).toBe(true);
     // Read SEPARATELY from bit0, which is the reason both fixtures exist.
     expect(m.ledgerLost).toBe(false);
@@ -101,7 +101,7 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     if (m?.type !== "resumeAck") {
       return;
     }
-    expect(m.serverWireVersion).toBe(4);
+    expect(m.serverWireVersion).toBe(5);
     expect(m.serverFocus).toBe(true);
     expect(m.ledgerLost).toBe(false);
     expect(m.historyPaging).toBe(false);
@@ -116,7 +116,7 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
     if (m?.type !== "resumeAck") {
       return;
     }
-    expect(m.serverWireVersion).toBe(4);
+    expect(m.serverWireVersion).toBe(5);
     expect(m.ephemeralInput).toBe(true);
     expect(m.ledgerLost).toBe(false);
     expect(m.historyPaging).toBe(false);
@@ -139,6 +139,37 @@ describe("wire golden frames (Go encoder ↔ TS decoder contract)", () => {
       return;
     }
     expect(m.text).toBe("copy me");
+  });
+
+  it("decodes a 10 KiB OSC 52 copy whole", () => {
+    const m = decodeWireBinary(load("clipboard-10k"));
+    expect(m?.type).toBe("clipboard");
+    if (m?.type !== "clipboard") {
+      return;
+    }
+    const want = "0123456789abcdef\u2713\n".repeat(512);
+    expect(new TextEncoder().encode(m.text).length).toBe(10_240);
+    expect(m.text).toBe(want);
+  });
+
+  it("decodes an OSC 52 copy past a 2-byte length whole", () => {
+    const m = decodeWireBinary(load("clipboard-long"));
+    expect(m?.type).toBe("clipboard");
+    if (m?.type !== "clipboard") {
+      return;
+    }
+    const want = "0123456789abcdef\u2713\n".repeat(3277);
+    expect(new TextEncoder().encode(m.text).length).toBe(65_540);
+    expect(m.text).toBe(want);
+  });
+
+  it("decodes the clipboardRefused frame", () => {
+    const m = decodeWireBinary(load("clipboard-refused"));
+    expect(m?.type).toBe("clipboardRefused");
+    if (m?.type !== "clipboardRefused") {
+      return;
+    }
+    expect(m.message).toBe("Copy too large to send to the browser");
   });
 
   it("decodes the modes frame", () => {

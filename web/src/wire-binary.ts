@@ -11,6 +11,7 @@ import type {
   ModesMessage,
   TitleMessage,
   ClipboardMessage,
+  ClipboardRefusedMessage,
   GridMessage,
   ServerMessage,
 } from "./types.js";
@@ -22,9 +23,14 @@ const MSG_RESUME_ACK = 2;
 const MSG_MODES = 3;
 const MSG_TITLE = 4;
 const MSG_PONG = 5;
+// Opcodes 6 and 9 differ only in length width (2 or 4 bytes); both decode to a clipboard message.
 const MSG_CLIPBOARD = 6;
 const MSG_ACK_ONLY = 7;
 const MSG_GRID = 8;
+const MSG_CLIPBOARD_LONG = 9;
+const MSG_CLIPBOARD_REFUSED = 10;
+
+const CLIPBOARD_REFUSED_MESSAGE = "Copy too large to send to the browser";
 
 const MODE_FLAG_BRACKETED_PASTE = 1;
 const MODE_FLAG_APP_CURSOR_KEYS = 2;
@@ -58,6 +64,11 @@ class Cursor {
     this.off += 2;
     return v;
   }
+  u32(): number {
+    const v = this.view.getUint32(this.off, true);
+    this.off += 4;
+    return v;
+  }
   i32(): number {
     const v = this.view.getInt32(this.off, true);
     this.off += 4;
@@ -73,6 +84,10 @@ class Cursor {
     return Number(v);
   }
   utf8(len: number): string {
+    // subarray clamps at the end of the buffer; a short frame must be dropped, not decoded as shorter text.
+    if (this.off + len > this.bytes.length) {
+      throw new RangeError("utf8 length past the end of the frame");
+    }
     const slice = this.bytes.subarray(this.off, this.off + len);
     this.off += len;
     return textDecoder.decode(slice);
@@ -273,10 +288,18 @@ function decodeWireBinaryInner(buf: ArrayBuffer): ServerMessage | null {
     const msg: TitleMessage = { type: "title", title, inputAck };
     return msg;
   }
-  if (msgType === MSG_CLIPBOARD) {
-    const textLen = c.u16();
+  if (msgType === MSG_CLIPBOARD || msgType === MSG_CLIPBOARD_LONG) {
+    const textLen = msgType === MSG_CLIPBOARD_LONG ? c.u32() : c.u16();
     const text = c.utf8(textLen);
     const msg: ClipboardMessage = { type: "clipboard", text, inputAck };
+    return msg;
+  }
+  if (msgType === MSG_CLIPBOARD_REFUSED) {
+    const msg: ClipboardRefusedMessage = {
+      type: "clipboardRefused",
+      message: CLIPBOARD_REFUSED_MESSAGE,
+      inputAck,
+    };
     return msg;
   }
   if (msgType === MSG_GRID) {

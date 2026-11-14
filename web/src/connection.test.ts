@@ -1490,7 +1490,7 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
     sock.fireOpen();
 
     sock.fireMessage(resumeAckFrame({ received: 0, version: 99 }));
-    expect(onWireVersionMismatch).toHaveBeenCalledWith(99, 4);
+    expect(onWireVersionMismatch).toHaveBeenCalledWith(99, WIRE_PROTOCOL_VERSION);
     expect(warn).toHaveBeenCalled();
     expect(sock.close).not.toHaveBeenCalled();
 
@@ -1533,12 +1533,12 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
 
     sock.fireMessage(resumeAckFrame({ received: 0, version: 2 }));
 
-    expect(onWireVersionMismatch).toHaveBeenCalledWith(2, 4);
+    expect(onWireVersionMismatch).toHaveBeenCalledWith(2, WIRE_PROTOCOL_VERSION);
     expect(onWireIncompatible).toHaveBeenCalledWith(
       expect.objectContaining({
         source: "server-version",
         serverVersion: 2,
-        clientVersion: 4,
+        clientVersion: WIRE_PROTOCOL_VERSION,
         minimumServerVersion: 3,
       }),
     );
@@ -1571,7 +1571,7 @@ describe("connection: ledger-loss signal, ackOnly trimming, wire-version surface
     sock.fireClose(4002);
 
     expect(onWireIncompatible).toHaveBeenCalledWith(
-      expect.objectContaining({ source: "server-close", clientVersion: 4 }),
+      expect.objectContaining({ source: "server-close", clientVersion: WIRE_PROTOCOL_VERSION }),
     );
     expect(onClose).not.toHaveBeenCalled();
     vi.advanceTimersByTime(60_000);

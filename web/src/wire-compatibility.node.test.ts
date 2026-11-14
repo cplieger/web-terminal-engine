@@ -49,6 +49,9 @@ const previousExpected = new Map<string, string | null>([
 const currentExpectedForV3 = new Map<string, string | null>([
   ["ackonly", null],
   ["clipboard", "clipboard"],
+  ["clipboard-10k", "clipboard"],
+  ["clipboard-long", null],
+  ["clipboard-refused", null],
   ["modes", "modes"],
   ["pong", null],
   ["resumeack", "resumeAck"],
@@ -65,7 +68,7 @@ describe("wire compatibility release metadata", () => {
       minimumServerProtocolVersion: MIN_SUPPORTED_SERVER_WIRE_VERSION,
       incompatibleCloseCode: WIRE_INCOMPATIBLE_CLOSE_CODE,
     });
-    expect(WIRE_PROTOCOL_VERSION).toBe(4);
+    expect(WIRE_PROTOCOL_VERSION).toBe(5);
     expect(MIN_SUPPORTED_SERVER_WIRE_VERSION).toBe(3);
     expect(WIRE_INCOMPATIBLE_CLOSE_CODE).toBe(4002);
   });

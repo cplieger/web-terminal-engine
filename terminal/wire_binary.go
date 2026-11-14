@@ -21,8 +21,9 @@ const (
 	wireMsgTitle     byte = 4
 	wireMsgPong      byte = 5
 	// wireMsgClipboard carries text an app copied via OSC 52, for the client to
-	// write to the system clipboard. New opcodes are back-compatible (older
-	// clients ignore unknown message types), so no wireProtocolVersion bump.
+	// write to the system clipboard, with a 2-byte length. A copy over 65,535
+	// bytes goes as wireMsgClipboardLong instead, so revision 3 and 4 clients,
+	// which know only this opcode, still receive every copy that fits it.
 	wireMsgClipboard byte = 6
 	// wireMsgAckOnly carries a bare inputAck for input that produced no output
 	// frame within a flush tick (e.g. typing into `read -s`), so the client's
@@ -32,13 +33,18 @@ const (
 	// wireMsgGrid carries the screen's columns and rows, sent only to a socket
 	// whose resume declared gridFrames, so it needs no version bump.
 	wireMsgGrid byte = 8
+	// wireMsgClipboardLong is wireMsgClipboard with a 4-byte length.
+	wireMsgClipboardLong byte = 9
+	// wireMsgClipboardRefused tells the client an OSC 52 copy was over
+	// vt.MaxOSC52Len and did not reach the clipboard.
+	wireMsgClipboardRefused byte = 10
 
 	// WireProtocolVersion is the current binary-protocol revision, mirroring
 	// WIRE_PROTOCOL_VERSION in web/src/wire-compatibility.ts. Bump it on any
 	// change to a frame layout or control-message shape. v4 adds typed framing
 	// (text controls, binary input), latched per connection by an `upgrade`
 	// control; v3 sentinel framing stays accepted before the latch.
-	WireProtocolVersion = 4
+	WireProtocolVersion = 5
 
 	// MinSupportedClientWireVersion is the oldest explicitly declared client
 	// revision this server accepts. A version-silent client (0) remains
@@ -492,17 +498,30 @@ func encodeTitleMsg(title string) []byte {
 }
 
 // encodeClipboardMsg builds a frame carrying text an app copied via OSC 52:
-// after the header, [2B] text_byte_len and the UTF-8 text. maxOSCLen keeps it
-// under the uint16 limit; the ack is zero until withClientAck stamps it.
+// after the header, the text's byte length and the text. Text of at most 65,535
+// bytes goes as opcode 6 with a 2-byte length, longer text as opcode 9 with a
+// 4-byte length; vt.MaxOSC52Len bounds it far under the uint32 limit. The ack
+// is zero until withClientAck stamps it.
 func encodeClipboardMsg(text []byte) []byte {
-	body := text
-	if len(body) > 0xFFFF {
-		body = body[:0xFFFF]
+	if len(text) <= 0xFFFF {
+		buf := make([]byte, 0, 11+len(text))
+		buf = append(buf, wireMsgClipboard)
+		buf = binary.LittleEndian.AppendUint64(buf, 0)
+		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(text)))
+		return append(buf, text...)
 	}
-	buf := make([]byte, 0, 11+len(body))
-	buf = append(buf, wireMsgClipboard)
+	buf := make([]byte, 0, 13+len(text))
+	buf = append(buf, wireMsgClipboardLong)
 	buf = binary.LittleEndian.AppendUint64(buf, 0)
-	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(body)))
-	buf = append(buf, body...)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(text))) //nolint:gosec // G115: len(text) <= vt.MaxOSC52Len
+	return append(buf, text...)
+}
+
+// encodeClipboardRefusedMsg builds the header-only frame telling the client an
+// OSC 52 copy was refused; the ack is zero until withClientAck stamps it.
+func encodeClipboardRefusedMsg() []byte {
+	buf := make([]byte, 0, 9)
+	buf = append(buf, wireMsgClipboardRefused)
+	buf = binary.LittleEndian.AppendUint64(buf, 0)
 	return buf
 }

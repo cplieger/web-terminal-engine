@@ -40,7 +40,7 @@ Every server-to-client frame starts with the same header. Integers are fixed-wid
 ### Common header
 
 ```text
-[1B] msg_type   0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard, 7=ackOnly, 8=grid
+[1B] msg_type   0=screen, 1=scroll, 2=resumeAck, 3=modes, 4=title, 5=pong, 6=clipboard, 7=ackOnly, 8=grid, 9=clipboardLong, 10=clipboardRefused
 [8B] inputAck   uint64  server-confirmed received count on the socket's input ledger
 ```
 
@@ -106,6 +106,24 @@ The header's inputAck carries the value and there is no body. The flush tick sen
 
 Sent only to a socket whose resume carried `gridFrames: true`: before the modes and the window on every resume, and before the next modes and screen frame after each size change. The client releases input typed while the modes were unknown as soon as the modes arrive, so the grid it encodes that input against must already be this socket's. A client that never declares it is never sent one, so the frame needs no revision bump. The client predicts and hit-tests against this grid, not its own measured box, which can differ when several clients share a session.
 
+### clipboard (6) and clipboardLong (9)
+
+```text
+clipboard (6):
+[2B] text_byte_len  uint16
+[N B] text          the bytes an OSC 52 copy decoded to, normally UTF-8
+
+clipboardLong (9):
+[4B] text_byte_len  uint32
+[N B] text          the bytes an OSC 52 copy decoded to, normally UTF-8
+```
+
+Text a program copied with OSC 52, for the client to write to the system clipboard. The server sends text of at most 65,535 bytes as clipboard (6) and longer text as clipboardLong (9); the client decodes both to a `clipboard` message. An OSC 52 payload holds at most 1 MiB (`vt.MaxOSC52Len`), so the text is at most 786,429 bytes. A revision 3 or 4 client knows only opcode 6: it receives every copy up to 65,535 bytes and ignores opcodes 9 and 10, so a longer copy or a refusal reaches it as nothing until it is updated.
+
+### clipboardRefused (10)
+
+The header only. A program's OSC 52 copy was over `vt.MaxOSC52Len`, so the server dropped it whole and the system clipboard keeps its old text. The client decodes it to a `clipboardRefused` message whose `message` is "Copy too large to send to the browser", for the page to show. Within one frame a later copy or refusal replaces the one still waiting; an empty or non-base64 payload (a clear) changes neither.
+
 ### Row payload
 
 ```text
@@ -121,7 +139,7 @@ For each run:
   [N B] url           UTF-8 bytes of the OSC 8 hyperlink URI
 ```
 
-The modes (3), title (4), pong (5) and clipboard (6) bodies are defined by their encoders in `terminal/wire_binary.go`.
+The modes (3), title (4) and pong (5) bodies are defined by their encoders in `terminal/wire_binary.go`.
 
 ## Line indices
 
@@ -136,7 +154,7 @@ You can upgrade the Go and TypeScript artifacts independently, and their package
 | Go `terminal` | `WireProtocolVersion` | `MinSupportedClientWireVersion` | `WireIncompatibleCloseCode` |
 | TypeScript | `WIRE_PROTOCOL_VERSION` | `MIN_SUPPORTED_SERVER_WIRE_VERSION` | `WIRE_INCOMPATIBLE_CLOSE_CODE` |
 
-Both sides currently send revision 4 and accept declared peers from revision 3. `WIRE_COMPATIBILITY` holds the TypeScript values as one object.
+Both sides currently send revision 5 and accept declared peers from revision 3. `WIRE_COMPATIBILITY` holds the TypeScript values as one object.
 
 - A peer that declares no revision is still supported.
 - A declared revision below the receiver's floor is refused with close code 4002.

@@ -236,6 +236,20 @@ export interface ClipboardMessage {
   inputAck?: number;
 }
 
+/**
+ * An app's OSC 52 copy was over the server's clipboard limit, so the system
+ * clipboard was not written. The client shows `message` to the user, who
+ * would otherwise paste the previous clipboard contents.
+ */
+export interface ClipboardRefusedMessage {
+  /** Discriminator — always `"clipboardRefused"`. */
+  type: "clipboardRefused";
+  /** User-facing reason: "Copy too large to send to the browser". */
+  message: string;
+  /** Server-confirmed bytesReceived for the input ACK protocol. */
+  inputAck?: number;
+}
+
 /** Discriminated union of all messages the server can send to the client. */
 export type ServerMessage =
   | ScreenMessage
@@ -244,6 +258,7 @@ export type ServerMessage =
   | ModesMessage
   | TitleMessage
   | ClipboardMessage
+  | ClipboardRefusedMessage
   | GridMessage
   | AckOnlyMessage;
 

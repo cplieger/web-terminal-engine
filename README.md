@@ -83,7 +83,8 @@ The engine routes screen frames to the renderer for you, and `engine.dispose()` 
 
 ## API
 
-- `vt` is the VT100/VT500 screen buffer: `New`, `Write`, `Resize`, row rendering to the wire format, and one-shot reads of replies, clipboard writes, the bell and palette changes.
+- `vt` is the VT100/VT500 screen buffer: `New`, `Write`, `Resize`, row rendering to the wire format, and one-shot reads of replies, clipboard writes and refusals, the bell and palette changes. An OSC 52 copy holds up to 1 MiB of base64 (`MaxOSC52Len`, about 768 KiB of text); every other OSC holds up to 4 KiB.
+- `osc52copy` stands in for `xclip`, `xsel`, `wl-copy` and `wl-paste` inside a session, for programs that copy by running one of them. A binary that calls `osc52copy.Main` under each name in `osc52copy.Names()` turns a clipboard copy from stdin into one OSC 52 write to the terminal. It takes the options those programs pass for a plain text copy; a paste, another selection, an option that changes what is copied or a copy over the OSC 52 limit fails with a message on stderr.
 - `terminal` serves sessions: `NewHandler` and its options, `NewSessionManager`, `MountSessionRoutes`, `NewOriginPolicy`, `LogID`, and the wire compatibility constants with `WirePairIncompatibility`.
 - The TypeScript package exports `createTerminalEngine` and the five factories it composes, the `keyboard` and `toolbar` namespaces, `decodeWireBinary`, `connectStatusStream`, `LineStore` and the wire types.
 
@@ -93,7 +94,7 @@ The full reference is on [pkg.go.dev](https://pkg.go.dev/github.com/cplieger/web
 
 The Go server and the TypeScript client share a protocol over WebSocket, not code. Server frames are binary. Each connection opens with a resume in the older binary form. After the upgrade to revision 4, client controls are JSON text frames and client input is raw bytes. Every line carries an absolute index, so applying a line twice changes nothing and a resume lines up by index.
 
-Each half states the wire revision it speaks and the oldest revision it accepts from the other half. Today both speak revision 4 and accept revision 3 or later. A peer that states no revision still connects. A peer older than the oldest accepted revision is refused with WebSocket close code 4002. A newer peer gets a warning, and the connection continues.
+Each half states the wire revision it speaks and the oldest revision it accepts from the other half. Today both speak revision 5 and accept revision 3 or later. A peer that states no revision still connects. A peer older than the oldest accepted revision is refused with WebSocket close code 4002. A newer peer gets a warning, and the connection continues.
 
 `WirePairIncompatibility` checks a declared Go and TypeScript pair at build time, so a release gate can refuse a mismatched pair before it ships. Every npm and JSR release also carries the TypeScript values as `wire-compatibility.json`, for a gate that cannot read TypeScript. [Wire protocol and compatibility](docs/wire-protocol.md) has the frame rules and the manifest contract.
 

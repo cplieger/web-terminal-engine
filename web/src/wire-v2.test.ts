@@ -12,6 +12,7 @@ import type {
   ResumeAckMessage,
   ModesMessage,
   ClipboardMessage,
+  ClipboardRefusedMessage,
 } from "./types.js";
 
 // emptyRowPayload encodes a single run of the given text with default
@@ -133,7 +134,7 @@ describe("wire v2 decoder", () => {
     expect(msg.mouseSGR).toBe(false); // bit2 not set
   });
 
-  it("decodes a clipboard frame (OSC 52) into a ClipboardMessage", () => {
+  it("decodes a clipboard frame (opcode 6, 2-byte length) into a ClipboardMessage", () => {
     const tb = new TextEncoder().encode("hello");
     const buf = new ArrayBuffer(1 + 8 + 2 + tb.length);
     const dv = new DataView(buf);
@@ -152,6 +153,49 @@ describe("wire v2 decoder", () => {
     expect(msg.type).toBe("clipboard");
     expect(msg.text).toBe("hello");
     expect(msg.inputAck).toBe(3);
+  });
+
+  it("decodes a clipboard frame (opcode 9, 4-byte length) whole past 65,535 bytes", () => {
+    const text = "0123456789abcdef\u2713\n".repeat(3500); // 70,000 bytes
+    const tb = new TextEncoder().encode(text);
+    const buf = new ArrayBuffer(1 + 8 + 4 + tb.length);
+    const dv = new DataView(buf);
+    dv.setUint8(0, 9); // type=clipboard
+    dv.setBigUint64(1, 5n, true); // inputAck=5
+    dv.setUint32(9, tb.length, true);
+    new Uint8Array(buf).set(tb, 13);
+
+    const msg = decodeWireBinary(buf) as ClipboardMessage;
+    expect(msg.type).toBe("clipboard");
+    expect(msg.text.length).toBe(text.length);
+    expect(msg.text).toBe(text);
+    expect(msg.inputAck).toBe(5);
+  });
+
+  it("drops a clipboard frame whose length runs past its end instead of decoding shorter text", () => {
+    const tb = new TextEncoder().encode("partial");
+    const buf = new ArrayBuffer(1 + 8 + 4 + tb.length);
+    const dv = new DataView(buf);
+    dv.setUint8(0, 9); // type=clipboard
+    dv.setBigUint64(1, 5n, true);
+    dv.setUint32(9, tb.length + 1, true);
+    new Uint8Array(buf).set(tb, 13);
+
+    expect(decodeWireBinary(buf)).toBeNull();
+  });
+
+  it("decodes a clipboardRefused frame into a message the client can show", () => {
+    const buf = new ArrayBuffer(1 + 8);
+    const dv = new DataView(buf);
+    dv.setUint8(0, 10); // type=clipboardRefused
+    dv.setBigUint64(1, 4n, true); // inputAck=4
+
+    const msg = decodeWireBinary(buf) as ClipboardRefusedMessage;
+    expect(msg).toEqual({
+      type: "clipboardRefused",
+      message: "Copy too large to send to the browser",
+      inputAck: 4,
+    });
   });
 
   it("scroll frame carries the absolute firstIndex", () => {

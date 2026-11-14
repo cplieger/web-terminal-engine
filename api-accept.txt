@@ -1,4 +1,4 @@
-# Removed as a fix, not a break: the reaper took exit statuses from a host's own
-# os/exec children, and no first-party server ever ran it. Delete this file once
-# a stable tag contains the removal.
-github.com/cplieger/web-terminal-engine/v6/terminal: StartZombieReaper: removed
+# Wire revision 5 (opcode 9 for copies over 65,535 bytes, and the
+# clipboardRefused frame) ships with its first-party clients in one release
+# train. Delete this file once a stable tag contains revision 5.
+github.com/cplieger/web-terminal-engine/v6/terminal: WireProtocolVersion: value changed from 4 to 5

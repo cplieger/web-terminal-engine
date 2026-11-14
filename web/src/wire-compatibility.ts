@@ -4,7 +4,7 @@
 // revisions may diverge as each receiver retires old decode paths.
 
 /** Current wire revision emitted by this browser client. */
-export const WIRE_PROTOCOL_VERSION = 4;
+export const WIRE_PROTOCOL_VERSION = 5;
 
 /** Oldest explicitly declared server revision this client accepts. */
 export const MIN_SUPPORTED_SERVER_WIRE_VERSION = 3;

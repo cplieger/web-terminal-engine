@@ -1,6 +1,11 @@
 package vt
 
-import "testing"
+import (
+	"bytes"
+	"strconv"
+	"strings"
+	"testing"
+)
 
 // FuzzParser feeds arbitrary byte sequences through the full VT parser. The
 // invariant: the parser never panics or accesses out of bounds, and the cursor
@@ -63,6 +68,13 @@ func FuzzParser(f *testing.F) {
 	// OSC payload containing every byte value.
 	f.Add(append([]byte("\x1b]2;"), all...))
 
+	// OSC 52 past the generic OSC cap, complete and cut off; another OSC past it.
+	osc52 := "\x1b]52;c;" + strings.Repeat("QUJD", maxOSCLen/4+8)
+	f.Add([]byte(osc52 + "\x07"))
+	f.Add([]byte(osc52))
+	f.Add([]byte(osc52 + "\x18\x1b]52;c;aGVsbG8=\x07"))
+	f.Add([]byte("\x1b]2;" + strings.Repeat("t", maxOSCLen+8) + "\x07"))
+
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s := New(24, 80)
 		s.Write(data)
@@ -84,12 +96,23 @@ func FuzzParser(f *testing.F) {
 				t.Fatalf("len(Cells[%d]) = %d, want Width %d", y, len(s.Cells[y]), s.Width)
 			}
 		}
-		// Buffer-bounds invariant: OSC/DCS accumulation never exceeds its cap.
+		// Buffer-bounds invariant: OSC/DCS accumulation never exceeds its cap,
+		// and only an OSC 52 grows past the generic OSC cap.
+		if len(s.oscBuf) > MaxOSC52Len {
+			t.Fatalf("oscBuf = %d bytes, want <= %d", len(s.oscBuf), MaxOSC52Len)
+		}
 		if len(s.oscBuf) > maxOSCLen {
-			t.Fatalf("oscBuf = %d bytes, want <= %d", len(s.oscBuf), maxOSCLen)
+			cmd, _, _ := bytes.Cut(s.oscBuf, []byte{';'})
+			if id, err := strconv.ParseUint(string(cmd), 10, 31); err != nil || id != 52 {
+				t.Fatalf("oscBuf = %d bytes for OSC command %q, want <= %d", len(s.oscBuf), cmd, maxOSCLen)
+			}
 		}
 		if len(s.dcsBuf) > maxDCSLen {
 			t.Fatalf("dcsBuf = %d bytes, want <= %d", len(s.dcsBuf), maxDCSLen)
+		}
+		// One clipboard outcome per take: a delivered copy or a refusal.
+		if refused, clip := s.TakeClipboardRefused(), s.TakeClipboard(); refused && clip != nil {
+			t.Fatalf("both a %d-byte copy and a refusal are pending, want one", len(clip))
 		}
 	})
 }

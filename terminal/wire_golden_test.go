@@ -2,8 +2,10 @@ package terminal
 
 import (
 	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/cplieger/web-terminal-engine/v6/vt"
@@ -45,6 +47,13 @@ func goldenFrames() map[string][]byte {
 		"ackonly": encodeAckOnly(42),
 		// clipboard (opcode 6): OSC 52 text for the system clipboard.
 		"clipboard": encodeClipboardMsg([]byte("copy me")),
+		// clipboard-10k: a 10,240-byte OSC 52 copy taken through the parser,
+		// past the generic OSC cap. The TS test rebuilds the same text.
+		"clipboard-10k": encodeClipboardMsg(parsedOSC52(strings.Repeat("0123456789abcdef\u2713\n", 512))),
+		// clipboard-long (opcode 9): a 65,540-byte copy, past a 2-byte length.
+		"clipboard-long": encodeClipboardMsg(parsedOSC52(strings.Repeat("0123456789abcdef\u2713\n", 3277))),
+		// clipboard-refused (opcode 10): a copy over the OSC 52 cap.
+		"clipboard-refused": encodeClipboardRefusedMsg(),
 		// modes: bracketed paste + SGR mouse + reverse video on, mouseMode 1002,
 		// kitty disambiguate flag (1).
 		"modes": encodeModesMsg(true, false, true, false, false, true, false, 1002, 1),
@@ -56,6 +65,13 @@ func goldenFrames() map[string][]byte {
 		// grid: 132 columns, 43 rows.
 		"grid": encodeGridMsg(132, 43),
 	}
+}
+
+// parsedOSC52 returns what a screen queues for an OSC 52 copy of text.
+func parsedOSC52(text string) []byte {
+	s := vt.New(24, 80)
+	s.Write([]byte("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07"))
+	return s.TakeClipboard()
 }
 
 func TestWireGolden(t *testing.T) {

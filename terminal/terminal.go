@@ -508,6 +508,10 @@ type Handler struct {
 	sizeEstablished          bool
 	scrollbackClearedPending bool
 	paletteChangedPending    bool
+	// clipboardRefused and pendingClipboard are never both set. A later copy or
+	// refusal replaces the one still waiting; an empty or non-base64 payload (a
+	// clear) changes neither. Guarded by h.mu.
+	clipboardRefused bool
 	// redrawCoalesceNow marks the one flush pass that must build a FULL repaint
 	// because the redraw-settle cap lapsed while the child was still writing
 	// (see redrawHoldUntil). Consumed by buildFrame. Guarded by h.mu.
@@ -1153,6 +1157,11 @@ func (h *Handler) handlePTYData(data []byte) {
 	if clip := h.screen.TakeClipboard(); len(clip) > 0 {
 		// OSC 52 copy; hand it to the next frame as a clipboard message.
 		h.pendingClipboard = clip
+		h.clipboardRefused = false
+	}
+	if h.screen.TakeClipboardRefused() {
+		h.pendingClipboard = nil
+		h.clipboardRefused = true
 	}
 	resp := h.screen.TakeResponse()
 	h.queueReplyLocked(resp)
@@ -1282,19 +1291,31 @@ func (h *Handler) buildFrame() (frame *flushFrame, holdUntil time.Time) {
 		frame.changed = appendRowIfMissing(frame.changed, frame.curRow, len(frame.rows))
 		h.scrollbackClearedPending = false
 	}
-	// OSC 52 clipboard is a one-shot event that can arrive with no screen
-	// change, so ensure it rides a frame even when Build produced none.
-	if len(h.pendingClipboard) > 0 {
-		if frame == nil {
-			frame = &flushFrame{clients: clients}
-		}
-		frame.clipboardPayload = encodeClipboardMsg(h.pendingClipboard)
-		h.pendingClipboard = nil
-	}
+	frame = h.attachClipboardLocked(frame, clients)
 	if frame != nil {
 		frame.writers, frame.gens = writers, gens
 	}
 	return frame, holdUntil
+}
+
+// attachClipboardLocked moves a pending OSC 52 copy or refusal onto frame,
+// creating one when Build produced none: the event can arrive with no screen
+// change and must still reach the clients. Caller holds h.mu.
+func (h *Handler) attachClipboardLocked(frame *flushFrame, clients map[*websocket.Conn]uint64) *flushFrame {
+	if len(h.pendingClipboard) == 0 && !h.clipboardRefused {
+		return frame
+	}
+	if frame == nil {
+		frame = &flushFrame{clients: clients}
+	}
+	if h.clipboardRefused {
+		frame.clipboardPayload = encodeClipboardRefusedMsg()
+	} else {
+		frame.clipboardPayload = encodeClipboardMsg(h.pendingClipboard)
+	}
+	h.pendingClipboard = nil
+	h.clipboardRefused = false
+	return frame
 }
 
 // flushPass runs one scheduler pass: build, then dispatch the frame or sweep

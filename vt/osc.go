@@ -51,31 +51,72 @@ func stripControlRunes(t string) string {
 	return b.String()
 }
 
+// oscPut buffers one OSC payload byte. Every OSC stops at maxOSCLen except
+// OSC 52, which may grow to MaxOSC52Len; the command is checked once, at the
+// generic cap, by the same rule dispatchOsc applies.
+func (s *Screen) oscPut(b byte) {
+	switch n := len(s.oscBuf); {
+	case s.oscOverflow:
+	case n < maxOSCLen, s.oscClipboard && n < MaxOSC52Len:
+		s.oscBuf = append(s.oscBuf, b)
+	case n == maxOSCLen && oscCommand(s.oscBuf) == 52:
+		s.oscClipboard = true
+		s.oscBuf = append(s.oscBuf, b)
+	default:
+		s.oscOverflow = true
+	}
+}
+
+// resetOscBuf empties the OSC buffer and frees one an OSC 52 grew past
+// maxOSCLen, so a terminal does not keep a megabyte for its life after one copy.
+func (s *Screen) resetOscBuf() {
+	if cap(s.oscBuf) > maxOSCLen {
+		s.oscBuf = nil
+		return
+	}
+	s.oscBuf = s.oscBuf[:0]
+}
+
+// oscCommand returns the numeric OSC command of an OSC payload, or -1 when it
+// runs none. The command is the field before the first ';'. An empty one
+// before ';' is xterm's omitted Ps, OSC 0 (misc.c do_osc); any other that is
+// not a plain decimal below 2^31 runs nothing, so "2x;t" or a wrapping id
+// cannot run OSC 2.
+func oscCommand(payload []byte) int {
+	cmd, _, hasSep := bytes.Cut(payload, []byte{';'})
+	if len(cmd) == 0 && hasSep {
+		return 0
+	}
+	n, err := strconv.ParseUint(string(cmd), 10, 31)
+	if err != nil {
+		return -1
+	}
+	return int(n)
+}
+
 // dispatchOsc processes the buffered OSC payload and resets the buffer. A
-// payload longer than maxOSCLen is dropped whole: its cut prefix would apply a
+// payload over its cap is dropped whole: its cut prefix would apply a
 // different value, such as a shorter clipboard text or another link target.
+// An OSC 52 over MaxOSC52Len is refused instead, so the client can say so.
 //
 //nolint:gocyclo // flat dispatch over the OSC command ids
 func (s *Screen) dispatchOsc() {
 	payload := s.oscBuf
-	s.oscBuf = s.oscBuf[:0]
+	s.resetOscBuf()
 
 	if s.oscOverflow {
+		if s.oscClipboard {
+			s.pendingClipboard = nil
+			s.clipboardRefused = true
+		}
 		return
 	}
 
-	// The command is the field before the first ';'. An empty one before ';' is
-	// xterm's omitted Ps, OSC 0 (misc.c do_osc); any other that is not a plain
-	// decimal below 2^31 runs nothing, so "2x;t" or a wrapping id cannot run OSC 2.
-	cmd, rest, hasSep := bytes.Cut(payload, []byte{';'})
-	id := 0
-	if len(cmd) > 0 || !hasSep {
-		n, err := strconv.ParseUint(string(cmd), 10, 31)
-		if err != nil {
-			return
-		}
-		id = int(n)
+	id := oscCommand(payload)
+	if id < 0 {
+		return
 	}
+	_, rest, _ := bytes.Cut(payload, []byte{';'})
 	data := string(rest)
 
 	switch id {
@@ -427,6 +468,7 @@ func (s *Screen) handleOsc52(data string) {
 	if decoded, ok := decodeBase64Lenient(payload); ok && len(decoded) > 0 {
 		s.selectionData = decoded
 		s.pendingClipboard = decoded
+		s.clipboardRefused = false
 		return
 	}
 	s.selectionData = nil

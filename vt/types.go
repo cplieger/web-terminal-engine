@@ -96,7 +96,8 @@ type ParserState struct {
 	ignoring  bool // set when params overflow
 	// Private marker for CSI (?, >, <, !)
 	privateMarker byte
-	oscOverflow   bool // the OSC payload ran past maxOSCLen
+	oscOverflow   bool // the OSC payload ran past its cap
+	oscClipboard  bool // the OSC payload is an OSC 52 grown past maxOSCLen
 	dcsOverflow   bool // the DCS data ran past maxDCSLen
 }
 
@@ -133,8 +134,17 @@ const (
 
 // Buffer size limits.
 const (
-	maxOSCLen   = 4096 // max bytes buffered for an OSC payload
+	maxOSCLen   = 4096 // max bytes buffered for an OSC payload other than OSC 52
 	maxParams   = 32   // max param slots (params + subparams)
 	maxIntermed = 2    // max intermediate bytes
 	maxDCSLen   = 256  // max DCS data for DECRQSS and XTGETTCAP
 )
+
+// MaxOSC52Len is the most bytes an OSC 52 payload ("52;<targets>;<base64>",
+// between OSC and its terminator) may hold; a longer one is refused whole
+// (TakeClipboardRefused). 1 MiB is tmux's default input-buffer-size
+// (https://github.com/tmux/tmux/blob/75fac4a77bb40dc655f8b217071c224c0c819c7f/options-table.c#L540-L547)
+// and carries about 768 KiB of text, past the 256 KiB kitty buffers for other
+// escapes (https://github.com/kovidgoyal/kitty/blob/8e5487e9d4a1dd79c3a769e0ba82326b8ad7c37f/kitty/vt-parser.c#L18-L21);
+// xterm.js allows 10 MB and foot, WezTerm and Windows Terminal set no bound.
+const MaxOSC52Len = 1 << 20

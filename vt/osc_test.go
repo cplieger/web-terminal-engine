@@ -638,22 +638,137 @@ func osc52OfLen(t *testing.T, n int) (seq, text string) {
 	return "\x1b]" + payload + "\x07", text
 }
 
-func TestOSCOverCapIsDiscardedWhole(t *testing.T) {
-	t.Run("osc52_over_cap_sets_no_clipboard", func(t *testing.T) {
+func TestOSC52HasItsOwnCap(t *testing.T) {
+	t.Run("a_10_KiB_copy_sets_the_clipboard_whole", func(t *testing.T) {
 		s := New(2, 10)
-		seq, _ := osc52OfLen(t, maxOSCLen+4)
+		text := strings.Repeat("0123456789abcdef\u2713\n", 512) // 10,240 bytes
+		s.Write([]byte("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07"))
+		if got := string(s.TakeClipboard()); got != text {
+			t.Errorf("10 KiB OSC 52 queued %d bytes, want the %d-byte text", len(got), len(text))
+		}
+		if s.TakeClipboardRefused() {
+			t.Error("10 KiB OSC 52 was refused, want it delivered")
+		}
+	})
+
+	t.Run("a_100000_byte_copy_fits", func(t *testing.T) {
+		s := New(2, 10)
+		text := strings.Repeat("y", 100_000)
+		s.Write([]byte("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x1b\\"))
+		if got := s.TakeClipboard(); len(got) != len(text) {
+			t.Errorf("100,000-byte OSC 52 queued %d bytes, want %d", len(got), len(text))
+		}
+	})
+
+	t.Run("at_its_cap_sets_the_clipboard", func(t *testing.T) {
+		s := New(2, 10)
+		seq, text := osc52OfLen(t, MaxOSC52Len)
+		s.Write([]byte(seq))
+		if got := s.TakeClipboard(); string(got) != text {
+			t.Errorf("at-cap OSC 52 queued %d bytes, want the %d-byte text", len(got), len(text))
+		}
+		if s.TakeClipboardRefused() {
+			t.Error("at-cap OSC 52 was refused, want it delivered")
+		}
+	})
+
+	t.Run("over_its_cap_is_refused_not_truncated", func(t *testing.T) {
+		s := New(2, 10)
+		seq, _ := osc52OfLen(t, MaxOSC52Len+4)
 		s.Write([]byte(seq))
 		if got := s.TakeClipboard(); got != nil {
 			t.Errorf("over-cap OSC 52 queued %d clipboard bytes, want none", len(got))
 		}
+		if !s.TakeClipboardRefused() {
+			t.Error("over-cap OSC 52 was dropped silently, want a refusal")
+		}
+		if s.TakeClipboardRefused() {
+			t.Error("TakeClipboardRefused reported the refusal twice, want a one-shot")
+		}
 	})
 
-	t.Run("osc52_at_cap_sets_the_clipboard", func(t *testing.T) {
+	t.Run("a_refused_copy_keeps_the_selection", func(t *testing.T) {
 		s := New(2, 10)
-		seq, text := osc52OfLen(t, maxOSCLen)
-		s.Write([]byte(seq))
-		if got := string(s.TakeClipboard()); got != text {
-			t.Errorf("at-cap OSC 52 queued %d bytes, want the %d-byte text", len(got), len(text))
+		s.AllowScreenReport = true
+		over, _ := osc52OfLen(t, MaxOSC52Len+4)
+		s.Write([]byte("\x1b]52;c;aGVsbG8=\x07" + over + "\x1b]52;c;?\x07")) // base64("hello")
+		if got, want := string(s.TakeResponse()), "\x1b]52;c;aGVsbG8=\x1b\\"; got != want {
+			t.Errorf("OSC 52 query after a refused copy = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("the_last_write_before_a_take_wins", func(t *testing.T) {
+		over, _ := osc52OfLen(t, MaxOSC52Len+4)
+		s := New(2, 10)
+		s.Write([]byte(over + "\x1b]52;c;aGVsbG8=\x07"))
+		if got := string(s.TakeClipboard()); got != "hello" {
+			t.Errorf("copy after a refused one queued %q, want hello", got)
+		}
+		if s.TakeClipboardRefused() {
+			t.Error("a refusal followed by a delivered copy still reports the refusal")
+		}
+		s.Write([]byte("\x1b]52;c;aGVsbG8=\x07" + over))
+		if got := s.TakeClipboard(); got != nil {
+			t.Errorf("refused copy after a delivered one left %q queued, want none", got)
+		}
+		if !s.TakeClipboardRefused() {
+			t.Error("a refused copy after a delivered one reports no refusal")
+		}
+	})
+
+	t.Run("an_aborted_oversize_copy_is_not_a_refusal", func(t *testing.T) {
+		s := New(2, 10)
+		over, _ := osc52OfLen(t, MaxOSC52Len+4)
+		s.Write([]byte(strings.TrimSuffix(over, "\x07") + "\x18"))
+		if s.TakeClipboardRefused() {
+			t.Error("an OSC 52 cancelled by CAN reported a refusal, want nothing")
+		}
+	})
+
+	t.Run("a_grown_buffer_is_released", func(t *testing.T) {
+		s := New(2, 10)
+		over, _ := osc52OfLen(t, MaxOSC52Len+4)
+		s.Write([]byte(over))
+		if got := cap(s.oscBuf); got > maxOSCLen {
+			t.Errorf("after a dispatched OSC 52, the OSC buffer holds %d bytes, want at most %d", got, maxOSCLen)
+		}
+		s.Write([]byte(strings.TrimSuffix(over, "\x07") + "\x18\x1b]2;t\x07"))
+		if got := cap(s.oscBuf); got > maxOSCLen {
+			t.Errorf("after a cancelled OSC 52 and a later OSC, the OSC buffer holds %d bytes, want at most %d", got, maxOSCLen)
+		}
+	})
+
+	t.Run("only_osc52_buffers_past_the_generic_cap", func(t *testing.T) {
+		for _, prefix := range []string{"52;c;", "052;c;", "52;"} {
+			s := New(2, 10)
+			s.Write([]byte("\x1b]" + prefix + strings.Repeat("A", maxOSCLen)))
+			if got, want := len(s.oscBuf), len(prefix)+maxOSCLen; got != want {
+				t.Errorf("OSC %q buffered %d bytes, want %d", prefix, got, want)
+			}
+		}
+		for _, prefix := range []string{"2;", "0;", "8;;", "7501;", "5;", "520;", "53;", "5;52;", ";52;", "52"} {
+			s := New(2, 10)
+			s.Write([]byte("\x1b]" + prefix + strings.Repeat("A", maxOSCLen)))
+			if got := len(s.oscBuf); got != maxOSCLen {
+				t.Errorf("OSC %q buffered %d bytes, want the generic cap %d", prefix, got, maxOSCLen)
+			}
+		}
+	})
+}
+
+func TestOSCOverCapIsDiscardedWhole(t *testing.T) {
+	t.Run("other_osc_over_the_generic_cap_is_dropped", func(t *testing.T) {
+		s := New(2, 10)
+		s.Write([]byte("\x1b]2;" + strings.Repeat("t", maxOSCLen-1) + "\x07"))
+		if s.Title != "" {
+			t.Errorf("over-cap OSC 2 set a %d-byte title, want none", len(s.Title))
+		}
+		s.Write([]byte("\x1b]2;" + strings.Repeat("t", maxOSCLen-2) + "\x07"))
+		if len(s.Title) != maxOSCLen-2 {
+			t.Errorf("at-cap OSC 2 set a %d-byte title, want %d", len(s.Title), maxOSCLen-2)
+		}
+		if s.TakeClipboardRefused() {
+			t.Error("an over-cap OSC 2 reported a clipboard refusal")
 		}
 	})
 
@@ -677,7 +792,7 @@ func TestOSCOverCapIsDiscardedWhole(t *testing.T) {
 
 	t.Run("osc_after_an_overflowed_one_applies", func(t *testing.T) {
 		s := New(2, 10)
-		over52, _ := osc52OfLen(t, maxOSCLen+4)
+		over52, _ := osc52OfLen(t, MaxOSC52Len+4)
 		over8, _ := oscOfLen(t, maxOSCLen+1)
 		s.Write([]byte(over52 + "\x1b]52;;aGVsbG8=\x07")) // base64("hello")
 		if got := string(s.TakeClipboard()); got != "hello" {
@@ -693,7 +808,7 @@ func TestOSCOverCapIsDiscardedWhole(t *testing.T) {
 		for name, abort := range map[string]string{"CAN": "\x18", "SUB": "\x1a"} {
 			t.Run(name, func(t *testing.T) {
 				s := New(2, 10)
-				over52, _ := osc52OfLen(t, maxOSCLen+4)
+				over52, _ := osc52OfLen(t, MaxOSC52Len+4)
 				s.Write([]byte(strings.TrimSuffix(over52, "\x07") + abort + "\x1b]52;;aGVsbG8=\x07"))
 				if got := string(s.TakeClipboard()); got != "hello" {
 					t.Errorf("OSC 52 after an overflowed one aborted by %s queued %q, want %q", name, got, "hello")

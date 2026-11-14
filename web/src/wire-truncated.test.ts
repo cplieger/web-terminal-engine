@@ -55,14 +55,7 @@ describe("wire-binary: truncated and oversized frames", () => {
     view.setUint8(0, 4); // MSG_TITLE
     // inputAck = 0 (bytes 1-8)
     view.setUint16(9, 1000, true); // titleLen = 1000 (but only 0 bytes of title)
-    // utf8() with len > remaining doesn't throw (subarray returns short slice),
-    // but subsequent reads would. For title it's the last field, so it decodes
-    // with a truncated string rather than crashing.
-    const msg = decodeWireBinary(buf);
-    // The title is the last field — subarray returns empty slice, no RangeError.
-    // This is acceptable: the frame is "valid" structurally, just the title is
-    // truncated. The decoder returns a message with an empty/short title.
-    expect(msg).not.toBeNull();
+    expect(decodeWireBinary(buf)).toBeNull();
   });
 
   it("decodes resumeAck with exactly 9 bytes (no epoch)", () => {

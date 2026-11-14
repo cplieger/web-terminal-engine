@@ -133,6 +133,11 @@ type Screen struct {
 	// palette) drained atomically via their Take* methods.
 	bellRing          bool
 	scrollbackCleared bool
+	// clipboardRefused is set by an OSC 52 over MaxOSC52Len; it and
+	// pendingClipboard are never both set. A later copy or refusal replaces
+	// the one still waiting; an empty or non-base64 payload (a clear) changes
+	// neither.
+	clipboardRefused  bool
 	MouseSGR          bool
 	FocusReporting    bool
 	AppKeypad         bool
@@ -172,6 +177,16 @@ func (s *Screen) TakeClipboard() []byte {
 	c := s.pendingClipboard
 	s.pendingClipboard = nil
 	return c
+}
+
+// TakeClipboardRefused reports whether an OSC 52 copy over MaxOSC52Len arrived
+// since the last take, with no later copy replacing it, and clears the flag.
+// The consumer tells the user the copy did not reach the clipboard (the
+// terminal package emits it as a clipboardRefused wire frame).
+func (s *Screen) TakeClipboardRefused() bool {
+	r := s.clipboardRefused
+	s.clipboardRefused = false
+	return r
 }
 
 // TakeBell reports whether BEL was received since the last take, clearing

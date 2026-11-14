@@ -297,10 +297,11 @@ func TestProcessName_prefersArgv0OverComm(t *testing.T) {
 }
 
 // startWithArgv0 runs /bin/sleep under a caller-chosen argv[0] and returns its
-// pid once procfs is serving that argv — the exec is asynchronous, so a read
-// taken too early sees the pre-exec image and would silently test the wrong
-// process. comm stays "sleep" whatever argv[0] says, which is what makes the two
-// name rungs distinguishable.
+// pid once the exec has completed — it is asynchronous, so a read taken too
+// early sees the pre-exec image and would silently test the wrong process. The
+// wait is on comm turning "sleep": the forked image's cmdline is already
+// NUL-terminated. comm stays "sleep" whatever argv[0] says, which is what makes
+// the two name rungs distinguishable.
 func startWithArgv0(t *testing.T, argv0 string) int {
 	t.Helper()
 	cmd := exec.Command("/bin/sleep", "60") // #nosec G204 -- fixed test command
@@ -314,11 +315,11 @@ func startWithArgv0(t *testing.T, argv0 string) int {
 	})
 	deadline := time.Now().Add(waitPatience)
 	for {
-		if raw, err := os.ReadFile(procPath(cmd.Process.Pid, "cmdline")); err == nil && bytes.Contains(raw, []byte{0}) {
+		if raw, err := os.ReadFile(procPath(cmd.Process.Pid, "comm")); err == nil && string(bytes.TrimSpace(raw)) == "sleep" {
 			return cmd.Process.Pid
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("child %d never published a NUL-terminated cmdline; the exec did not complete", cmd.Process.Pid)
+			t.Fatalf("child %d's comm never became sleep; the exec did not complete", cmd.Process.Pid)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

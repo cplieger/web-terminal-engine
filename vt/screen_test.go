@@ -532,7 +532,10 @@ func TestScreenWriteAllocationCountIsIndependentOfSequencePayloadLength(t *testi
 			return "\x1bP$q" + strings.Repeat("m", maxDCSLen+n) + "\x1b\\"
 		},
 		"osc_over_cap": func(n int) string {
-			return "\x1b]52;c;" + strings.Repeat("A", maxOSCLen+n) + "\x07"
+			return "\x1b]2;" + strings.Repeat("A", maxOSCLen+n) + "\x07"
+		},
+		"osc52_over_cap": func(n int) string {
+			return "\x1b]52;c;" + strings.Repeat("A", MaxOSC52Len+n) + "\x07"
 		},
 		"csi_parameter_list": func(n int) string {
 			return "\x1b[" + strings.Repeat("1;", n) + "1mx\r"

@@ -132,16 +132,29 @@ func FuzzResize_widthRoundTrip(f *testing.F) {
 	})
 }
 
-// writeEditing writes data to s as letters, line ends, cursor moves and
-// erases: what a line editor or a full redraw writes, with no blank written as
-// text.
+// writeEditing writes data to s as letters, line ends, cursor moves, erases
+// and line shifts: what a line editor, a full redraw or a pager writes, with
+// no blank written as text. A byte from 0x80 up is a line shift: IL, DL, SU
+// or SD, a scroll region (DECSTBM), RI or IND.
 func writeEditing(t *testing.T, s *Screen, data []byte) {
 	t.Helper()
 	erases := [6]string{1: "\x1b[J", 2: "\x1b[1J", 3: "\x1b[K", 4: "\x1b[1K", 5: "\x1b[2K"}
+	shifts := [8]string{0: "L", 1: "M", 3: "S", 4: "T", 5: "r"}
 	for i := 0; i < len(data); i++ {
 		b := data[i]
 		op := b % 16
 		switch {
+		case b >= 0x80 && b%8 == 2:
+			if i+2 < len(data) {
+				writeString(t, s, fmt.Sprintf("\x1b[%d;%dr", int(data[i+1])%s.Height+1, int(data[i+2])%s.Height+1))
+				i += 2
+			}
+		case b >= 0x80 && b%8 == 6:
+			writeString(t, s, "\x1bM")
+		case b >= 0x80 && b%8 == 7:
+			writeString(t, s, "\x1bD")
+		case b >= 0x80:
+			writeString(t, s, fmt.Sprintf("\x1b[%d%s", int(b>>3)%3+1, shifts[b%8]))
 		case op == 0:
 			writeString(t, s, "\r\n")
 		case op <= 5:
@@ -160,8 +173,9 @@ func writeEditing(t *testing.T, s *Screen, data []byte) {
 // FuzzWrapped_onlyIntactRowsStayLinked pins the soft-wrap flag a reflow joins
 // rows on to the content it describes. With no blank written as text, a row
 // that continues the one above starts with a glyph, and the row above ends
-// with one; an erase that blanks either end cuts the link. A width round trip
-// then keeps the lines.
+// with one; an erase that blanks either end, or a line shift that moves a
+// blank or another row next to it, cuts the link. A width round trip then
+// keeps the lines.
 func FuzzWrapped_onlyIntactRowsStayLinked(f *testing.F) {
 	f.Add([]byte("abcdefghijklmnopqrstuvwxyzabcdefghijklmnop\x06\x00\x00\x01hij\x00klm"), uint8(9))
 	f.Add([]byte("abcdefghijklmnopqrstuvwxyzabcdef\x05\x06\x00\x00\x03zz"), uint8(30))
@@ -169,6 +183,12 @@ func FuzzWrapped_onlyIntactRowsStayLinked(f *testing.F) {
 	f.Add([]byte("abcdefghijklmnopqrstuvwxyz\x06\x01\x02\x04\x17"), uint8(40))
 	f.Add([]byte("00&0088118"), uint8(1))
 	f.Add([]byte("&&208"), uint8(0))
+	f.Add([]byte(strings.Repeat("h", 20)+"\x06\x00\x00\x91"), uint8(40))
+	f.Add([]byte("hh\x00"+strings.Repeat("h", 20)+"\x06\x01\x00\x91"), uint8(40))
+	f.Add([]byte(strings.Repeat("h", 25)+"\x06\x01\x00\x90"), uint8(40))
+	f.Add([]byte("hh\x00"+strings.Repeat("h", 20)+"\x82\x00\x01\x91"), uint8(40))
+	f.Add([]byte("hh\x00"+strings.Repeat("h", 20)+"\x82\x00\x01\x93"), uint8(40))
+	f.Add([]byte("hh\x00"+strings.Repeat("h", 20)+"\x82\x00\x01\x00\x00hhh\x94"), uint8(40))
 
 	f.Fuzz(func(t *testing.T, data []byte, to uint8) {
 		const rows, cols = 8, 10
@@ -200,9 +220,7 @@ func assertGridShape(t *testing.T, s *Screen) {
 }
 
 // widthOps writes data to s as a width-independent sequence: letters, spaces,
-// a wide character, line ends and DECSC, which saves a place in the text. A
-// cursor move or an erase names a row or a column, which mean different text
-// at another width, so they are left out.
+// a wide character, line ends and DECSC, which saves a place in the text.
 func widthOps(t *testing.T, s *Screen, data []byte) {
 	t.Helper()
 	var b strings.Builder
@@ -264,14 +282,152 @@ func logicalText(s *Screen) (lines []string, cursorLine, cursorOffset int) {
 	return lines, cursorLine, cursorOffset
 }
 
+// lineStarts returns the first row of each of s's lines, then s.Height.
+func lineStarts(s *Screen) []int {
+	var starts []int
+	for y := range s.Height {
+		if y == 0 || !s.wrapped[y] {
+			starts = append(starts, y)
+		}
+	}
+	return append(starts, s.Height)
+}
+
+// emptyLines reports whether rows from to to of s are each an empty line,
+// which takes one row at every width.
+func emptyLines(s *Screen, from, to int) bool {
+	for y := from; y <= to; y++ {
+		if y < 0 || contentLen(s.Cells[y]) > 0 || s.wrapped[y] || y+1 < s.Height && s.wrapped[y+1] {
+			return false
+		}
+	}
+	return true
+}
+
+// lineEdit is one edit of whole lines as one screen writes it: seq, and the
+// number of empty lines it lets into a scroll region, which every screen must
+// agree on.
+type lineEdit struct {
+	seq   string
+	letIn int
+}
+
+// planLineEdit lays out edit op on s's own rows, at line j, the at-th line up
+// to the cursor's: op%8 picks IL or DL at line j, or SU, SD, IL, DL, IND at
+// the bottom or RI inside a scroll region (DECSTBM) spanning lines j to k
+// above the cursor's line. Bit 3 is the count, bits 4 and 5 the region's span,
+// and bit 6 turns DL into ED 0 from line j's start, which leaves the cursor
+// there. It refuses an edit that would push text off the screen or its region
+// or cut a line, so the same edit means the same text at every width.
+func planLineEdit(s *Screen, op, at byte) (lineEdit, bool) {
+	kind, n := op%8, int(op>>3)%2+1
+	starts := lineStarts(s)
+	cur := 0
+	for cur+1 < len(starts) && starts[cur+1] <= s.curY {
+		cur++
+	}
+	j := int(at) % (cur + 1)
+	k := min(j+int(op>>4)%4, cur-1)
+	rows := func(m int) int { return starts[m+1] - starts[m] }
+	cup := func(y, x int) string { return fmt.Sprintf("\x1b[%d;%dH", y+1, x+1) }
+	y, x := s.curY, s.curX
+	var e lineEdit
+	var b strings.Builder
+	top, bottom := 0, s.Height-1
+	if kind >= 2 {
+		if j >= cur || starts[k+1]-1 <= starts[j] {
+			return e, false
+		}
+		top, bottom = starts[j], starts[k+1]-1
+		fmt.Fprintf(&b, "\x1b[%d;%dr", top+1, bottom+1)
+	}
+	switch kind {
+	case 0: // IL before line j
+		if y+n >= s.Height || !emptyLines(s, s.Height-n, s.Height-1) {
+			return e, false
+		}
+		fmt.Fprintf(&b, "%s\x1b[%dL", cup(starts[j], 0), n)
+		y += n
+	case 1:
+		if op&0x40 != 0 {
+			e.seq = cup(starts[j], 0) + "\x1b[J"
+			return e, true
+		}
+		if j >= cur {
+			return e, false
+		}
+		fmt.Fprintf(&b, "%s\x1b[%dM", cup(starts[j], 0), rows(j))
+		y -= rows(j)
+	case 2: // SU of line j
+		e.letIn = rows(j)
+		fmt.Fprintf(&b, "\x1b[%dS", e.letIn)
+	case 3, 4, 7: // SD, IL before line k, RI
+		if kind == 7 {
+			n = 1
+		}
+		if bottom-n+1 <= top || !emptyLines(s, bottom-n+1, bottom) {
+			return e, false
+		}
+		switch kind {
+		case 3:
+			fmt.Fprintf(&b, "\x1b[%dT", n)
+		case 4:
+			fmt.Fprintf(&b, "%s\x1b[%dL", cup(starts[k], 0), n)
+		default:
+			b.WriteString(cup(top, 0) + "\x1bM")
+		}
+	case 5: // DL of line k
+		e.letIn = rows(k)
+		fmt.Fprintf(&b, "%s\x1b[%dM", cup(starts[k], 0), e.letIn)
+	case 6: // LF at the region's bottom, scrolling line j out
+		if rows(j) != 1 {
+			return e, false
+		}
+		b.WriteString(cup(bottom, 0) + "\n")
+	}
+	if kind >= 2 {
+		b.WriteString("\x1b[r")
+	}
+	b.WriteString(cup(y, x))
+	if s.pendingWrap {
+		// Writing the last character again pends the wrap the edit cleared.
+		if c := s.Cells[s.curY][x]; c.Ch == 0 {
+			b.WriteString(cup(y, x-1) + string(s.Cells[s.curY][x-1].Ch))
+		} else {
+			b.WriteRune(c.Ch)
+		}
+	}
+	e.seq = b.String()
+	return e, true
+}
+
+// editLines applies line edit op to every screen at the same line of their
+// text, then puts each cursor back where the edit moved its text. It skips an
+// edit some screen refuses and reports whether it applied it.
+func editLines(t *testing.T, screens []*Screen, op, at byte) bool {
+	t.Helper()
+	edits := make([]lineEdit, len(screens))
+	for i, s := range screens {
+		e, ok := planLineEdit(s, op, at)
+		if !ok || e.letIn != edits[0].letIn && i > 0 {
+			return false
+		}
+		edits[i] = e
+	}
+	for i, s := range screens {
+		writeString(t, s, edits[i].seq)
+	}
+	return true
+}
+
 // FuzzResize_matchesWritingAtTheNewWidth pins the reflow to its definition:
 // text written at one width and resized to another reads as the text written
-// at the new width, the cursor at the same place in the same line. data[0]'s
-// high bit first restores the last DECSC, putting the cursor mid-text or
-// above other lines. Only a cursor left at the end must keep the same pending
-// wrap and land the next text the same way: a restored cursor after a full
-// last row with text below takes a continuation row, where writing at the new
-// width pends a wrap onto the next line's row.
+// at the new width, the cursor at the same place in the same line. A byte
+// from 0x80 up after the first is a line edit (planLineEdit). data[0]'s high
+// bit restores the last DECSC unless an edit moved its row. Only a cursor left
+// at the end must keep the same pending wrap and land the next text the same
+// way: a restored cursor after a full last row with text below takes a
+// continuation row, where writing at the new width pends a wrap.
 func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 	f.Add([]byte("abcdefghijklmnop\x00qr\x01st\x00\x00uvwxyz"), uint8(20), uint8(7))
 	f.Add([]byte("ab\x01\x01cd\x01\x01"), uint8(8), uint8(4))
@@ -282,6 +438,19 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 	f.Add([]byte("\x84bcd\x03\x00next"), uint8(6), uint8(2))
 	f.Add([]byte("\xc4b\x01\x01cd\x01\x01\x03\x00more"), uint8(6), uint8(2))
 	f.Add([]byte("\x04\x05\x06\x07\x04\x05\x06\x07"), uint8(18), uint8(6))
+	f.Add([]byte("dddddddddd\x00ee\x00ff\x80\x00"), uint8(8), uint8(2))
+	f.Add([]byte("dddddddddd\x00ee\x00ff\x81\x00"), uint8(8), uint8(2))
+	f.Add([]byte("dddddddddd\x00ee\x00ff\xc1\x01"), uint8(8), uint8(2))
+	f.Add([]byte("dd\x00dddddddddd\x00ff\x92\x00"), uint8(8), uint8(2))
+	f.Add([]byte("dddddddddd\x00\x00ff\x93\x00"), uint8(8), uint8(2))
+	f.Add([]byte("dddddddddd\x00\x00ff\x94\x00"), uint8(2), uint8(8))
+	f.Add([]byte("dddddddddd\x00ee\x00ff\x95\x00"), uint8(8), uint8(2))
+	f.Add([]byte("dd\x00dddddddddd\x00ff\x96\x00"), uint8(8), uint8(2))
+	f.Add([]byte("dddddddddd\x00\x00ff\x97\x00"), uint8(8), uint8(2))
+	f.Add([]byte("dddd\x00eeeeeeee\x80\x00"), uint8(6), uint8(2))
+	f.Add([]byte("eeeeee\x02\x80\x00"), uint8(6), uint8(2))
+	f.Add([]byte("dd\x02e\x00fg\x02\x80\x00"), uint8(1), uint8(6))
+	f.Add([]byte("\x84dd\x03\x02e\x00f"), uint8(1), uint8(6))
 
 	f.Fuzz(func(t *testing.T, data []byte, from, to uint8) {
 		const rows = 120
@@ -289,11 +458,25 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 			return
 		}
 		a, b := int(from)%40+2, int(to)%40+2
-		restore := data[0]&0x80 != 0
 		resized, written := New(rows, a), New(rows, b)
-		for _, s := range []*Screen{resized, written} {
-			widthOps(t, s, data)
-			if restore {
+		screens := []*Screen{resized, written}
+		shifted := false
+		for start, i := 0, 1; i <= len(data); i++ {
+			if i < len(data) && data[i] < 0x80 {
+				continue
+			}
+			for _, s := range screens {
+				widthOps(t, s, data[start:i])
+			}
+			if i+1 < len(data) {
+				shifted = editLines(t, screens, data[i], data[i+1]) || shifted
+			}
+			start = min(i+2, len(data))
+			i++
+		}
+		restore := data[0]&0x80 != 0 && !shifted
+		if restore {
+			for _, s := range screens {
 				writeString(t, s, "\x1b8")
 			}
 		}

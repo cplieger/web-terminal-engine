@@ -798,14 +798,23 @@ func (s *Screen) scrollIfNeeded() {
 // soft continuation of the row above it. Called at the two autowrap sites in
 // put(), after any scroll has settled the cursor row. Only a true full-row
 // wrap chains rows for the autolinker; a wrap inside a DECSLRM left/right
-// margin box continues box content, not the row, so it is not recorded.
+// margin box continues box content, not the row, so it is not recorded. A
+// row above with no text in its last column continues nothing: SU and SD
+// keep a pending wrap, as xterm does, while blanking the row it was armed on.
 func (s *Screen) markWrapContinuation() {
 	if s.leftBound() != 0 || s.rightBound() != s.Width-1 {
 		return
 	}
-	if s.curY >= 0 && s.curY < len(s.wrapped) {
-		s.wrapped[s.curY] = true
+	if s.curY < 0 || s.curY >= len(s.wrapped) {
+		return
 	}
+	if s.curY > 0 {
+		last := s.Cells[s.curY-1][s.Width-1]
+		if !last.widePad && contentLen([]Cell{last}) == 0 {
+			return
+		}
+	}
+	s.wrapped[s.curY] = true
 }
 
 // drainTopRow commits main-screen row 0 to the pending scrollback drain

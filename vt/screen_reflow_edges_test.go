@@ -344,6 +344,19 @@ func TestResizeKeepsLinesALineShiftSeparated(t *testing.T) {
 	}
 }
 
+// SD keeps a pending wrap, as xterm's RevScroll does, but the row it blanks
+// holds no text for the next character to continue.
+func TestResizeKeepsTextAfterAScrollBlankedTheRowItWrapsFrom(t *testing.T) {
+	s := New(8, 10)
+	writeString(t, s, strings.Repeat("e", 10)+"\x1b[3Te")
+
+	s.Resize(8, 40)
+
+	if got, want := screenRows(s)[:4], []string{"", "e", "", strings.Repeat("e", 10)}; !slices.Equal(got, want) {
+		t.Errorf("rows after widening to 40 = %q, want %q", got, want)
+	}
+}
+
 // A full-screen scroll sends the top row to scrollback, so the row that
 // becomes the top still continues it.
 func TestResizeKeepsTheLinkAFullScreenScrollSendsToHistory(t *testing.T) {

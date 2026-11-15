@@ -31,7 +31,7 @@ The [esctest2](https://github.com/ThomasDickey/esctest2) conformance suite check
 
 ## Length limits
 
-The engine buffers at most 4096 bytes of an OSC payload, except an OSC 52 copy, and 256 bytes of a DECRQSS or XTGETTCAP query. The over-the-cap column below says what happens to a longer one. An OSC 52 copy holds up to 1 MiB of base64 (`vt.MaxOSC52Len`, about 768 KiB of text); a longer one is dropped whole and the client is told it was refused, as [clipboardRefused](wire-protocol.md#clipboardrefused-10) describes. An OSC 8 link of about 4 KB or more leaves the current link, if any, in place.
+The engine buffers at most 4096 bytes of an OSC payload, except an OSC 52 copy, and 256 bytes of a DECRQSS or XTGETTCAP query. The over-the-cap column below says what happens to a longer one. An OSC 52 copy holds up to 1 MiB of base64 (`vt.MaxOSC52Len`, about 768 KiB of text). A longer one is dropped whole and the client is told it was refused, as [clipboardRefused](wire-protocol.md#clipboardrefused-10) describes. An OSC 8 link of about 4 KB or more leaves the current link, if any, in place.
 
 ## String terminators
 

@@ -6,7 +6,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 
@@ -17,6 +19,14 @@ import (
 // childEnv makes the test binary run osc52copy.Main as the named command with
 // a nil Streams.TTY, so it writes to its own controlling terminal.
 const childEnv = "OSC52COPY_TEST_ARGV0"
+
+// Linux delivers a process-group signal to the main thread first, so pinning
+// the child's Main there makes a resize pend on the writing thread every run.
+func init() {
+	if _, ok := os.LookupEnv(childEnv); ok {
+		runtime.LockOSThread()
+	}
+}
 
 func TestMain(m *testing.M) {
 	if argv0, ok := os.LookupEnv(childEnv); ok {
@@ -59,6 +69,23 @@ func runChild(t *testing.T, stdin io.Reader, ctty *os.File) (stderr string, code
 // Another writer keeps the same terminal's buffer full: a write split into
 // several write(2) calls lets its bytes land inside the sequence.
 func TestMainWritesOneUnbrokenSequenceToTheControllingTerminal(t *testing.T) {
+	copyBesideAnotherWriter(t, nil)
+}
+
+// A resize signals the foreground process group, and a signal pending during a
+// write to a full terminal ends write(2) with a short count.
+func TestMainWritesOneUnbrokenSequenceThroughAResize(t *testing.T) {
+	copyBesideAnotherWriter(t, func(master *os.File, i int) {
+		_ = pty.Setsize(master, &pty.Winsize{Rows: uint16(24 + i%2), Cols: 80})
+	})
+}
+
+// copyBesideAnotherWriter runs a maxText copy in a child whose controlling
+// terminal is a pty slave that another writer fills the whole time, calls
+// during (when not nil) in a loop on the master meanwhile, and requires the
+// exact sequence on the master.
+func copyBesideAnotherWriter(t *testing.T, during func(master *os.File, i int)) {
+	t.Helper()
 	master, slave, err := pty.Open()
 	if err != nil {
 		t.Fatal(err)
@@ -72,9 +99,8 @@ func TestMainWritesOneUnbrokenSequenceToTheControllingTerminal(t *testing.T) {
 		_, _ = io.Copy(&out, master) // ends with EIO once every slave fd is closed
 	}()
 	stop := make(chan struct{})
-	foreignDone := make(chan struct{})
-	go func() {
-		defer close(foreignDone)
+	var busy sync.WaitGroup
+	busy.Go(func() {
 		for {
 			select {
 			case <-stop:
@@ -85,12 +111,24 @@ func TestMainWritesOneUnbrokenSequenceToTheControllingTerminal(t *testing.T) {
 				return
 			}
 		}
-	}()
+	})
+	if during != nil {
+		busy.Go(func() {
+			for i := 0; ; i++ {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				during(master, i)
+			}
+		})
+	}
 
 	text := strings.Repeat("abc", maxText/3)
 	stderr, code := runChild(t, strings.NewReader(text), slave)
 	close(stop)
-	<-foreignDone
+	busy.Wait()
 	_ = slave.Close()
 	<-readDone
 

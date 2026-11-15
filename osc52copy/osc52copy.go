@@ -30,8 +30,10 @@ type Streams struct {
 	// Stdin carries the text to copy.
 	Stdin io.Reader
 	// TTY is the terminal the OSC 52 sequence is written to. Nil means the
-	// controlling terminal, /dev/tty, opened for the write with a blocking fd
-	// so no other output lands inside the sequence.
+	// controlling terminal, /dev/tty, opened for the write with a blocking fd,
+	// and makes Main ignore SIGWINCH for the rest of the process, so neither a
+	// full terminal nor a resize splits the write and lets other output inside
+	// the sequence. A job-control stop during the write can still split it.
 	TTY io.Writer
 	// Stderr receives one line explaining a failure.
 	Stderr io.Writer
@@ -114,12 +116,12 @@ func writeCopy(name string, s Streams) int {
 
 const ttyPath = "/dev/tty"
 
-// writeTTY writes seq to tty, or to the controlling terminal when tty is nil.
 func writeTTY(tty io.Writer, seq []byte) error {
 	if tty != nil {
 		_, err := tty.Write(seq)
 		return err
 	}
+	ignoreResize()
 	f, err := openBlockingWrite(ttyPath)
 	if err != nil {
 		return err

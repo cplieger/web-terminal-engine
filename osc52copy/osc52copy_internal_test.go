@@ -1,4 +1,4 @@
-//go:build unix
+//go:build linux
 
 package osc52copy
 
@@ -10,8 +10,9 @@ import (
 	"testing"
 )
 
-// A FIFO stands in for the terminal: Go's poller takes both, so an opener that
-// goes through it hands back a non-blocking fd for either.
+// A FIFO stands in for the terminal: on Linux Go's poller takes both, so an
+// opener that goes through it hands back a non-blocking fd for either. Darwin
+// never polls a FIFO (https://go.dev/issue/24164), hence the linux tag.
 func TestOpenBlockingWriteLeavesFdBlocking(t *testing.T) {
 	fifo := filepath.Join(t.TempDir(), "tty")
 	if err := syscall.Mkfifo(fifo, 0o600); err != nil {

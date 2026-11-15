@@ -178,7 +178,7 @@ When several clients share a session, the screen takes the size of the client th
 
 ## The processes a session starts
 
-A session's process starts at 80 columns by 24 rows when it starts before any client has reported a size, as `Create` and `CreateWith` start it. The first client's size then reaches the process as a resize and `SIGWINCH`. Text the process printed before the resize and does not repaint keeps the layout it was printed at: a client narrower than 80 columns shows each of those rows cut at its own width.
+A session's process starts at 80 columns by 24 rows when it starts before any client has reported a size, as `Create` and `CreateWith` start it. The first client's size then reaches the process as a resize and `SIGWINCH` when it differs from 80 by 24. Text the process printed before the resize and does not repaint keeps the layout it was printed at: a client narrower than 80 columns shows each of those rows cut at its own width, and a client shorter than 24 rows loses the rows below its last one.
 
 A session's process inherits the server's environment plus a default terminal identity: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=iTerm.app` and `TERM_PROGRAM_VERSION=3.6.6`. This identity advertises truecolor, `OSC 9;4` progress reporting and DEC 2026 synchronized output, which the engine implements. `WithEnv` values come after these defaults, so your entry for the same variable wins.
 

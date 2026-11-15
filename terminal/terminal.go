@@ -37,11 +37,9 @@ const (
 	wsReadLimit = 64 * 1024
 	ptyReadBuf  = 4096
 	// defaultCols and defaultRows are the spawn size before any client reports
-	// one: 80x24, the VT100 screen and xterm's default geometry, at which a
-	// program that lays out by the width it reads at start stays readable. The
-	// first client's size reaches the PTY as a resize. A client narrower than 80
-	// keeps only each row's first columns of output nothing repaints, since
-	// vt.Screen.Resize does not re-wrap.
+	// one: 80x24, the VT100 screen and xterm's default geometry, so a program
+	// that lays out by the width it reads at start stays readable. Rows painted
+	// before a client narrows the screen are cut at its width, not re-wrapped.
 	defaultCols   = 80
 	defaultRows   = 24
 	flushInterval = 50 * time.Millisecond

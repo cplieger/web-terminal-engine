@@ -169,15 +169,19 @@ func TestResizeSendsTheCursorsLineToScrollbackWhenTheRowsBelowOverflow(t *testin
 	}{
 		{
 			"narrower", 5, 10, "TOP!!!!!!!\r\n" + strings.Repeat("b", 40) + "\x1b[1;4H", 5, 5,
-			[]string{"TOP!!!!!!!", strings.Repeat("b", 40)}, slices.Repeat([]string{"bbbbb"}, 5), 3,
+			[]string{"TOP!!!!!!!", strings.Repeat("b", 40)},
+			slices.Repeat([]string{"bbbbb"}, 5), 3,
 		},
 		{
 			"shorter", 6, 20, "top\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5\x1b[1;2H", 3, 20,
-			[]string{"top", "l1", "l2", "l3", "l4", "l5"}, []string{"l3", "l4", "l5"}, 1,
+			[]string{"top", "l1", "l2", "l3", "l4", "l5"},
+			[]string{"l3", "l4", "l5"},
+			1,
 		},
 		{
 			"narrower with a wrap pending", 5, 10, "\x1b[2;1H" + strings.Repeat("b", 40) + "\x1b[HTOP!!!!!!!", 5, 5,
-			[]string{"TOP!!!!!!!", strings.Repeat("b", 40)}, slices.Repeat([]string{"bbbbb"}, 5), 4,
+			[]string{"TOP!!!!!!!", strings.Repeat("b", 40)},
+			slices.Repeat([]string{"bbbbb"}, 5), 4,
 		},
 	}
 	for _, tt := range tests {

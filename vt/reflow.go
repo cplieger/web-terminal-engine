@@ -125,27 +125,36 @@ func (g *reflowGrid) readLine(start, end int) (l logicalLine, at int) {
 			n := contentLen(row)
 			row, l.tail = row[:n], row[n:]
 		}
-		cursorX := -1
-		if r == curY {
-			cursorX = g.curX
+		if r != curY {
+			l.cells, _ = appendRow(l.cells, row, -1)
+			continue
 		}
-		for x, c := range row {
-			if x == cursorX {
-				at = len(l.cells)
-			}
-			if c.widePad && x != cursorX {
-				continue
-			}
-			l.cells = append(l.cells, c)
-		}
-		if cursorX >= len(row) {
-			at = len(l.cells) + cursorX - len(row)
-		}
-		if r == curY && g.pendingWrap {
+		l.cells, at = appendRow(l.cells, row, g.curX)
+		if g.pendingWrap {
 			at++
 		}
 	}
 	return l, at
+}
+
+// appendRow appends row to cells without any wide character's pad but the one
+// at cursorX, and returns the offset in cells of column cursorX, or -1 when
+// cursorX is -1.
+func appendRow(cells, row []Cell, cursorX int) (joined []Cell, at int) {
+	at = -1
+	for x, c := range row {
+		if x == cursorX {
+			at = len(cells)
+		}
+		if c.widePad && x != cursorX {
+			continue
+		}
+		cells = append(cells, c)
+	}
+	if cursorX >= len(row) {
+		at = len(cells) + cursorX - len(row)
+	}
+	return cells, at
 }
 
 // layout wraps lines onto rows of width cols, as writing them at that width

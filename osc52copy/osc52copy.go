@@ -5,7 +5,8 @@
 // have.
 //
 // A consumer binary dispatches on its argv[0] (a symlink per name in [Names])
-// and calls [Main]. Only a copy of stdin to the clipboard selection is
+// and calls [Main], leaving [Streams].TTY nil to write to its controlling
+// terminal. Only a copy of stdin to the clipboard selection is
 // supported, as text: a paste, another selection, a file or text argument, or
 // any option that changes what is copied fails with a message on stderr.
 package osc52copy
@@ -15,9 +16,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 )
@@ -26,7 +29,12 @@ import (
 type Streams struct {
 	// Stdin carries the text to copy.
 	Stdin io.Reader
-	// TTY is the terminal the OSC 52 sequence is written to, normally /dev/tty.
+	// TTY is the terminal the OSC 52 sequence is written to. Nil means the
+	// controlling terminal, /dev/tty, opened for the write with a blocking fd,
+	// and makes Main ignore SIGWINCH for the rest of the process, so neither a
+	// full terminal nor a resize splits the write and lets other output inside
+	// the sequence. A job-control stop, or another signal the process catches,
+	// during the write can still split it.
 	TTY io.Writer
 	// Stderr receives one line explaining a failure.
 	Stderr io.Writer
@@ -53,7 +61,8 @@ func Names() []string {
 // OSC 52 clipboard write, 1 when the copy was refused (larger than the
 // terminal accepts, or a paste) or an I/O error stopped it, and 2 for an
 // unknown name or an unsupported argument. Nothing is written to TTY unless
-// the copy succeeds.
+// the copy succeeds, and a nil TTY is opened only then, so a refused copy needs
+// no terminal.
 func Main(argv0 string, args []string, s Streams) int {
 	name := filepath.Base(argv0)
 	var err error
@@ -99,11 +108,50 @@ func writeCopy(name string, s Streams) int {
 	seq = append(seq, "\x1b]"+osc52Prefix...)
 	seq = base64.StdEncoding.AppendEncode(seq, text)
 	seq = append(seq, "\x1b\\"...)
-	if _, err := s.TTY.Write(seq); err != nil {
+	if err := writeTTY(s.TTY, seq); err != nil {
 		fmt.Fprintf(s.Stderr, "%s: write to the terminal: %v\n", name, err)
 		return exitFail
 	}
 	return exitOK
+}
+
+const ttyPath = "/dev/tty"
+
+func writeTTY(tty io.Writer, seq []byte) error {
+	if tty != nil {
+		_, err := tty.Write(seq)
+		return err
+	}
+	ignoreResize()
+	f, err := openBlockingWrite(ttyPath)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(seq)
+	return errors.Join(err, f.Close())
+}
+
+// sysOpen is a test seam: Go's signal handlers carry SA_RESTART, so a test on
+// a local filesystem cannot make open return EINTR.
+var sysOpen = syscall.Open
+
+// openBlockingWrite opens path write-only and leaves the fd blocking. Opened
+// with os.OpenFile, a terminal joins Go's poller, which sets O_NONBLOCK: a
+// write to a full terminal then takes several write(2) calls, another
+// process's output lands inside the OSC 52 string, and the terminal ends the
+// string at its first ESC. os.NewFile keeps a blocking fd out of the poller.
+// EINTR is retried as os.OpenFile does (https://go.dev/issue/11180, 39237).
+func openBlockingWrite(path string) (*os.File, error) {
+	for {
+		fd, err := sysOpen(path, syscall.O_WRONLY|syscall.O_CLOEXEC, 0)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, &os.PathError{Op: "open", Path: path, Err: err}
+		}
+		return os.NewFile(uintptr(fd), path), nil
+	}
 }
 
 // The xclip options parseXclip handles by name.

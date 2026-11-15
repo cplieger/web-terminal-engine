@@ -51,8 +51,8 @@ func (g reflowGrid) relayout(cols int) reflowGrid {
 }
 
 // layoutHolds reports whether re-wrapping g at cols would change nothing: no
-// row continues the one above, every row's content fits, and the cursor keeps
-// its column with no wrap pending.
+// row continues the one above, every row's content fits with no pad in it
+// but the cursor's, and the cursor keeps its column with no wrap pending.
 func (g *reflowGrid) layoutHolds(cols int) bool {
 	if g.pendingWrap || g.curX >= cols {
 		return false
@@ -61,8 +61,14 @@ func (g *reflowGrid) layoutHolds(cols int) bool {
 		if y > 0 && g.wrappedAt(y) {
 			return false
 		}
-		if contentLen(row) > cols {
+		n := contentLen(row)
+		if n > cols {
 			return false
+		}
+		for x, c := range row[:n] {
+			if c.widePad && (y != g.curY || x != g.curX) {
+				return false
+			}
 		}
 	}
 	return true
@@ -70,8 +76,8 @@ func (g *reflowGrid) layoutHolds(cols int) bool {
 
 // logicalLine is one line of a grid, its rows joined by soft wraps.
 type logicalLine struct {
-	// cells is the text, without its last row's padding or the pad before a
-	// wrapped wide character, unless the cursor is on that pad.
+	// cells is the text, without its last row's padding or any wide
+	// character's pad but the one the cursor is on.
 	cells []Cell
 	// tail is the padding after the text on its last row, kept for its paint.
 	tail []Cell
@@ -115,21 +121,29 @@ func (g *reflowGrid) readLine(start, end int) (l logicalLine, at int) {
 	at = -1
 	for r := start; r <= end; r++ {
 		row := g.cells[r]
-		n := len(row)
-		switch {
-		case r == end:
-			n = contentLen(row)
-			l.tail = row[n:]
-		case n > 0 && row[n-1].widePad && (r != curY || g.curX != n-1):
-			n--
+		if r == end {
+			n := contentLen(row)
+			row, l.tail = row[:n], row[n:]
 		}
+		cursorX := -1
 		if r == curY {
-			at = len(l.cells) + g.curX
-			if g.pendingWrap {
-				at++
-			}
+			cursorX = g.curX
 		}
-		l.cells = append(l.cells, row[:n]...)
+		for x, c := range row {
+			if x == cursorX {
+				at = len(l.cells)
+			}
+			if c.widePad && x != cursorX {
+				continue
+			}
+			l.cells = append(l.cells, c)
+		}
+		if cursorX >= len(row) {
+			at = len(l.cells) + cursorX - len(row)
+		}
+		if r == curY && g.pendingWrap {
+			at++
+		}
 	}
 	return l, at
 }
@@ -139,20 +153,31 @@ func (g *reflowGrid) readLine(start, end int) (l logicalLine, at int) {
 // row; the caller fits the result to the screen's height.
 func layout(lines []logicalLine, cursor logicalCursor, cols, rowsHint int) reflowGrid {
 	g := reflowGrid{cells: make([][]Cell, 0, rowsHint), wrapped: make([]bool, 0, rowsHint)}
+	mayPend := cursor.pendingWrap || !textAfter(lines, cursor.line)
 	for i, l := range lines {
 		at := -1
 		if i == cursor.line {
 			at = cursor.offset
 		}
-		g.appendLine(l, at, cursor.pendingWrap, cols)
+		g.appendLine(l, at, mayPend, cols)
 	}
 	return g
 }
 
+// textAfter reports whether a line after lines[i] holds text.
+func textAfter(lines []logicalLine, i int) bool {
+	for _, l := range lines[i+1:] {
+		if len(l.cells) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // appendLine wraps l onto new rows of width cols, without splitting a wide
 // character, and places the cursor when at, its offset in l or -1, falls in
-// it. wasPending is whether a wrap was pending before the resize.
-func (g *reflowGrid) appendLine(l logicalLine, at int, wasPending bool, cols int) {
+// it. mayPend is whether a cursor just past a full last row may pend a wrap.
+func (g *reflowGrid) appendLine(l logicalLine, at int, mayPend bool, cols int) {
 	row := g.newRow(cols, l.continuesHistory)
 	x := 0
 	for i := 0; i < len(l.cells); {
@@ -180,22 +205,23 @@ func (g *reflowGrid) appendLine(l logicalLine, at int, wasPending bool, cols int
 	if at < len(l.cells) {
 		return
 	}
-	g.placePastText(x+at-len(l.cells), x, wasPending, cols, l.tail)
+	g.placePastText(x+at-len(l.cells), x, mayPend, cols, l.tail)
 }
 
 // placePastText puts a cursor that sat after its line's text, at column col
 // of the line's last row whose text ends at x. Blank space with room keeps the
-// cursor on the row. A full row keeps a wrap only when one was pending, and
-// that wrap still lands on the next row; otherwise it gains a continuation
-// row for the cursor, moving the rows below down by one.
-func (g *reflowGrid) placePastText(col, x int, wasPending bool, cols int, tail []Cell) {
+// cursor on the row. A cursor just past a full row pends a wrap when mayPend:
+// a wrap was pending, which still lands on the next row, or no later line
+// holds text for it to land on. Otherwise the row gains a continuation row
+// for the cursor, moving the rows below down by one.
+func (g *reflowGrid) placePastText(col, x int, mayPend bool, cols int, tail []Cell) {
 	last := len(g.cells) - 1
 	switch {
 	case col < cols:
 		g.curY, g.curX = last, col
 	case x < cols:
 		g.curY, g.curX = last, cols-1
-	case col == cols && wasPending:
+	case col == cols && mayPend:
 		g.curY, g.curX, g.pendingWrap = last, cols-1, true
 	default:
 		copy(g.newRow(cols, true), tail)

@@ -25,8 +25,8 @@ func TestResizePlacesTheCursorAfterItsLineWhereTheNextCharacterBelongs(t *testin
 			wantRows: []string{"ab", "cd", "Z", ""}, wantLines: []string{"ab  cd  Z"},
 		},
 		{
-			name: "written spaces survive a round trip that drops the pending wrap", rows: 4, cols: 8,
-			input: "ab  cd  ", widths: []int{5, 8},
+			name: "written spaces survive a round trip through a width they do not fill", rows: 4, cols: 8,
+			input: "ab  cd  ", widths: []int{5, 8}, wantPending: true,
 			wantRows: []string{"ab  cd", "Z", "", ""}, wantLines: []string{"ab  cd  Z"},
 		},
 		{
@@ -63,6 +63,45 @@ func TestResizePlacesTheCursorAfterItsLineWhereTheNextCharacterBelongs(t *testin
 			}
 			if got := historyLines(s); !slices.Equal(got, tt.wantLines) {
 				t.Errorf("lines after writing Z = %q, want %q", got, tt.wantLines)
+			}
+		})
+	}
+}
+
+// With no text below, a line that fills its last row at the new width leaves
+// the wrap pending, as writing it at that width does, so a shell's next
+// output and its carriage-return redraw land where they would have.
+func TestResizePendsTheWrapAfterALineThatFillsTheLastRowWithNothingBelow(t *testing.T) {
+	tests := []struct {
+		name, before, after string
+		wantRows            []string
+		wantDrained         []string
+	}{
+		{
+			name: "the next output follows the line", before: "out1\r\nout2\r\n$ ls -la", after: "\r\nfile",
+			wantRows: []string{"out2", "$ ls -la", "file"}, wantDrained: []string{"out1"},
+		},
+		{
+			name: "a carriage-return redraw replaces the line", before: "$ abcdef", after: "\r\x1b[K$ abcdef",
+			wantRows: []string{"$ abcdef", "", ""},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New(3, 20)
+			writeString(t, s, tt.before)
+
+			s.Resize(3, 8)
+			if y, x := s.CursorPos(); x != 7 || !s.pendingWrap {
+				t.Errorf("cursor = (%d, %d) pending %v, want column 7 with the wrap pending", y, x, s.pendingWrap)
+			}
+			writeString(t, s, tt.after)
+
+			if got := screenRows(s); !slices.Equal(got, tt.wantRows) {
+				t.Errorf("rows = %q, want %q", got, tt.wantRows)
+			}
+			if got := drainedText(s); !slices.Equal(got, tt.wantDrained) {
+				t.Errorf("drained = %q, want %q", got, tt.wantDrained)
 			}
 		})
 	}

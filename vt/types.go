@@ -76,7 +76,8 @@ type Cell struct {
 	// program wrote is text and the blanks an erase or a new row leave are not.
 	drawn bool
 	// widePad marks the blank autowrap leaves in a row's last column when a
-	// wide character does not fit there: layout a re-wrap drops.
+	// wide character does not fit there: layout, not text, so a re-wrap drops
+	// it unless the cursor is on it.
 	widePad bool
 }
 

@@ -67,20 +67,19 @@ func TestResizeNarrowerSendsOverflowToScrollback(t *testing.T) {
 
 	s.Resize(2, 4)
 
-	if got, want := drainedText(s), []string{"aaaa", "bbbb"}; !slices.Equal(got, want) {
-		t.Errorf("drained = %q, want %q: the rows the re-wrap pushed off the top are history", got, want)
+	if got, want := drainedText(s), []string{"aaaa"}; !slices.Equal(got, want) {
+		t.Errorf("drained = %q, want %q: the row the re-wrap pushed off the top is history", got, want)
 	}
-	// The line fills its last row with no wrap pending, so the cursor after it
-	// takes a continuation row of its own: a pending wrap could land the next
-	// character on another line's row.
-	if got, want := screenRows(s), []string{"cccc", ""}; !slices.Equal(got, want) {
+	if got, want := screenRows(s), []string{"bbbb", "cccc"}; !slices.Equal(got, want) {
 		t.Errorf("rows = %q, want %q", got, want)
 	}
-	if got, want := s.wrapped, []bool{true, true}; !slices.Equal(got, want) {
-		t.Errorf("wrapped = %v, want %v: both rows continue the line now in history", got, want)
+	if !s.wrapped[0] {
+		t.Error("wrapped[0] = false, want true: the top row continues the line now in history")
 	}
-	if y, x := s.CursorPos(); y != 1 || x != 0 || s.pendingWrap {
-		t.Errorf("cursor = (%d, %d) pending %v, want (1, 0) with no wrap pending", y, x, s.pendingWrap)
+	// No line below holds text, so the wrap pends as writing the line at this
+	// width leaves it.
+	if y, x := s.CursorPos(); y != 1 || x != 3 || !s.pendingWrap {
+		t.Errorf("cursor = (%d, %d) pending %v, want (1, 3) with the wrap pending", y, x, s.pendingWrap)
 	}
 	writeString(t, s, "d")
 	if got, want := screenRows(s), []string{"cccc", "d"}; !slices.Equal(got, want) {
@@ -90,14 +89,14 @@ func TestResizeNarrowerSendsOverflowToScrollback(t *testing.T) {
 
 func TestResizeNarrowerGivesUpBlankRowsBeforeHistory(t *testing.T) {
 	s := New(3, 10)
-	writeString(t, s, "abcdefghijk")
+	writeString(t, s, "abcdefghijkl")
 
 	s.Resize(3, 4)
 
 	if got := drainedText(s); len(got) != 0 {
 		t.Errorf("drained = %q, want none: the blank row below the cursor makes room first", got)
 	}
-	if got, want := screenRows(s), []string{"abcd", "efgh", "ijk"}; !slices.Equal(got, want) {
+	if got, want := screenRows(s), []string{"abcd", "efgh", "ijkl"}; !slices.Equal(got, want) {
 		t.Errorf("rows = %q, want %q", got, want)
 	}
 }

@@ -253,6 +253,19 @@ func TestResizeKeepsThePadTheCursorIsOn(t *testing.T) {
 	}
 }
 
+func TestResizeDropsAKeptPadOnceTheCursorLeavesIt(t *testing.T) {
+	s := New(3, 5)
+	writeString(t, s, "abcd中\x1b[1;5H")
+
+	s.Resize(3, 10)
+	writeString(t, s, "\r")
+	s.Resize(3, 20)
+
+	if got, want := historyLines(s), []string{"abcd中"}; !slices.Equal(got, want) {
+		t.Errorf("lines = %q, want %q: the pad is layout, not text", got, want)
+	}
+}
+
 // A row inserted, deleted or scrolled away ends the soft wrap through it: the
 // row that lands below a new neighbour is not that neighbour's continuation, so
 // a widen keeps the two apart.

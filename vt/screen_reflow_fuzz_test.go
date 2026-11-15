@@ -91,8 +91,8 @@ func assertKept(t *testing.T, before, after logicalScreen, what string) {
 // roundTrip resizes s to w2 and back to its width, checking the grid shape
 // each time and, when the lines fit the screen at both widths so nothing
 // leaves it, that both resizes keep the lines and the cursor. The fit leaves
-// a row spare: a cursor after a line that fills its last row takes a row of
-// its own.
+// a row spare: a cursor after a line that fills its last row, with text
+// below, takes a row of its own.
 func roundTrip(t *testing.T, s *Screen, w2 int) {
 	t.Helper()
 	w1 := s.Width
@@ -223,8 +223,9 @@ func widthOps(t *testing.T, s *Screen, data []byte) {
 	writeString(t, s, b.String())
 }
 
-// logicalText is logicalOf with a wide character's pad left out and its
-// spacer read as '.', so lines written at different widths compare.
+// logicalText is logicalOf with every wide character's pad left out and its
+// spacer read as '.', so lines written at different widths compare. A cursor
+// on a pad reads as the offset of the cell after it.
 func logicalText(s *Screen) (lines []string, cursorLine, cursorOffset int) {
 	var line []rune
 	var kept int // len(line) up to its last cell a character was written to
@@ -236,15 +237,15 @@ func logicalText(s *Screen) (lines []string, cursorLine, cursorOffset int) {
 		if y > 0 && !s.wrapped[y] {
 			flush()
 		}
-		if y == s.curY {
-			cursorLine, cursorOffset = len(lines), len(line)+s.curX
-			if s.pendingWrap {
-				cursorOffset++
-			}
-		}
 		for x, c := range row {
+			if y == s.curY && x == s.curX {
+				cursorLine, cursorOffset = len(lines), len(line)
+				if s.pendingWrap {
+					cursorOffset++
+				}
+			}
 			switch {
-			case c.widePad && x == len(row)-1:
+			case c.widePad:
 				continue
 			case c.Ch == 0:
 				line = append(line, '.')
@@ -267,9 +268,10 @@ func logicalText(s *Screen) (lines []string, cursorLine, cursorOffset int) {
 // text written at one width and resized to another reads as the text written
 // at the new width, the cursor at the same place in the same line. data[0]'s
 // high bit first restores the last DECSC, putting the cursor mid-text or
-// above other lines. Only a cursor left at the end must land the next text
-// the same way: a restored cursor after a full last row takes a continuation
-// row where writing at the new width pends a wrap onto the next line's row.
+// above other lines. Only a cursor left at the end must keep the same pending
+// wrap and land the next text the same way: a restored cursor after a full
+// last row with text below takes a continuation row, where writing at the new
+// width pends a wrap onto the next line's row.
 func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 	f.Add([]byte("abcdefghijklmnop\x00qr\x01st\x00\x00uvwxyz"), uint8(20), uint8(7))
 	f.Add([]byte("ab\x01\x01cd\x01\x01"), uint8(8), uint8(4))
@@ -279,6 +281,7 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 	f.Add([]byte("\x84bcd\x03\x00next"), uint8(4), uint8(6))
 	f.Add([]byte("\x84bcd\x03\x00next"), uint8(6), uint8(2))
 	f.Add([]byte("\xc4b\x01\x01cd\x01\x01\x03\x00more"), uint8(6), uint8(2))
+	f.Add([]byte("\x04\x05\x06\x07\x04\x05\x06\x07"), uint8(18), uint8(6))
 
 	f.Fuzz(func(t *testing.T, data []byte, from, to uint8) {
 		const rows = 120
@@ -311,6 +314,9 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 		}
 		if restore {
 			return
+		}
+		if resized.pendingWrap != written.pendingWrap {
+			t.Fatalf("width %d resized to %d leaves the wrap pending %v; written at %d it is %v", a, b, resized.pendingWrap, b, written.pendingWrap)
 		}
 		widthOps(t, resized, []byte("ZYX\x00Q"))
 		widthOps(t, written, []byte("ZYX\x00Q"))

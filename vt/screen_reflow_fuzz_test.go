@@ -423,10 +423,10 @@ func editLines(t *testing.T, screens []*Screen, op, at byte) bool {
 // FuzzResize_matchesWritingAtTheNewWidth pins the reflow to its definition:
 // text written at one width and resized to another reads as the text written
 // at the new width, the cursor at the same place in the same line. A byte
-// from 0x80 up after the first is a line edit (planLineEdit). data[0]'s high
-// bit restores the last DECSC unless an edit moved its row. Only a cursor left
-// at the end must keep the same pending wrap and land the next text the same
-// way: a restored cursor after a full last row with text below takes a
+// from 0x80 up after the first is a line edit (planLineEdit). Unless an edit
+// moved rows, data[0]'s high bit restores the last DECSC after the resize, and
+// with bit 6 before it too. A cursor restored before the resize keeps neither
+// pending wrap nor next text: after a full last row with text below it takes a
 // continuation row, where writing at the new width pends a wrap.
 func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 	f.Add([]byte("abcdefghijklmnop\x00qr\x01st\x00\x00uvwxyz"), uint8(20), uint8(7))
@@ -451,6 +451,12 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 	f.Add([]byte("eeeeee\x02\x80\x00"), uint8(6), uint8(2))
 	f.Add([]byte("dd\x02e\x00fg\x02\x80\x00"), uint8(1), uint8(6))
 	f.Add([]byte("\x84dd\x03\x02e\x00f"), uint8(1), uint8(6))
+	f.Add([]byte("\x84dd\x03\x02e\x00f"), uint8(2), uint8(4))
+	f.Add([]byte("\x84dd\x03\x02e\x00f"), uint8(4), uint8(2))
+	f.Add([]byte("\x84ddddddddddddddddddd\x00f\x01\x03\x00eeeeee"), uint8(18), uint8(8))
+	f.Add([]byte("\x84ddddddddddddddddddd\x00f\x01\x03\x00eeeeee"), uint8(8), uint8(18))
+	f.Add([]byte("\x84ddddddddd\x03\x00eeeeee"), uint8(18), uint8(8))
+	f.Add([]byte("\x84ddddddddd\x03\x00eeeeee"), uint8(8), uint8(18))
 
 	f.Fuzz(func(t *testing.T, data []byte, from, to uint8) {
 		const rows = 120
@@ -474,8 +480,9 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 			start = min(i+2, len(data))
 			i++
 		}
-		restore := data[0]&0x80 != 0 && !shifted
-		if restore {
+		restoreAfter := data[0]&0x80 != 0 && !shifted
+		restoreBefore := restoreAfter && data[0]&0x40 != 0
+		if restoreBefore {
 			for _, s := range screens {
 				writeString(t, s, "\x1b8")
 			}
@@ -489,13 +496,23 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 			return
 		}
 
-		gotLines, gotLine, gotOffset := logicalText(resized)
-		wantLines, wantLine, wantOffset := logicalText(written)
-		if !slices.Equal(gotLines, wantLines) || gotLine != wantLine || gotOffset != wantOffset {
-			t.Fatalf("width %d resized to %d reads %q with the cursor at line %d offset %d; written at %d it reads %q, line %d offset %d",
-				a, b, gotLines, gotLine, gotOffset, b, wantLines, wantLine, wantOffset)
+		compare := func(what string) {
+			t.Helper()
+			gotLines, gotLine, gotOffset := logicalText(resized)
+			wantLines, wantLine, wantOffset := logicalText(written)
+			if !slices.Equal(gotLines, wantLines) || gotLine != wantLine || gotOffset != wantOffset {
+				t.Fatalf("%s, width %d resized to %d reads %q with the cursor at line %d offset %d; written at %d it reads %q, line %d offset %d",
+					what, a, b, gotLines, gotLine, gotOffset, b, wantLines, wantLine, wantOffset)
+			}
 		}
-		if restore {
+		compare("after the resize")
+		if restoreAfter {
+			for _, s := range screens {
+				writeString(t, s, "\x1b8")
+			}
+			compare("after ESC 8")
+		}
+		if restoreBefore {
 			return
 		}
 		if resized.pendingWrap != written.pendingWrap {
@@ -503,8 +520,8 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 		}
 		widthOps(t, resized, []byte("ZYX\x00Q"))
 		widthOps(t, written, []byte("ZYX\x00Q"))
-		gotLines, _, _ = logicalText(resized)
-		wantLines, _, _ = logicalText(written)
+		gotLines, _, _ := logicalText(resized)
+		wantLines, _, _ := logicalText(written)
 		if !slices.Equal(gotLines, wantLines) {
 			t.Fatalf("after more text, width %d resized to %d reads %q; written at %d it reads %q", a, b, gotLines, b, wantLines)
 		}

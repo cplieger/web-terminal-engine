@@ -107,6 +107,46 @@ func TestResizePendsTheWrapAfterALineThatFillsTheLastRowWithNothingBelow(t *test
 	}
 }
 
+// The DECSC slot is a place in the text: DECRC after a width change lands
+// where it lands when the same bytes are written at the new width.
+func TestResizeCarriesTheSavedCursorToItsPlaceInTheText(t *testing.T) {
+	const prompt = "aaaaaaaaaaaaaaaaaaaa\r\n$ \x1b7\r\nstatus"
+	const filled = "aaaaaaaaaa\x1b7\r\nstatus"
+	tests := []struct {
+		name, input, around, after string
+		from, to                   int
+	}{
+		{name: "narrower", input: prompt, from: 20, to: 10},
+		{name: "wider", input: prompt, from: 10, to: 20},
+		{name: "narrower under the alternate screen", input: prompt, around: "1049", from: 20, to: 10},
+		{name: "wider under the alternate screen", input: prompt, around: "47", from: 10, to: 20},
+		{name: "narrower to a pending wrap", input: filled, from: 20, to: 10},
+		{name: "wider from a pending wrap", input: filled, from: 10, to: 20},
+		{name: "narrower to a row the rest of the line wraps from", input: "abcd\x1b7ef", after: "\r", from: 8, to: 4},
+		{name: "narrower to a wide character's pad", input: "abc\x1b7中\r\nstatus", from: 6, to: 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New(6, tt.from)
+			writeString(t, s, tt.input)
+			if tt.around != "" {
+				writeString(t, s, "\x1b[?"+tt.around+"h")
+			}
+			s.Resize(6, tt.to)
+			if tt.around != "" {
+				writeString(t, s, "\x1b[?"+tt.around+"l")
+			}
+			writeString(t, s, "\x1b8"+tt.after+"X")
+
+			want := New(6, tt.to)
+			writeString(t, want, tt.input+"\x1b8"+tt.after+"X")
+			if got, wantRows := screenRows(s), screenRows(want); !slices.Equal(got, wantRows) {
+				t.Errorf("rows after ESC 8 %qX = %q, want %q as written at %d columns", tt.after, got, wantRows, tt.to)
+			}
+		})
+	}
+}
+
 func TestResizeGivesTheWideCharacterPadItsPaint(t *testing.T) {
 	s := New(3, 4)
 	writeString(t, s, "\x1b[41mab中")

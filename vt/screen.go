@@ -429,14 +429,14 @@ func (s *Screen) CursorPos() (row, col int) {
 	return s.curY, s.curX
 }
 
-// Resize adjusts the screen dimensions, preserving existing content. A width
-// change re-wraps the main screen's soft-wrapped lines, beneath the alternate
-// screen too. A main screen with more rows than the new height first gives up
-// blank rows below the cursor, then sends rows from the top to scrollback
-// (Drained), the cursor's too when it and the rows below it do not fit, and
-// discards none. The saved main screen keeps every row until the alternate
-// screen exits, which applies the same rule. The alternate screen is neither
-// reflowed nor drained. Each dimension is floored at 1 and capped at 1000.
+// Resize adjusts the screen dimensions, keeping its content. A width change
+// re-wraps the main screen's soft-wrapped lines, beneath the alternate screen
+// too, carrying the cursor and the main DECSC slot with their text. A main
+// screen taller than the new height gives up blank rows below the cursor, then
+// sends rows from the top to scrollback (Drained), the cursor's too when it
+// and the rows below it do not fit. The saved main screen keeps every row
+// until the alternate screen exits, which applies the same rule. The alternate
+// screen is neither reflowed nor drained. Each dimension is clamped to 1..1000.
 func (s *Screen) Resize(rows, cols int) {
 	cols = capDimension(max(cols, 1))
 	rows = capDimension(max(rows, 1))
@@ -446,7 +446,9 @@ func (s *Screen) Resize(rows, cols int) {
 		s.resizeHeight(rows)
 		s.resizeAltWidth(cols)
 	case widthChanged || rows != s.Height:
-		s.reflowMain(s.mainGrid().relayout(cols), rows, cols)
+		g := s.mainGrid()
+		g.relayout(cols)
+		s.reflowMain(&g, rows, cols)
 	}
 	if widthChanged {
 		s.resizeTabStops(cols)
@@ -528,7 +530,25 @@ func (s *Screen) resizeTabStops(cols int) {
 }
 
 func (s *Screen) mainGrid() reflowGrid {
-	return reflowGrid{cells: s.Cells, wrapped: s.wrapped, curY: s.curY, curX: s.curX, pendingWrap: s.pendingWrap}
+	g := reflowGrid{cells: s.Cells, wrapped: s.wrapped, cursor: gridPoint{y: s.curY, x: s.curX, pendingWrap: s.pendingWrap}}
+	s.addMainSaved(&g)
+	return g
+}
+
+// addMainSaved adds the main screen's DECSC slot to g, the main screen or the
+// one saved beneath the alternate screen.
+func (s *Screen) addMainSaved(g *reflowGrid) {
+	m := s.mainSaved
+	g.saved, g.hasSaved = gridPoint{y: m.y, x: m.x, pendingWrap: m.pendingWrap}, m.valid
+}
+
+// takeMainSaved moves the main screen's DECSC slot to its place in g. It is
+// not moved with rows that later leave for scrollback, as a save point stays
+// put while output scrolls.
+func (s *Screen) takeMainSaved(g *reflowGrid) {
+	if g.hasSaved {
+		s.mainSaved.y, s.mainSaved.x, s.mainSaved.pendingWrap = g.saved.y, g.saved.x, g.saved.pendingWrap
+	}
 }
 
 // reflowMain installs g as the main screen at rows by cols. When g is taller,
@@ -537,8 +557,9 @@ func (s *Screen) mainGrid() reflowGrid {
 // cursor's own row, which leaves the cursor on the top row with no wrap
 // pending. The screen's Height spans every row while they drain, because
 // drainTopRow's autolink scan reads the rows below the one it drains.
-func (s *Screen) reflowMain(g reflowGrid, rows, cols int) {
-	s.curY, s.curX, s.pendingWrap = g.curY, g.curX, g.pendingWrap
+func (s *Screen) reflowMain(g *reflowGrid, rows, cols int) {
+	s.curY, s.curX, s.pendingWrap = g.cursor.y, g.cursor.x, g.cursor.pendingWrap
+	s.takeMainSaved(g)
 	n := len(g.cells)
 	for n > rows && n-1 > s.curY && contentLen(g.cells[n-1]) == 0 {
 		n--
@@ -568,7 +589,9 @@ func (s *Screen) reflowMain(g reflowGrid, rows, cols int) {
 
 // savedMainGrid is the main screen saved beneath the alternate screen.
 func (s *Screen) savedMainGrid() reflowGrid {
-	return reflowGrid{cells: s.savedMainCells, wrapped: s.savedMainWrapped, curY: s.savedMainCurY, curX: s.savedMainCurX, pendingWrap: s.savedMainPendingWrap}
+	g := reflowGrid{cells: s.savedMainCells, wrapped: s.savedMainWrapped, cursor: gridPoint{y: s.savedMainCurY, x: s.savedMainCurX, pendingWrap: s.savedMainPendingWrap}}
+	s.addMainSaved(&g)
+	return g
 }
 
 // resizeSavedMain lays the saved main screen out at the new dimensions while
@@ -586,14 +609,16 @@ func (s *Screen) resizeSavedMain(rows, cols int) {
 	if len(s.savedMainCells) == rows && (rows == 0 || len(s.savedMainCells[0]) == cols) {
 		return
 	}
-	g := s.savedMainGrid().relayout(cols)
+	g := s.savedMainGrid()
+	g.relayout(cols)
 	for len(g.cells) < rows {
 		g.cells = append(g.cells, makeRow(cols, Color{}))
 		g.wrapped = append(g.wrapped, false)
 	}
 	s.savedMainCells, s.savedMainWrapped = g.cells, g.wrapped
-	s.savedMainCurY, s.savedMainCurX = min(g.curY, len(g.cells)-1), g.curX
-	s.savedMainPendingWrap = g.pendingWrap
+	s.savedMainCurY, s.savedMainCurX = min(g.cursor.y, len(g.cells)-1), g.cursor.x
+	s.savedMainPendingWrap = g.cursor.pendingWrap
+	s.takeMainSaved(&g)
 }
 
 // RenderViewport returns the entire screen as ANSI-colored text. Used by
@@ -996,11 +1021,12 @@ func (s *Screen) exitAltScreen(mode int) {
 		s.altCells = nil
 	}
 	altY, altX, altPending := s.curY, s.curX, s.pendingWrap
-	g := s.savedMainGrid().relayout(s.Width)
+	g := s.savedMainGrid()
+	g.relayout(s.Width)
 	// drainTopRow commits only main-screen rows, so the switch comes first:
 	// reflowMain sends the saved rows that do not fit to scrollback.
 	s.InAltScreen = false
-	s.reflowMain(g, s.Height, s.Width)
+	s.reflowMain(&g, s.Height, s.Width)
 	s.savedMainCells, s.savedMainWrapped = nil, nil
 	s.scrollTop = s.savedMainScrollTop
 	s.scrollBottom = s.savedMainScrollBottom

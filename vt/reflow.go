@@ -1,13 +1,20 @@
 package vt
 
-// reflowGrid is a main-screen grid with its soft-wrap flags and cursor: what a
-// width change lays out again. wrapped may be shorter than cells (a missing
-// flag reads false).
+// reflowGrid is a main-screen grid with its soft-wrap flags, cursor and DECSC
+// slot: what a width change lays out again. wrapped may be shorter than cells
+// (a missing flag reads false).
 type reflowGrid struct {
-	cells       [][]Cell
-	wrapped     []bool
-	curY        int
-	curX        int
+	cells   [][]Cell
+	wrapped []bool
+	cursor  gridPoint
+	// saved is the DECSC slot's place, carried with the text when hasSaved.
+	saved    gridPoint
+	hasSaved bool
+}
+
+// gridPoint is a cell of a grid; a pending wrap puts the place one past it.
+type gridPoint struct {
+	y, x        int
 	pendingWrap bool
 }
 
@@ -26,10 +33,10 @@ func contentLen(row []Cell) int {
 	return n
 }
 
-// relayout returns g laid out at cols, with a flag for every row: unchanged
-// at its own width, each row cut or padded when re-wrapping would move
-// nothing, else re-wrapped.
-func (g reflowGrid) relayout(cols int) reflowGrid {
+// relayout lays g out at cols, with a flag for every row: unchanged at its
+// own width, each row cut or padded when re-wrapping would move nothing, else
+// re-wrapped.
+func (g *reflowGrid) relayout(cols int) {
 	if len(g.wrapped) < len(g.cells) {
 		w := make([]bool, len(g.cells))
 		copy(w, g.wrapped)
@@ -37,38 +44,48 @@ func (g reflowGrid) relayout(cols int) reflowGrid {
 	}
 	switch {
 	case len(g.cells) == 0 || len(g.cells[0]) == cols:
-		return g
 	case g.layoutHolds(cols):
 		for i, old := range g.cells {
 			g.cells[i] = makeRow(cols, Color{})
 			copy(g.cells[i], old)
 		}
-		return g
 	default:
-		lines, cursor := g.lines()
-		return layout(lines, cursor, cols, len(g.cells))
+		lines, cursor, saved := g.lines()
+		*g = layout(lines, cursor, saved, cols, len(g.cells))
 	}
 }
 
 // layoutHolds reports whether re-wrapping g at cols would change nothing: no
 // row continues the one above, every row's content fits with no pad in it
-// but the cursor's, and the cursor keeps its column with no wrap pending.
+// but the cursor's, and the cursor and DECSC slot keep their columns with no
+// wrap pending.
 func (g *reflowGrid) layoutHolds(cols int) bool {
-	if g.pendingWrap || g.curX >= cols {
+	if !g.cursor.holds(cols) || g.hasSaved && !g.saved.holds(cols) {
 		return false
 	}
-	for y, row := range g.cells {
-		if y > 0 && g.wrappedAt(y) {
+	for y := range g.cells {
+		if y > 0 && g.wrappedAt(y) || !g.rowFits(y, cols) {
 			return false
 		}
-		n := contentLen(row)
-		if n > cols {
+	}
+	return true
+}
+
+// holds reports whether p keeps its column at cols with no wrap pending.
+func (p gridPoint) holds(cols int) bool {
+	return !p.pendingWrap && p.x < cols
+}
+
+// rowFits reports whether row y's content fits cols with no pad in it but the
+// cursor's.
+func (g *reflowGrid) rowFits(y, cols int) bool {
+	n := contentLen(g.cells[y])
+	if n > cols {
+		return false
+	}
+	for x, c := range g.cells[y][:n] {
+		if c.widePad && (y != g.cursor.y || x != g.cursor.x) {
 			return false
-		}
-		for x, c := range row[:n] {
-			if c.widePad && (y != g.curY || x != g.curX) {
-				return false
-			}
 		}
 	}
 	return true
@@ -85,93 +102,113 @@ type logicalLine struct {
 	continuesHistory bool
 }
 
-// logicalCursor is the cursor as a place in a line: offset is the cell of the
-// line the next character goes to, so a pending wrap reads one past the
-// cursor's column.
+// logicalCursor is the cursor or DECSC slot as a place in a line: offset is
+// the cell of the line the next character goes to, so a pending wrap reads one
+// past the column. line is -1 for a slot never saved.
 type logicalCursor struct {
 	line, offset int
 	pendingWrap  bool
 }
 
 // lines reads g as logical lines, one per row not continuing the row above,
-// and the cursor as a place in them. The width does not enter either.
-func (g *reflowGrid) lines() ([]logicalLine, logicalCursor) {
-	cursor := logicalCursor{pendingWrap: g.pendingWrap}
-	lines := make([]logicalLine, 0, len(g.cells))
+// and the cursor and DECSC slot as places in them. The width does not enter
+// any of them.
+func (g *reflowGrid) lines() (lines []logicalLine, cursor, saved logicalCursor) {
+	cursor = logicalCursor{pendingWrap: g.cursor.pendingWrap}
+	saved = logicalCursor{line: -1, pendingWrap: g.saved.pendingWrap}
+	lines = make([]logicalLine, 0, len(g.cells))
 	for start := 0; start < len(g.cells); {
 		end := start
 		for end+1 < len(g.cells) && g.wrappedAt(end+1) {
 			end++
 		}
-		l, at := g.readLine(start, end)
+		l, at, savedAt := g.readLine(start, end)
 		if at >= 0 {
 			cursor.line, cursor.offset = len(lines), at
+		}
+		if savedAt >= 0 {
+			saved.line, saved.offset = len(lines), savedAt
 		}
 		lines = append(lines, l)
 		start = end + 1
 	}
-	return lines, cursor
+	return lines, cursor, saved
 }
 
 // readLine joins rows start to end into one line and returns the cursor's
-// offset in it, or -1 when the cursor is on another line.
-func (g *reflowGrid) readLine(start, end int) (l logicalLine, at int) {
-	curY := min(max(g.curY, 0), len(g.cells)-1)
+// and the DECSC slot's offsets in it, each -1 when on another line.
+func (g *reflowGrid) readLine(start, end int) (l logicalLine, at, savedAt int) {
+	onRow := func(p gridPoint) int { return min(max(p.y, 0), len(g.cells)-1) }
 	l.continuesHistory = start == 0 && g.wrappedAt(0)
-	at = -1
+	at, savedAt = -1, -1
 	for r := start; r <= end; r++ {
 		row := g.cells[r]
 		if r == end {
 			n := contentLen(row)
 			row, l.tail = row[:n], row[n:]
 		}
-		if r != curY {
-			l.cells, _ = appendRow(l.cells, row, -1)
-			continue
+		keepPad := -1
+		if r == onRow(g.cursor) {
+			keepPad = g.cursor.x
+			at = placeIn(l.cells, row, g.cursor, keepPad)
 		}
-		l.cells, at = appendRow(l.cells, row, g.curX)
-		if g.pendingWrap {
-			at++
+		if g.hasSaved && r == onRow(g.saved) {
+			savedAt = placeIn(l.cells, row, g.saved, keepPad)
 		}
+		l.cells = appendRow(l.cells, row, keepPad)
 	}
-	return l, at
+	return l, at, savedAt
 }
 
 // appendRow appends row to cells without any wide character's pad but the one
-// at cursorX, and returns the offset in cells of column cursorX, or -1 when
-// cursorX is -1.
-func appendRow(cells, row []Cell, cursorX int) (joined []Cell, at int) {
-	at = -1
+// at column keepPad.
+func appendRow(cells, row []Cell, keepPad int) []Cell {
 	for x, c := range row {
-		if x == cursorX {
-			at = len(cells)
+		if !c.widePad || x == keepPad {
+			cells = append(cells, c)
 		}
-		if c.widePad && x != cursorX {
-			continue
+	}
+	return cells
+}
+
+// placeIn returns the offset of p in a line whose cells precede row, which
+// appendRow is about to add keeping only keepPad's pad. A point on a dropped
+// pad reads as the cell after it.
+func placeIn(cells, row []Cell, p gridPoint, keepPad int) int {
+	at := len(cells) + max(p.x-len(row), 0)
+	for x, c := range row[:min(p.x, len(row))] {
+		if !c.widePad || x == keepPad {
+			at++
 		}
-		cells = append(cells, c)
 	}
-	if cursorX >= len(row) {
-		at = len(cells) + cursorX - len(row)
+	if p.pendingWrap {
+		at++
 	}
-	return cells, at
+	return at
 }
 
 // layout wraps lines onto rows of width cols, as writing them at that width
 // would, and puts the cursor back at its place. Every line takes at least one
 // row; the caller fits the result to the screen's height.
-func layout(lines []logicalLine, cursor logicalCursor, cols, rowsHint int) reflowGrid {
-	g := reflowGrid{cells: make([][]Cell, 0, rowsHint), wrapped: make([]bool, 0, rowsHint)}
+func layout(lines []logicalLine, cursor, saved logicalCursor, cols, rowsHint int) reflowGrid {
+	g := reflowGrid{cells: make([][]Cell, 0, rowsHint), wrapped: make([]bool, 0, rowsHint), hasSaved: saved.line >= 0}
 	mayPend := cursor.pendingWrap || !textAfter(lines, cursor.line)
 	for i, l := range lines {
-		at := -1
+		at, savedAt := -1, -1
 		if i == cursor.line {
 			at = cursor.offset
 		}
-		g.appendLine(l, at, mayPend, cols)
+		if i == saved.line {
+			savedAt = saved.offset
+		}
+		g.appendLine(l, lineMarks{at, savedAt}, mayPend, cols)
 	}
 	return g
 }
+
+// lineMarks are the cursor's and the DECSC slot's offsets in a line, each -1
+// when on another line.
+type lineMarks struct{ cursor, saved int }
 
 // textAfter reports whether a line after lines[i] holds text.
 func textAfter(lines []logicalLine, i int) bool {
@@ -184,37 +221,59 @@ func textAfter(lines []logicalLine, i int) bool {
 }
 
 // appendLine wraps l onto new rows of width cols, without splitting a wide
-// character, and places the cursor when at, its offset in l or -1, falls in
-// it. mayPend is whether a cursor just past a full last row may pend a wrap.
-func (g *reflowGrid) appendLine(l logicalLine, at int, mayPend bool, cols int) {
+// character, and places the cursor and DECSC slot whose offsets fall in it.
+// mayPend is whether a cursor just past a full last row may pend a wrap.
+func (g *reflowGrid) appendLine(l logicalLine, at lineMarks, mayPend bool, cols int) {
 	row := g.newRow(cols, l.continuesHistory)
 	x := 0
 	for i := 0; i < len(l.cells); {
-		w := 1
-		if i+1 < len(l.cells) && l.cells[i].Ch != 0 && l.cells[i+1].Ch == 0 {
-			w = 2
-		}
+		w := cellWidth(l.cells, i)
 		if x+w > cols && x > 0 {
 			if x < cols {
 				// The pad autowrap leaves takes the wide character's paint, as put does.
 				row[x] = Cell{Ch: ' ', Style: l.cells[i].Style, widePad: true}
 			}
+			if at.saved == i {
+				g.saved = savedPastText(len(g.cells)-1, x, x, cols)
+				at.saved = -1
+			}
 			row = g.newRow(cols, true)
 			x = 0
 		}
-		if at >= i && at < i+w {
-			g.curY, g.curX = len(g.cells)-1, min(x+at-i, cols-1)
-		}
+		g.markCell(at, i, w, x, cols)
 		// A wide character on a one-column row keeps its glyph and loses its
 		// spacer.
 		x += copy(row[x:], l.cells[i:i+w])
 		i += w
 	}
 	copy(row[x:], l.tail)
-	if at < len(l.cells) {
-		return
+	if at.saved >= len(l.cells) {
+		g.saved = savedPastText(len(g.cells)-1, x+at.saved-len(l.cells), x, cols)
 	}
-	g.placePastText(x+at-len(l.cells), x, mayPend, cols, l.tail)
+	if at.cursor >= len(l.cells) {
+		g.placePastText(x+at.cursor-len(l.cells), x, mayPend, cols, l.tail)
+	}
+}
+
+// cellWidth is 2 for a wide character at cells[i], followed by its spacer,
+// else 1.
+func cellWidth(cells []Cell, i int) int {
+	if i+1 < len(cells) && cells[i].Ch != 0 && cells[i+1].Ch == 0 {
+		return 2
+	}
+	return 1
+}
+
+// markCell places the cursor and DECSC slot whose offsets fall in the w cells
+// at offset i, copied to column x of the last row.
+func (g *reflowGrid) markCell(at lineMarks, i, w, x, cols int) {
+	y := len(g.cells) - 1
+	if at.cursor >= i && at.cursor < i+w {
+		g.cursor = gridPoint{y: y, x: min(x+at.cursor-i, cols-1)}
+	}
+	if at.saved >= i && at.saved < i+w {
+		g.saved = gridPoint{y: y, x: min(x+at.saved-i, cols-1)}
+	}
 }
 
 // placePastText puts a cursor that sat after its line's text, at column col
@@ -227,15 +286,27 @@ func (g *reflowGrid) placePastText(col, x int, mayPend bool, cols int, tail []Ce
 	last := len(g.cells) - 1
 	switch {
 	case col < cols:
-		g.curY, g.curX = last, col
+		g.cursor = gridPoint{y: last, x: col}
 	case x < cols:
-		g.curY, g.curX = last, cols-1
+		g.cursor = gridPoint{y: last, x: cols - 1}
 	case col == cols && mayPend:
-		g.curY, g.curX, g.pendingWrap = last, cols-1, true
+		g.cursor = gridPoint{y: last, x: cols - 1, pendingWrap: true}
 	default:
 		copy(g.newRow(cols, true), tail)
-		g.curY, g.curX = last+1, min(col-cols, cols-1)
+		g.cursor = gridPoint{y: last + 1, x: min(col-cols, cols-1)}
 	}
+}
+
+// savedPastText is the place of a DECSC slot at column col after text that
+// ends at x on row y, the end of its line or a row a character wraps from, as
+// writing at cols leaves it: a wrap pending just past a full row, else
+// clamped to the row. Unlike the cursor it never adds a row, which would move
+// text a restore does not write to.
+func savedPastText(y, col, x, cols int) gridPoint {
+	if col == cols && x == cols {
+		return gridPoint{y: y, x: cols - 1, pendingWrap: true}
+	}
+	return gridPoint{y: y, x: min(col, cols-1)}
 }
 
 func (g *reflowGrid) newRow(cols int, wrapped bool) []Cell {

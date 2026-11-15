@@ -289,6 +289,24 @@ func TestResizeDropsThePadAWrappedWideCharacterLeft(t *testing.T) {
 	}
 }
 
+// A wide character that does not fit before a DECSLRM right margin wraps
+// inside the box, so its blank is a cell of a row that is not soft-wrapped:
+// a re-wrap keeps it and the text right of the box keeps its column.
+func TestResizeKeepsTheBlankAWideCharacterLeftAtARightMargin(t *testing.T) {
+	for name, cols := range map[string]int{"widen": 20, "narrow": 9} {
+		t.Run(name, func(t *testing.T) {
+			s := New(3, 10)
+			writeString(t, s, "abcdefghij\x1b[?69h\x1b[1;5s\x1b[1;1HABCD中\x1b[3;1H")
+
+			s.Resize(3, cols)
+
+			if got, want := historyLines(s), []string{"ABCD fghij", "中"}; !slices.Equal(got, want) {
+				t.Errorf("lines after resizing to width %d = %q, want %q", cols, got, want)
+			}
+		})
+	}
+}
+
 // The next character goes where the cursor is, so a pad the cursor sits on
 // stays in the line: writing on it after a widen keeps the wide character.
 func TestResizeKeepsThePadTheCursorIsOn(t *testing.T) {

@@ -2,31 +2,45 @@ package vt
 
 import (
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 	"testing"
 )
 
-// printableLines keeps data's printable ASCII and turns each newline into
-// CR LF, so the written text has soft wraps and line ends but no cursor
-// movement and no wide characters.
-func printableLines(data []byte) []byte {
-	out := make([]byte, 0, len(data))
-	for _, b := range data {
-		switch {
-		case b == '\n':
-			out = append(out, '\r', '\n')
-		case b >= 0x20 && b < 0x7f:
-			out = append(out, b)
+// wrappingText keeps data's printable ASCII and turns each newline into
+// CR LF, 0x01 into a wide character, 0x02 and the next three bytes into a
+// DECSLRM box the cursor moves into, and 0x03 into the box's end: soft wraps,
+// wraps inside a box and the blank a wide character leaves at either edge,
+// with no cursor movement outside a box.
+func wrappingText(data []byte, rows, cols int) string {
+	var b strings.Builder
+	for i := 0; i < len(data); i++ {
+		switch c := data[i]; {
+		case c == '\n':
+			b.WriteString("\r\n")
+		case c == 0x01:
+			b.WriteString("中")
+		case c == 0x02 && i+3 < len(data) && cols > 1:
+			left := int(data[i+1]) % (cols - 1)
+			right := left + 1 + int(data[i+2])%(cols-left-1)
+			fmt.Fprintf(&b, "\x1b[?69h\x1b[%d;%ds\x1b[%d;%dH", left+1, right+1, int(data[i+3])%rows+1, left+1)
+			i += 3
+		case c == 0x03:
+			b.WriteString("\x1b[?69l")
+		case c >= 0x20 && c < 0x7f:
+			b.WriteByte(c)
 		}
 	}
-	return out
+	return b.String()
 }
 
 // logicalScreen is what a width change must keep: the text of each line, with
-// rows joined by a soft wrap and the blanks no character was written to
-// dropped from its end, and the cursor's offset in its line, one past the
-// last column while a wrap is pending.
+// rows joined by a soft wrap, the blanks no character was written to dropped
+// from its end and the pad a wrapped wide character leaves in a row's last
+// column left out, and the
+// cursor's offset in its line, one past the last column while a wrap is
+// pending.
 type logicalScreen struct {
 	lines        []string
 	cursorLine   int
@@ -52,14 +66,17 @@ func logicalOf(s *Screen) logicalScreen {
 		if y > 0 && !s.wrapped[y] {
 			flush()
 		}
-		if y == s.curY {
-			ls.cursorLine = len(ls.lines)
-			ls.cursorOffset = len(line) + s.curX
-			if s.pendingWrap {
-				ls.cursorOffset++
+		for x, c := range row {
+			if y == s.curY && x == s.curX {
+				ls.cursorLine, ls.cursorOffset = len(ls.lines), len(line)
+				if s.pendingWrap {
+					ls.cursorOffset++
+				}
+			}
+			if !c.widePad || x < len(row)-1 || y == s.curY && x == s.curX {
+				line = append(line, c)
 			}
 		}
-		line = append(line, row...)
 	}
 	flush()
 	for len(ls.lines)-1 > ls.cursorLine && ls.lines[len(ls.lines)-1] == "" {
@@ -68,11 +85,26 @@ func logicalOf(s *Screen) logicalScreen {
 	return ls
 }
 
-// rowsNeeded is how many rows the lines take at cols, one at least each.
+// rowsNeeded is how many rows the lines take at cols, one at least each, a
+// wide character that does not fit a row's end going to the next row.
 func (ls logicalScreen) rowsNeeded(cols int) int {
 	n := 0
 	for _, line := range ls.lines {
-		n += max(1, (len(line)+cols-1)/cols)
+		n++
+		x := 0
+		for _, r := range line {
+			w := runeWidth(r)
+			switch {
+			case r == 0:
+				continue
+			case w > cols:
+				return math.MaxInt
+			case x+w > cols:
+				n++
+				x = 0
+			}
+			x += w
+		}
 	}
 	return n
 }
@@ -123,10 +155,12 @@ func FuzzResize_widthRoundTrip(f *testing.F) {
 	f.Add([]byte(" "), uint8(0), uint8(6))
 	f.Add([]byte(strings.Repeat("0", 40)), uint8(0), uint8(21))
 	f.Add([]byte(strings.Repeat("0", 78)+"  "), uint8(2), uint8(1))
+	f.Add([]byte("abcdefghij\x02\x00\x03\x00ABCD\x01\x03"), uint8(9), uint8(19))
+	f.Add([]byte("abcd\x01ef\x01\x01g"), uint8(4), uint8(6))
 
 	f.Fuzz(func(t *testing.T, data []byte, from, to uint8) {
 		s := New(40, int(from)%60+1)
-		writeString(t, s, string(printableLines(data)))
+		writeString(t, s, wrappingText(data, s.Height, s.Width))
 		s.DrainScrollback()
 		roundTrip(t, s, int(to)%60+1)
 	})

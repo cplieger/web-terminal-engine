@@ -757,7 +757,7 @@ func (s *Screen) put(r rune) {
 
 	// Width-2: if only 1 cell remains before the wrap edge, wrap first.
 	if w == 2 && s.curX >= s.wrapEdge() && s.AutoWrap {
-		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style, widePad: true}
+		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style, widePad: s.wrapsWholeRow()}
 		s.curX = s.wrapColumn()
 		s.curY++
 		s.scrollIfNeeded()
@@ -819,15 +819,19 @@ func (s *Screen) scrollIfNeeded() {
 	}
 }
 
+// wrapsWholeRow reports whether an autowrap continues the row, soft-wrapping
+// it, rather than the content of a DECSLRM left/right margin box.
+func (s *Screen) wrapsWholeRow() bool {
+	return s.leftBound() == 0 && s.rightBound() == s.Width-1
+}
+
 // markWrapContinuation records that the row the cursor just wrapped ONTO is a
 // soft continuation of the row above it. Called at the two autowrap sites in
-// put(), after any scroll has settled the cursor row. Only a true full-row
-// wrap chains rows for the autolinker; a wrap inside a DECSLRM left/right
-// margin box continues box content, not the row, so it is not recorded. A
-// row above with no text in its last column continues nothing: SU and SD
-// keep a pending wrap, as xterm does, while blanking the row it was armed on.
+// put(), after any scroll has settled the cursor row. A row above with no
+// text in its last column continues nothing: SU and SD keep a pending wrap,
+// as xterm does, while blanking the row it was armed on.
 func (s *Screen) markWrapContinuation() {
-	if s.leftBound() != 0 || s.rightBound() != s.Width-1 {
+	if !s.wrapsWholeRow() {
 		return
 	}
 	if s.curY < 0 || s.curY >= len(s.wrapped) {

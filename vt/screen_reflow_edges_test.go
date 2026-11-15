@@ -239,6 +239,20 @@ func TestResizeDropsThePadAWrappedWideCharacterLeft(t *testing.T) {
 	}
 }
 
+// The next character goes where the cursor is, so a pad the cursor sits on
+// stays in the line: writing on it after a widen keeps the wide character.
+func TestResizeKeepsThePadTheCursorIsOn(t *testing.T) {
+	s := New(3, 5)
+	writeString(t, s, "abcd中\x1b[1;5H")
+
+	s.Resize(3, 10)
+	writeString(t, s, "Z")
+
+	if got, want := historyLines(s), []string{"abcdZ中"}; !slices.Equal(got, want) {
+		t.Errorf("lines = %q, want %q: Z goes on the pad, as it does without a resize", got, want)
+	}
+}
+
 func TestAlternateScreenKeepsTheMainScreensPendingWrap(t *testing.T) {
 	t.Run("without a resize", func(t *testing.T) {
 		s := New(4, 6)

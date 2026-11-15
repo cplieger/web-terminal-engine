@@ -71,7 +71,7 @@ func (g *reflowGrid) layoutHolds(cols int) bool {
 // logicalLine is one line of a grid, its rows joined by soft wraps.
 type logicalLine struct {
 	// cells is the text, without its last row's padding or the pad before a
-	// wrapped wide character.
+	// wrapped wide character, unless the cursor is on that pad.
 	cells []Cell
 	// tail is the padding after the text on its last row, kept for its paint.
 	tail []Cell
@@ -120,7 +120,7 @@ func (g *reflowGrid) readLine(start, end int) (l logicalLine, at int) {
 		case r == end:
 			n = contentLen(row)
 			l.tail = row[n:]
-		case n > 0 && row[n-1].widePad:
+		case n > 0 && row[n-1].widePad && (r != curY || g.curX != n-1):
 			n--
 		}
 		if r == curY {

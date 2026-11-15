@@ -430,14 +430,13 @@ func (s *Screen) CursorPos() (row, col int) {
 }
 
 // Resize adjusts the screen dimensions, preserving existing content. A width
-// change reflows the main screen, the one beneath the alternate screen too:
-// soft-wrapped lines re-wrap at the new width. A main screen with more rows
-// than the new height first gives up blank rows below the cursor, then sends
-// the rows above the cursor to scrollback (Drained), then discards the rows
-// below it, and never loses the cursor's row. The saved main screen keeps
-// every row until the alternate screen exits, which applies the same rule. The
-// alternate screen is neither reflowed nor drained. Each dimension is floored
-// at 1 and capped at 1000.
+// change re-wraps the main screen's soft-wrapped lines, beneath the alternate
+// screen too. A main screen with more rows than the new height first gives up
+// blank rows below the cursor, then sends the rows above the cursor to
+// scrollback (Drained), then discards the rows below it, and never loses the
+// cursor's row. The saved main screen keeps every row until the alternate
+// screen exits, which applies the same rule. The alternate screen is neither
+// reflowed nor drained. Each dimension is floored at 1 and capped at 1000.
 func (s *Screen) Resize(rows, cols int) {
 	cols = capDimension(max(cols, 1))
 	rows = capDimension(max(rows, 1))
@@ -789,11 +788,8 @@ func (s *Screen) scrollIfNeeded() {
 		s.curY = s.scrollBottom
 	}
 	if s.curY >= s.Height {
-		s.drainTopRow()
-		copy(s.Cells, s.Cells[1:])
-		s.Cells[s.Height-1] = makeRow(s.Width, s.style.BG)
-		copy(s.wrapped, s.wrapped[1:])
-		s.wrapped[s.Height-1] = false
+		drained := s.drainTopRow()
+		s.shiftRows(0, s.Height-1, 1, drained)
 		s.curY = s.Height - 1
 	}
 }
@@ -817,10 +813,11 @@ func (s *Screen) markWrapContinuation() {
 // and maintains drainTail: when the row about to become the new top row
 // soft-continues the drained one, the drained row's text is retained so the
 // chain can still be joined; otherwise the retained tail is dropped. An
-// alternate-screen row scrolls away with no history, as in xterm.
-func (s *Screen) drainTopRow() {
+// alternate-screen row scrolls away with no history, as in xterm. Reports
+// whether the row went to scrollback.
+func (s *Screen) drainTopRow() bool {
 	if s.InAltScreen {
-		return
+		return false
 	}
 	// Row 0's trailing blanks are content, not padding, when row 1 soft-wraps
 	// from it — the same flag that decides whether the drain tail is retained
@@ -837,6 +834,7 @@ func (s *Screen) drainTopRow() {
 	} else {
 		s.drainTail = nil
 	}
+	return true
 }
 
 // eraseMode selects which per-cell protection attributes an erase spares.

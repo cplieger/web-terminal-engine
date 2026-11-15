@@ -253,6 +253,51 @@ func TestResizeKeepsThePadTheCursorIsOn(t *testing.T) {
 	}
 }
 
+// A row inserted, deleted or scrolled away ends the soft wrap through it: the
+// row that lands below a new neighbour is not that neighbour's continuation, so
+// a widen keeps the two apart.
+func TestResizeKeepsLinesALineShiftSeparated(t *testing.T) {
+	wrappedAB := strings.Repeat("a", 10) + strings.Repeat("b", 10)
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{"delete the head of a wrapped line", "HELLO\r\n" + wrappedAB + "\x1b[2;1H\x1b[M", []string{"HELLO", "bbbbbbbbbb"}},
+		{"insert in the middle of a wrapped line", wrappedAB + "\x1b[2;1H\x1b[L", []string{"aaaaaaaaaa", "", "bbbbbbbbbb"}},
+		{"delete in a region whose bottom splits a wrapped line", "top\r\n" + wrappedAB + "\x1b[1;2r\x1b[1;1H\x1b[M\x1b[r", []string{"aaaaaaaaaa", "", "bbbbbbbbbb"}},
+		{"scroll up a region whose bottom splits a wrapped line", "top\r\n" + wrappedAB + "\x1b[1;2r\x1b[S\x1b[r", []string{"aaaaaaaaaa", "", "bbbbbbbbbb"}},
+		{"line feed at the bottom of a region that splits a wrapped line", "top\r\n" + wrappedAB + "\x1b[1;2r\x1b[2;1H\n\x1b[r", []string{"aaaaaaaaaa", "", "bbbbbbbbbb"}},
+		{"scroll down a region whose bottom splits a wrapped line", "top\r\n" + wrappedAB + "\x1b[1;2r\x1b[T\x1b[r", []string{"", "top", "bbbbbbbbbb"}},
+		{"insert in a region whose bottom splits a wrapped line", "top\r\n" + wrappedAB + "\x1b[1;2r\x1b[1;1H\x1b[L\x1b[r", []string{"", "top", "bbbbbbbbbb"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New(5, 10)
+			writeString(t, s, tt.input)
+
+			s.Resize(5, 40)
+
+			if got := historyLines(s); !slices.Equal(got, tt.want) {
+				t.Errorf("lines after widening to 40 = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// A full-screen scroll sends the top row to scrollback, so the row that
+// becomes the top still continues it.
+func TestResizeKeepsTheLinkAFullScreenScrollSendsToHistory(t *testing.T) {
+	s := New(2, 10)
+	writeString(t, s, "top\r\n"+strings.Repeat("a", 10)+strings.Repeat("b", 10)+"\r\nnext")
+
+	s.Resize(2, 40)
+
+	if got, want := historyLines(s), []string{"top", strings.Repeat("a", 10) + strings.Repeat("b", 10), "next"}; !slices.Equal(got, want) {
+		t.Errorf("lines after widening to 40 = %q, want %q", got, want)
+	}
+}
+
 func TestAlternateScreenKeepsTheMainScreensPendingWrap(t *testing.T) {
 	t.Run("without a resize", func(t *testing.T) {
 		s := New(4, 6)

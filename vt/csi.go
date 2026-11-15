@@ -1266,12 +1266,7 @@ func (s *Screen) insertLines(n int) {
 	}
 	for range n {
 		if fullWidth {
-			for y := s.scrollBottom; y > s.curY; y-- {
-				s.Cells[y] = s.Cells[y-1]
-				s.wrapped[y] = s.wrapped[y-1]
-			}
-			s.Cells[s.curY] = makeRow(s.Width, s.style.BG)
-			s.wrapped[s.curY] = false
+			s.shiftRows(s.curY, s.scrollBottom, -1, false)
 			continue
 		}
 		for y := s.scrollBottom; y > s.curY; y-- {
@@ -1288,12 +1283,7 @@ func (s *Screen) deleteLines(n int) {
 	}
 	for range n {
 		if fullWidth {
-			for y := s.curY; y < s.scrollBottom; y++ {
-				s.Cells[y] = s.Cells[y+1]
-				s.wrapped[y] = s.wrapped[y+1]
-			}
-			s.Cells[s.scrollBottom] = makeRow(s.Width, s.style.BG)
-			s.wrapped[s.scrollBottom] = false
+			s.shiftRows(s.curY, s.scrollBottom, 1, false)
 			continue
 		}
 		for y := s.curY; y < s.scrollBottom; y++ {
@@ -1306,17 +1296,10 @@ func (s *Screen) deleteLines(n int) {
 func (s *Screen) scrollUpOnce() {
 	left, right := s.leftBound(), s.rightBound()
 	if left == 0 && right == s.Width-1 {
-		// Full-width scroll: move whole rows; only a full-screen scroll drains
-		// to scrollback (partial-height/partial-width content never does).
-		if s.scrollTop == 0 && s.scrollBottom == s.Height-1 {
-			s.drainTopRow()
-		}
-		for y := s.scrollTop; y < s.scrollBottom; y++ {
-			s.Cells[y] = s.Cells[y+1]
-			s.wrapped[y] = s.wrapped[y+1]
-		}
-		s.Cells[s.scrollBottom] = makeRow(s.Width, s.style.BG)
-		s.wrapped[s.scrollBottom] = false
+		// Only a full-screen scroll drains to scrollback (partial-height or
+		// partial-width content never does).
+		drained := s.scrollTop == 0 && s.scrollBottom == s.Height-1 && s.drainTopRow()
+		s.shiftRows(s.scrollTop, s.scrollBottom, 1, drained)
 		return
 	}
 	// Boxed scroll (DECSLRM): shift only [left..right] up within the region.
@@ -1325,6 +1308,34 @@ func (s *Screen) scrollUpOnce() {
 		copy(s.Cells[y][left:right+1], s.Cells[y+1][left:right+1])
 	}
 	s.blankCols(s.scrollBottom, left, right)
+}
+
+// shiftRows moves the whole rows top..bottom up one row (down when dir < 0),
+// blanking the row it vacates. It owns the soft-wrap flags of every full-width
+// row shift: a flag stays set only while the row above is still the row it
+// continued. drained says the row that left the top went to scrollback, which
+// the new top row still continues.
+func (s *Screen) shiftRows(top, bottom, dir int, drained bool) {
+	if dir > 0 {
+		copy(s.Cells[top:bottom], s.Cells[top+1:bottom+1])
+		copy(s.wrapped[top:bottom], s.wrapped[top+1:bottom+1])
+		s.Cells[bottom] = makeRow(s.Width, s.style.BG)
+		s.wrapped[bottom] = false
+		if !drained {
+			s.wrapped[top] = false
+		}
+	} else {
+		copy(s.Cells[top+1:bottom+1], s.Cells[top:bottom])
+		copy(s.wrapped[top+1:bottom+1], s.wrapped[top:bottom])
+		s.Cells[top] = makeRow(s.Width, s.style.BG)
+		s.wrapped[top] = false
+		if top < bottom {
+			s.wrapped[top+1] = false
+		}
+	}
+	if bottom+1 < len(s.wrapped) {
+		s.wrapped[bottom+1] = false
+	}
 }
 
 func (s *Screen) lineDown() {
@@ -1344,12 +1355,7 @@ func (s *Screen) lineDown() {
 func (s *Screen) scrollDownOnce() {
 	left, right := s.leftBound(), s.rightBound()
 	if left == 0 && right == s.Width-1 {
-		for y := s.scrollBottom; y > s.scrollTop; y-- {
-			s.Cells[y] = s.Cells[y-1]
-			s.wrapped[y] = s.wrapped[y-1]
-		}
-		s.Cells[s.scrollTop] = makeRow(s.Width, s.style.BG)
-		s.wrapped[s.scrollTop] = false
+		s.shiftRows(s.scrollTop, s.scrollBottom, -1, false)
 		return
 	}
 	// Boxed scroll (DECSLRM): shift only [left..right] down within the region.

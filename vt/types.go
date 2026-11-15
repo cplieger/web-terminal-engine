@@ -71,6 +71,13 @@ type Cell struct {
 	Style        Style
 	Protected    bool
 	IsoProtected bool
+	// drawn marks a cell a character was written to, as xterm's CHARDRAWN:
+	// a re-wrap carries a line up to its last drawn cell, so a space the
+	// program wrote is text and the blanks an erase or a new row leave are not.
+	drawn bool
+	// widePad marks the blank autowrap leaves in a row's last column when a
+	// wide character does not fit there: layout a re-wrap drops.
+	widePad bool
 }
 
 // ParserState holds the VT500-style state machine state used by the

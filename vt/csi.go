@@ -494,7 +494,7 @@ func (s *Screen) fillRect() {
 	y1, x1, y2, x2 := s.rectBounds(s.paramVal(1, 0), s.paramVal(2, 0), s.paramVal(3, 0), s.paramVal(4, 0))
 	for y := y1; y <= y2; y++ {
 		for x := x1; x <= x2; x++ {
-			s.Cells[y][x] = Cell{Ch: ch, Style: s.style, Protected: s.curProtected}
+			s.Cells[y][x] = Cell{Ch: ch, Style: s.style, Protected: s.curProtected, drawn: true}
 		}
 	}
 }
@@ -561,6 +561,9 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 	if selective {
 		regular = eraseSpareBoth
 	}
+	if mode <= 2 {
+		s.pendingWrap = false // xterm's ResetWrap
+	}
 	switch mode {
 	case 0:
 		s.eraseRegionMode(s.curY, s.curX, s.curY, s.Width-1, regular)
@@ -576,7 +579,6 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 			m = eraseSpareBoth
 		}
 		s.eraseRegionMode(0, 0, s.Height-1, s.Width-1, m)
-		s.clearWrapState()
 	case 3:
 		// ED3 ("Erase Saved Lines"): clears scrollback only, screen untouched.
 		// The VT has no handle on the terminal-layer ring, so it raises a flag
@@ -593,6 +595,9 @@ func (s *Screen) eraseInLine(mode int, selective bool) {
 	m := eraseSpareISO
 	if selective {
 		m = eraseSpareBoth
+	}
+	if mode <= 2 {
+		s.pendingWrap = false // xterm's ResetWrap
 	}
 	switch mode {
 	case 0:
@@ -613,6 +618,7 @@ func (s *Screen) eraseChars(n int) {
 	}
 	// ECH respects ISO (SPA/EPA) protection like ED/EL.
 	s.eraseRegionMode(s.curY, s.curX, s.curY, end, eraseSpareISO)
+	s.pendingWrap = false // xterm's ResetWrap
 }
 
 // scrollUp implements SU (CSI S): scroll the region up n lines (clamped to the

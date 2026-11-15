@@ -118,8 +118,8 @@ func FuzzParser(f *testing.F) {
 }
 
 // FuzzScreenWriteResize feeds arbitrary bytes through the parser with a resize
-// interleaved partway through. Invariant: the cursor stays in bounds across the
-// resize.
+// interleaved partway through. Invariant: the grid keeps its shape and the
+// cursor stays in bounds across the resize.
 func FuzzScreenWriteResize(f *testing.F) {
 	f.Add([]byte("\x1b[?1049h\x1b[2J\x1b[H漢字テスト\x1b[?1049l"), uint8(10), uint8(20))
 	f.Add([]byte("\x1b[5S\x1b[5T\x1b[10L\x1b[10M"), uint8(3), uint8(5))
@@ -132,6 +132,7 @@ func FuzzScreenWriteResize(f *testing.F) {
 		mid := len(data) / 2
 		s.Write(data[:mid])
 		s.Resize(r, c)
+		assertGridShape(t, s)
 		s.Write(data[mid:])
 		row, col := s.CursorPos()
 		if row < 0 || row >= s.Height {

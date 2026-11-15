@@ -63,12 +63,13 @@ func TestStartEager_childReadsTheConventionalDefaultSize(t *testing.T) {
 	awaitMainScreenText(t, h, "size=24 80")
 }
 
-// TestStartEager_lineWrittenBeforeAttachReachesTheClientOnOneRow pins the
-// first client's view of a line up to 80 columns that a program printed before
-// any client attached and never repainted: it arrives on one row. sleep
+// TestStartEager_lineWrittenBeforeAttachReachesTheClientUnwrapped pins the
+// first client's view of a long line a program printed before any client
+// attached and never repainted: it arrives on one row at the client's width,
+// as a terminal that re-wraps soft-wrapped lines on resize shows it. sleep
 // ignores SIGWINCH, so nothing redraws the line.
-func TestStartEager_lineWrittenBeforeAttachReachesTheClientOnOneRow(t *testing.T) {
-	line := strings.Repeat("0123456789", 7) // 70 columns: fits the spawn width
+func TestStartEager_lineWrittenBeforeAttachReachesTheClientUnwrapped(t *testing.T) {
+	line := strings.Repeat("0123456789", 12) // 120 columns: wider than 80, narrower than the client
 	ws := startEagerOnServer(t, `printf '%s\nready\n' "$1"; exec sleep 60`, "ready", line)
 
 	sendControl(t, ws, map[string]any{"type": "resize", "cols": 153, "rows": 48})

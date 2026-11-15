@@ -160,17 +160,32 @@ func rowLink(s *Screen, y int) string {
 	return ""
 }
 
-// An erase from the cursor ends a pending wrap, as xterm's ResetWrap does in
-// ClearRight and ClearInLine: the next character overwrites the last column
-// instead of wrapping onto a row that would continue a blank.
+// An erase that reaches the cursor ends a pending wrap, as xterm's ResetWrap
+// does in ClearRight, ClearInLine and ClearScreen: the next character
+// overwrites the last column instead of wrapping onto a row that would
+// continue a blank.
 func TestEraseFromTheCursorEndsAPendingWrap(t *testing.T) {
-	for name, erase := range map[string]string{"EL 0": "\x1b[K", "ECH": "\x1b[X", "ED 0": "\x1b[J"} {
-		t.Run(name, func(t *testing.T) {
+	keptRow := []string{"aaaaaaaaaX", "", "", ""}
+	erasedRow := []string{"         X", "", "", ""}
+	tests := []struct {
+		name, erase string
+		want        []string
+	}{
+		{"EL 0", "\x1b[K", keptRow},
+		{"ECH", "\x1b[X", keptRow},
+		{"ED 0", "\x1b[J", keptRow},
+		{"EL 1", "\x1b[1K", erasedRow},
+		{"EL 2", "\x1b[2K", erasedRow},
+		{"ED 1", "\x1b[1J", erasedRow},
+		{"ED 2", "\x1b[2J", erasedRow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			s := New(4, 10)
-			writeString(t, s, strings.Repeat("a", 10)+erase+"X")
+			writeString(t, s, strings.Repeat("a", 10)+tt.erase+"X")
 
-			if got, want := screenRows(s), []string{"aaaaaaaaaX", "", "", ""}; !slices.Equal(got, want) {
-				t.Errorf("rows = %q, want %q", got, want)
+			if got := screenRows(s); !slices.Equal(got, tt.want) {
+				t.Errorf("rows = %q, want %q", got, tt.want)
 			}
 			if s.wrapped[1] {
 				t.Error("wrapped[1] = true, want false: nothing wrapped")

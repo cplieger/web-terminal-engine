@@ -55,6 +55,7 @@ func TestResizeKeepsLinesAnEraseSeparatedApart(t *testing.T) {
 		{"erase above through the last column", strings.Repeat("z", 30) + "\x1b[1;20H\x1b[1J", []string{"", "zzzzzzzzzz"}},
 		{"erase to the start of a continuation row", strings.Repeat("w", 30) + "\x1b[2;1H\x1b[1K", []string{strings.Repeat("w", 20), " " + strings.Repeat("w", 9)}},
 		{"erase characters through the last column", strings.Repeat("v", 30) + "\x1b[1;19H\x1b[5X", []string{strings.Repeat("v", 18), strings.Repeat("v", 10)}},
+		{"screen alignment test over a wrapped line", strings.Repeat("u", 30) + "\x1b#8", slices.Repeat([]string{strings.Repeat("E", 20)}, 4)},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,6 +68,20 @@ func TestResizeKeepsLinesAnEraseSeparatedApart(t *testing.T) {
 				t.Errorf("lines after widening to 40 = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestResizeCarriesSpacesARectangleFillDrew(t *testing.T) {
+	s := New(4, 10)
+	writeString(t, s, "abc\x1b[32;1;4;1;6$x\x1b[3;1H")
+
+	s.Resize(4, 4)
+
+	if !s.wrapped[1] {
+		t.Error("wrapped[1] = false, want true: the filled spaces are written text that continues onto row 1")
+	}
+	if y, x := s.CursorPos(); y != 3 || x != 0 {
+		t.Errorf("cursor = (%d, %d), want (3, 0): two rows for the six-cell line, one for the empty line", y, x)
 	}
 }
 

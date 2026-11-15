@@ -433,9 +433,9 @@ func (s *Screen) CursorPos() (row, col int) {
 // change re-wraps the main screen's soft-wrapped lines, beneath the alternate
 // screen too. A main screen with more rows than the new height first gives up
 // blank rows below the cursor, then sends rows from the top to scrollback
-// (Drained), the cursor's too when the rows below it overflow, and discards
-// none. The saved main screen keeps every row until the alternate screen
-// exits, which applies the same rule. The alternate screen is neither
+// (Drained), the cursor's too when it and the rows below it do not fit, and
+// discards none. The saved main screen keeps every row until the alternate
+// screen exits, which applies the same rule. The alternate screen is neither
 // reflowed nor drained. Each dimension is floored at 1 and capped at 1000.
 func (s *Screen) Resize(rows, cols int) {
 	cols = capDimension(max(cols, 1))
@@ -998,7 +998,7 @@ func (s *Screen) exitAltScreen(mode int) {
 	altY, altX, altPending := s.curY, s.curX, s.pendingWrap
 	g := s.savedMainGrid().relayout(s.Width)
 	// drainTopRow commits only main-screen rows, so the switch comes first:
-	// reflowMain sends saved rows above the cursor past the height to scrollback.
+	// reflowMain sends the saved rows that do not fit to scrollback.
 	s.InAltScreen = false
 	s.reflowMain(g, s.Height, s.Width)
 	s.savedMainCells, s.savedMainWrapped = nil, nil

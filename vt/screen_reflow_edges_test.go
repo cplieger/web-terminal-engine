@@ -152,20 +152,51 @@ func TestResizeShorterDrainsTheTopAndKeepsTheCursorRow(t *testing.T) {
 	})
 }
 
-func TestResizeKeepsTheCursorRowWhenTheRowsBelowOverflow(t *testing.T) {
-	s := New(5, 10)
-	writeString(t, s, "TOP!!!!!!!\r\n"+strings.Repeat("b", 40)+"\x1b[1;3H")
-
-	s.Resize(5, 5)
-
-	if y, x := s.CursorPos(); y != 0 || x != 2 {
-		t.Fatalf("cursor = (%d, %d), want (0, 2): still on the 'P' of its line", y, x)
+// Rows below the cursor that overflow the screen push the rows above them,
+// the cursor's row too, into scrollback, as kitty does: no text is lost, and
+// the cursor stays on the top row.
+func TestResizeSendsTheCursorsLineToScrollbackWhenTheRowsBelowOverflow(t *testing.T) {
+	tests := []struct {
+		name      string
+		rows      int
+		cols      int
+		input     string
+		toRows    int
+		toCols    int
+		wantLines []string
+		wantRows  []string
+		wantX     int
+	}{
+		{
+			"narrower", 5, 10, "TOP!!!!!!!\r\n" + strings.Repeat("b", 40) + "\x1b[1;4H", 5, 5,
+			[]string{"TOP!!!!!!!", strings.Repeat("b", 40)}, slices.Repeat([]string{"bbbbb"}, 5), 3,
+		},
+		{
+			"shorter", 6, 20, "top\r\nl1\r\nl2\r\nl3\r\nl4\r\nl5\x1b[1;2H", 3, 20,
+			[]string{"top", "l1", "l2", "l3", "l4", "l5"}, []string{"l3", "l4", "l5"}, 1,
+		},
+		{
+			"narrower with a wrap pending", 5, 10, "\x1b[2;1H" + strings.Repeat("b", 40) + "\x1b[HTOP!!!!!!!", 5, 5,
+			[]string{"TOP!!!!!!!", strings.Repeat("b", 40)}, slices.Repeat([]string{"bbbbb"}, 5), 4,
+		},
 	}
-	if got := s.RowString(0); got != "TOP!!" {
-		t.Errorf("cursor row = %q, want %q", got, "TOP!!")
-	}
-	if got := drainedText(s); len(got) != 0 {
-		t.Errorf("drained = %q, want none: the cursor's line is the top one", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := New(tt.rows, tt.cols)
+			writeString(t, s, tt.input)
+
+			s.Resize(tt.toRows, tt.toCols)
+
+			if got := historyLines(s); !slices.Equal(got, tt.wantLines) {
+				t.Errorf("scrollback and screen = %q, want every line: %q", got, tt.wantLines)
+			}
+			if got := screenRows(s); !slices.Equal(got, tt.wantRows) {
+				t.Errorf("rows = %q, want %q", got, tt.wantRows)
+			}
+			if y, x := s.CursorPos(); y != 0 || x != tt.wantX || s.pendingWrap {
+				t.Errorf("cursor = (%d, %d) pending %v, want (0, %d) with no wrap pending", y, x, s.pendingWrap, tt.wantX)
+			}
+		})
 	}
 }
 

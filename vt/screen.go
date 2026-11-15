@@ -432,10 +432,10 @@ func (s *Screen) CursorPos() (row, col int) {
 // Resize adjusts the screen dimensions, preserving existing content. A width
 // change re-wraps the main screen's soft-wrapped lines, beneath the alternate
 // screen too. A main screen with more rows than the new height first gives up
-// blank rows below the cursor, then sends the rows above the cursor to
-// scrollback (Drained), then discards the rows below it, and never loses the
-// cursor's row. The saved main screen keeps every row until the alternate
-// screen exits, which applies the same rule. The alternate screen is neither
+// blank rows below the cursor, then sends rows from the top to scrollback
+// (Drained), the cursor's too when the rows below it overflow, and discards
+// none. The saved main screen keeps every row until the alternate screen
+// exits, which applies the same rule. The alternate screen is neither
 // reflowed nor drained. Each dimension is floored at 1 and capped at 1000.
 func (s *Screen) Resize(rows, cols int) {
 	cols = capDimension(max(cols, 1))
@@ -532,11 +532,11 @@ func (s *Screen) mainGrid() reflowGrid {
 }
 
 // reflowMain installs g as the main screen at rows by cols. When g is taller,
-// blank rows below the cursor go first, then rows above the cursor leave
-// through the top into scrollback, as output scrolling off does, and only
-// then rows below the cursor are dropped: the cursor's row always stays. The
-// screen's Height spans every row while they drain, because drainTopRow's
-// autolink scan reads the rows below the one it drains.
+// blank rows below the cursor go first, then rows leave through the top into
+// scrollback, as output scrolling off does, until g fits. That can take the
+// cursor's own row, which leaves the cursor on the top row with no wrap
+// pending. The screen's Height spans every row while they drain, because
+// drainTopRow's autolink scan reads the rows below the one it drains.
 func (s *Screen) reflowMain(g reflowGrid, rows, cols int) {
 	s.curY, s.curX, s.pendingWrap = g.curY, g.curX, g.pendingWrap
 	n := len(g.cells)
@@ -544,20 +544,20 @@ func (s *Screen) reflowMain(g reflowGrid, rows, cols int) {
 		n--
 	}
 	s.Cells, s.wrapped, s.Height, s.Width = g.cells[:n], g.wrapped[:n], n, cols
-	drain := min(max(n-rows, 0), max(s.curY, 0))
+	drain := max(n-rows, 0)
 	for range drain {
 		s.drainTopRow()
 		s.Cells, s.wrapped = s.Cells[1:], s.wrapped[1:]
 		s.Height--
 		s.curY--
 	}
+	if s.curY < 0 {
+		s.curY, s.pendingWrap = 0, false
+	}
 	if drain > 0 {
 		// Drop the drained rows' references held by the shared backing array.
 		s.Cells = append(make([][]Cell, 0, rows), s.Cells...)
 		s.wrapped = append(make([]bool, 0, rows), s.wrapped...)
-	}
-	if len(s.Cells) > rows {
-		s.Cells, s.wrapped = s.Cells[:rows], s.wrapped[:rows]
 	}
 	for len(s.Cells) < rows {
 		s.Cells = append(s.Cells, makeRow(cols, Color{}))

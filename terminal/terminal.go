@@ -36,11 +36,14 @@ const (
 	// wire-golden/limits.json holds it and every other limit the client mirrors.
 	wsReadLimit = 64 * 1024
 	ptyReadBuf  = 4096
-	// defaultCols is the spawn width before any client reports one. Keep it at or
-	// below minResizeCols: a spawn wider than a real client renders past the
-	// viewport's clipped right edge, while a narrower one only wraps early.
-	defaultCols   = minResizeCols
-	defaultRows   = 30
+	// defaultCols and defaultRows are the spawn size before any client reports
+	// one: 80x24, the VT100 screen and xterm's default geometry, at which a
+	// program that lays out by the width it reads at start stays readable. The
+	// first client's size reaches the PTY as a resize. A client narrower than 80
+	// keeps only each row's first columns of output nothing repaints, since
+	// vt.Screen.Resize does not re-wrap.
+	defaultCols   = 80
+	defaultRows   = 24
 	flushInterval = 50 * time.Millisecond
 
 	// After a size change, armRedrawSettle holds flushes until the child's
@@ -839,11 +842,11 @@ func (h *Handler) statusSnapshot() screenStatus {
 	}
 }
 
-// StartEager starts the child process now at a default size, rather than lazily
-// on the first client message. A session manager calls this at Create time so a
-// new session's process (and its activity signal) exist from creation; the first
-// client attach still sends the real resize. Idempotent. On a handler closed
-// before its first start it returns an error.
+// StartEager starts the child process now at the default 80x24, rather than
+// lazily on the first client message. A session manager calls this at Create
+// time so a new session's process (and its activity signal) exist from
+// creation; the first client attach still sends the real resize. Idempotent.
+// On a handler closed before its first start it returns an error.
 func (h *Handler) StartEager() error {
 	return h.ensureStarted(0, 0)
 }

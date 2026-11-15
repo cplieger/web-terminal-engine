@@ -20,8 +20,10 @@ import (
 // a nil Streams.TTY, so it writes to its own controlling terminal.
 const childEnv = "OSC52COPY_TEST_ARGV0"
 
-// Linux delivers a process-group signal to the main thread first, so pinning
-// the child's Main there makes a resize pend on the writing thread every run.
+// Linux delivers a process-group signal to the main thread first
+// (complete_signal, https://github.com/torvalds/linux/blob/master/kernel/signal.c),
+// so pinning the child's Main there makes a resize pend on the writing thread
+// every run.
 func init() {
 	if _, ok := os.LookupEnv(childEnv); ok {
 		runtime.LockOSThread()

@@ -33,7 +33,8 @@ type Streams struct {
 	// controlling terminal, /dev/tty, opened for the write with a blocking fd,
 	// and makes Main ignore SIGWINCH for the rest of the process, so neither a
 	// full terminal nor a resize splits the write and lets other output inside
-	// the sequence. A job-control stop during the write can still split it.
+	// the sequence. A job-control stop, or another signal the process catches,
+	// during the write can still split it.
 	TTY io.Writer
 	// Stderr receives one line explaining a failure.
 	Stderr io.Writer

@@ -2,6 +2,7 @@ package vt
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -455,5 +456,56 @@ func TestDeleteCharsWithWideCharSplit(t *testing.T) {
 	}
 	if row < 0 || row >= s.Height {
 		t.Fatalf("row %d out of bounds", row)
+	}
+}
+
+// --- Edits that cut a wide character in two ---
+
+// cellsString renders row y with a wide character's right half as '|' and
+// the trailing blanks dropped.
+func cellsString(s *Screen, y int) string {
+	var b strings.Builder
+	for _, c := range s.Cells[y] {
+		if c.Ch == 0 {
+			b.WriteRune('|')
+			continue
+		}
+		b.WriteRune(c.Ch)
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+// An edit that replaces, erases or shifts away one half of a wide character
+// blanks the other half too, as xterm (screen.c ClearCells, ScrnWriteText)
+// and xterm.js (BufferLine.replaceCells, insertCells, deleteCells) do.
+func TestEditsBlankBothHalvesOfACutWideCharacter(t *testing.T) {
+	const line = "a中b中c" // columns: a 中 | b 中 | c
+	for _, tc := range []struct {
+		name, setup, edit, want string
+	}{
+		{"a narrow character over the right half", line, "\x1b[1;3HX", "a Xb中|c"},
+		{"a narrow character over the left half", line, "\x1b[1;2HX", "aX b中|c"},
+		{"a wide character over a right half", line, "\x1b[1;3H字", "a 字|中|c"},
+		{"a wide character over a left half", line, "\x1b[1;4H字", "a中|字| c"},
+		{"EL 0 from a right half", line, "\x1b[1;3H\x1b[K", "a"},
+		{"EL 1 to a left half", line, "\x1b[1;5H\x1b[1K", "      c"},
+		{"ECH on a left half", line, "\x1b[1;2H\x1b[X", "a  b中|c"},
+		{"DCH at a right half", line, "\x1b[1;3H\x1b[P", "a b中|c"},
+		{"DCH ending on a left half", line, "\x1b[1;4H\x1b[2P", "a中| c"},
+		{"ICH at a right half", line, "\x1b[1;3H\x1b[@", "a   b中|c"},
+		{"ICH pushing a right half past the edge", "abcdef中", "\x1b[1;1H\x1b[@", " abcdef"},
+		{"DECFRA over a right half", line, "\x1b[88;1;3;1;3$x", "a Xb中|c"},
+		{"DECCRA copying a lone right half", line, "\x1b[1;3;1;3;1;1;8$v", "a中|b中|c"},
+		{"SL shifting a right half to the edge", line, "\x1b[2 @", " b中|c"},
+		{"SU in a box whose edge cuts a wide character", line + "\r\n12345678", "\x1b[?69h\x1b[3;8s\x1b[S", "a 345678"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, 8)
+			writeString(t, s, tc.setup)
+			writeString(t, s, tc.edit)
+			if got := cellsString(s, 0); got != tc.want {
+				t.Errorf("row 0 = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }

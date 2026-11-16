@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 // wrappingText keeps data's printable ASCII and turns each newline into
@@ -114,7 +115,7 @@ func (ls logicalScreen) rowsNeeded(cols int) int {
 // after it. A cursor further out in blank space keeps its row only.
 func assertKept(t *testing.T, before, after logicalScreen, what string) {
 	t.Helper()
-	inText := before.cursorOffset <= len(before.lines[before.cursorLine])
+	inText := before.cursorOffset <= utf8.RuneCountInString(before.lines[before.cursorLine])
 	if !slices.Equal(after.lines, before.lines) || after.cursorLine != before.cursorLine || inText && after.cursorOffset != before.cursorOffset {
 		t.Fatalf("%s changed the lines:\nbefore %+v\nafter  %+v", what, before, after)
 	}
@@ -132,11 +133,13 @@ func roundTrip(t *testing.T, s *Screen, w2 int) {
 	fits := before.rowsNeeded(w2) < s.Height && before.rowsNeeded(w1) < s.Height
 	s.Resize(s.Height, w2)
 	assertGridShape(t, s)
+	assertWidePairs(t, s)
 	if fits {
 		assertKept(t, before, logicalOf(s), fmt.Sprintf("width %d -> %d", w1, w2))
 	}
 	s.Resize(s.Height, w1)
 	assertGridShape(t, s)
+	assertWidePairs(t, s)
 	if fits {
 		assertKept(t, before, logicalOf(s), fmt.Sprintf("width %d -> %d -> %d", w1, w2, w1))
 	}
@@ -250,6 +253,24 @@ func assertGridShape(t *testing.T, s *Screen) {
 	}
 	if s.curY < 0 || s.curY >= s.Height || s.curX < 0 || s.curX >= s.Width {
 		t.Fatalf("cursor (%d, %d) outside a %dx%d screen", s.curY, s.curX, s.Height, s.Width)
+	}
+}
+
+// assertWidePairs fails unless every wide character's right half follows it
+// and every right half follows a wide character. A wide character in a row's
+// last column has no room for its right half.
+func assertWidePairs(t *testing.T, s *Screen) {
+	t.Helper()
+	for y, row := range s.Cells {
+		for x, c := range row {
+			wide := c.Ch != 0 && runeWidth(c.Ch) == 2
+			switch {
+			case c.Ch == 0 && (x == 0 || row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2):
+				t.Fatalf("row %d %q: column %d is a right half with no wide character before it", y, s.RowString(y), x)
+			case wide && x+1 < len(row) && row[x+1].Ch != 0:
+				t.Fatalf("row %d %q: the wide character in column %d has no right half", y, s.RowString(y), x)
+			}
+		}
 	}
 }
 
@@ -526,6 +547,7 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 		}
 
 		resized.Resize(rows, b)
+		assertWidePairs(t, resized)
 		if len(resized.Drained) > 0 {
 			return
 		}

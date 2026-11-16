@@ -757,6 +757,7 @@ func (s *Screen) put(r rune) {
 
 	// Width-2: if only 1 cell remains before the wrap edge, wrap first.
 	if w == 2 && s.curX >= s.wrapEdge() && s.AutoWrap {
+		s.splitWideSpan(s.curY, s.curX, s.curX)
 		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style, widePad: s.wrapsWholeRow()}
 		s.curX = s.wrapColumn()
 		s.curY++
@@ -772,6 +773,7 @@ func (s *Screen) put(r rune) {
 	}
 
 	if s.curY < s.Height && s.curX < s.Width {
+		s.splitWideSpan(s.curY, s.curX, s.curX+w-1)
 		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected, drawn: true}
 	}
 	s.lastPrintedRune = r
@@ -885,39 +887,85 @@ const (
 	eraseSpareBoth                    // spare DECSCA OR ISO — DECSED/DECSEL (xterm backward-compat)
 )
 
+// spares reports whether an erase in mode m leaves cell c as it is.
+func (m eraseMode) spares(c Cell) bool {
+	switch m {
+	case eraseSpareISO:
+		return c.IsoProtected
+	case eraseSpareDECSCA:
+		return c.Protected
+	case eraseSpareBoth:
+		return c.Protected || c.IsoProtected
+	case eraseAll:
+	}
+	return false
+}
+
 // eraseRegionMode blanks the rectangle [y1,x1]..[y2,x2], honoring the given
 // protection mode. Coordinates outside the screen are skipped.
-//
-//nolint:gocognit // per-cell bounds + protection-mode guard over a 2-D region
 func (s *Screen) eraseRegionMode(y1, x1, y2, x2 int, mode eraseMode) {
 	blank := Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
-	for y := y1; y <= y2; y++ {
-		if y < 0 || y >= s.Height {
-			continue
-		}
+	x1, x2 = max(x1, 0), min(x2, s.Width-1)
+	for y := max(y1, 0); y <= min(y2, s.Height-1); y++ {
 		row := s.Cells[y]
+		// A spared edge cell keeps its wide character whole.
+		if x1 <= x2 && !mode.spares(row[x1]) {
+			s.splitWide(y, x1)
+		}
+		if x1 <= x2 && !mode.spares(row[x2]) {
+			s.splitWide(y, x2+1)
+		}
 		for x := x1; x <= x2; x++ {
-			if x < 0 || x >= s.Width {
-				continue
+			if !mode.spares(row[x]) {
+				row[x] = blank
 			}
-			switch mode {
-			case eraseSpareISO:
-				if row[x].IsoProtected {
-					continue
-				}
-			case eraseSpareDECSCA:
-				if row[x].Protected {
-					continue
-				}
-			case eraseSpareBoth:
-				if row[x].Protected || row[x].IsoProtected {
-					continue
-				}
-			case eraseAll:
-			}
-			row[x] = blank
 		}
 		s.unlinkReplaced(y, x1, x2)
+	}
+}
+
+// splitWide blanks both halves of the wide character that column x cuts: one
+// whose left half is at x-1 and whose right half is at x or, at x == Width,
+// was cut off. Every edit that replaces or shifts a span of a row calls it at
+// the span's edges first, as xterm (screen.c ClearCells) and xterm.js
+// (BufferLine.replaceCells) do: a reflow reads a glyph followed by a right
+// half as one character, so a lone half would merge with its neighbour.
+func (s *Screen) splitWide(y, x int) {
+	if y < 0 || y >= len(s.Cells) || x <= 0 || x > s.Width {
+		return
+	}
+	row := s.Cells[y]
+	if row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2 || x < s.Width && row[x].Ch != 0 {
+		return
+	}
+	blank := Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+	row[x-1] = blank
+	if x < s.Width {
+		row[x] = blank
+	}
+}
+
+// splitWideSpan splits the wide characters at both edges of columns x1..x2.
+func (s *Screen) splitWideSpan(y, x1, x2 int) {
+	s.splitWide(y, x1)
+	s.splitWide(y, x2+1)
+}
+
+// splitWideShift readies columns x1..x2 of row y for a shift that drops the
+// cells on one side of column cut: no wide character straddles a span edge or
+// the cut.
+func (s *Screen) splitWideShift(y, x1, x2, cut int) {
+	s.splitWideSpan(y, x1, x2)
+	if cut > x1 && cut <= x2 {
+		s.splitWide(y, cut)
+	}
+}
+
+// splitWideBox splits the wide characters at both edges of columns x1..x2 in
+// rows y1..y2.
+func (s *Screen) splitWideBox(y1, y2, x1, x2 int) {
+	for y := y1; y <= y2; y++ {
+		s.splitWideSpan(y, x1, x2)
 	}
 }
 

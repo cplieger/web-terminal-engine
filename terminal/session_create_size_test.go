@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -15,10 +16,13 @@ import (
 	"github.com/creack/pty"
 )
 
-// testStartBound is the start bound these tests give their handlers, short so
-// the no-client fallback is seen quickly and long enough that a dial and a
-// resize land inside it on a loaded runner.
-const testStartBound = 750 * time.Millisecond
+// testStartBound is the start bound of the tests that wait out the fallback,
+// short so it is seen quickly. A test whose resize must win passes noFallback,
+// so a stalled runner cannot let the fallback fire first.
+const (
+	testStartBound = 750 * time.Millisecond
+	noFallback     = time.Hour
+)
 
 // withStartBound sets the deferred start's bound.
 func withStartBound(d time.Duration) Option {
@@ -32,12 +36,12 @@ var sizeReporterCmd = []string{
 	`stty -echo; printf 'size=%s\n' "$(stty size)"; while read -r l; do printf 'got=%s\n' "$l"; done`,
 }
 
-// sizeReporterManager serves a manager of sizeReporterCmd sessions on a mux
-// with the whole session API mounted.
-func sizeReporterManager(t *testing.T) (*SessionManager, *httptest.Server) {
+// sizeReporterManager serves a manager of sizeReporterCmd sessions, each with
+// start bound bound, on a mux with the whole session API mounted.
+func sizeReporterManager(t *testing.T, bound time.Duration) (*SessionManager, *httptest.Server) {
 	t.Helper()
 	m := NewSessionManager(func(SessionID) *Handler {
-		return NewHandler(sizeReporterCmd, WithLogger(nil), WithWorkDir("/"), withStartBound(testStartBound))
+		return NewHandler(sizeReporterCmd, WithLogger(nil), WithWorkDir("/"), withStartBound(bound))
 	})
 	t.Cleanup(func() { shutdownManager(t, m) })
 	mux := http.NewServeMux()
@@ -154,7 +158,7 @@ func assertNeverSpawned(t *testing.T, path string) {
 }
 
 func TestCreateREST_spawnsAtTheFirstClientResize(t *testing.T) {
-	m, srv := sizeReporterManager(t)
+	m, srv := sizeReporterManager(t, noFallback)
 	id := restCreate(t, srv)
 	ws := dialSession(t, srv, id)
 	t.Cleanup(func() { _ = ws.CloseNow() })
@@ -164,11 +168,34 @@ func TestCreateREST_spawnsAtTheFirstClientResize(t *testing.T) {
 	awaitMainScreenText(t, h, "size=20 50")
 }
 
+// TestCreateREST_clampsAnOutOfRangeFirstResize pins that the size a process
+// starts at is bounded as a resize is: 20 to 1000 columns, 5 to 1000 rows.
+func TestCreateREST_clampsAnOutOfRangeFirstResize(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		cols, rows int
+		want       string
+	}{
+		{name: "below the floor", cols: 5, rows: 2, want: "size=5 20"},
+		{name: "columns over the cap", cols: 1500, rows: 10, want: "size=10 1000"},
+		{name: "rows over the cap", cols: 30, rows: 1500, want: "size=1000 30"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m, srv := sizeReporterManager(t, noFallback)
+			id := restCreate(t, srv)
+			ws := dialSession(t, srv, id)
+			t.Cleanup(func() { _ = ws.CloseNow() })
+			sendControl(t, ws, map[string]any{"type": "resize", "cols": tc.cols, "rows": tc.rows})
+			awaitMainScreenText(t, sessionHandler(t, m, id), tc.want)
+		})
+	}
+}
+
 // TestCreateREST_spawnsAtTheFirstResizeAfterALayoutChange pins that the size a
 // socket first announces is the size the process starts at, and that a later
 // change (a split, a snap, a window resize) reaches it as a resize.
 func TestCreateREST_spawnsAtTheFirstResizeAfterALayoutChange(t *testing.T) {
-	m, srv := sizeReporterManager(t)
+	m, srv := sizeReporterManager(t, noFallback)
 	id := restCreate(t, srv)
 	ws := dialSession(t, srv, id)
 	t.Cleanup(func() { _ = ws.CloseNow() })
@@ -190,13 +217,13 @@ func TestCreateREST_spawnsAtTheFirstResizeAfterALayoutChange(t *testing.T) {
 // TestCreateREST_withoutAClientSpawnsAt80x24 pins the fallback for a create no
 // client attaches to: an API create, a smoke test's bare POST.
 func TestCreateREST_withoutAClientSpawnsAt80x24(t *testing.T) {
-	m, srv := sizeReporterManager(t)
+	m, srv := sizeReporterManager(t, testStartBound)
 	id := restCreate(t, srv)
 	awaitMainScreenText(t, sessionHandler(t, m, id), "size=24 80")
 }
 
 func TestCreateREST_inputBeforeTheSpawnIsWrittenAfterItInOrder(t *testing.T) {
-	m, srv := sizeReporterManager(t)
+	m, srv := sizeReporterManager(t, noFallback)
 	id := restCreate(t, srv)
 	ws := dialSession(t, srv, id)
 	t.Cleanup(func() { _ = ws.CloseNow() })
@@ -253,11 +280,11 @@ func TestCreate_spawnsAtOnceAt80x24(t *testing.T) {
 	awaitMainScreenText(t, h, "size=24 80")
 }
 
-// bareSizeReporter serves one sizeReporterCmd handler with no manager, as a
-// host serving a single terminal does, and dials it.
-func bareSizeReporter(t *testing.T, cmd []string) (*Handler, *httptest.Server) {
+// bareSizeReporter serves one handler of cmd with start bound bound and no
+// manager, as a host serving a single terminal does.
+func bareSizeReporter(t *testing.T, cmd []string, bound time.Duration) (*Handler, *httptest.Server) {
 	t.Helper()
-	h := NewHandler(cmd, WithLogger(nil), WithWorkDir("/"), withStartBound(testStartBound))
+	h := NewHandler(cmd, WithLogger(nil), WithWorkDir("/"), withStartBound(bound))
 	shutdownOnCleanup(t, h)
 	mux := http.NewServeMux()
 	h.RegisterRoutes(mux)
@@ -267,7 +294,7 @@ func bareSizeReporter(t *testing.T, cmd []string) (*Handler, *httptest.Server) {
 }
 
 func TestHandler_inputBeforeTheFirstResizeWaitsForIt(t *testing.T) {
-	h, srv := bareSizeReporter(t, sizeReporterCmd)
+	h, srv := bareSizeReporter(t, sizeReporterCmd, noFallback)
 	ws := dialWS(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws")
 	writeBinary(t, ws, []byte("one\n"))
 	assertUnspawnedAfter(t, h, ws)
@@ -276,17 +303,42 @@ func TestHandler_inputBeforeTheFirstResizeWaitsForIt(t *testing.T) {
 }
 
 func TestHandler_attachedWithoutAResizeSpawnsAt80x24(t *testing.T) {
-	h, srv := bareSizeReporter(t, sizeReporterCmd)
+	h, srv := bareSizeReporter(t, sizeReporterCmd, testStartBound)
 	dialWS(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws")
 	awaitMainScreenText(t, h, "size=24 80")
 }
 
 func TestHandler_closedBeforeTheSpawnSpawnsNothing(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "spawned")
-	h, srv := bareSizeReporter(t, markerCmd(marker))
+	h, srv := bareSizeReporter(t, markerCmd(marker), testStartBound)
 	ws := dialWS(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws")
 	writeBinary(t, ws, []byte("x"))
 	awaitHandled(t, ws)
 	h.Close()
 	assertNeverSpawned(t, marker)
+}
+
+// TestHandler_inputPastTheQueueCapStartsAt80x24 pins the queue's bound: input
+// under 64 KiB waits for a resize, and the frame that takes it past 64 KiB
+// starts the process at 80x24 with every queued line delivered in order.
+func TestHandler_inputPastTheQueueCapStartsAt80x24(t *testing.T) {
+	const frames, frameBytes = 20, 3300 // 19 frames stay under 64 KiB, 20 pass it
+	// The leading newline ends the echo of the input the tty received before
+	// stty -echo ran, so the size line starts a row of its own.
+	numberedLines := []string{
+		"/bin/sh", "-c",
+		`stty -echo; printf '\nsize=%s\n' "$(stty size)"; while read -r l; do printf 'got=%s\n' "${l%%:*}"; done`,
+	}
+	h, srv := bareSizeReporter(t, numberedLines, noFallback)
+	ws := dialWS(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws")
+	want := []string{"size=24 80"}
+	for i := 1; i <= frames; i++ {
+		if i == frames {
+			assertUnspawnedAfter(t, h, ws)
+		}
+		head := strconv.Itoa(i) + ":"
+		writeBinary(t, ws, []byte(head+strings.Repeat("a", frameBytes-len(head)-1)+"\n"))
+		want = append(want, "got="+strconv.Itoa(i))
+	}
+	awaitInOrder(t, h, want...)
 }

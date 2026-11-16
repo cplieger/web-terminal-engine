@@ -59,8 +59,8 @@ func (h *Handler) ephemeralInputControl(state *clientState, c *controlMsg) {
 		return
 	}
 	if !h.started.Load() {
-		// No ensureStarted, unlike handleBinaryFrame: a mouse report must not BOOT
-		// the process, because there is nothing on screen it can have been aimed at.
+		// Dropped, not queued as input is: a mouse report describes a screen that
+		// does not exist before the process starts.
 		h.cfg.logger.Debug("terminal: ephemeral input before process start; dropping")
 		return
 	}

@@ -1754,8 +1754,8 @@ type controlMsg struct {
 	GridFrames bool `json:"gridFrames,omitempty"`
 }
 
-// handleWS upgrades to WebSocket, spawns the configured command in a
-// PTY, and bridges bytes both ways until either side closes.
+// handleWS upgrades to WebSocket and bridges the session's PTY with the
+// client until either side closes.
 func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws, err := acceptWS(w, r, h.cfg.originPolicy)
 	if err != nil {
@@ -2346,9 +2346,9 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 
 // clampResize floors the requested dimensions to a sane minimum and caps them
 // at the eager-allocation ceiling. Floored (rather than dropped) so a near-zero
-// reading from an iPad keyboard-slide animation still drives ensureStarted on
-// first connect — dropping the resize would leave the process unstarted until
-// the client sent raw input.
+// reading from an iPad keyboard-slide animation still starts the process at
+// the client's size on first connect; a dropped resize would leave it to the
+// start bound's 80x24.
 func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 	clampedCols = min(max(cols, minResizeCols), maxResizeCols)
 	clampedRows = min(max(rows, minResizeRows), maxResizeRows)

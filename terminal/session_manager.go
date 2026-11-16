@@ -446,8 +446,8 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 	m.mu.Unlock()
 
 	m.logger.Info("session: created", "session", LogID(id), "sessions", n)
-	// A freshly eager-started session is idle until it produces output; the
-	// status stream corrects that within a tick if the process died instantly.
+	// A new session reports idle until its process produces output; the status
+	// stream corrects that within a tick if the process died instantly.
 	return SessionInfo{
 		ID: id, Alias: alias, PinnedTitle: pinned,
 		Title:  title,

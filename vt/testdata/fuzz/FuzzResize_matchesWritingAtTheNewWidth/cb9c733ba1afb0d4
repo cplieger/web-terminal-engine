@@ -1,0 +1,4 @@
+go test fuzz v1
+[]byte("\xf82C2")
+byte('y')
+byte('\x16')

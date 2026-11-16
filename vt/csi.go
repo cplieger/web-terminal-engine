@@ -492,19 +492,18 @@ func (s *Screen) fillRect() {
 		ch = ' '
 	}
 	y1, x1, y2, x2 := s.rectBounds(s.paramVal(1, 0), s.paramVal(2, 0), s.paramVal(3, 0), s.paramVal(4, 0))
+	s.splitWideBox(y1, y2, x1, x2)
 	for y := y1; y <= y2; y++ {
 		for x := x1; x <= x2; x++ {
-			s.Cells[y][x] = Cell{Ch: ch, Style: s.style, Protected: s.curProtected}
+			s.Cells[y][x] = Cell{Ch: ch, Style: s.style, Protected: s.curProtected, drawn: true}
 		}
 	}
 }
 
 // eraseRect implements DECERA (CSI Pt;Pl;Pb;Pr $ z) and, when selective is true,
 // DECSERA ($ {): erase the rectangle to blanks. DECSERA spares DECSCA-protected
-// cells (Cell.Protected) but not ISO/SPA-EPA-guarded cells, which we don't model.
+// cells only, not SPA-guarded ones.
 func (s *Screen) eraseRect(selective bool) {
-	// DECERA clears the rectangle unconditionally; DECSERA spares DECSCA-
-	// protected cells (and, unlike DECSED/DECSEL, does NOT spare ISO cells).
 	m := eraseAll
 	if selective {
 		m = eraseSpareDECSCA
@@ -540,15 +539,34 @@ func (s *Screen) copyRect() {
 	}
 	buf := make([][]Cell, h)
 	for i := range buf {
-		buf[i] = append([]Cell(nil), s.Cells[sy1+i][sx1:sx2+1]...)
+		// One source cell past the right edge tells a left half from a glyph.
+		buf[i] = append([]Cell(nil), s.Cells[sy1+i][sx1:min(sx2+2, s.Width)]...)
 	}
-	for i := range h {
-		for j := range w {
-			dy, dx := dy0+i, dx0+j
-			if dy >= 0 && dy < s.Height && dx >= 0 && dx < s.Width {
-				s.Cells[dy][dx] = buf[i][j]
-			}
-		}
+	dy1, dx1 := min(dy0+h-1, s.Height-1), min(dx0+w-1, s.Width-1)
+	s.splitWideBox(dy0, dy1, dx0, dx1)
+	for i := range dy1 - dy0 + 1 {
+		row := s.Cells[dy0+i]
+		copy(row[dx0:dx1+1], buf[i])
+		s.cutCopyEdges(row, buf[i], dx0, dx1)
+	}
+}
+
+// cutCopyEdges settles the wide characters the edges of a copy of src into
+// row's columns dx0 to dx1 cut in two: a lone half is blanked, as splitWide
+// does, but one left in the last column is cut off, as one written there is.
+// src holds one cell past the copied ones when the source row has it.
+func (s *Screen) cutCopyEdges(row, src []Cell, dx0, dx1 int) {
+	if row[dx0].Ch == 0 {
+		row[dx0] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+	}
+	edge := dx1 - dx0
+	if !src[edge].wideCut && (edge+1 >= len(src) || src[edge+1].Ch != 0 || row[dx1].Ch == 0) {
+		return
+	}
+	if dx1 < s.Width-1 {
+		row[dx1] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+	} else {
+		row[dx1].wideCut = true
 	}
 }
 
@@ -560,6 +578,9 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 	regular := eraseSpareISO
 	if selective {
 		regular = eraseSpareBoth
+	}
+	if mode <= 2 {
+		s.pendingWrap = false // xterm's ResetWrap
 	}
 	switch mode {
 	case 0:
@@ -576,7 +597,6 @@ func (s *Screen) eraseInDisplay(mode int, selective bool) {
 			m = eraseSpareBoth
 		}
 		s.eraseRegionMode(0, 0, s.Height-1, s.Width-1, m)
-		s.clearWrapState()
 	case 3:
 		// ED3 ("Erase Saved Lines"): clears scrollback only, screen untouched.
 		// The VT has no handle on the terminal-layer ring, so it raises a flag
@@ -593,6 +613,9 @@ func (s *Screen) eraseInLine(mode int, selective bool) {
 	m := eraseSpareISO
 	if selective {
 		m = eraseSpareBoth
+	}
+	if mode <= 2 {
+		s.pendingWrap = false // xterm's ResetWrap
 	}
 	switch mode {
 	case 0:
@@ -613,6 +636,7 @@ func (s *Screen) eraseChars(n int) {
 	}
 	// ECH respects ISO (SPA/EPA) protection like ED/EL.
 	s.eraseRegionMode(s.curY, s.curX, s.curY, end, eraseSpareISO)
+	s.pendingWrap = false // xterm's ResetWrap
 }
 
 // scrollUp implements SU (CSI S): scroll the region up n lines (clamped to the
@@ -1160,6 +1184,7 @@ func (s *Screen) insertChars(n int) {
 		return
 	}
 	right := s.rightBound()
+	s.splitWideShift(s.curY, s.curX, right, right-n+1)
 	row := s.Cells[s.curY]
 	for x := right; x >= s.curX+n; x-- {
 		row[x] = row[x-n]
@@ -1179,6 +1204,7 @@ func (s *Screen) deleteChars(n int) {
 	right := s.rightBound()
 	row := s.Cells[s.curY]
 	n = min(n, right-s.curX+1)
+	s.splitWideShift(s.curY, s.curX, right, s.curX+n)
 	for x := s.curX; x <= right-n; x++ {
 		row[x] = row[x+n]
 	}
@@ -1201,6 +1227,7 @@ func (s *Screen) insertColumns(n int) {
 		return
 	}
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
+		s.splitWideShift(y, s.curX, right, right-n+1)
 		row := s.Cells[y]
 		for x := right; x >= s.curX+n; x-- {
 			row[x] = row[x-n]
@@ -1225,6 +1252,7 @@ func (s *Screen) deleteColumns(n int) {
 		return
 	}
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
+		s.splitWideShift(y, s.curX, right, s.curX+n)
 		row := s.Cells[y]
 		for x := s.curX; x <= right-n; x++ {
 			row[x] = row[x+n]
@@ -1260,14 +1288,10 @@ func (s *Screen) insertLines(n int) {
 	}
 	for range n {
 		if fullWidth {
-			for y := s.scrollBottom; y > s.curY; y-- {
-				s.Cells[y] = s.Cells[y-1]
-				s.wrapped[y] = s.wrapped[y-1]
-			}
-			s.Cells[s.curY] = makeRow(s.Width, s.style.BG)
-			s.wrapped[s.curY] = false
+			s.shiftRows(s.curY, s.scrollBottom, -1, false)
 			continue
 		}
+		s.splitWideBox(s.curY, s.scrollBottom, left, right)
 		for y := s.scrollBottom; y > s.curY; y-- {
 			copy(s.Cells[y][left:right+1], s.Cells[y-1][left:right+1])
 		}
@@ -1282,14 +1306,10 @@ func (s *Screen) deleteLines(n int) {
 	}
 	for range n {
 		if fullWidth {
-			for y := s.curY; y < s.scrollBottom; y++ {
-				s.Cells[y] = s.Cells[y+1]
-				s.wrapped[y] = s.wrapped[y+1]
-			}
-			s.Cells[s.scrollBottom] = makeRow(s.Width, s.style.BG)
-			s.wrapped[s.scrollBottom] = false
+			s.shiftRows(s.curY, s.scrollBottom, 1, false)
 			continue
 		}
+		s.splitWideBox(s.curY, s.scrollBottom, left, right)
 		for y := s.curY; y < s.scrollBottom; y++ {
 			copy(s.Cells[y][left:right+1], s.Cells[y+1][left:right+1])
 		}
@@ -1300,25 +1320,47 @@ func (s *Screen) deleteLines(n int) {
 func (s *Screen) scrollUpOnce() {
 	left, right := s.leftBound(), s.rightBound()
 	if left == 0 && right == s.Width-1 {
-		// Full-width scroll: move whole rows; only a full-screen scroll drains
-		// to scrollback (partial-height/partial-width content never does).
-		if s.scrollTop == 0 && s.scrollBottom == s.Height-1 {
-			s.drainTopRow()
-		}
-		for y := s.scrollTop; y < s.scrollBottom; y++ {
-			s.Cells[y] = s.Cells[y+1]
-			s.wrapped[y] = s.wrapped[y+1]
-		}
-		s.Cells[s.scrollBottom] = makeRow(s.Width, s.style.BG)
-		s.wrapped[s.scrollBottom] = false
+		// Only a full-screen scroll drains to scrollback (partial-height or
+		// partial-width content never does).
+		drained := s.scrollTop == 0 && s.scrollBottom == s.Height-1 && s.drainTopRow()
+		s.shiftRows(s.scrollTop, s.scrollBottom, 1, drained)
 		return
 	}
 	// Boxed scroll (DECSLRM): shift only [left..right] up within the region.
 	// Cell contents move but row identity does not, so the wrap flags stay.
+	s.splitWideBox(s.scrollTop, s.scrollBottom, left, right)
 	for y := s.scrollTop; y < s.scrollBottom; y++ {
 		copy(s.Cells[y][left:right+1], s.Cells[y+1][left:right+1])
 	}
 	s.blankCols(s.scrollBottom, left, right)
+}
+
+// shiftRows moves the whole rows top..bottom up one row (down when dir < 0),
+// blanking the row it vacates. It owns the soft-wrap flags of every full-width
+// row shift: a flag stays set only while the row above is still the row it
+// continued. drained says the row that left the top went to scrollback, which
+// the new top row still continues.
+func (s *Screen) shiftRows(top, bottom, dir int, drained bool) {
+	if dir > 0 {
+		copy(s.Cells[top:bottom], s.Cells[top+1:bottom+1])
+		copy(s.wrapped[top:bottom], s.wrapped[top+1:bottom+1])
+		s.Cells[bottom] = makeRow(s.Width, s.style.BG)
+		s.wrapped[bottom] = false
+		if !drained {
+			s.wrapped[top] = false
+		}
+	} else {
+		copy(s.Cells[top+1:bottom+1], s.Cells[top:bottom])
+		copy(s.wrapped[top+1:bottom+1], s.wrapped[top:bottom])
+		s.Cells[top] = makeRow(s.Width, s.style.BG)
+		s.wrapped[top] = false
+		if top < bottom {
+			s.wrapped[top+1] = false
+		}
+	}
+	if bottom+1 < len(s.wrapped) {
+		s.wrapped[bottom+1] = false
+	}
 }
 
 func (s *Screen) lineDown() {
@@ -1338,16 +1380,12 @@ func (s *Screen) lineDown() {
 func (s *Screen) scrollDownOnce() {
 	left, right := s.leftBound(), s.rightBound()
 	if left == 0 && right == s.Width-1 {
-		for y := s.scrollBottom; y > s.scrollTop; y-- {
-			s.Cells[y] = s.Cells[y-1]
-			s.wrapped[y] = s.wrapped[y-1]
-		}
-		s.Cells[s.scrollTop] = makeRow(s.Width, s.style.BG)
-		s.wrapped[s.scrollTop] = false
+		s.shiftRows(s.scrollTop, s.scrollBottom, -1, false)
 		return
 	}
 	// Boxed scroll (DECSLRM): shift only [left..right] down within the region.
 	// Cell contents move but row identity does not, so the wrap flags stay.
+	s.splitWideBox(s.scrollTop, s.scrollBottom, left, right)
 	for y := s.scrollBottom; y > s.scrollTop; y-- {
 		copy(s.Cells[y][left:right+1], s.Cells[y-1][left:right+1])
 	}
@@ -1390,6 +1428,7 @@ func (s *Screen) decForwardIndex() {
 func (s *Screen) scrollColumnsRight() {
 	left, right := s.leftBound(), s.rightBound()
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
+		s.splitWideShift(y, left, right, right)
 		row := s.Cells[y]
 		for x := right; x > left; x-- {
 			row[x] = row[x-1]
@@ -1403,6 +1442,7 @@ func (s *Screen) scrollColumnsRight() {
 func (s *Screen) scrollColumnsLeft() {
 	left, right := s.leftBound(), s.rightBound()
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
+		s.splitWideShift(y, left, right, left+1)
 		row := s.Cells[y]
 		for x := left; x < right; x++ {
 			row[x] = row[x+1]
@@ -1421,6 +1461,7 @@ func (s *Screen) shiftLeft(n int) {
 		return
 	}
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
+		s.splitWideShift(y, 0, s.Width-1, n)
 		row := s.Cells[y]
 		for x := range s.Width - n {
 			row[x] = row[x+n]
@@ -1441,6 +1482,7 @@ func (s *Screen) shiftRight(n int) {
 		return
 	}
 	for y := s.scrollTop; y <= s.scrollBottom; y++ {
+		s.splitWideShift(y, 0, s.Width-1, s.Width-n)
 		row := s.Cells[y]
 		for x := s.Width - 1; x >= n; x-- {
 			row[x] = row[x-n]

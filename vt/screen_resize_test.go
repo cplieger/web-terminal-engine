@@ -86,30 +86,6 @@ func TestResizeGrowsAtTopAltScreen(t *testing.T) {
 	}
 }
 
-// TestResizeShrinksFromBottom: shrinking still drops rows from the
-// bottom (truncates s.Cells[:rows]). The cursor clamps into the new
-// range. This is unchanged behaviour — verifying it didn't regress.
-func TestResizeShrinksFromBottom(t *testing.T) {
-	s := New(10, 10)
-	for x := range s.Width {
-		s.Cells[0][x].Ch = 'A'
-		s.Cells[9][x].Ch = 'B'
-	}
-	s.curY = 9
-
-	s.Resize(5, 10)
-
-	if s.Height != 5 {
-		t.Fatalf("Height = %d, want 5", s.Height)
-	}
-	if s.Cells[0][0].Ch != 'A' {
-		t.Errorf("top row 'A' should survive shrink, got %q", s.Cells[0][0].Ch)
-	}
-	if s.curY != 4 {
-		t.Errorf("curY = %d, want 4 (clamped from 9)", s.curY)
-	}
-}
-
 // TestResizeWidthOnly verifies that growing/shrinking only the width
 // (no height change) preserves all rows in place — no prepend/append.
 func TestResizeWidthOnly(t *testing.T) {
@@ -144,12 +120,12 @@ func makeSavedMain(rows, cols int) [][]Cell {
 	return g
 }
 
-func resizeSavedCursorX(savedX, newRows, newCols int) int {
+func resizeSavedCursor(savedX, newRows, newCols int) (y, x int) {
 	s := New(8, 12)
 	s.enterAltScreen(1049)
 	s.savedMainCurX = savedX
 	s.Resize(newRows, newCols)
-	return s.savedMainCurX
+	return s.savedMainCurY, s.savedMainCurX
 }
 
 // TestResizeTabStopsGrow verifies that widening a non-nil tabStops slice fills
@@ -240,24 +216,27 @@ func TestResizeClampsSavedCursorY(t *testing.T) {
 	}
 }
 
-// TestResizeSavedCursorXClamp verifies the saved main-screen cursor column is
-// clamped to cols-1 when out of range and preserved otherwise.
-func TestResizeSavedCursorXClamp(t *testing.T) {
+// TestResizeSavedCursorKeepsItsPlaceInItsLine verifies a width change carries
+// the saved main-screen cursor through its line as the main screen's reflow
+// does. On a blank line the cursor sits in blank space, which never becomes
+// another row: a column past the new width stays on the last column.
+func TestResizeSavedCursorKeepsItsPlaceInItsLine(t *testing.T) {
 	cases := []struct {
 		name    string
 		savedX  int
 		newCols int
+		wantY   int
 		wantX   int
 	}{
-		{"over clamps to cols-1", 8, 5, 4},
-		{"equal clamps to cols-1", 5, 5, 4},
-		{"under unchanged", 2, 5, 2},
+		{"past the width stops on the last column", 8, 5, 0, 4},
+		{"at the width stops on the last column", 5, 5, 0, 4},
+		{"inside the width stays", 2, 5, 0, 2},
 	}
 	for _, c := range cases {
-		gotX := resizeSavedCursorX(c.savedX, 8, c.newCols)
-		if gotX != c.wantX {
-			t.Errorf("%s: Resize savedMainCurX (savedX=%d, cols=%d) = %d, want %d",
-				c.name, c.savedX, c.newCols, gotX, c.wantX)
+		gotY, gotX := resizeSavedCursor(c.savedX, 8, c.newCols)
+		if gotY != c.wantY || gotX != c.wantX {
+			t.Errorf("%s: Resize saved cursor (savedX=%d, cols=%d) = (%d, %d), want (%d, %d)",
+				c.name, c.savedX, c.newCols, gotY, gotX, c.wantY, c.wantX)
 		}
 	}
 }

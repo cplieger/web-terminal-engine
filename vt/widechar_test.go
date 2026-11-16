@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"fmt"
 	"strconv"
 	"testing"
 )
@@ -456,4 +457,133 @@ func TestDeleteCharsWithWideCharSplit(t *testing.T) {
 	if row < 0 || row >= s.Height {
 		t.Fatalf("row %d out of bounds", row)
 	}
+}
+
+// --- Edits that cut a wide character in two ---
+
+// An edit that replaces, erases or shifts away one half of a wide character
+// blanks the other half too, as xterm (screen.c ClearCells, ScrnWriteText)
+// and xterm.js (BufferLine.replaceCells, insertCells, deleteCells) do.
+func TestEditsBlankBothHalvesOfACutWideCharacter(t *testing.T) {
+	const line = "a中b中c" // columns: a 中 | b 中 | c
+	for _, tc := range []struct {
+		name, setup, edit, want string
+		width, row              int
+	}{
+		{"a narrow character over the right half", line, "\x1b[1;3HX", "a Xb中|c", 8, 0},
+		{"a narrow character over the left half", line, "\x1b[1;2HX", "aX b中|c", 8, 0},
+		{"a wide character over a right half", line, "\x1b[1;3H字", "a 字|中|c", 8, 0},
+		{"a wide character over a left half", line, "\x1b[1;4H字", "a中|字| c", 8, 0},
+		{"EL 0 from a right half", line, "\x1b[1;3H\x1b[K", "a", 8, 0},
+		{"EL 1 to a left half", line, "\x1b[1;5H\x1b[1K", "      c", 8, 0},
+		{"ECH on a left half", line, "\x1b[1;2H\x1b[X", "a  b中|c", 8, 0},
+		{"DCH at a right half", line, "\x1b[1;3H\x1b[P", "a b中|c", 8, 0},
+		{"DCH ending on a left half", line, "\x1b[1;4H\x1b[2P", "a中| c", 8, 0},
+		{"ICH at a right half", line, "\x1b[1;3H\x1b[@", "a   b中|c", 8, 0},
+		{"ICH pushing a right half past the edge", "abcdef中", "\x1b[1;1H\x1b[@", " abcdef", 8, 0},
+		{"DECFRA over a right half", line, "\x1b[88;1;3;1;3$x", "a Xb中|c", 8, 0},
+		{"DECCRA copying a lone right half", line, "\x1b[1;3;1;3;1;1;8$v", "a中|b中|c", 8, 0},
+		{"SL shifting a right half to the edge", line, "\x1b[2 @", " b中|c", 8, 0},
+		{"SU in a box whose edge cuts a wide character", line + "\r\n12345678", "\x1b[?69h\x1b[3;8s\x1b[S", "a 345678", 8, 0},
+		{"EL on a protected wide character's right edge", "a\x1b[1\"q中\x1b[0\"qbc", "\x1b[1;3H\x1b[?K", "a中|", 8, 0},
+		{"EL 1 on a protected wide character's left edge", "ab\x1b[1\"q中\x1b[0\"qc", "\x1b[1;3H\x1b[?1K", "  中|c", 8, 0},
+		{"DECCRA copying a lone left half", "a中bcdefg\r\n", "\x1b[1;1;1;2;1;2;1;1$v", "a", 8, 1},
+		{"a wrap pad on a right half", "abcdef中", "\x1b[1;8H字", "abcdef", 8, 0},
+		{"DCH shifting a cut-off wide character", "\x1b[?7lab中", "\x1b[1;1H\x1b[P", "b", 3, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, tc.width)
+			writeString(t, s, tc.setup)
+			writeString(t, s, tc.edit)
+			if got := rowText(s.Cells[tc.row]); got != tc.want {
+				t.Errorf("row %d = %q, want %q", tc.row, got, tc.want)
+			}
+		})
+	}
+}
+
+// A one-cell wide glyph DECFRA wrote has no half to lose, so an edit moving
+// it moves it whole, as xterm's ScrnFillRectangle leaves it.
+func TestEditsMoveADECFRAWideGlyphWhole(t *testing.T) {
+	const filled = "abcdefgh\x1b[20013;1;8;1;8$x" // the glyph in the last column
+	for _, tc := range []struct{ name, edit, want string }{
+		{"DCH shifting it out of the last column", "\x1b[1;1H\x1b[P", "bcdefg中"},
+		{"DECCRA copying it from a source's right edge", "\x1b[1;7;1;8;1;1;1$v", "g中cdefg中"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, 8)
+			writeString(t, s, filled+tc.edit)
+			if got := rowText(s.Cells[0]); got != tc.want {
+				t.Errorf("row 0 = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A wide character an alternate-screen narrowing cuts at the new last column
+// is a cut-off character like one written there, so DCH blanks it.
+func TestDCHBlanksAWideCharacterAnAlternateScreenNarrowingCut(t *testing.T) {
+	s := New(3, 8)
+	writeString(t, s, "\x1b[?1049habcdef中")
+	s.Resize(3, 7)
+	writeString(t, s, "\x1b[1;1H\x1b[P")
+	if got, want := rowText(s.Cells[0]), "bcdef"; got != want {
+		t.Errorf("row 0 = %q, want %q", got, want)
+	}
+}
+
+// An alternate-screen widening gives a cut-off wide character its right half
+// back, attributes included, so the row reads and edits like the same bytes
+// written at the new width.
+func TestAltScreenWideningGivesACutOffWideCharacterItsRightHalfBack(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		widths     []int
+	}{
+		{"cut by a narrowing", "\x1b[?1049h" + cellAttrs + "abcdef中", []int{8, 7, 12}},
+		{"written in the last column with autowrap off", "\x1b[?1049h\x1b[?7l" + cellAttrs + "abcdef中", []int{7, 12}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, tc.widths[0])
+			writeString(t, s, tc.text)
+			for _, w := range tc.widths[1:] {
+				s.Resize(3, w)
+			}
+			want := New(3, 12)
+			writeString(t, want, tc.text)
+			for _, edit := range []struct{ name, seq string }{{"the widening", ""}, {"ICH 5", "\x1b[1;1H\x1b[5@"}} {
+				writeString(t, s, edit.seq)
+				writeString(t, want, edit.seq)
+				if got, wantRow := rowText(s.Cells[0]), rowText(want.Cells[0]); got != wantRow {
+					t.Errorf("after %s, row 0 = %q, want %q", edit.name, got, wantRow)
+				}
+				for _, d := range cellDiffs(s.Cells[0], want.Cells[0]) {
+					t.Errorf("after %s, row 0 %s", edit.name, d)
+				}
+			}
+		})
+	}
+}
+
+// cellAttrs sets a style, an OSC 8 link, DECSCA protection and SPA
+// protection, so a cell comparison of what follows it catches a cell that
+// lost any of them.
+const cellAttrs = "\x1b[41;1m\x1b]8;;http://x\x07\x1b[1\"q\x1bV"
+
+// cellDiffs describes each column where got and want hold different cells.
+func cellDiffs(got, want []Cell) []string {
+	var diffs []string
+	for x := range max(len(got), len(want)) {
+		var g, w Cell
+		if x < len(got) {
+			g = got[x]
+		}
+		if x < len(want) {
+			w = want[x]
+		}
+		if g != w {
+			diffs = append(diffs, fmt.Sprintf("column %d = %+v, want %+v", x, g, w))
+		}
+	}
+	return diffs
 }

@@ -52,9 +52,10 @@ type Screen struct {
 	// screen: whether it soft-wraps from the line drained before it.
 	drainedWrapped []bool
 	Cells          [][]Cell
-	// wrapped[y] marks row y as a soft-wrap continuation of row y-1, for
-	// stampAutolinks. Every site that moves whole rows must move it too. In-place
-	// edits leave it alone: a stale true only fails a later URL match.
+	// wrapped[y] marks row y as a soft-wrap continuation of row y-1. A width
+	// change joins rows on it (reflow.go) and the autolinker chains them, so a
+	// stale true merges unrelated lines: every site that moves whole rows moves
+	// it, and an erase that cuts the chain clears it (unlinkReplaced).
 	wrapped []bool
 	// drainTail retains the text of the most recently drained (scrolled-off)
 	// rows while the row now at the top of the screen still continues them,
@@ -216,8 +217,6 @@ func (s *Screen) TakePaletteChanged() bool {
 	return p
 }
 
-// CursorState holds cursor position, saved cursor, and current style.
-// Embedded in Screen.
 // savedCursor is the full state DECSC/DECRC (and DEC mode 1048) preserve:
 // position, SGR, charsets, origin/autowrap modes, the deferred-wrap flag, and
 // the DECSCA protection attribute. xterm keeps a separate slot for the main and
@@ -261,7 +260,8 @@ type altScreenState struct {
 	savedMainScrollBottom int
 	savedMainStyle        Style
 	// InAltScreen indicates the alternate screen buffer is active.
-	InAltScreen bool
+	InAltScreen          bool
+	savedMainPendingWrap bool
 }
 
 // Option configures a Screen at construction time. Pass options to New.
@@ -427,16 +427,30 @@ func (s *Screen) CursorPos() (row, col int) {
 	return s.curY, s.curX
 }
 
-// Resize adjusts the screen dimensions, preserving existing content where
-// possible. When dimensions actually change, cells are cleared so the application's
-// SIGWINCH redraw starts from a clean slate; on a no-op resize (e.g. client
-// reconnect at the same size), content is preserved. Each dimension is floored
-// at 1 and capped at 1000.
+// Resize adjusts the screen dimensions, keeping its content. A width change
+// re-wraps the main screen's soft-wrapped lines, beneath the alternate screen
+// too, carrying the cursor and the main DECSC slot with their text. A main
+// screen taller than the new height gives up blank rows below the cursor, then
+// sends rows from the top to scrollback (Drained), the cursor's too when it
+// and the rows below it do not fit. The saved main screen keeps every row
+// until the alternate screen exits, which applies the same rule. The alternate
+// screen is neither reflowed nor drained. Each dimension is clamped to 1..1000.
 func (s *Screen) Resize(rows, cols int) {
 	cols = capDimension(max(cols, 1))
 	rows = capDimension(max(rows, 1))
-	s.resizeHeight(rows)
-	s.resizeWidth(cols)
+	widthChanged := cols != s.Width
+	switch {
+	case s.InAltScreen:
+		s.resizeHeight(rows)
+		s.resizeAltWidth(cols)
+	case widthChanged || rows != s.Height:
+		g := s.mainGrid()
+		g.relayout(cols)
+		s.reflowMain(&g, rows, cols)
+	}
+	if widthChanged {
+		s.resizeTabStops(cols)
+	}
 	if s.curY >= s.Height {
 		s.curY = s.Height - 1
 	}
@@ -457,11 +471,9 @@ func (s *Screen) Resize(rows, cols int) {
 	s.resizeSavedMain(rows, cols)
 }
 
-// resizeHeight adjusts the buffer to the new row count, preserving content.
-// On the alt screen, growth adds rows on top and moves the cursor with the
-// content until the app's SIGWINCH repaint; on the main screen it adds them
-// below, since a shell does not repaint on resize. Shrinking drops rows from
-// the bottom.
+// resizeHeight adjusts the alternate screen to the new row count. Growth adds
+// rows on top and moves the cursor with the content until the program's
+// SIGWINCH repaint; shrinking drops rows from the bottom.
 func (s *Screen) resizeHeight(rows int) {
 	if rows > s.Height {
 		grow := rows - s.Height
@@ -469,18 +481,9 @@ func (s *Screen) resizeHeight(rows int) {
 		for i := range newRows {
 			newRows[i] = makeRow(s.Width, Color{})
 		}
-		if s.InAltScreen {
-			// Keep the alt-screen content pinned to the bottom; the app
-			// repaints on the SIGWINCH that follows.
-			s.Cells = append(newRows, s.Cells...)
-			s.wrapped = append(make([]bool, grow), s.wrapped...)
-			s.curY += grow
-		} else {
-			// Keep the shell's output anchored at the top; the cursor stays on
-			// its row and the trailing blanks are trimmed client-side.
-			s.Cells = append(s.Cells, newRows...)
-			s.wrapped = append(s.wrapped, make([]bool, grow)...)
-		}
+		s.Cells = append(newRows, s.Cells...)
+		s.wrapped = append(make([]bool, grow), s.wrapped...)
+		s.curY += grow
 		s.Height = rows
 	}
 	if rows < s.Height {
@@ -490,10 +493,11 @@ func (s *Screen) resizeHeight(rows int) {
 	}
 }
 
-// resizeWidth adjusts the buffer to the new column count, preserving each row's
-// content. Tab stops are preserved and extended with the default every-8
-// pattern for newly exposed columns.
-func (s *Screen) resizeWidth(cols int) {
+// resizeAltWidth cuts or pads each alternate-screen row, since a full-screen
+// program repaints its own rows on SIGWINCH. A wide character the cut leaves
+// in the last column is marked cut off, as one written there is, and a
+// widening gives a cut-off one its right half back.
+func (s *Screen) resizeAltWidth(cols int) {
 	if cols == s.Width {
 		return
 	}
@@ -501,8 +505,23 @@ func (s *Screen) resizeWidth(cols int) {
 		old := s.Cells[i]
 		s.Cells[i] = makeRow(cols, Color{})
 		copy(s.Cells[i], old)
+		last := len(old) - 1
+		switch row := s.Cells[i]; {
+		case cols < len(old) && old[cols].Ch == 0 && old[cols-1].Ch != 0:
+			row[cols-1].wideCut = true
+		case cols > len(old) && old[last].wideCut:
+			half := old[last]
+			half.Ch, half.wideCut = 0, false
+			row[last].wideCut = false
+			row[len(old)] = half
+		}
 	}
 	s.Width = cols
+}
+
+// resizeTabStops keeps the tab stops set and extends them with the default
+// every-8 pattern for newly exposed columns.
+func (s *Screen) resizeTabStops(cols int) {
 	// nil-as-lazy, NOT len==0: nil means "default stops, computed on demand",
 	// while an EMPTY non-nil array is an explicit all-cleared configuration
 	// that must still be rebuilt to len == Width for nextTabStop's scan to
@@ -520,9 +539,76 @@ func (s *Screen) resizeWidth(cols int) {
 	s.tabStops = newStops
 }
 
-// resizeSavedMain rebuilds the saved main-screen buffer to the new dimensions
-// while in alt-screen mode, so exiting alt-screen restores correctly at the new
-// size. rows and cols are the already-clamped target dimensions.
+func (s *Screen) mainGrid() reflowGrid {
+	g := reflowGrid{cells: s.Cells, wrapped: s.wrapped, cursor: gridPoint{y: s.curY, x: s.curX, pendingWrap: s.pendingWrap}}
+	s.addMainSaved(&g)
+	return g
+}
+
+// addMainSaved adds the main screen's DECSC slot to g, the main screen or the
+// one saved beneath the alternate screen.
+func (s *Screen) addMainSaved(g *reflowGrid) {
+	m := s.mainSaved
+	g.saved, g.hasSaved = gridPoint{y: m.y, x: m.x, pendingWrap: m.pendingWrap}, m.valid
+}
+
+// takeMainSaved moves the main screen's DECSC slot to its place in g. It is
+// not moved with rows that later leave for scrollback, as a save point stays
+// put while output scrolls.
+func (s *Screen) takeMainSaved(g *reflowGrid) {
+	if g.hasSaved {
+		s.mainSaved.y, s.mainSaved.x, s.mainSaved.pendingWrap = g.saved.y, g.saved.x, g.saved.pendingWrap
+	}
+}
+
+// reflowMain installs g as the main screen at rows by cols. When g is taller,
+// blank rows below the cursor go first, then rows leave through the top into
+// scrollback, as output scrolling off does, until g fits. That can take the
+// cursor's own row, which leaves the cursor on the top row with no wrap
+// pending. The screen's Height spans every row while they drain, because
+// drainTopRow's autolink scan reads the rows below the one it drains.
+func (s *Screen) reflowMain(g *reflowGrid, rows, cols int) {
+	s.curY, s.curX, s.pendingWrap = g.cursor.y, g.cursor.x, g.cursor.pendingWrap
+	s.takeMainSaved(g)
+	n := len(g.cells)
+	for n > rows && n-1 > s.curY && contentLen(g.cells[n-1]) == 0 {
+		n--
+	}
+	s.Cells, s.wrapped, s.Height, s.Width = g.cells[:n], g.wrapped[:n], n, cols
+	drain := max(n-rows, 0)
+	for range drain {
+		s.drainTopRow()
+		s.Cells, s.wrapped = s.Cells[1:], s.wrapped[1:]
+		s.Height--
+		s.curY--
+	}
+	if s.curY < 0 {
+		s.curY, s.pendingWrap = 0, false
+	}
+	if drain > 0 {
+		// Drop the drained rows' references held by the shared backing array.
+		s.Cells = append(make([][]Cell, 0, rows), s.Cells...)
+		s.wrapped = append(make([]bool, 0, rows), s.wrapped...)
+	}
+	for len(s.Cells) < rows {
+		s.Cells = append(s.Cells, makeRow(cols, Color{}))
+		s.wrapped = append(s.wrapped, false)
+	}
+	s.Height = rows
+}
+
+// savedMainGrid is the main screen saved beneath the alternate screen.
+func (s *Screen) savedMainGrid() reflowGrid {
+	g := reflowGrid{cells: s.savedMainCells, wrapped: s.savedMainWrapped, cursor: gridPoint{y: s.savedMainCurY, x: s.savedMainCurX, pendingWrap: s.savedMainPendingWrap}}
+	s.addMainSaved(&g)
+	return g
+}
+
+// resizeSavedMain lays the saved main screen out at the new dimensions while
+// the alternate screen is up, as the main screen would be. It keeps every
+// row, even past rows: exitAltScreen fits them through reflowMain, since the
+// alternate screen cannot reach scrollback. rows and cols are the
+// already-clamped target dimensions.
 //
 // The same-size early return compares the saved buffer's own dimensions:
 // s.Height and s.Width are already the new size.
@@ -533,21 +619,16 @@ func (s *Screen) resizeSavedMain(rows, cols int) {
 	if len(s.savedMainCells) == rows && (rows == 0 || len(s.savedMainCells[0]) == cols) {
 		return
 	}
-	resized := make([][]Cell, rows)
-	for i := range resized {
-		row := makeRow(cols, Color{})
-		if i < len(s.savedMainCells) {
-			copy(row, s.savedMainCells[i])
-		}
-		resized[i] = row
+	g := s.savedMainGrid()
+	g.relayout(cols)
+	for len(g.cells) < rows {
+		g.cells = append(g.cells, makeRow(cols, Color{}))
+		g.wrapped = append(g.wrapped, false)
 	}
-	s.savedMainCells = resized
-	if s.savedMainCurY >= rows {
-		s.savedMainCurY = rows - 1
-	}
-	if s.savedMainCurX >= cols {
-		s.savedMainCurX = cols - 1
-	}
+	s.savedMainCells, s.savedMainWrapped = g.cells, g.wrapped
+	s.savedMainCurY, s.savedMainCurX = min(g.cursor.y, len(g.cells)-1), g.cursor.x
+	s.savedMainPendingWrap = g.cursor.pendingWrap
+	s.takeMainSaved(&g)
 }
 
 // RenderViewport returns the entire screen as ANSI-colored text. Used by
@@ -577,12 +658,32 @@ func (s *Screen) RenderViewport() string {
 
 // clearWrapState resets every soft-wrap continuation flag and drops the
 // retained cross-boundary chain tail. Called where the screen's content and
-// its relationship to history are severed wholesale (ED2, RIS).
+// its relationship to history are severed wholesale (RIS).
 func (s *Screen) clearWrapState() {
 	for i := range s.wrapped {
 		s.wrapped[i] = false
 	}
 	s.drainTail = nil
+}
+
+// unlinkReplaced clears the soft-wrap links that replacing columns x1 to x2
+// of row y cuts: to the row above when the span starts at column 0, to the
+// row below when it reaches the last column. Every erase reaches it through
+// eraseRegionMode. A cut at the main screen's top row also cuts it from
+// history; drainTail is the main screen's alone.
+func (s *Screen) unlinkReplaced(y, x1, x2 int) {
+	if y < 0 || y >= len(s.wrapped) {
+		return
+	}
+	if x1 <= 0 {
+		s.wrapped[y] = false
+		if y == 0 && !s.InAltScreen {
+			s.drainTail = nil
+		}
+	}
+	if x2 >= s.Width-1 && y+1 < len(s.wrapped) {
+		s.wrapped[y+1] = false
+	}
 }
 
 // RowString returns the text content of a row (no styling).
@@ -666,7 +767,8 @@ func (s *Screen) put(r rune) {
 
 	// Width-2: if only 1 cell remains before the wrap edge, wrap first.
 	if w == 2 && s.curX >= s.wrapEdge() && s.AutoWrap {
-		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style}
+		s.splitWideSpan(s.curY, s.curX, s.curX)
+		s.Cells[s.curY][s.curX] = Cell{Ch: ' ', Style: s.style, widePad: s.wrapsWholeRow()}
 		s.curX = s.wrapColumn()
 		s.curY++
 		s.scrollIfNeeded()
@@ -681,7 +783,8 @@ func (s *Screen) put(r rune) {
 	}
 
 	if s.curY < s.Height && s.curX < s.Width {
-		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected}
+		s.splitWideSpan(s.curY, s.curX, s.curX+w-1)
+		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected, drawn: true, wideCut: w == 2 && s.curX == s.Width-1}
 	}
 	s.lastPrintedRune = r
 	s.lastPrintedStyle = s.style
@@ -689,7 +792,7 @@ func (s *Screen) put(r rune) {
 	if w == 2 {
 		s.curX++
 		if s.curX < s.Width && s.curY < s.Height {
-			s.Cells[s.curY][s.curX] = Cell{Ch: 0, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected}
+			s.Cells[s.curY][s.curX] = Cell{Ch: 0, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected, drawn: true}
 		}
 	}
 
@@ -722,27 +825,37 @@ func (s *Screen) scrollIfNeeded() {
 		s.curY = s.scrollBottom
 	}
 	if s.curY >= s.Height {
-		s.drainTopRow()
-		copy(s.Cells, s.Cells[1:])
-		s.Cells[s.Height-1] = makeRow(s.Width, s.style.BG)
-		copy(s.wrapped, s.wrapped[1:])
-		s.wrapped[s.Height-1] = false
+		drained := s.drainTopRow()
+		s.shiftRows(0, s.Height-1, 1, drained)
 		s.curY = s.Height - 1
 	}
 }
 
+// wrapsWholeRow reports whether an autowrap continues the row, soft-wrapping
+// it, rather than the content of a DECSLRM left/right margin box.
+func (s *Screen) wrapsWholeRow() bool {
+	return s.leftBound() == 0 && s.rightBound() == s.Width-1
+}
+
 // markWrapContinuation records that the row the cursor just wrapped ONTO is a
 // soft continuation of the row above it. Called at the two autowrap sites in
-// put(), after any scroll has settled the cursor row. Only a true full-row
-// wrap chains rows for the autolinker; a wrap inside a DECSLRM left/right
-// margin box continues box content, not the row, so it is not recorded.
+// put(), after any scroll has settled the cursor row. A row above with no
+// text in its last column continues nothing: SU and SD keep a pending wrap,
+// as xterm does, while blanking the row it was armed on.
 func (s *Screen) markWrapContinuation() {
-	if s.leftBound() != 0 || s.rightBound() != s.Width-1 {
+	if !s.wrapsWholeRow() {
 		return
 	}
-	if s.curY >= 0 && s.curY < len(s.wrapped) {
-		s.wrapped[s.curY] = true
+	if s.curY < 0 || s.curY >= len(s.wrapped) {
+		return
 	}
+	if s.curY > 0 {
+		last := s.Cells[s.curY-1][s.Width-1]
+		if !last.widePad && contentLen([]Cell{last}) == 0 {
+			return
+		}
+	}
+	s.wrapped[s.curY] = true
 }
 
 // drainTopRow commits main-screen row 0 to the pending scrollback drain
@@ -750,10 +863,11 @@ func (s *Screen) markWrapContinuation() {
 // and maintains drainTail: when the row about to become the new top row
 // soft-continues the drained one, the drained row's text is retained so the
 // chain can still be joined; otherwise the retained tail is dropped. An
-// alternate-screen row scrolls away with no history, as in xterm.
-func (s *Screen) drainTopRow() {
+// alternate-screen row scrolls away with no history, as in xterm. Reports
+// whether the row went to scrollback.
+func (s *Screen) drainTopRow() bool {
 	if s.InAltScreen {
-		return
+		return false
 	}
 	// Row 0's trailing blanks are content, not padding, when row 1 soft-wraps
 	// from it — the same flag that decides whether the drain tail is retained
@@ -770,55 +884,112 @@ func (s *Screen) drainTopRow() {
 	} else {
 		s.drainTail = nil
 	}
+	return true
 }
 
 // eraseMode selects which per-cell protection attributes an erase spares.
 type eraseMode uint8
 
 const (
-	eraseAll         eraseMode = iota // clear every cell (plain ED 2, scroll blanks, RIS)
+	eraseAll         eraseMode = iota // clear every cell (plain ED 2, DECERA, DECCOLM, RIS)
 	eraseSpareISO                     // spare ISO (SPA/EPA) guarded cells — regular ED 0/1, EL, ECH
 	eraseSpareDECSCA                  // spare DECSCA-protected cells — DECSERA
 	eraseSpareBoth                    // spare DECSCA OR ISO — DECSED/DECSEL (xterm backward-compat)
 )
 
+// spares reports whether an erase in mode m leaves cell c as it is.
+func (m eraseMode) spares(c Cell) bool {
+	switch m {
+	case eraseSpareISO:
+		return c.IsoProtected
+	case eraseSpareDECSCA:
+		return c.Protected
+	case eraseSpareBoth:
+		return c.Protected || c.IsoProtected
+	case eraseAll:
+	}
+	return false
+}
+
 // eraseRegionMode blanks the rectangle [y1,x1]..[y2,x2], honoring the given
 // protection mode. Coordinates outside the screen are skipped.
-//
-//nolint:gocognit // per-cell bounds + protection-mode guard over a 2-D region
 func (s *Screen) eraseRegionMode(y1, x1, y2, x2 int, mode eraseMode) {
 	blank := Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
-	for y := y1; y <= y2; y++ {
-		if y < 0 || y >= s.Height {
-			continue
-		}
+	x1, x2 = max(x1, 0), min(x2, s.Width-1)
+	for y := max(y1, 0); y <= min(y2, s.Height-1); y++ {
 		row := s.Cells[y]
-		for x := x1; x <= x2; x++ {
-			if x < 0 || x >= s.Width {
-				continue
-			}
-			switch mode {
-			case eraseSpareISO:
-				if row[x].IsoProtected {
-					continue
-				}
-			case eraseSpareDECSCA:
-				if row[x].Protected {
-					continue
-				}
-			case eraseSpareBoth:
-				if row[x].Protected || row[x].IsoProtected {
-					continue
-				}
-			case eraseAll:
-			}
-			row[x] = blank
+		// A spared edge cell keeps its wide character whole. The links cut
+		// are the replaced cells', the split halves included.
+		from, to := x1, x2
+		if x1 <= x2 && !mode.spares(row[x1]) && s.splitWide(y, x1) {
+			from = x1 - 1
 		}
+		if x1 <= x2 && !mode.spares(row[x2]) && s.splitWide(y, x2+1) {
+			to = x2 + 1
+		}
+		for x := x1; x <= x2; x++ {
+			if !mode.spares(row[x]) {
+				row[x] = blank
+			}
+		}
+		s.unlinkReplaced(y, from, to)
 	}
 }
 
-// eraseRegion clears the rectangle unconditionally (no protection). Used by the
-// scroll blanks, RIS, and other full clears.
+// splitWide blanks both halves of the wide character that column x cuts: one
+// whose left half is at x-1 and whose right half is at x or, at x == Width,
+// was cut off. Every edit that replaces or shifts a span of a row calls it at
+// the span's edges first, as xterm (screen.c ClearCells) and xterm.js
+// (BufferLine.replaceCells) do: a reflow reads a glyph followed by a right
+// half as one character, so a lone half would merge with its neighbour.
+// Reports whether it blanked.
+func (s *Screen) splitWide(y, x int) bool {
+	if y < 0 || y >= len(s.Cells) || x <= 0 || x > s.Width {
+		return false
+	}
+	row := s.Cells[y]
+	switch {
+	case x == s.Width:
+		if !row[x-1].wideCut {
+			return false
+		}
+	case row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2 || row[x].Ch != 0:
+		return false
+	}
+	blank := Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+	row[x-1] = blank
+	if x < s.Width {
+		row[x] = blank
+	}
+	return true
+}
+
+// splitWideSpan splits the wide characters at both edges of columns x1..x2.
+func (s *Screen) splitWideSpan(y, x1, x2 int) {
+	s.splitWide(y, x1)
+	s.splitWide(y, x2+1)
+}
+
+// splitWideShift readies columns x1..x2 of row y for a shift that drops the
+// cells on one side of column cut: no wide character straddles a span edge or
+// the cut.
+func (s *Screen) splitWideShift(y, x1, x2, cut int) {
+	s.splitWideSpan(y, x1, x2)
+	if cut > x1 && cut <= x2 {
+		s.splitWide(y, cut)
+	}
+}
+
+// splitWideBox splits the wide characters at both edges of columns x1..x2 in
+// rows y1..y2.
+func (s *Screen) splitWideBox(y1, y2, x1, x2 int) {
+	for y := y1; y <= y2; y++ {
+		s.splitWideSpan(y, x1, x2)
+	}
+}
+
+// eraseRegion clears the rectangle unconditionally (no protection). Used by
+// RIS and DECCOLM.
 func (s *Screen) eraseRegion(y1, x1, y2, x2 int) {
 	s.eraseRegionMode(y1, x1, y2, x2, eraseAll)
 }
@@ -867,6 +1038,7 @@ func (s *Screen) enterAltScreen(mode int) {
 	s.savedMainWrapped = append([]bool(nil), s.wrapped...)
 	s.savedMainCurY = s.curY
 	s.savedMainCurX = s.curX
+	s.savedMainPendingWrap = s.pendingWrap
 	s.savedMainStyle = s.style
 	s.savedMainScrollTop = s.scrollTop
 	s.savedMainScrollBottom = s.scrollBottom
@@ -891,6 +1063,7 @@ func (s *Screen) enterAltScreen(mode int) {
 		// 1049 homes the cursor and resets SGR in the cleared alt buffer; 47 and
 		// 1047 leave both shared with the main screen.
 		s.curY, s.curX = 0, 0
+		s.pendingWrap = false
 		s.style = Style{}
 	}
 	s.InAltScreen = true
@@ -918,40 +1091,22 @@ func (s *Screen) exitAltScreen(mode int) {
 	if mode == 1047 || mode == 1049 {
 		s.altCells = nil
 	}
-	// Resize-resilient restore: if dimensions changed while in alt,
-	// truncate or pad rows to match current height.
-	restored := make([][]Cell, s.Height)
-	for i := range restored {
-		switch {
-		case i < len(s.savedMainCells) && len(s.savedMainCells[i]) == s.Width:
-			restored[i] = s.savedMainCells[i]
-		case i < len(s.savedMainCells):
-			// Width changed — copy what fits, pad with spaces.
-			row := makeRow(s.Width, Color{})
-			copy(row, s.savedMainCells[i])
-			restored[i] = row
-		default:
-			restored[i] = makeRow(s.Width, Color{})
-		}
-	}
-	s.Cells = restored
-	// Restore the main screen's wrap flags alongside its cells, padded or
-	// truncated to the current height like the cells above.
-	restoredWrapped := make([]bool, s.Height)
-	copy(restoredWrapped, s.savedMainWrapped)
-	s.wrapped = restoredWrapped
-	s.savedMainWrapped = nil
+	altY, altX, altPending := s.curY, s.curX, s.pendingWrap
+	g := s.savedMainGrid()
+	g.relayout(s.Width)
+	// drainTopRow commits only main-screen rows, so the switch comes first:
+	// reflowMain sends the saved rows that do not fit to scrollback.
+	s.InAltScreen = false
+	s.reflowMain(&g, s.Height, s.Width)
+	s.savedMainCells, s.savedMainWrapped = nil, nil
 	s.scrollTop = s.savedMainScrollTop
 	s.scrollBottom = s.savedMainScrollBottom
 	if mode == 1049 {
-		// Only 1049 is "restore cursor as in DECRC", and DECRC restores the SGR
-		// pen alongside the position (see restoreCursor). 47 and 1047 carry no
-		// restore clause, so SGR set inside such a session stays shared with the
-		// main screen — matching the enter side, which resets the pen only for
-		// 1049.
-		s.curY = s.savedMainCurY
-		s.curX = s.savedMainCurX
+		// Only 1049 restores as DECRC does, the SGR pen with the cursor
+		// (restoreCursor); 47 and 1047 keep the alt session's cursor and pen.
 		s.style = s.savedMainStyle
+	} else {
+		s.curY, s.curX, s.pendingWrap = altY, altX, altPending
 	}
 	if s.curY >= s.Height {
 		s.curY = s.Height - 1
@@ -962,6 +1117,4 @@ func (s *Screen) exitAltScreen(mode int) {
 	if s.scrollBottom >= s.Height {
 		s.scrollBottom = s.Height - 1
 	}
-	s.savedMainCells = nil
-	s.InAltScreen = false
 }

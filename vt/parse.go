@@ -424,8 +424,9 @@ func (s *Screen) decLineSize(final byte) {
 	for y := range s.Cells {
 		row := s.Cells[y]
 		for x := range row {
-			row[x] = Cell{Ch: 'E'}
+			row[x] = Cell{Ch: 'E', drawn: true}
 		}
+		s.unlinkReplaced(y, 0, s.Width-1)
 	}
 	s.scrollTop = 0
 	s.scrollBottom = s.Height - 1

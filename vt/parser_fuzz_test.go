@@ -8,8 +8,9 @@ import (
 )
 
 // FuzzParser feeds arbitrary byte sequences through the full VT parser. The
-// invariant: the parser never panics or accesses out of bounds, and the cursor
-// always stays within [0,Width) x [0,Height).
+// invariant: the parser never panics or accesses out of bounds, the cursor
+// always stays within [0,Width) x [0,Height), and the wide pairs on both
+// screens stay intact wherever writeFuzzed checks them.
 func FuzzParser(f *testing.F) {
 	seeds := [][]byte{
 		// Plain text and basic sequences.
@@ -77,7 +78,7 @@ func FuzzParser(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte) {
 		s := New(24, 80)
-		s.Write(data)
+		writeFuzzed(t, s, data)
 		row, col := s.CursorPos()
 		if row < 0 || row >= s.Height {
 			t.Fatalf("cursor row %d out of bounds [0,%d)", row, s.Height)
@@ -118,21 +119,27 @@ func FuzzParser(f *testing.F) {
 }
 
 // FuzzScreenWriteResize feeds arbitrary bytes through the parser with a resize
-// interleaved partway through. Invariant: the cursor stays in bounds across the
-// resize.
+// interleaved partway through. Invariant: the grid keeps its shape, the
+// cursor stays in bounds across the resize, and the wide pairs on both
+// screens stay intact after the resize and wherever writeFuzzed checks them.
 func FuzzScreenWriteResize(f *testing.F) {
 	f.Add([]byte("\x1b[?1049h\x1b[2J\x1b[H漢字テスト\x1b[?1049l"), uint8(10), uint8(20))
 	f.Add([]byte("\x1b[5S\x1b[5T\x1b[10L\x1b[10M"), uint8(3), uint8(5))
 	f.Add([]byte("\x1b[38;2;255;0;0m\xf0\x9f\x98\x80\x1b[0m"), uint8(1), uint8(2))
+	f.Add([]byte("\x1b[?1049h\x1b[?7l\x1b[1;80H中\x1b[1;1H\x1b[5@\x1b[?1049l\x1b[?7h"), uint8(23), uint8(89))
+	f.Add([]byte("\x1b[?7l\x1b[1;80H中\x1b[2;79H字\x1b[1;1H\x1b[5@\x1b[2;1H\x1b[3P\x1b[?7h"), uint8(23), uint8(89))
+	f.Add([]byte("\x1b[1;79H中字\x1b[?1049h\x1b[1;79H字\x1b[1;2H\x1b[2X\x1b[?1049l\x1b[1;80H\x1b[K"), uint8(23), uint8(76))
 
 	f.Fuzz(func(t *testing.T, data []byte, rows, cols uint8) {
 		r := int(rows)%50 + 1
 		c := int(cols)%100 + 1
 		s := New(24, 80)
 		mid := len(data) / 2
-		s.Write(data[:mid])
+		writeFuzzed(t, s, data[:mid])
 		s.Resize(r, c)
-		s.Write(data[mid:])
+		assertGridShape(t, s)
+		assertWidePairs(t, s)
+		writeFuzzed(t, s, data[mid:])
 		row, col := s.CursorPos()
 		if row < 0 || row >= s.Height {
 			t.Errorf("cursor row %d out of bounds [0, %d)", row, s.Height)

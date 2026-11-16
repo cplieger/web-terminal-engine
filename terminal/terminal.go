@@ -38,8 +38,7 @@ const (
 	ptyReadBuf  = 4096
 	// defaultCols and defaultRows are the spawn size before any client reports
 	// one: 80x24, the VT100 screen and xterm's default geometry, so a program
-	// that lays out by the width it reads at start stays readable. Rows painted
-	// before a client narrows the screen are cut at its width, not re-wrapped.
+	// that lays out by the width it reads at start stays readable.
 	defaultCols   = 80
 	defaultRows   = 24
 	flushInterval = 50 * time.Millisecond
@@ -2352,9 +2351,7 @@ func (h *Handler) resizeToOwner(reason string) {
 	}); err != nil {
 		// The PTY keeps the winsize it had, so the child never learns the new one
 		// and keeps painting at the width it last read. Moving the screen anyway
-		// models a width nothing on the wire is written for, and a width shrink
-		// DROPS each row's tail (vt.Screen.resizeWidth), so the disagreement
-		// destroys output.
+		// would lay that output out at a width it was not written for.
 		h.cfg.logger.Warn("terminal: "+reason+" not applied",
 			"error", err,
 			"cols", h.screen.Width, "rows", h.screen.Height,

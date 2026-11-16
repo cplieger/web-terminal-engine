@@ -578,10 +578,9 @@ func TestApplySize_sizeChangeArmsRedrawSettle(t *testing.T) {
 // and pins it against the VT screen's own dimensions, on both outcomes of the
 // TIOCSWINSZ. The screen models what the child paints and the child's width
 // comes from TIOCGWINSZ on the PTY, so a screen that disagrees with its PTY is
-// a session rendering at a width nothing on the wire is written for — and on a
-// shrink vt.Screen.resizeWidth drops each row's tail, so the disagreement
-// destroys output rather than merely misplacing it. Nothing else in the package
-// reads the PTY back, which is what let a failed ioctl move the screen anyway.
+// a session laying the child's output out at a width it was not written for.
+// Nothing else in the package reads the PTY back, which is what let a failed
+// ioctl move the screen anyway.
 func TestApplySize_ptyAndScreenAgreeOnTheAppliedSize(t *testing.T) {
 	t.Run("applied", func(t *testing.T) {
 		h := NewHandler([]string{"/bin/cat"}, WithLogger(nil))

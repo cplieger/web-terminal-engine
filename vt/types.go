@@ -71,6 +71,19 @@ type Cell struct {
 	Style        Style
 	Protected    bool
 	IsoProtected bool
+	// drawn marks a cell a character was written to, as xterm's CHARDRAWN:
+	// a re-wrap carries a line up to its last drawn cell, so a space the
+	// program wrote is text and the blanks an erase or a new row leave are not.
+	drawn bool
+	// widePad marks the blank autowrap leaves in a row's last column when a
+	// wide character does not fit there: layout, not text, so a re-wrap drops
+	// it unless the cursor is on it.
+	widePad bool
+	// wideCut marks a wide character written in a row's last column, or laid
+	// on a one-column row, with no room for its right half: a re-wrap or an
+	// alternate-screen widening gives the half back. A wide glyph DECFRA
+	// fills into one cell lacks the mark and stays one cell.
+	wideCut bool
 }
 
 // ParserState holds the VT500-style state machine state used by the

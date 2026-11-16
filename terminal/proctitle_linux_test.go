@@ -297,11 +297,10 @@ func TestProcessName_prefersArgv0OverComm(t *testing.T) {
 }
 
 // startWithArgv0 runs /bin/sleep under a caller-chosen argv[0] and returns its
-// pid once the exec has completed — it is asynchronous, so a read taken too
-// early sees the pre-exec image and would silently test the wrong process. The
-// wait is on comm turning "sleep": the forked image's cmdline is already
-// NUL-terminated. comm stays "sleep" whatever argv[0] says, which is what makes
-// the two name rungs distinguishable.
+// pid once the exec has completed, so a read sees the new image. The wait is on
+// both comm and cmdline: exec sets comm before the new image's argv is mapped,
+// and cmdline reads empty in between. comm stays "sleep" whatever argv[0] says,
+// which is what makes the two name rungs distinguishable.
 func startWithArgv0(t *testing.T, argv0 string) int {
 	t.Helper()
 	cmd := exec.Command("/bin/sleep", "60") // #nosec G204 -- fixed test command
@@ -315,7 +314,9 @@ func startWithArgv0(t *testing.T, argv0 string) int {
 	})
 	deadline := time.Now().Add(waitPatience)
 	for {
-		if raw, err := os.ReadFile(procPath(cmd.Process.Pid, "comm")); err == nil && string(bytes.TrimSpace(raw)) == "sleep" {
+		comm, err := os.ReadFile(procPath(cmd.Process.Pid, "comm"))
+		args, argsErr := os.ReadFile(procPath(cmd.Process.Pid, "cmdline"))
+		if err == nil && argsErr == nil && string(bytes.TrimSpace(comm)) == "sleep" && bytes.HasPrefix(args, []byte(argv0+"\x00")) {
 			return cmd.Process.Pid
 		}
 		if time.Now().After(deadline) {

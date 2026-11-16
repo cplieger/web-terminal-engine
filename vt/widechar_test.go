@@ -482,29 +482,35 @@ func TestEditsBlankBothHalvesOfACutWideCharacter(t *testing.T) {
 	const line = "a中b中c" // columns: a 中 | b 中 | c
 	for _, tc := range []struct {
 		name, setup, edit, want string
+		width, row              int
 	}{
-		{"a narrow character over the right half", line, "\x1b[1;3HX", "a Xb中|c"},
-		{"a narrow character over the left half", line, "\x1b[1;2HX", "aX b中|c"},
-		{"a wide character over a right half", line, "\x1b[1;3H字", "a 字|中|c"},
-		{"a wide character over a left half", line, "\x1b[1;4H字", "a中|字| c"},
-		{"EL 0 from a right half", line, "\x1b[1;3H\x1b[K", "a"},
-		{"EL 1 to a left half", line, "\x1b[1;5H\x1b[1K", "      c"},
-		{"ECH on a left half", line, "\x1b[1;2H\x1b[X", "a  b中|c"},
-		{"DCH at a right half", line, "\x1b[1;3H\x1b[P", "a b中|c"},
-		{"DCH ending on a left half", line, "\x1b[1;4H\x1b[2P", "a中| c"},
-		{"ICH at a right half", line, "\x1b[1;3H\x1b[@", "a   b中|c"},
-		{"ICH pushing a right half past the edge", "abcdef中", "\x1b[1;1H\x1b[@", " abcdef"},
-		{"DECFRA over a right half", line, "\x1b[88;1;3;1;3$x", "a Xb中|c"},
-		{"DECCRA copying a lone right half", line, "\x1b[1;3;1;3;1;1;8$v", "a中|b中|c"},
-		{"SL shifting a right half to the edge", line, "\x1b[2 @", " b中|c"},
-		{"SU in a box whose edge cuts a wide character", line + "\r\n12345678", "\x1b[?69h\x1b[3;8s\x1b[S", "a 345678"},
+		{"a narrow character over the right half", line, "\x1b[1;3HX", "a Xb中|c", 8, 0},
+		{"a narrow character over the left half", line, "\x1b[1;2HX", "aX b中|c", 8, 0},
+		{"a wide character over a right half", line, "\x1b[1;3H字", "a 字|中|c", 8, 0},
+		{"a wide character over a left half", line, "\x1b[1;4H字", "a中|字| c", 8, 0},
+		{"EL 0 from a right half", line, "\x1b[1;3H\x1b[K", "a", 8, 0},
+		{"EL 1 to a left half", line, "\x1b[1;5H\x1b[1K", "      c", 8, 0},
+		{"ECH on a left half", line, "\x1b[1;2H\x1b[X", "a  b中|c", 8, 0},
+		{"DCH at a right half", line, "\x1b[1;3H\x1b[P", "a b中|c", 8, 0},
+		{"DCH ending on a left half", line, "\x1b[1;4H\x1b[2P", "a中| c", 8, 0},
+		{"ICH at a right half", line, "\x1b[1;3H\x1b[@", "a   b中|c", 8, 0},
+		{"ICH pushing a right half past the edge", "abcdef中", "\x1b[1;1H\x1b[@", " abcdef", 8, 0},
+		{"DECFRA over a right half", line, "\x1b[88;1;3;1;3$x", "a Xb中|c", 8, 0},
+		{"DECCRA copying a lone right half", line, "\x1b[1;3;1;3;1;1;8$v", "a中|b中|c", 8, 0},
+		{"SL shifting a right half to the edge", line, "\x1b[2 @", " b中|c", 8, 0},
+		{"SU in a box whose edge cuts a wide character", line + "\r\n12345678", "\x1b[?69h\x1b[3;8s\x1b[S", "a 345678", 8, 0},
+		{"EL on a protected wide character's right edge", "a\x1b[1\"q中\x1b[0\"qbc", "\x1b[1;3H\x1b[?K", "a中|", 8, 0},
+		{"EL 1 on a protected wide character's left edge", "ab\x1b[1\"q中\x1b[0\"qc", "\x1b[1;3H\x1b[?1K", "  中|c", 8, 0},
+		{"DECCRA copying a lone left half", "a中bcdefg\r\n", "\x1b[1;1;1;2;1;2;1;1$v", "a", 8, 1},
+		{"a wrap pad on a right half", "abcdef中", "\x1b[1;8H字", "abcdef", 8, 0},
+		{"DCH shifting a cut-off wide character", "\x1b[?7lab中", "\x1b[1;1H\x1b[P", "b", 3, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := New(3, 8)
+			s := New(3, tc.width)
 			writeString(t, s, tc.setup)
 			writeString(t, s, tc.edit)
-			if got := cellsString(s, 0); got != tc.want {
-				t.Errorf("row 0 = %q, want %q", got, tc.want)
+			if got := cellsString(s, tc.row); got != tc.want {
+				t.Errorf("row %d = %q, want %q", tc.row, got, tc.want)
 			}
 		})
 	}

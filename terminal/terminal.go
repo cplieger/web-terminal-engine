@@ -11,6 +11,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,14 @@ const (
 	defaultCols   = 80
 	defaultRows   = 24
 	flushInterval = 50 * time.Millisecond
+	// defaultStartBound is how long a deferred start waits for a client's first
+	// resize before it spawns at 80x24. A browser client waits up to 3 s for its
+	// web font before that resize, and the rest covers the create's answer and
+	// the socket dial on a slow link.
+	defaultStartBound = 5 * time.Second
+	// maxPendingInput bounds the input queued before the spawn; input past it
+	// starts the process at once.
+	maxPendingInput = 64 * 1024
 
 	// After a size change, armRedrawSettle holds flushes until the child's
 	// redraw has been quiet for redrawSettleQuiet, which must exceed a DEC 2026
@@ -203,6 +212,7 @@ type handlerConfig struct {
 	scrollbackCapacity int
 	// minContrast of 0, like 1, leaves the contrast floor off.
 	minContrast   float64
+	startBound    time.Duration
 	keepUnfocused bool
 }
 
@@ -469,7 +479,12 @@ type Handler struct {
 	replyWake chan struct{}
 	// pendingReplies holds device-query answers for replyLoop. Guarded by h.mu.
 	pendingReplies []byte
-	sizeHoldTimer  *time.Timer
+	// pendingInput holds input that reached the ledger before the spawn, written
+	// to the PTY in order once it runs (drainPendingInput). Guarded by h.mu.
+	pendingInput  bytes.Buffer
+	sizeHoldTimer *time.Timer
+	// startTimer is the deferred start's fallback (deferStart). Guarded by h.mu.
+	startTimer *time.Timer
 	// The redraw-settle hold's fields are guarded by h.mu; a zero
 	// redrawSettleUntil means the hold is inactive.
 	redrawSettleUntil time.Time
@@ -489,17 +504,21 @@ type Handler struct {
 	// "is anything of mine still running" instead of leaving the caller to assume
 	// it from the process having exited. Added to only from ensureStarted, which
 	// holds h.mu, and never after done is armed.
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	started atomic.Bool
+	wg sync.WaitGroup
+	mu sync.Mutex
+	// redrawRearms counts how many times the redraw-settle cap has lapsed
+	// mid-redraw and coalesced instead of releasing, bounding the coalescing at
+	// redrawSettleMaxRearms. Guarded by h.mu. Placed ahead of the atomic.Bool
+	// and bool block so that block packs (govet fieldalignment).
+	redrawRearms int
+	started      atomic.Bool
+	// inputLive latches once pendingInput is drained: from then on input goes
+	// straight to the PTY. Stored under h.mu after the last queued write, so a
+	// writer that reads true cannot overtake it.
+	inputLive atomic.Bool
 	// shutdownRequested latches when Close ends the session, keeping that exit
 	// out of crashedExit's crashed class. Atomic: the monitor reads it without h.mu.
 	shutdownRequested atomic.Bool
-	// redrawRearms counts how many times the redraw-settle cap has lapsed
-	// mid-redraw and coalesced instead of releasing, bounding the coalescing at
-	// redrawSettleMaxRearms. Guarded by h.mu. Placed ahead of the bool block so
-	// the bools stay contiguous (govet fieldalignment).
-	redrawRearms int
 	// sizeEstablished is latched true once the PTY has real dimensions (the
 	// eager start's default size, or a client resize) and never cleared: the
 	// flush builder emits nothing before it, so clients never see a frame
@@ -522,6 +541,9 @@ type Handler struct {
 	// autoTitleWarned makes the automatic-title probe's failure note once-per-
 	// session rather than once-per-sweep (see probeAutoTitle). Guarded by h.mu.
 	autoTitleWarned bool
+	// inputDraining marks the one drainPendingInput call that owns the queue.
+	// Guarded by h.mu.
+	inputDraining bool
 	// focusTold is the DEC 1004 state this session's process has been told, so
 	// the derivation writes on transitions only (see focusReportLocked), and
 	// focusEnableSeen the screen's FocusEnableSeq it last saw. Guarded by h.mu.
@@ -535,6 +557,7 @@ type Handler struct {
 func NewHandler(command []string, opts ...Option) *Handler {
 	cfg := handlerConfig{
 		scrollbackCapacity: defaultScrollbackCapacity,
+		startBound:         defaultStartBound,
 		logger:             slog.Default(),
 	}
 	for _, o := range opts {
@@ -599,6 +622,10 @@ func (h *Handler) Close() {
 	// triggers, and therefore ahead of the cmd.Wait() return the monitor
 	// classifies.
 	h.shutdownRequested.Store(true)
+	if h.startTimer != nil {
+		h.startTimer.Stop()
+	}
+	h.pendingInput.Reset()
 	if h.cancel != nil {
 		h.cancel()
 	}
@@ -839,13 +866,94 @@ func (h *Handler) statusSnapshot() screenStatus {
 	}
 }
 
-// StartEager starts the child process now at the default 80x24 rather than
-// lazily on the first client message, so the process and its activity signal
-// exist before any client attaches; the first attach still sends the real
-// resize. Idempotent. On a handler closed before its first start it returns an
-// error.
+// StartEager starts the child process now at the default 80x24 rather than at
+// the first client resize, so the process and its activity signal exist before
+// any client attaches; the first attach still sends the real resize.
+// Idempotent. On a handler closed before its first start it returns an error.
 func (h *Handler) StartEager() error {
-	return h.ensureStarted(0, 0)
+	return h.start(0, 0)
+}
+
+// deferStart arms the fallback of a handler that starts at its first client
+// resize: with no resize within the start bound, the process spawns at 80x24.
+// A no-op once armed, started or closed.
+func (h *Handler) deferStart() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.startTimer != nil || h.started.Load() || h.shutdownRequested.Load() {
+		return
+	}
+	h.startTimer = time.AfterFunc(h.cfg.startBound, func() {
+		if err := h.start(0, 0); err != nil {
+			h.logStartFailure(err)
+		}
+	})
+}
+
+// start spawns the process (ensureStarted) and then writes the input queued
+// before the spawn.
+func (h *Handler) start(cols, rows int) error {
+	if err := h.ensureStarted(cols, rows); err != nil {
+		return err
+	}
+	h.drainPendingInput()
+	return nil
+}
+
+// drainPendingInput writes pendingInput to the PTY in order, including input
+// queued while it writes, then latches inputLive. The PTY is written without
+// h.mu: a child that does not read its input yet would otherwise block the
+// read loop's screen updates behind the write.
+func (h *Handler) drainPendingInput() {
+	h.mu.Lock()
+	if h.inputLive.Load() || h.inputDraining {
+		h.mu.Unlock()
+		return
+	}
+	h.inputDraining = true
+	for h.pendingInput.Len() > 0 {
+		buf := bytes.Clone(h.pendingInput.Bytes())
+		h.pendingInput.Reset()
+		ptmx := h.ptmx
+		h.mu.Unlock()
+		if _, err := ptmx.Write(buf); err != nil {
+			h.cfg.logger.Debug("terminal: pty write", "error", err)
+		}
+		h.mu.Lock()
+	}
+	h.inputDraining = false
+	h.inputLive.Store(true)
+	h.mu.Unlock()
+	// The pass's ack sweep trims the clients' outboxes for the queued input.
+	h.markDirty()
+}
+
+// writeInput applies msg through state's ledger: to the PTY once the queued
+// input is written, to pendingInput before that. Input past maxPendingInput
+// starts the process at once.
+func (h *Handler) writeInput(state *clientState, msg []byte) (applied bool, err error) {
+	if !h.inputLive.Load() {
+		h.mu.Lock()
+		if !h.inputLive.Load() {
+			if h.shutdownRequested.Load() {
+				h.mu.Unlock()
+				return false, errHandlerClosed
+			}
+			applied, err = h.registry.ApplyInput(state, &h.pendingInput, msg)
+			// A process that started before this input queued drains it now, or
+			// the drain already running picks it up.
+			startNow := h.started.Load() || h.pendingInput.Len() > maxPendingInput
+			h.mu.Unlock()
+			if startNow {
+				if serr := h.start(0, 0); serr != nil {
+					return false, serr
+				}
+			}
+			return applied, err
+		}
+		h.mu.Unlock()
+	}
+	return h.registry.ApplyInput(state, h.ptmx, msg)
 }
 
 // exitAwareCloseCode returns statusProcessExited (4001) when the child process
@@ -901,9 +1009,11 @@ func (h *Handler) logStartFailure(err error) {
 }
 
 // ensureStarted spawns the process if not already running, sized at
-// spawnSize(cols, rows). Idempotent: concurrent callers all see
-// started==true after the first returns; cols/rows on subsequent calls
-// are ignored.
+// the given dimensions. cols/rows ≤ 0 fall back to defaults so callers
+// who don't yet know the client size can still start the process.
+// Idempotent: concurrent callers all see started==true after the
+// first returns; cols/rows on subsequent calls are ignored. Callers go
+// through start, which also writes the input queued before the spawn.
 func (h *Handler) ensureStarted(cols, rows int) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -928,7 +1038,12 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	cmd.Dir = h.cfg.workDir
 	h.reap = h.newSessionReap()
 	cmd.Env = h.childEnv(h.reap)
-	cols, rows = spawnSize(cols, rows)
+	if cols < 1 {
+		cols = defaultCols
+	}
+	if rows < 1 {
+		rows = defaultRows
+	}
 	h.contain = h.beginContainment(cmd)
 	ptmx, err := startSessionPTY(cmd, cols, rows)
 	// The cgroup fd is only needed at clone time; holding it would leak one
@@ -946,6 +1061,9 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	h.ptmx = ptmx
 	h.cmd = cmd
 	h.started.Store(true)
+	if h.startTimer != nil {
+		h.startTimer.Stop()
+	}
 	h.sizeEstablished = true
 	h.screen.Resize(rows, cols)
 	loggedCommand := any(h.command)
@@ -1061,7 +1179,7 @@ func (h *Handler) childEnv(reap *sessionReap) []string {
 
 // startSessionPTY forks the session's process on a new PTY.
 func startSessionPTY(cmd *exec.Cmd, cols, rows int) (*os.File, error) {
-	return pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}) // #nosec G115 -- spawnSize bounds cols/rows to [1, maxResize<=1000]
+	return pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}) // #nosec G115 -- cols/rows are floored above and bounded by the client protocol
 }
 
 // markProgramExited tells the screen the process exited (vt.Screen.ProgramExited
@@ -1646,9 +1764,9 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.SetReadLimit(wsReadLimit)
 
-	// Note: the child process is preferably started on the first resize message so it
-	// boots at the correct dimensions. As a fallback we still call ensureStarted
-	// here in case the client never sends a resize (e.g. tests).
+	// The process starts at the first resize, so it boots at the client's size;
+	// deferStart spawns it at 80x24 if none comes.
+	h.deferStart()
 
 	// Register this client.
 	state := h.registry.Add(ws)
@@ -1745,18 +1863,13 @@ func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg 
 		}
 		// Parse-fallback: fall through and deliver the WHOLE frame as input.
 	}
-	// Ensure process is started (fallback if no resize was sent).
-	// h.started is atomic.Bool so the fast-path read does not race
-	// with ensureStarted's write. cols/rows of 0 select defaults.
-	if !h.started.Load() {
-		if err := h.ensureStarted(0, 0); err != nil {
-			h.logStartFailure(err)
-			return armed, false
-		}
-	}
-	applied, err := h.registry.ApplyInput(state, h.ptmx, msg)
+	applied, err := h.writeInput(state, msg)
 	if err != nil {
-		h.cfg.logger.Debug("terminal: pty write", "error", err)
+		if errors.Is(err, errHandlerClosed) {
+			h.logStartFailure(err)
+		} else {
+			h.cfg.logger.Debug("terminal: pty write", "error", err)
+		}
 		return armed, false
 	}
 	if !applied {
@@ -2242,19 +2355,6 @@ func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 	return clampedCols, clampedRows
 }
 
-// spawnSize is the size a process starts at: a dimension ≤ 0 is unknown and
-// starts at the default, and any other is clamped like a resize, so a create
-// carrying a size and the resize after it agree.
-func spawnSize(cols, rows int) (spawnCols, spawnRows int) {
-	if cols < 1 {
-		cols = defaultCols
-	}
-	if rows < 1 {
-		rows = defaultRows
-	}
-	return clampResize(cols, rows)
-}
-
 // handleResize records a client's requested size on its socket and resizes
 // the shared PTY and screen to the size owner's (clientRegistry.OwnerSize), so
 // a resize from any other client changes nothing. It reports whether the start
@@ -2269,7 +2369,7 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool)
 		if ownerCols, ownerRows, ok := h.registry.OwnerSize(); ok {
 			cols, rows = ownerCols, ownerRows
 		}
-		if err := h.ensureStarted(cols, rows); err != nil {
+		if err := h.start(cols, rows); err != nil {
 			h.logStartFailure(err)
 			return errors.Is(err, errHandlerClosed)
 		}

@@ -29,9 +29,9 @@ A handler stops in one of two ways:
 
 `MountSessionRoutes(mux, SessionHandlers{WS, REST, Events}, ...MountOption)` mounts exactly the route constants `WSPath`, `SessionsPath`, `SessionsSubtreePath` and `SessionEventsPath`. The REST handler needs both `SessionsPath` and `SessionsSubtreePath`. These paths match the defaults the TypeScript client exports as `WS_PATH`, `SESSIONS_PATH` and `SESSION_EVENTS_PATH`. `(*SessionManager).MountAPI(mux, opts...)` does the same for one manager.
 
-Each `POST /api/sessions` starts a process. `WithCreateGate(mw)` wraps the whole REST handler in your own middleware, for example a rate limit that picks out session creation.
+Each `POST /api/sessions` starts a process, at its first client's size (below). `WithCreateGate(mw)` wraps the whole REST handler in your own middleware, for example a rate limit that picks out session creation.
 
-`(*SessionManager).Create()` starts a session from the factory. `(*SessionManager).CreateWith(spec)` does the same with a `CreateSpec`: `Build` replaces the factory for that one session, `Alias` names it when the alias is valid and free, and `PinnedTitle` pins its title. `Cols` and `Rows` set the size its process starts at, under the rule of the create body below. The alias and the title are in place before any client can list the session. After `Shutdown`, both `Create` and `CreateWith` return `ErrManagerClosed` and start nothing, and `POST /api/sessions` answers 503.
+`(*SessionManager).Create()` starts a session from the factory. `(*SessionManager).CreateWith(spec)` does the same with a `CreateSpec`: `Build` replaces the factory for that one session, `Alias` names it when the alias is valid and free, and `PinnedTitle` pins its title. The alias and the title are in place before any client can list the session. After `Shutdown`, both `Create` and `CreateWith` return `ErrManagerClosed` and start nothing, and `POST /api/sessions` answers 503.
 
 The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdleReaper`, `WithStatusClassifier` and `WithSessionActivity`.
 
@@ -42,17 +42,13 @@ The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdl
 | Route | What it does |
 | --- | --- |
 | `GET /api/sessions` | Lists the live sessions. |
-| `POST /api/sessions` | Creates a session and starts its process, at the size the optional body `{"cols": C, "rows": R}` gives. |
+| `POST /api/sessions` | Creates a session. Its process starts at the first client's first resize, or at 80 by 24 after 5 seconds with none. |
 | `DELETE /api/sessions/{id}` | Closes a session and ends its process. |
 | `PUT /api/sessions/order` | Sets the display order every viewer shares. |
 | `GET` and `PUT /api/sessions/layout` | Reads and sets the pane layout every viewer shares. |
 | `PUT /api/sessions/{id}/title` | Stores a title the client derived, such as the first line the user submitted. |
 | `PUT` and `DELETE /api/sessions/{id}/pinned-title` | Sets and clears a name the user chose. |
 | `PUT /api/sessions/{id}/seen` | Marks the session's status as read for every reader, with the body `{"seq": N}`. |
-
-### Creating a session
-
-`POST /api/sessions` takes an optional JSON body, `{"cols": C, "rows": R}`, the creating client's grid size. The process starts at that size, so a program that reads its width once at start and never redraws on `SIGWINCH` is laid out at the client's width. A missing field, 0 or a negative value starts that dimension at the default, 80 columns or 24 rows, so an empty body starts the process at 80 by 24. Any other value is clamped to the bounds a resize has, 20 to 1000 columns and 5 to 1000 rows. A body over 256 bytes, a body that does not decode as that object with integer fields that fit in 64 bits, or data after the object answers 400 and creates nothing.
 
 ### Display order
 
@@ -182,7 +178,7 @@ When several clients share a session, the screen takes the size of the client th
 
 ## The processes a session starts
 
-A session's process starts at the size its create carried, `CreateSpec.Cols` and `Rows` or the `POST /api/sessions` body, and at 80 columns by 24 rows when the create carried none, as `Create`, a restore and a create with no body start it. The first client's size then reaches the process as a resize and `SIGWINCH` when it differs from the start size. On every width change the screen re-wraps the lines the terminal wrapped, as a desktop terminal does. Text a program printed before the resize then shows at the new width, even when the program does not repaint it. The cursor and a position saved with `ESC 7` move with their text. When the screen has more rows than fit, after a narrower width or a shorter height, blank rows below the cursor go first, then rows from the top go to scrollback until the rest fit, so no text is lost. When the cursor's row and the rows below it do not fit, the cursor's row goes to scrollback too, as in kitty, and the cursor moves to the top row. The main screen beneath a full-screen program keeps every row while the program runs, and the same rule fits it to the screen when the program leaves the alternate screen. The alternate screen of a full-screen program is not re-wrapped, because the program redraws it on `SIGWINCH`. Lines already in scrollback keep the width they had.
+A session created through `POST /api/sessions`, and a `Handler` served on its own, starts its process when its first client sends its first resize, at that client's size clamped as a resize is. A program that reads its width once at start and never redraws on `SIGWINCH` is then laid out at the client's width. When no client resizes within 5 seconds of the create, or of the first attach for a handler on its own, the process starts at 80 columns by 24 rows. Input that arrives before the process starts is queued and written to it in order once it starts; more than 64 KiB of it starts the process at once. A session closed before its process starts never starts one. `Create`, `CreateWith` and `StartEager` have no client to size the process, so they start it at once at 80 by 24. A later client's size reaches the process as a resize and `SIGWINCH` when it differs from the start size. On every width change the screen re-wraps the lines the terminal wrapped, as a desktop terminal does. Text a program printed before the resize then shows at the new width, even when the program does not repaint it. The cursor and a position saved with `ESC 7` move with their text. When the screen has more rows than fit, after a narrower width or a shorter height, blank rows below the cursor go first, then rows from the top go to scrollback until the rest fit, so no text is lost. When the cursor's row and the rows below it do not fit, the cursor's row goes to scrollback too, as in kitty, and the cursor moves to the top row. The main screen beneath a full-screen program keeps every row while the program runs, and the same rule fits it to the screen when the program leaves the alternate screen. The alternate screen of a full-screen program is not re-wrapped, because the program redraws it on `SIGWINCH`. Lines already in scrollback keep the width they had.
 
 A session's process inherits the server's environment plus a default terminal identity: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=iTerm.app` and `TERM_PROGRAM_VERSION=3.6.6`. This identity advertises truecolor, `OSC 9;4` progress reporting and DEC 2026 synchronized output, which the engine implements. `WithEnv` values come after these defaults, so your entry for the same variable wins.
 

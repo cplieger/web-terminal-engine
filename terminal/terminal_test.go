@@ -354,7 +354,7 @@ func TestClose_closesPtmx(t *testing.T) {
 }
 
 // TestEnsureStarted_colsNotDefaultedWhenPositive verifies a positive cols value
-// is floored to the resize minimum, not defaulted (only cols < 1 is).
+// below the default is kept (only cols < 1 falls back to defaultCols).
 func TestEnsureStarted_colsNotDefaultedWhenPositive(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"))
 	if err := h.ensureStarted(1, 24); err != nil {
@@ -365,13 +365,13 @@ func TestEnsureStarted_colsNotDefaultedWhenPositive(t *testing.T) {
 	h.mu.Lock()
 	w := h.screen.Width
 	h.mu.Unlock()
-	if w != 20 {
-		t.Errorf("ensureStarted(cols=1): screen.Width = %d, want 20 (cols==1 must floor, not default to %d)", w, defaultCols)
+	if w != 1 {
+		t.Errorf("ensureStarted(cols=1): screen.Width = %d, want 1 (cols==1 must not default to %d)", w, defaultCols)
 	}
 }
 
 // TestEnsureStarted_rowsNotDefaultedWhenPositive verifies a positive rows value
-// is floored to the resize minimum, not defaulted (only rows < 1 is).
+// below the default is kept (only rows < 1 falls back to defaultRows).
 func TestEnsureStarted_rowsNotDefaultedWhenPositive(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"))
 	if err := h.ensureStarted(24, 1); err != nil {
@@ -382,8 +382,8 @@ func TestEnsureStarted_rowsNotDefaultedWhenPositive(t *testing.T) {
 	h.mu.Lock()
 	ht := h.screen.Height
 	h.mu.Unlock()
-	if ht != 5 {
-		t.Errorf("ensureStarted(rows=1): screen.Height = %d, want 5 (rows==1 must floor, not default to %d)", ht, defaultRows)
+	if ht != 1 {
+		t.Errorf("ensureStarted(rows=1): screen.Height = %d, want 1 (rows==1 must not default to %d)", ht, defaultRows)
 	}
 }
 
@@ -1829,6 +1829,9 @@ func TestTypedFraming_textSizeLimits(t *testing.T) {
 		ws, cleanup := dialHandler(t, []string{"/bin/cat"})
 		defer cleanup()
 		bootstrapResume(t, ws, "sid-limit")
+		// The process starts at the first resize, which must precede the latch:
+		// after it, a binary frame is input.
+		sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 24})
 
 		msg := pad(wsReadLimit)
 		if len(msg) != wsReadLimit {

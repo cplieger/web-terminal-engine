@@ -337,7 +337,7 @@ func NewSessionManager(factory func(id SessionID) *Handler, opts ...ManagerOptio
 // Create starts a new session (eagerly spawning its process at a default size)
 // and returns its id. After Shutdown it returns ErrManagerClosed.
 func (m *SessionManager) Create() (SessionID, error) {
-	info, err := m.createWith(CreateSpec{})
+	info, err := m.createWith(CreateSpec{}, false)
 	return info.ID, err
 }
 
@@ -356,20 +356,16 @@ type CreateSpec struct {
 	Alias string
 	// PinnedTitle is sanitized like SetSessionPinnedTitle; "" pins nothing.
 	PinnedTitle string
-	// Cols and Rows are the size the process starts at; a value ≤ 0 starts
-	// that dimension at 80 columns or 24 rows, and any other is clamped to
-	// the resize bounds.
-	Cols, Rows int
 }
 
 // CreateWith creates one session from spec. The alias and pinned title are in
 // place before the session is first listed or streamed. After Shutdown it
 // returns ErrManagerClosed and starts nothing.
 func (m *SessionManager) CreateWith(spec CreateSpec) (SessionInfo, error) {
-	return m.createWith(spec)
+	return m.createWith(spec, false)
 }
 
-// createStartedHook runs between the eager start and the insert; a test seam for a
+// createStartedHook runs between the start and the insert; a test seam for a
 // Shutdown that lands while a create forks. A no-op in production.
 var createStartedHook = func() {}
 
@@ -377,8 +373,10 @@ var createStartedHook = func() {}
 // echoes the createdAt, Order and Title every later enumeration reports. The
 // first two are sort keys: a re-derived createdAt matched neither List nor the
 // stream, and a zero Order put the newest tab at the FRONT of a strip until the
-// next status event.
-func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
+// next status event. A Go create has no client to size it and starts the process
+// at once at 80x24; a REST create (deferred) starts it at its first client's
+// first resize (Handler.deferStart).
+func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -396,10 +394,12 @@ func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	h := build(id)
 	m.mu.Unlock()
 
-	// Eager start outside the lock: spawning a process should not block other
+	// Start outside the lock: spawning a process should not block other
 	// manager operations. A duplicate id is astronomically unlikely (128-bit
 	// random) so we do not re-check under the lock after start.
-	if err := h.ensureStarted(spec.Cols, spec.Rows); err != nil {
+	if deferred {
+		h.deferStart()
+	} else if err := h.StartEager(); err != nil {
 		return SessionInfo{}, err
 	}
 	createStartedHook()
@@ -1055,15 +1055,11 @@ func (m *SessionManager) RESTHandler() http.Handler {
 	return withNoStore(mux)
 }
 
-func (m *SessionManager) handleCreate(w http.ResponseWriter, r *http.Request) {
+func (m *SessionManager) handleCreate(w http.ResponseWriter, _ *http.Request) {
 	if m.refuseWhileRestoring(w) {
 		return
 	}
-	cols, rows, ok := decodeCreateBody(w, r)
-	if !ok {
-		return
-	}
-	info, err := m.createWith(CreateSpec{Cols: cols, Rows: rows})
+	info, err := m.createWith(CreateSpec{}, true)
 	if errors.Is(err, ErrManagerClosed) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
 		return
@@ -1227,37 +1223,6 @@ func (m *SessionManager) markSessionSeen(id SessionID, seq uint64) bool {
 		tr.seenSeq = max(tr.seenSeq, min(seq, tr.statusSeq))
 	}
 	return true
-}
-
-// maxCreateBodyBytes bounds the create body, which carries two integers.
-const maxCreateBodyBytes = 256
-
-// decodeCreateBody reads the optional {"cols": C, "rows": R} body of
-// POST /api/sessions, answering 400 itself when it cannot. An empty body or a
-// missing field reads as 0, which spawnSize starts at the default. Integer
-// fields are required (encoding/json refuses a fraction, an exponent and a
-// string for int), unknown fields are tolerated, and trailing data is refused
-// as in decodeOrderBody.
-func decodeCreateBody(w http.ResponseWriter, r *http.Request) (cols, rows int, ok bool) {
-	r.Body = http.MaxBytesReader(w, r.Body, maxCreateBodyBytes)
-	var body struct {
-		Cols int `json:"cols"`
-		Rows int `json:"rows"`
-	}
-	dec := json.NewDecoder(r.Body)
-	err := dec.Decode(&body)
-	if errors.Is(err, io.EOF) {
-		return 0, 0, true
-	}
-	if err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
-		return 0, 0, false
-	}
-	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		http.Error(w, "unexpected data after the body", http.StatusBadRequest)
-		return 0, 0, false
-	}
-	return body.Cols, body.Rows, true
 }
 
 // maxSeenBodyBytes bounds the seen body, which carries one integer.

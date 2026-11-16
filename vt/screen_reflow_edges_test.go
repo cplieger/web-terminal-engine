@@ -71,6 +71,38 @@ func TestResizeKeepsLinesAnEraseSeparatedApart(t *testing.T) {
 	}
 }
 
+// An erase that cuts a wide character blanks its other half too, so the
+// soft wrap it ends is the one an erase over both halves ends.
+func TestResizeTreatsAnEraseThatCutsAWideCharacterAsOneOverBothHalves(t *testing.T) {
+	const endsWide = "abcdef中xyz"     // 中 in row 0's last two columns
+	const startsWide = "abcdefgh中xyz" // 中 in row 1's first two columns
+	tests := []struct {
+		name, setup, cut, whole string
+	}{
+		{"ECH ending on a left half in the last two columns", endsWide, "\x1b[1;6H\x1b[2X", "\x1b[1;6H\x1b[3X"},
+		{"EL 1 ending on a left half in the last two columns", endsWide, "\x1b[1;7H\x1b[1K", "\x1b[1;8H\x1b[1K"},
+		{"ED 1 ending on a left half in the last two columns", endsWide, "\x1b[1;7H\x1b[1J", "\x1b[1;8H\x1b[1J"},
+		{"ECH starting on a right half in column 1", startsWide, "\x1b[2;2H\x1b[X", "\x1b[2;1H\x1b[2X"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cut, whole := New(6, 8), New(6, 8)
+			writeString(t, cut, tt.setup+tt.cut)
+			writeString(t, whole, tt.setup+tt.whole)
+
+			cut.Resize(6, 20)
+			whole.Resize(6, 20)
+
+			if !slices.Equal(cut.wrapped, whole.wrapped) {
+				t.Errorf("wrapped after widening = %v, want %v", cut.wrapped, whole.wrapped)
+			}
+			if got, want := historyLines(cut), historyLines(whole); !slices.Equal(got, want) {
+				t.Errorf("lines after widening = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
 func TestResizeCarriesSpacesARectangleFillDrew(t *testing.T) {
 	s := New(4, 10)
 	writeString(t, s, "abc\x1b[32;1;4;1;6$x\x1b[3;1H")

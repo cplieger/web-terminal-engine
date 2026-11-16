@@ -906,19 +906,21 @@ func (s *Screen) eraseRegionMode(y1, x1, y2, x2 int, mode eraseMode) {
 	x1, x2 = max(x1, 0), min(x2, s.Width-1)
 	for y := max(y1, 0); y <= min(y2, s.Height-1); y++ {
 		row := s.Cells[y]
-		// A spared edge cell keeps its wide character whole.
-		if x1 <= x2 && !mode.spares(row[x1]) {
-			s.splitWide(y, x1)
+		// A spared edge cell keeps its wide character whole. The links cut
+		// are the replaced cells', the split halves included.
+		from, to := x1, x2
+		if x1 <= x2 && !mode.spares(row[x1]) && s.splitWide(y, x1) {
+			from = x1 - 1
 		}
-		if x1 <= x2 && !mode.spares(row[x2]) {
-			s.splitWide(y, x2+1)
+		if x1 <= x2 && !mode.spares(row[x2]) && s.splitWide(y, x2+1) {
+			to = x2 + 1
 		}
 		for x := x1; x <= x2; x++ {
 			if !mode.spares(row[x]) {
 				row[x] = blank
 			}
 		}
-		s.unlinkReplaced(y, x1, x2)
+		s.unlinkReplaced(y, from, to)
 	}
 }
 
@@ -928,19 +930,21 @@ func (s *Screen) eraseRegionMode(y1, x1, y2, x2 int, mode eraseMode) {
 // the span's edges first, as xterm (screen.c ClearCells) and xterm.js
 // (BufferLine.replaceCells) do: a reflow reads a glyph followed by a right
 // half as one character, so a lone half would merge with its neighbour.
-func (s *Screen) splitWide(y, x int) {
+// Reports whether it blanked.
+func (s *Screen) splitWide(y, x int) bool {
 	if y < 0 || y >= len(s.Cells) || x <= 0 || x > s.Width {
-		return
+		return false
 	}
 	row := s.Cells[y]
 	if row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2 || x < s.Width && row[x].Ch != 0 {
-		return
+		return false
 	}
 	blank := Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
 	row[x-1] = blank
 	if x < s.Width {
 		row[x] = blank
 	}
+	return true
 }
 
 // splitWideSpan splits the wide characters at both edges of columns x1..x2.

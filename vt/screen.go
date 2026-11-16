@@ -217,8 +217,6 @@ func (s *Screen) TakePaletteChanged() bool {
 	return p
 }
 
-// CursorState holds cursor position, saved cursor, and current style.
-// Embedded in Screen.
 // savedCursor is the full state DECSC/DECRC (and DEC mode 1048) preserve:
 // position, SGR, charsets, origin/autowrap modes, the deferred-wrap flag, and
 // the DECSCA protection attribute. xterm keeps a separate slot for the main and

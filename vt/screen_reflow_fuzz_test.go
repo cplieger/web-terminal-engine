@@ -461,10 +461,14 @@ func planLineEdit(s *Screen, op, at byte) (lineEdit, bool) {
 	}
 	b.WriteString(cup(y, x))
 	if s.pendingWrap {
-		// Writing the last character again pends the wrap the edit cleared.
-		if c := s.Cells[s.curY][x]; c.Ch == 0 {
+		// Writing the last character again pends the wrap the edit cleared. A
+		// wide glyph in one cell is DECFRA's: written, it would wrap whole.
+		switch c := s.Cells[s.curY][x]; {
+		case c.Ch == 0:
 			b.WriteString(cup(y, x-1) + string(s.Cells[s.curY][x-1].Ch))
-		} else {
+		case runeWidth(c.Ch) == 2:
+			fmt.Fprintf(&b, "a\x1b[%d;%d;%d;%d;%d$x", c.Ch, y+1, x+1, y+1, x+1)
+		default:
 			b.WriteRune(c.Ch)
 		}
 	}

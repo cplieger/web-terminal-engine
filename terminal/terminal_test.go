@@ -354,7 +354,7 @@ func TestClose_closesPtmx(t *testing.T) {
 }
 
 // TestEnsureStarted_colsNotDefaultedWhenPositive verifies a positive cols value
-// below the default is kept (only cols < 1 falls back to defaultCols).
+// is floored to the resize minimum, not defaulted (only cols < 1 is).
 func TestEnsureStarted_colsNotDefaultedWhenPositive(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"))
 	if err := h.ensureStarted(1, 24); err != nil {
@@ -365,13 +365,13 @@ func TestEnsureStarted_colsNotDefaultedWhenPositive(t *testing.T) {
 	h.mu.Lock()
 	w := h.screen.Width
 	h.mu.Unlock()
-	if w != 1 {
-		t.Errorf("ensureStarted(cols=1): screen.Width = %d, want 1 (cols==1 must not default to %d)", w, defaultCols)
+	if w != 20 {
+		t.Errorf("ensureStarted(cols=1): screen.Width = %d, want 20 (cols==1 must floor, not default to %d)", w, defaultCols)
 	}
 }
 
 // TestEnsureStarted_rowsNotDefaultedWhenPositive verifies a positive rows value
-// below the default is kept (only rows < 1 falls back to defaultRows).
+// is floored to the resize minimum, not defaulted (only rows < 1 is).
 func TestEnsureStarted_rowsNotDefaultedWhenPositive(t *testing.T) {
 	h := NewHandler([]string{"/bin/sh", "-c", "true"}, WithWorkDir("/"))
 	if err := h.ensureStarted(24, 1); err != nil {
@@ -382,8 +382,8 @@ func TestEnsureStarted_rowsNotDefaultedWhenPositive(t *testing.T) {
 	h.mu.Lock()
 	ht := h.screen.Height
 	h.mu.Unlock()
-	if ht != 1 {
-		t.Errorf("ensureStarted(rows=1): screen.Height = %d, want 1 (rows==1 must not default to %d)", ht, defaultRows)
+	if ht != 5 {
+		t.Errorf("ensureStarted(rows=1): screen.Height = %d, want 5 (rows==1 must floor, not default to %d)", ht, defaultRows)
 	}
 }
 

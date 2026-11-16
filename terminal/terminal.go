@@ -839,11 +839,11 @@ func (h *Handler) statusSnapshot() screenStatus {
 	}
 }
 
-// StartEager starts the child process now at the default 80x24, rather than
-// lazily on the first client message. A session manager calls this at Create
-// time so a new session's process (and its activity signal) exist from
-// creation; the first client attach still sends the real resize. Idempotent.
-// On a handler closed before its first start it returns an error.
+// StartEager starts the child process now at the default 80x24 rather than
+// lazily on the first client message, so the process and its activity signal
+// exist before any client attaches; the first attach still sends the real
+// resize. Idempotent. On a handler closed before its first start it returns an
+// error.
 func (h *Handler) StartEager() error {
 	return h.ensureStarted(0, 0)
 }
@@ -901,10 +901,9 @@ func (h *Handler) logStartFailure(err error) {
 }
 
 // ensureStarted spawns the process if not already running, sized at
-// the given dimensions. cols/rows ≤ 0 fall back to defaults so callers
-// who don't yet know the client size can still start the process.
-// Idempotent: concurrent callers all see started==true after the
-// first returns; cols/rows on subsequent calls are ignored.
+// spawnSize(cols, rows). Idempotent: concurrent callers all see
+// started==true after the first returns; cols/rows on subsequent calls
+// are ignored.
 func (h *Handler) ensureStarted(cols, rows int) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -929,12 +928,7 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	cmd.Dir = h.cfg.workDir
 	h.reap = h.newSessionReap()
 	cmd.Env = h.childEnv(h.reap)
-	if cols < 1 {
-		cols = defaultCols
-	}
-	if rows < 1 {
-		rows = defaultRows
-	}
+	cols, rows = spawnSize(cols, rows)
 	h.contain = h.beginContainment(cmd)
 	ptmx, err := startSessionPTY(cmd, cols, rows)
 	// The cgroup fd is only needed at clone time; holding it would leak one
@@ -1067,7 +1061,7 @@ func (h *Handler) childEnv(reap *sessionReap) []string {
 
 // startSessionPTY forks the session's process on a new PTY.
 func startSessionPTY(cmd *exec.Cmd, cols, rows int) (*os.File, error) {
-	return pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}) // #nosec G115 -- cols/rows are floored above and bounded by the client protocol
+	return pty.StartWithSize(cmd, &pty.Winsize{Cols: uint16(cols), Rows: uint16(rows)}) // #nosec G115 -- spawnSize bounds cols/rows to [1, maxResize<=1000]
 }
 
 // markProgramExited tells the screen the process exited (vt.Screen.ProgramExited
@@ -2246,6 +2240,19 @@ func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 	clampedCols = min(max(cols, minResizeCols), maxResizeCols)
 	clampedRows = min(max(rows, minResizeRows), maxResizeRows)
 	return clampedCols, clampedRows
+}
+
+// spawnSize is the size a process starts at: a dimension ≤ 0 is unknown and
+// starts at the default, and any other is clamped like a resize, so a create
+// carrying a size and the resize after it agree.
+func spawnSize(cols, rows int) (spawnCols, spawnRows int) {
+	if cols < 1 {
+		cols = defaultCols
+	}
+	if rows < 1 {
+		rows = defaultRows
+	}
+	return clampResize(cols, rows)
 }
 
 // handleResize records a client's requested size on its socket and resizes

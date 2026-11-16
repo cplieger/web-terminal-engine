@@ -565,9 +565,10 @@ func TestAltScreenWideningGivesACutOffWideCharacterItsRightHalfBack(t *testing.T
 	}
 }
 
-// cellAttrs sets a style, an OSC 8 link and DECSCA protection, so a cell
-// comparison of what follows it pins every attribute a cell carries.
-const cellAttrs = "\x1b[41;1m\x1b]8;;http://x\x07\x1b[1\"q"
+// cellAttrs sets a style, an OSC 8 link, DECSCA protection and SPA
+// protection, so a cell comparison of what follows it catches a cell that
+// lost any of them.
+const cellAttrs = "\x1b[41;1m\x1b]8;;http://x\x07\x1b[1\"q\x1bV"
 
 // cellDiffs describes each column where got and want hold different cells.
 func cellDiffs(got, want []Cell) []string {

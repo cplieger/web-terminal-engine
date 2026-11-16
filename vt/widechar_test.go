@@ -2,7 +2,6 @@ package vt
 
 import (
 	"fmt"
-	"slices"
 	"strconv"
 	"testing"
 )
@@ -558,9 +557,6 @@ func TestAltScreenWideningGivesACutOffWideCharacterItsRightHalfBack(t *testing.T
 				if got, wantRow := rowText(s.Cells[0]), rowText(want.Cells[0]); got != wantRow {
 					t.Errorf("after %s, row 0 = %q, want %q", edit.name, got, wantRow)
 				}
-				if got, wantCut := cutColumns(s.Cells[0]), cutColumns(want.Cells[0]); !slices.Equal(got, wantCut) {
-					t.Errorf("after %s, cut-off columns = %v, want %v", edit.name, got, wantCut)
-				}
 				for _, d := range cellDiffs(s.Cells[0], want.Cells[0]) {
 					t.Errorf("after %s, row 0 %s", edit.name, d)
 				}
@@ -589,16 +585,4 @@ func cellDiffs(got, want []Cell) []string {
 		}
 	}
 	return diffs
-}
-
-// cutColumns lists the columns of row marked as a wide character cut off from
-// its right half.
-func cutColumns(row []Cell) []int {
-	var cols []int
-	for x, c := range row {
-		if c.wideCut {
-			cols = append(cols, x)
-		}
-	}
-	return cols
 }

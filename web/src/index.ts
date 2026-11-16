@@ -7,7 +7,12 @@ export { createRenderer } from "./render.js";
 export type { Renderer, RendererOptions, ViewMemory } from "./render.js";
 export { createScrollController } from "./scroll.js";
 export type { ScrollController, ScrollControllerOptions } from "./scroll.js";
-export { createConnection, MAX_OUTBOX_BYTES } from "./connection.js";
+export {
+  createConnection,
+  MAX_OUTBOX_BYTES,
+  PROCESS_EXITED_CLOSE_CODE,
+  SESSION_UNKNOWN_CLOSE_CODE,
+} from "./connection.js";
 export { MAX_REPLAY_LINES } from "./replay.js";
 export type {
   Connection,

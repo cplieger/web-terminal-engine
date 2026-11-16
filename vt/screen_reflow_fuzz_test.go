@@ -39,11 +39,14 @@ func wrappingText(data []byte, rows, cols int) string {
 // logicalScreen is what a width change must keep: the text of each line, with
 // rows joined by a soft wrap, the blanks no character was written to dropped
 // from its end and the pad a wrapped wide character leaves in a row's last
-// column left out, and the
-// cursor's offset in its line, one past the last column while a wrap is
-// pending.
+// column left out, and the cursor's offset in its line, one past the last
+// column while a wrap is pending. blanks counts, per line, the dropped blanks
+// a re-wrap still lays out: those on rows before the line's last row, which
+// xterm.js's reflow also keeps (getWrappedLineTrimmedLength trims the last
+// row only).
 type logicalScreen struct {
 	lines        []string
+	blanks       []int
 	cursorLine   int
 	cursorOffset int
 }
@@ -51,6 +54,7 @@ type logicalScreen struct {
 func logicalOf(s *Screen) logicalScreen {
 	var ls logicalScreen
 	var line []Cell
+	lastRow := 0
 	flush := func() {
 		n := len(line)
 		for n > 0 && line[n-1].Ch == ' ' && !line[n-1].drawn {
@@ -61,12 +65,14 @@ func logicalOf(s *Screen) logicalScreen {
 			b.WriteRune(c.Ch)
 		}
 		ls.lines = append(ls.lines, b.String())
+		ls.blanks = append(ls.blanks, max(lastRow-n, 0))
 		line = line[:0]
 	}
 	for y, row := range s.Cells {
 		if y > 0 && !s.wrapped[y] {
 			flush()
 		}
+		lastRow = len(line)
 		for x, c := range row {
 			if y == s.curY && x == s.curX {
 				ls.cursorLine, ls.cursorOffset = len(ls.lines), len(line)
@@ -82,18 +88,20 @@ func logicalOf(s *Screen) logicalScreen {
 	flush()
 	for len(ls.lines)-1 > ls.cursorLine && ls.lines[len(ls.lines)-1] == "" {
 		ls.lines = ls.lines[:len(ls.lines)-1]
+		ls.blanks = ls.blanks[:len(ls.blanks)-1]
 	}
 	return ls
 }
 
-// rowsNeeded is how many rows the lines take at cols, one at least each, a
-// wide character that does not fit a row's end going to the next row.
+// rowsNeeded is how many rows the lines and their kept blanks take at cols,
+// one at least each, a wide character that does not fit a row's end going to
+// the next row.
 func (ls logicalScreen) rowsNeeded(cols int) int {
 	n := 0
-	for _, line := range ls.lines {
+	for i, line := range ls.lines {
 		n++
 		x := 0
-		for _, r := range line {
+		for _, r := range line + strings.Repeat(" ", ls.blanks[i]) {
 			w := runeWidth(r)
 			switch {
 			case r == 0:

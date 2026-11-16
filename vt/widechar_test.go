@@ -461,12 +461,6 @@ func TestDeleteCharsWithWideCharSplit(t *testing.T) {
 
 // --- Edits that cut a wide character in two ---
 
-// cellsString renders row y with a wide character's right half as '|' and
-// the trailing blanks dropped.
-func cellsString(s *Screen, y int) string {
-	return rowText(s.Cells[y])
-}
-
 // An edit that replaces, erases or shifts away one half of a wide character
 // blanks the other half too, as xterm (screen.c ClearCells, ScrnWriteText)
 // and xterm.js (BufferLine.replaceCells, insertCells, deleteCells) do.
@@ -501,7 +495,7 @@ func TestEditsBlankBothHalvesOfACutWideCharacter(t *testing.T) {
 			s := New(3, tc.width)
 			writeString(t, s, tc.setup)
 			writeString(t, s, tc.edit)
-			if got := cellsString(s, tc.row); got != tc.want {
+			if got := rowText(s.Cells[tc.row]); got != tc.want {
 				t.Errorf("row %d = %q, want %q", tc.row, got, tc.want)
 			}
 		})
@@ -519,7 +513,7 @@ func TestEditsMoveADECFRAWideGlyphWhole(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			s := New(3, 8)
 			writeString(t, s, filled+tc.edit)
-			if got := cellsString(s, 0); got != tc.want {
+			if got := rowText(s.Cells[0]); got != tc.want {
 				t.Errorf("row 0 = %q, want %q", got, tc.want)
 			}
 		})
@@ -533,7 +527,7 @@ func TestDCHBlanksAWideCharacterAnAlternateScreenNarrowingCut(t *testing.T) {
 	writeString(t, s, "\x1b[?1049habcdef中")
 	s.Resize(3, 7)
 	writeString(t, s, "\x1b[1;1H\x1b[P")
-	if got, want := cellsString(s, 0), "bcdef"; got != want {
+	if got, want := rowText(s.Cells[0]), "bcdef"; got != want {
 		t.Errorf("row 0 = %q, want %q", got, want)
 	}
 }
@@ -560,7 +554,7 @@ func TestAltScreenWideningGivesACutOffWideCharacterItsRightHalfBack(t *testing.T
 			for _, edit := range []struct{ name, seq string }{{"the widening", ""}, {"ICH 5", "\x1b[1;1H\x1b[5@"}} {
 				writeString(t, s, edit.seq)
 				writeString(t, want, edit.seq)
-				if got, wantRow := cellsString(s, 0), cellsString(want, 0); got != wantRow {
+				if got, wantRow := rowText(s.Cells[0]), rowText(want.Cells[0]); got != wantRow {
 					t.Errorf("after %s, row 0 = %q, want %q", edit.name, got, wantRow)
 				}
 				if got, wantCut := cutColumns(s.Cells[0]), cutColumns(want.Cells[0]); !slices.Equal(got, wantCut) {

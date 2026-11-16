@@ -474,7 +474,7 @@ func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
 
 		written := New(3, 16)
 		writeString(t, written, "中")
-		if got, want := cellsString(s, 0), cellsString(written, 0); got != want {
+		if got, want := rowText(s.Cells[0]), rowText(written.Cells[0]); got != want {
 			t.Errorf("row 0 = %q, want %q", got, want)
 		}
 		if y, x := s.CursorPos(); y != 0 || x != 2 {
@@ -486,7 +486,7 @@ func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
 		writeString(t, s, "\x1b[?7lab中")
 		s.Resize(3, 4)
 
-		if got, want := cellsString(s, 0), "ab中|"; got != want {
+		if got, want := rowText(s.Cells[0]), "ab中|"; got != want {
 			t.Errorf("row 0 = %q, want %q", got, want)
 		}
 	})
@@ -496,7 +496,7 @@ func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
 		s.Resize(3, 1)
 		s.Resize(3, 16)
 
-		if got, want := cellsString(s, 0), "中|"; got != want {
+		if got, want := rowText(s.Cells[0]), "中|"; got != want {
 			t.Errorf("row 0 = %q, want %q", got, want)
 		}
 	})
@@ -505,7 +505,7 @@ func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
 		writeString(t, s, "a中b\x1b[1;2;1;2;1;1;4$v")
 		s.Resize(3, 8)
 
-		if got, want := cellsString(s, 0), "a中|中|"; got != want {
+		if got, want := rowText(s.Cells[0]), "a中|中|"; got != want {
 			t.Errorf("row 0 = %q, want %q", got, want)
 		}
 	})
@@ -534,7 +534,7 @@ func TestResizeKeepsADECFRAWideGlyphOneCell(t *testing.T) {
 				written := New(4, cols)
 				writeString(t, written, "abcdefgh"+fill(cols, tc.from, tc.to))
 				for y := range 3 {
-					if got, want := cellsString(s, y), cellsString(written, y); got != want || s.wrapped[y] != written.wrapped[y] {
+					if got, want := rowText(s.Cells[y]), rowText(written.Cells[y]); got != want || s.wrapped[y] != written.wrapped[y] {
 						t.Errorf("row %d = %q wrapped %v, want %q wrapped %v", y, got, s.wrapped[y], want, written.wrapped[y])
 					}
 				}

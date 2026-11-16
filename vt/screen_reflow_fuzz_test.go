@@ -287,7 +287,8 @@ func assertWidePairs(t *testing.T, s *Screen) {
 	}
 }
 
-// rowText renders row with a wide character's right half as '|'.
+// rowText renders row with a wide character's right half as '|' and the
+// trailing blanks dropped.
 func rowText(row []Cell) string {
 	var b strings.Builder
 	for _, c := range row {
@@ -301,8 +302,8 @@ func rowText(row []Cell) string {
 }
 
 // writeChecked writes text to s a byte at a time and runs assertWidePairs
-// after each byte that leaves the parser in ground state, so every edit,
-// erase and write a sequence makes keeps the wide pairs, not only the last.
+// after each byte that leaves the parser in ground state, so a break is
+// caught at the edit that made it, not only at the end.
 func writeChecked(t *testing.T, s *Screen, text string) {
 	t.Helper()
 	var b [1]byte

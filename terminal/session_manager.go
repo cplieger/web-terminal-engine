@@ -375,7 +375,8 @@ var createStartedHook = func() {}
 // stream, and a zero Order put the newest tab at the FRONT of a strip until the
 // next status event. A Go create has no client to size it and starts the process
 // at once at 80x24; a REST create (deferred) starts it at its first client's
-// first resize (Handler.deferStart).
+// first resize (Handler.deferStart), and a session that ends before that start
+// is dropped (Handler.endBeforeStart).
 func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo, error) {
 	m.mu.Lock()
 	if m.closed {
@@ -398,7 +399,7 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 	// manager operations. A duplicate id is astronomically unlikely (128-bit
 	// random) so we do not re-check under the lock after start.
 	if deferred {
-		h.deferStart()
+		h.onEndedBeforeStart = func() { m.Close(id) }
 	} else if err := h.StartEager(); err != nil {
 		return SessionInfo{}, err
 	}
@@ -444,6 +445,11 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 	}
 	n := len(m.sessions)
 	m.mu.Unlock()
+	// Armed once the session is listed, so a fallback start that fails finds
+	// the session to drop.
+	if deferred {
+		h.deferStart()
+	}
 
 	m.logger.Info("session: created", "session", LogID(id), "sessions", n)
 	// A new session reports idle until its process produces output; the status

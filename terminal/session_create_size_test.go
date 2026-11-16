@@ -1,12 +1,15 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -40,8 +43,15 @@ var sizeReporterCmd = []string{
 // start bound bound, on a mux with the whole session API mounted.
 func sizeReporterManager(t *testing.T, bound time.Duration) (*SessionManager, *httptest.Server) {
 	t.Helper()
+	return commandManager(t, sizeReporterCmd, bound)
+}
+
+// commandManager serves a manager of cmd sessions, each with start bound bound,
+// on a mux with the whole session API mounted.
+func commandManager(t *testing.T, cmd []string, bound time.Duration) (*SessionManager, *httptest.Server) {
+	t.Helper()
 	m := NewSessionManager(func(SessionID) *Handler {
-		return NewHandler(sizeReporterCmd, WithLogger(nil), WithWorkDir("/"), withStartBound(bound))
+		return NewHandler(cmd, WithLogger(nil), WithWorkDir("/"), withStartBound(bound))
 	})
 	t.Cleanup(func() { shutdownManager(t, m) })
 	mux := http.NewServeMux()
@@ -318,27 +328,158 @@ func TestHandler_closedBeforeTheSpawnSpawnsNothing(t *testing.T) {
 	assertNeverSpawned(t, marker)
 }
 
-// TestHandler_inputPastTheQueueCapStartsAt80x24 pins the queue's bound: input
-// under 64 KiB waits for a resize, and the frame that takes it past 64 KiB
-// starts the process at 80x24 with every queued line delivered in order.
-func TestHandler_inputPastTheQueueCapStartsAt80x24(t *testing.T) {
-	const frames, frameBytes = 20, 3300 // 19 frames stay under 64 KiB, 20 pass it
-	// The leading newline ends the echo of the input the tty received before
-	// stty -echo ran, so the size line starts a row of its own.
-	numberedLines := []string{
-		"/bin/sh", "-c",
-		`stty -echo; printf '\nsize=%s\n' "$(stty size)"; while read -r l; do printf 'got=%s\n' "${l%%:*}"; done`,
-	}
-	h, srv := bareSizeReporter(t, numberedLines, noFallback)
-	ws := dialWS(t, "ws"+strings.TrimPrefix(srv.URL, "http")+"/ws")
-	want := []string{"size=24 80"}
-	for i := 1; i <= frames; i++ {
-		if i == frames {
-			assertUnspawnedAfter(t, h, ws)
-		}
+// missingCmd names no executable, so its process cannot start.
+var missingCmd = []string{"/nonexistent/cmd"}
+
+// numberedLinesCmd prints its start size, then got=<n> for each input line
+// <n>:<padding>. The leading newline ends the echo of the input the tty
+// received before stty -echo ran, so the size line starts a row of its own.
+var numberedLinesCmd = []string{
+	"/bin/sh", "-c",
+	`stty -echo; printf '\nsize=%s\n' "$(stty size)"; while read -r l; do printf 'got=%s\n' "${l%%:*}"; done`,
+}
+
+// queueCapLines is the number of numbered 2 KiB lines that fill the 64 KiB
+// queue exactly.
+const queueCapLines = 32
+
+// writeNumberedLines sends n frames of 2 KiB, each one numbered line, and
+// returns the got= lines numberedLinesCmd prints for them.
+func writeNumberedLines(t *testing.T, ws *websocket.Conn, n int) []string {
+	t.Helper()
+	var got []string
+	for i := 1; i <= n; i++ {
 		head := strconv.Itoa(i) + ":"
-		writeBinary(t, ws, []byte(head+strings.Repeat("a", frameBytes-len(head)-1)+"\n"))
-		want = append(want, "got="+strconv.Itoa(i))
+		writeBinary(t, ws, []byte(head+strings.Repeat("a", 2048-len(head)-1)+"\n"))
+		got = append(got, "got="+strconv.Itoa(i))
 	}
-	awaitInOrder(t, h, want...)
+	return got
+}
+
+// awaitClose reads ws until the server closes it and returns the close code
+// and reason.
+func awaitClose(t *testing.T, ws *websocket.Conn) (websocket.StatusCode, string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), waitPatience)
+	defer cancel()
+	for {
+		_, _, err := ws.Read(ctx)
+		if err == nil {
+			continue
+		}
+		var ce websocket.CloseError
+		if !errors.As(err, &ce) {
+			t.Fatalf("the socket ended without a close frame: %v", err)
+		}
+		return ce.Code, ce.Reason
+	}
+}
+
+// assertEndedWith fails unless ws is closed as a session that ended, 4001,
+// with reason.
+func assertEndedWith(t *testing.T, ws *websocket.Conn, reason string) {
+	t.Helper()
+	code, got := awaitClose(t, ws)
+	if code != statusProcessExited || got != reason {
+		t.Errorf("close = %d %q, want %d %q", code, got, statusProcessExited, reason)
+	}
+}
+
+// awaitUnlisted fails unless session id leaves m's list within waitPatience.
+func awaitUnlisted(t *testing.T, m *SessionManager, id SessionID) {
+	t.Helper()
+	deadline := time.Now().Add(waitPatience)
+	for {
+		listed := slices.ContainsFunc(m.List(), func(s SessionInfo) bool { return s.ID == id })
+		if !listed {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session %s still listed after %v", LogID(id), waitPatience)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestCreateREST_aFailedStartEndsTheSession(t *testing.T) {
+	m, srv := commandManager(t, missingCmd, noFallback)
+	id := restCreate(t, srv)
+	ws := dialSession(t, srv, id)
+	t.Cleanup(func() { _ = ws.CloseNow() })
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 50, "rows": 20})
+	assertEndedWith(t, ws, startFailedReason)
+	awaitUnlisted(t, m, id)
+}
+
+func TestCreateREST_aFailedFallbackStartEndsTheSession(t *testing.T) {
+	m, srv := commandManager(t, missingCmd, testStartBound)
+	id := restCreate(t, srv)
+	awaitUnlisted(t, m, id)
+}
+
+func TestCreateREST_inputUpToTheQueueCapWaitsForTheResize(t *testing.T) {
+	m, srv := commandManager(t, numberedLinesCmd, noFallback)
+	id := restCreate(t, srv)
+	ws := dialSession(t, srv, id)
+	t.Cleanup(func() { _ = ws.CloseNow() })
+	h := sessionHandler(t, m, id)
+	got := writeNumberedLines(t, ws, queueCapLines)
+	assertUnspawnedAfter(t, h, ws)
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 50})
+	awaitInOrder(t, h, append([]string{"size=50 80"}, got...)...)
+}
+
+func TestCreateREST_inputPastTheQueueCapEndsTheSession(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "spawned")
+	m, srv := commandManager(t, markerCmd(marker), noFallback)
+	id := restCreate(t, srv)
+	ws := dialSession(t, srv, id)
+	t.Cleanup(func() { _ = ws.CloseNow() })
+	h := sessionHandler(t, m, id)
+	writeNumberedLines(t, ws, queueCapLines)
+	assertUnspawnedAfter(t, h, ws)
+	writeBinary(t, ws, []byte("x"))
+	assertEndedWith(t, ws, inputOverflowReason)
+	awaitUnlisted(t, m, id)
+	assertNeverSpawned(t, marker)
+}
+
+// TestHandler_aFailedStartEndsTheHandler pins a handler served on its own: the
+// start error reaches the exit callback a host replaces a spent handler on, and
+// input after the end is refused rather than queued.
+func TestHandler_aFailedStartEndsTheHandler(t *testing.T) {
+	exited := make(chan error, 1)
+	h := NewHandler(missingCmd, WithLogger(nil), WithWorkDir("/"), withStartBound(noFallback),
+		WithOnProcessExit(func(err error) { exited <- err }))
+	shutdownOnCleanup(t, h)
+	mux := http.NewServeMux()
+	h.RegisterRoutes(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+
+	ws := dialWS(t, wsURL)
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 50, "rows": 20})
+	assertEndedWith(t, ws, startFailedReason)
+	select {
+	case err := <-exited:
+		if err == nil {
+			t.Error("the exit callback got a nil error for a process that never started")
+		}
+	case <-time.After(waitPatience):
+		t.Fatal("the exit callback never ran")
+	}
+	if !h.Exited() {
+		t.Error("Exited() = false after the start failed")
+	}
+
+	again := dialWS(t, wsURL)
+	writeBinary(t, again, bytes.Repeat([]byte("a"), 60*1024))
+	assertEndedWith(t, again, startFailedReason)
+	h.mu.Lock()
+	queued := h.pendingInput.Len()
+	h.mu.Unlock()
+	if queued != 0 {
+		t.Errorf("%d bytes queued after the session ended, want 0", queued)
+	}
 }

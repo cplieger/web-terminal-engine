@@ -48,9 +48,15 @@ const (
 	// web font before that resize, and the rest covers the create's answer and
 	// the socket dial on a slow link.
 	defaultStartBound = 5 * time.Second
-	// maxPendingInput bounds the input queued before the spawn; input past it
-	// starts the process at once.
-	maxPendingInput = 64 * 1024
+	// maxPendingInput bounds the input queued before the spawn at one client
+	// message (wsReadLimit): a client that keeps the wire contract sends no input
+	// before its first resize, so only one that breaks it passes the cap, and
+	// that ends the session (endBeforeStart).
+	maxPendingInput = wsReadLimit
+	// The 4001 close reasons of a session that ends before its process starts;
+	// docs/sessions.md quotes them.
+	startFailedReason   = "the process failed to start"
+	inputOverflowReason = "input before the process started passed 64 KiB"
 
 	// After a size change, armRedrawSettle holds flushes until the child's
 	// redraw has been quiet for redrawSettleQuiet, which must exceed a DEC 2026
@@ -275,7 +281,9 @@ func WithOriginPolicy(p *OriginPolicy) Option {
 
 // WithOnProcessExit registers a callback invoked when the child process exits.
 // The child's final output is on the screen by then, unless a process still
-// holding the terminal keeps it open past a one-second drain bound.
+// holding the terminal keeps it open past a one-second drain bound. It also runs,
+// with the error, when a session that starts at its first client's resize ends
+// before its process starts: the start failed or the queued input passed 64 KiB.
 func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
@@ -485,6 +493,10 @@ type Handler struct {
 	sizeHoldTimer *time.Timer
 	// startTimer is the deferred start's fallback (deferStart). Guarded by h.mu.
 	startTimer *time.Timer
+	// onEndedBeforeStart runs once endBeforeStart has ended the session; the
+	// manager sets it to drop the session. Written before the handler is
+	// reachable by any client.
+	onEndedBeforeStart func()
 	// The redraw-settle hold's fields are guarded by h.mu; a zero
 	// redrawSettleUntil means the hold is inactive.
 	redrawSettleUntil time.Time
@@ -496,7 +508,10 @@ type Handler struct {
 	// signalled one. Guarded by h.mu and written exactly once, BEFORE
 	// procExitCh closes, so Exited() == true implies this value is final (see
 	// the monitor in ensureStarted). Read through ExitError.
-	exitErr      error
+	exitErr error
+	// endReason is the 4001 close reason endBeforeStart set, empty for a process
+	// that ran. Guarded by h.mu.
+	endReason    string
 	cfg          handlerConfig
 	bootEpoch    int64
 	lastActivity atomic.Int64
@@ -544,6 +559,9 @@ type Handler struct {
 	// inputDraining marks the one drainPendingInput call that owns the queue.
 	// Guarded by h.mu.
 	inputDraining bool
+	// endedBeforeStart latches once endBeforeStart has ended the session; every
+	// later start and input is refused. Guarded by h.mu.
+	endedBeforeStart bool
 	// focusTold is the DEC 1004 state this session's process has been told, so
 	// the derivation writes on transitions only (see focusReportLocked), and
 	// focusEnableSeen the screen's FocusEnableSeq it last saw. Guarded by h.mu.
@@ -705,9 +723,10 @@ func (h *Handler) Title() string {
 	return h.screen.Title
 }
 
-// Exited reports whether the child process has exited. Non-blocking and
-// race-free (procExitCh is closed exactly once, by the process monitor). False
-// for a handler whose process was never started.
+// Exited reports whether the child process has exited, or the session ended
+// before its process started (endBeforeStart). Non-blocking and race-free
+// (procExitCh is closed exactly once). False for a handler whose process has not
+// started yet.
 func (h *Handler) Exited() bool {
 	select {
 	case <-h.procExitCh:
@@ -720,7 +739,9 @@ func (h *Handler) Exited() bool {
 // ExitError returns what cmd.Wait() reported for the child: nil when the process
 // exited cleanly (status 0), was never started, or has not exited yet, and
 // otherwise the wait error — an *exec.ExitError for a non-zero or signalled
-// exit, the same error WithOnProcessExit's callback receives. Pair it with
+// exit, the same error WithOnProcessExit's callback receives. A session that
+// ended before its process started returns the start error or the input
+// overflow that ended it. Pair it with
 // Exited to tell "not dead yet" from "died cleanly"; the value is final once
 // Exited reports true. Safe for concurrent use.
 func (h *Handler) ExitError() error {
@@ -880,14 +901,60 @@ func (h *Handler) StartEager() error {
 func (h *Handler) deferStart() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.startTimer != nil || h.started.Load() || h.shutdownRequested.Load() {
+	if h.startTimer != nil || h.started.Load() || h.shutdownRequested.Load() || h.endedBeforeStart {
 		return
 	}
-	h.startTimer = time.AfterFunc(h.cfg.startBound, func() {
-		if err := h.start(0, 0); err != nil {
-			h.logStartFailure(err)
-		}
-	})
+	h.startTimer = time.AfterFunc(h.cfg.startBound, func() { h.startDeferred(0, 0) })
+}
+
+// startDeferred starts a process that waited for its first client, and ends the
+// session when the start fails, so no client is left on a session that never
+// runs. It reports whether the start was refused or failed.
+func (h *Handler) startDeferred(cols, rows int) (failed bool) {
+	err := h.start(cols, rows)
+	if err == nil {
+		return false
+	}
+	h.logStartFailure(err)
+	if !errors.Is(err, errHandlerClosed) {
+		h.endBeforeStart(err, startFailedReason)
+	}
+	return true
+}
+
+// endBeforeStart ends a session whose process has not started, as an exit ends
+// one that ran: cause becomes the exit error, procExitCh closes, so every
+// client closes with 4001 and reason, and the exit callback runs. A no-op once
+// the process has started, the session is closed, or it already ended.
+func (h *Handler) endBeforeStart(cause error, reason string) {
+	h.mu.Lock()
+	if h.started.Load() || h.shutdownRequested.Load() || h.endedBeforeStart {
+		h.mu.Unlock()
+		return
+	}
+	h.endedBeforeStart = true
+	h.endReason = reason
+	h.exitErr = cause
+	h.pendingInput.Reset()
+	if h.startTimer != nil {
+		h.startTimer.Stop()
+	}
+	h.mu.Unlock()
+	close(h.procExitCh)
+	h.markProgramExited()
+	if h.onEndedBeforeStart != nil {
+		h.onEndedBeforeStart()
+	}
+	if h.cfg.onProcessExit != nil {
+		// Runs on a client's read loop or the fallback timer, which a callback
+		// panic must not take down, as the process monitor does not.
+		defer func() {
+			if r := recover(); r != nil {
+				h.cfg.logger.Error("terminal: onProcessExit callback panicked", "panic", r)
+			}
+		}()
+		h.cfg.onProcessExit(cause)
+	}
 }
 
 // start spawns the process (ensureStarted) and then writes the input queued
@@ -929,44 +996,65 @@ func (h *Handler) drainPendingInput() {
 }
 
 // writeInput applies msg through state's ledger: to the PTY once the queued
-// input is written, to pendingInput before that. Input past maxPendingInput
-// starts the process at once.
+// input is written, to pendingInput before that. Input that takes the queue past
+// maxPendingInput ends the session and returns errHandlerClosed, as does input
+// after the session ended.
 func (h *Handler) writeInput(state *clientState, msg []byte) (applied bool, err error) {
 	if !h.inputLive.Load() {
 		h.mu.Lock()
 		if !h.inputLive.Load() {
-			if h.shutdownRequested.Load() {
-				h.mu.Unlock()
-				return false, errHandlerClosed
-			}
-			applied, err = h.registry.ApplyInput(state, &h.pendingInput, msg)
-			// A process that started before this input queued drains it now, or
-			// the drain already running picks it up.
-			startNow := h.started.Load() || h.pendingInput.Len() > maxPendingInput
-			h.mu.Unlock()
-			if startNow {
-				if serr := h.start(0, 0); serr != nil {
-					return false, serr
-				}
-			}
-			return applied, err
+			return h.queueInputLocked(state, msg)
 		}
 		h.mu.Unlock()
 	}
 	return h.registry.ApplyInput(state, h.ptmx, msg)
 }
 
-// exitAwareCloseCode returns statusProcessExited (4001) when the child process
-// has exited (procExitCh is closed), otherwise a normal closure. The
-// non-blocking receive is race-free: channel operations synchronize and a
-// closed channel is always ready.
-func (h *Handler) exitAwareCloseCode() websocket.StatusCode {
+// queueInputLocked is writeInput's path before the queued input is written.
+// Called with h.mu held; it releases it.
+func (h *Handler) queueInputLocked(state *clientState, msg []byte) (applied bool, err error) {
+	if h.shutdownRequested.Load() || h.endedBeforeStart {
+		h.mu.Unlock()
+		return false, errHandlerClosed
+	}
+	applied, err = h.registry.ApplyInput(state, &h.pendingInput, msg)
+	started := h.started.Load()
+	if !started && h.pendingInput.Len() > maxPendingInput {
+		h.mu.Unlock()
+		h.cfg.logger.Warn("terminal: input before the process started passed its cap; session ended",
+			"cap_bytes", maxPendingInput)
+		h.endBeforeStart(errInputOverflow, inputOverflowReason)
+		return false, errHandlerClosed
+	}
+	h.mu.Unlock()
+	// A process that started before this input queued drains it now, or the
+	// drain already running picks it up.
+	if started {
+		if serr := h.start(0, 0); serr != nil {
+			return false, serr
+		}
+	}
+	return applied, err
+}
+
+// exitAwareClose returns statusProcessExited (4001) and the session's end
+// reason when the child process has exited (procExitCh is closed), otherwise a
+// normal closure. The non-blocking receive is race-free: channel operations
+// synchronize and a closed channel is always ready.
+func (h *Handler) exitAwareClose() (code websocket.StatusCode, reason string) {
 	select {
 	case <-h.procExitCh:
-		return statusProcessExited
+		return statusProcessExited, h.exitReason()
 	default:
-		return websocket.StatusNormalClosure
+		return websocket.StatusNormalClosure, ""
 	}
+}
+
+// exitReason is the 4001 close reason: endReason, empty for a process that ran.
+func (h *Handler) exitReason() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.endReason
 }
 
 // closeOnProcExit closes the client WS with statusProcessExited when the child
@@ -992,11 +1080,16 @@ func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resum
 		case <-t.C:
 		}
 	}
-	ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
+	ws.Close(statusProcessExited, h.exitReason()) // #nosec G104 -- best-effort
 }
 
-// errHandlerClosed is ensureStarted's refusal to start a child once Close has run.
+// errHandlerClosed is ensureStarted's refusal to start a child once Close has
+// run or the session ended before its start.
 var errHandlerClosed = errors.New("terminal: session closed")
+
+// errInputOverflow is the exit error of a session whose queued input passed
+// maxPendingInput before its process started.
+var errInputOverflow = errors.New("terminal: input before the process started passed its cap")
 
 // logStartFailure logs a client-triggered start that failed. A refusal after
 // Close is the expected end of a session, not a failure.
@@ -1022,7 +1115,7 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	}
 	// Shutdown may already have returned, so a child started now would outlive
 	// it. Close stores the latch under h.mu, which orders this check against it.
-	if h.shutdownRequested.Load() {
+	if h.shutdownRequested.Load() || h.endedBeforeStart {
 		return errHandlerClosed
 	}
 	if len(h.command) == 0 {
@@ -1790,7 +1883,8 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 		if hold != 0 {
 			h.armSizeHold(hold)
 		}
-		ws.Close(h.exitAwareCloseCode(), "") // #nosec G104 -- best-effort
+		code, reason := h.exitAwareClose()
+		ws.Close(code, reason) // #nosec G104 -- best-effort
 	}()
 
 	// Cancellable context tied to the client's request — pingLoop
@@ -1803,7 +1897,7 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Close promptly with 4001 when the child process exits, so the client can
 	// distinguish "process ended" from a transient drop (see closeOnProcExit
-	// and exitAwareCloseCode). resumeServed defers that close on an
+	// and exitAwareClose). resumeServed defers that close on an
 	// attach-to-already-exited session until the first resume exchange has been
 	// written, so the client renders the final screen before the 4001.
 	resumeServed := make(chan struct{})
@@ -2358,8 +2452,7 @@ func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 // handleResize records a client's requested size on its socket and resizes
 // the shared PTY and screen to the size owner's (clientRegistry.OwnerSize), so
 // a resize from any other client changes nothing. It reports whether the start
-// was refused because Close has run: no process exit will close that client's
-// socket, so the caller must end it.
+// was refused or failed (startDeferred), so the caller ends that client's socket.
 func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool) {
 	cols, rows = clampResize(cols, rows)
 	h.registry.RecordSize(state, cols, rows)
@@ -2369,9 +2462,8 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool)
 		if ownerCols, ownerRows, ok := h.registry.OwnerSize(); ok {
 			cols, rows = ownerCols, ownerRows
 		}
-		if err := h.start(cols, rows); err != nil {
-			h.logStartFailure(err)
-			return errors.Is(err, errHandlerClosed)
+		if h.startDeferred(cols, rows) {
+			return true
 		}
 	}
 	h.resizeToOwner("resize received")

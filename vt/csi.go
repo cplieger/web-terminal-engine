@@ -502,10 +502,8 @@ func (s *Screen) fillRect() {
 
 // eraseRect implements DECERA (CSI Pt;Pl;Pb;Pr $ z) and, when selective is true,
 // DECSERA ($ {): erase the rectangle to blanks. DECSERA spares DECSCA-protected
-// cells (Cell.Protected) but not ISO/SPA-EPA-guarded cells, which we don't model.
+// cells only, not SPA-guarded ones.
 func (s *Screen) eraseRect(selective bool) {
-	// DECERA clears the rectangle unconditionally; DECSERA spares DECSCA-
-	// protected cells (and, unlike DECSED/DECSEL, does NOT spare ISO cells).
 	m := eraseAll
 	if selective {
 		m = eraseSpareDECSCA

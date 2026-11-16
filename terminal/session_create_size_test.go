@@ -96,6 +96,8 @@ func TestCreateREST_clampsAnOutOfRangeSize(t *testing.T) {
 		{"rows above the maximum cap at 1000", `{"cols":30,"rows":1500}`, "size=1000 30"},
 		{"zero columns start at the default", `{"cols":0,"rows":30}`, "size=30 80"},
 		{"negative values start at the default", `{"cols":-3,"rows":-3}`, "size=24 80"},
+		{"missing rows start at the default", `{"cols":50}`, "size=24 50"},
+		{"missing columns start at the default", `{"rows":20}`, "size=20 80"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

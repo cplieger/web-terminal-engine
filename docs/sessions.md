@@ -52,7 +52,7 @@ The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdl
 
 ### Creating a session
 
-`POST /api/sessions` takes an optional JSON body, `{"cols": C, "rows": R}`, the creating client's grid size. The process starts at that size, so a program that reads its width once at start and never redraws on `SIGWINCH` is laid out at the client's width. A missing field, 0 or a negative value starts that dimension at the default, 80 columns or 24 rows, so an empty body starts the process at 80 by 24. Any other value is clamped to the bounds a resize has, 20 to 1000 columns and 5 to 1000 rows. A body over 256 bytes, a body that does not decode as that object with integer fields, or data after the object answers 400 and creates nothing.
+`POST /api/sessions` takes an optional JSON body, `{"cols": C, "rows": R}`, the creating client's grid size. The process starts at that size, so a program that reads its width once at start and never redraws on `SIGWINCH` is laid out at the client's width. A missing field, 0 or a negative value starts that dimension at the default, 80 columns or 24 rows, so an empty body starts the process at 80 by 24. Any other value is clamped to the bounds a resize has, 20 to 1000 columns and 5 to 1000 rows. A body over 256 bytes, a body that does not decode as that object with integer fields that fit in 64 bits, or data after the object answers 400 and creates nothing.
 
 ### Display order
 

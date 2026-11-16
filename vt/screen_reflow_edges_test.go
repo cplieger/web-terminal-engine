@@ -465,7 +465,8 @@ func TestResizeKeepsACursorPastTheContentOnItsRow(t *testing.T) {
 }
 
 // A wide character a row too narrow for it left without its right half takes
-// two columns again once the row is wide enough, as writing it there does.
+// two columns again once the row is wide enough, attributes included, as
+// writing it there does.
 func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
 	t.Run("from a one-column screen", func(t *testing.T) {
 		s := New(3, 1)
@@ -509,6 +510,25 @@ func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
 			t.Errorf("row 0 = %q, want %q", got, want)
 		}
 	})
+	for _, tc := range []struct {
+		name, text string
+		from, to   int
+	}{
+		{"keeps the attributes from a one-column screen", "中", 1, 4},
+		{"keeps the attributes from the last column with autowrap off", "\x1b[?7labcdef中", 7, 12},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, tc.from)
+			writeString(t, s, cellAttrs+tc.text)
+			s.Resize(3, tc.to)
+
+			written := New(3, tc.to)
+			writeString(t, written, cellAttrs+tc.text)
+			for _, d := range cellDiffs(s.Cells[0], written.Cells[0]) {
+				t.Errorf("row 0 %s", d)
+			}
+		})
+	}
 }
 
 // DECFRA fills every column of its box with one cell of a wide code point,

@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"fmt"
 	"slices"
 	"strconv"
 	"testing"
@@ -533,15 +534,15 @@ func TestDCHBlanksAWideCharacterAnAlternateScreenNarrowingCut(t *testing.T) {
 }
 
 // An alternate-screen widening gives a cut-off wide character its right half
-// back, so the row reads and edits like the same bytes written at the new
-// width.
+// back, attributes included, so the row reads and edits like the same bytes
+// written at the new width.
 func TestAltScreenWideningGivesACutOffWideCharacterItsRightHalfBack(t *testing.T) {
 	for _, tc := range []struct {
 		name, text string
 		widths     []int
 	}{
-		{"cut by a narrowing", "\x1b[?1049habcdef中", []int{8, 7, 12}},
-		{"written in the last column with autowrap off", "\x1b[?1049h\x1b[?7labcdef中", []int{7, 12}},
+		{"cut by a narrowing", "\x1b[?1049h" + cellAttrs + "abcdef中", []int{8, 7, 12}},
+		{"written in the last column with autowrap off", "\x1b[?1049h\x1b[?7l" + cellAttrs + "abcdef中", []int{7, 12}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := New(3, tc.widths[0])
@@ -560,9 +561,34 @@ func TestAltScreenWideningGivesACutOffWideCharacterItsRightHalfBack(t *testing.T
 				if got, wantCut := cutColumns(s.Cells[0]), cutColumns(want.Cells[0]); !slices.Equal(got, wantCut) {
 					t.Errorf("after %s, cut-off columns = %v, want %v", edit.name, got, wantCut)
 				}
+				for _, d := range cellDiffs(s.Cells[0], want.Cells[0]) {
+					t.Errorf("after %s, row 0 %s", edit.name, d)
+				}
 			}
 		})
 	}
+}
+
+// cellAttrs sets a style, an OSC 8 link and DECSCA protection, so a cell
+// comparison of what follows it pins every attribute a cell carries.
+const cellAttrs = "\x1b[41;1m\x1b]8;;http://x\x07\x1b[1\"q"
+
+// cellDiffs describes each column where got and want hold different cells.
+func cellDiffs(got, want []Cell) []string {
+	var diffs []string
+	for x := range max(len(got), len(want)) {
+		var g, w Cell
+		if x < len(got) {
+			g = got[x]
+		}
+		if x < len(want) {
+			w = want[x]
+		}
+		if g != w {
+			diffs = append(diffs, fmt.Sprintf("column %d = %+v, want %+v", x, g, w))
+		}
+	}
+	return diffs
 }
 
 // cutColumns lists the columns of row marked as a wide character cut off from

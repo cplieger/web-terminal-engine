@@ -79,6 +79,11 @@ type Cell struct {
 	// wide character does not fit there: layout, not text, so a re-wrap drops
 	// it unless the cursor is on it.
 	widePad bool
+	// wideCut marks a wide character written in a row's last column, or laid
+	// on a one-column row, with no room for its right half: a re-wrap gives
+	// the half back. A wide glyph DECFRA fills into one cell lacks the mark
+	// and stays one cell.
+	wideCut bool
 }
 
 // ParserState holds the VT500-style state machine state used by the

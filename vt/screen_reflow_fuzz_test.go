@@ -264,38 +264,46 @@ func assertGridShape(t *testing.T, s *Screen) {
 	}
 }
 
-// assertWidePairs fails unless every wide character's right half follows it
-// and every right half follows a wide character. A wide character in a row's
-// last column has no room for its right half.
+// assertWidePairs fails unless every right half follows a wide character and
+// a wide character cut off from its right half sits in a row's last column. A
+// wide glyph with no right half elsewhere is one cell DECFRA filled.
 func assertWidePairs(t *testing.T, s *Screen) {
 	t.Helper()
 	for y, row := range s.Cells {
 		for x, c := range row {
-			wide := c.Ch != 0 && runeWidth(c.Ch) == 2
 			switch {
 			case c.Ch == 0 && (x == 0 || row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2):
 				t.Fatalf("row %d %q: column %d is a right half with no wide character before it", y, s.RowString(y), x)
-			case wide && x+1 < len(row) && row[x+1].Ch != 0:
-				t.Fatalf("row %d %q: the wide character in column %d has no right half", y, s.RowString(y), x)
+			case c.wideCut && x != len(row)-1:
+				t.Fatalf("row %d %q: the wide character in column %d is cut off from its right half before the last column", y, s.RowString(y), x)
 			}
 		}
 	}
 }
 
 // widthOps writes data to s as a width-independent sequence: letters, spaces,
-// a wide character, line ends and DECSC, which saves a place in the text.
+// a wide character, line ends, DECSC, which saves a place in the text, and
+// 0x7f, a letter DECFRA then fills with a wide code point in its one cell.
 func widthOps(t *testing.T, s *Screen, data []byte) {
 	t.Helper()
 	var b strings.Builder
 	for _, c := range data {
-		switch c % 8 {
-		case 0:
+		switch {
+		case c == 0x7f:
+			writeString(t, s, b.String()+"a")
+			b.Reset()
+			y, x := s.curY, s.curX
+			if !s.pendingWrap {
+				x--
+			}
+			fmt.Fprintf(&b, "\x1b[20013;%d;%d;%d;%d$x", y+1, x+1, y+1, x+1)
+		case c%8 == 0:
 			b.WriteString("\r\n")
-		case 1:
+		case c%8 == 1:
 			b.WriteByte(' ')
-		case 2:
+		case c%8 == 2:
 			b.WriteString("中")
-		case 3:
+		case c%8 == 3:
 			b.WriteString("\x1b7")
 		default:
 			b.WriteByte('a' + c%26)
@@ -520,6 +528,10 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 	f.Add([]byte("\x84ddddddddddddddddddd\x00f\x01\x03\x00eeeeee"), uint8(8), uint8(18))
 	f.Add([]byte("\x84ddddddddd\x03\x00eeeeee"), uint8(18), uint8(8))
 	f.Add([]byte("\x84ddddddddd\x03\x00eeeeee"), uint8(8), uint8(18))
+	f.Add([]byte("\x7f\x7f\x7fddddd"), uint8(6), uint8(14))
+	f.Add([]byte("\x7f\x7f\x7fddddd"), uint8(6), uint8(2))
+	f.Add([]byte("ddddddd\x7f"), uint8(6), uint8(14))
+	f.Add([]byte("ddddddd\x7f"), uint8(6), uint8(2))
 
 	f.Fuzz(func(t *testing.T, data []byte, from, to uint8) {
 		const rows = 120

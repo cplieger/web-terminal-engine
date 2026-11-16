@@ -541,21 +541,34 @@ func (s *Screen) copyRect() {
 	}
 	buf := make([][]Cell, h)
 	for i := range buf {
-		buf[i] = append([]Cell(nil), s.Cells[sy1+i][sx1:sx2+1]...)
+		// One source cell past the right edge tells a left half from a glyph.
+		buf[i] = append([]Cell(nil), s.Cells[sy1+i][sx1:min(sx2+2, s.Width)]...)
 	}
 	dy1, dx1 := min(dy0+h-1, s.Height-1), min(dx0+w-1, s.Width-1)
 	s.splitWideBox(dy0, dy1, dx0, dx1)
 	for i := range dy1 - dy0 + 1 {
 		row := s.Cells[dy0+i]
 		copy(row[dx0:dx1+1], buf[i])
-		// The source's edges cut the wide characters there in two; a lone
-		// half is blanked, as splitWide does.
-		if row[dx0].Ch == 0 {
-			row[dx0] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
-		}
-		if dx1 < s.Width-1 && runeWidth(row[dx1].Ch) == 2 {
-			row[dx1] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
-		}
+		s.cutCopyEdges(row, buf[i], dx0, dx1)
+	}
+}
+
+// cutCopyEdges settles the wide characters the edges of a copy of src into
+// row's columns dx0 to dx1 cut in two: a lone half is blanked, as splitWide
+// does, but one left in the last column is cut off, as one written there is.
+// src holds one cell past the copied ones when the source row has it.
+func (s *Screen) cutCopyEdges(row, src []Cell, dx0, dx1 int) {
+	if row[dx0].Ch == 0 {
+		row[dx0] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+	}
+	edge := dx1 - dx0
+	if !src[edge].wideCut && (edge+1 >= len(src) || src[edge+1].Ch != 0 || row[dx1].Ch == 0) {
+		return
+	}
+	if dx1 < s.Width-1 {
+		row[dx1] = Cell{Ch: ' ', Style: Style{BG: s.style.BG}}
+	} else {
+		row[dx1].wideCut = true
 	}
 }
 

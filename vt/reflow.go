@@ -244,15 +244,7 @@ func (g *reflowGrid) appendLine(l logicalLine, at lineMarks, mayPend bool, cols 
 			x = 0
 		}
 		g.markCell(at, i, w, x, cols)
-		// A wide character on a one-column row keeps its glyph and loses its
-		// spacer.
-		x += copy(row[x:], l.cells[i:i+w])
-		if span > w {
-			half := l.cells[i]
-			half.Ch = 0
-			row[x] = half
-			x++
-		}
+		x = placeChar(row, x, l.cells[i:i+w], span)
 		i += w
 	}
 	copy(row[x:], l.tail)
@@ -262,6 +254,22 @@ func (g *reflowGrid) appendLine(l logicalLine, at lineMarks, mayPend bool, cols 
 	if at.cursor >= len(l.cells) {
 		g.placePastText(x+at.cursor-len(l.cells), x, mayPend, cols, l.tail)
 	}
+}
+
+// placeChar copies the cells of one character to row at column x, laid out
+// over span columns, and returns the column after it. On a one-column row a
+// wide character keeps its glyph, cut off from its spacer; given room, one
+// cut off takes its right half back.
+func placeChar(row []Cell, x int, char []Cell, span int) int {
+	x += copy(row[x:], char)
+	row[x-1].wideCut = len(row) == 1 && (len(char) == 2 || char[0].wideCut)
+	if span > len(char) {
+		half := char[0]
+		half.Ch, half.wideCut = 0, false
+		row[x] = half
+		x++
+	}
+	return x
 }
 
 // cellWidth is 2 for a wide character at cells[i], followed by its spacer,
@@ -274,11 +282,11 @@ func cellWidth(cells []Cell, i int) int {
 }
 
 // cellSpan returns the cells of the character at cells[i] and the columns it
-// takes on a row of cols: a wide character a one-column row left without its
-// right half takes two again, as writing it there would.
+// takes on a row of cols: a wide character cut off from its right half takes
+// two again, as writing it there would.
 func cellSpan(cells []Cell, i, cols int) (w, span int) {
 	w = cellWidth(cells, i)
-	if w == 1 && cols > 1 && runeWidth(cells[i].Ch) == 2 {
+	if w == 1 && cols > 1 && cells[i].wideCut {
 		return w, 2
 	}
 	return w, w

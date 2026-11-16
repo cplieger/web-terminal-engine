@@ -515,3 +515,33 @@ func TestEditsBlankBothHalvesOfACutWideCharacter(t *testing.T) {
 		})
 	}
 }
+
+// A one-cell wide glyph DECFRA wrote has no half to lose, so an edit moving
+// it moves it whole, as xterm's ScrnFillRectangle leaves it.
+func TestEditsMoveADECFRAWideGlyphWhole(t *testing.T) {
+	const filled = "abcdefgh\x1b[20013;1;8;1;8$x" // the glyph in the last column
+	for _, tc := range []struct{ name, edit, want string }{
+		{"DCH shifting it out of the last column", "\x1b[1;1H\x1b[P", "bcdefg中"},
+		{"DECCRA copying it from a source's right edge", "\x1b[1;7;1;8;1;1;1$v", "g中cdefg中"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, 8)
+			writeString(t, s, filled+tc.edit)
+			if got := cellsString(s, 0); got != tc.want {
+				t.Errorf("row 0 = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// A wide character an alternate-screen narrowing cuts at the new last column
+// is a cut-off character like one written there, so DCH blanks it.
+func TestDCHBlanksAWideCharacterAnAlternateScreenNarrowingCut(t *testing.T) {
+	s := New(3, 8)
+	writeString(t, s, "\x1b[?1049habcdef中")
+	s.Resize(3, 7)
+	writeString(t, s, "\x1b[1;1H\x1b[P")
+	if got, want := cellsString(s, 0), "bcdef"; got != want {
+		t.Errorf("row 0 = %q, want %q", got, want)
+	}
+}

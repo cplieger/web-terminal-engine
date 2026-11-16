@@ -1,6 +1,7 @@
 package vt
 
 import (
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -489,4 +490,55 @@ func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
 			t.Errorf("row 0 = %q, want %q", got, want)
 		}
 	})
+	t.Run("from a re-wrap onto one column", func(t *testing.T) {
+		s := New(3, 4)
+		writeString(t, s, "中")
+		s.Resize(3, 1)
+		s.Resize(3, 16)
+
+		if got, want := cellsString(s, 0), "中|"; got != want {
+			t.Errorf("row 0 = %q, want %q", got, want)
+		}
+	})
+	t.Run("from a DECCRA of a left half into the last column", func(t *testing.T) {
+		s := New(3, 4)
+		writeString(t, s, "a中b\x1b[1;2;1;2;1;1;4$v")
+		s.Resize(3, 8)
+
+		if got, want := cellsString(s, 0), "a中|中|"; got != want {
+			t.Errorf("row 0 = %q, want %q", got, want)
+		}
+	})
+}
+
+// DECFRA fills every column of its box with one cell of a wide code point,
+// as xterm's ScrnFillRectangle writes it, so a re-wrap keeps the glyph one
+// cell wherever it sits, as filling at the new width does.
+func TestResizeKeepsADECFRAWideGlyphOneCell(t *testing.T) {
+	fill := func(cols, from, to int) string {
+		return fmt.Sprintf("\x1b[20013;%d;%d;%d;%d$x", from/cols+1, from%cols+1, to/cols+1, to%cols+1)
+	}
+	for _, tc := range []struct {
+		name     string
+		from, to int
+	}{
+		{"mid-row", 0, 2},
+		{"in the last column", 7, 7},
+	} {
+		for _, cols := range []int{16, 4} {
+			t.Run(fmt.Sprintf("%s resized to %d", tc.name, cols), func(t *testing.T) {
+				s := New(4, 8)
+				writeString(t, s, "abcdefgh"+fill(8, tc.from, tc.to))
+				s.Resize(4, cols)
+
+				written := New(4, cols)
+				writeString(t, written, "abcdefgh"+fill(cols, tc.from, tc.to))
+				for y := range 3 {
+					if got, want := cellsString(s, y), cellsString(written, y); got != want || s.wrapped[y] != written.wrapped[y] {
+						t.Errorf("row %d = %q wrapped %v, want %q wrapped %v", y, got, s.wrapped[y], want, written.wrapped[y])
+					}
+				}
+			})
+		}
+	}
 }

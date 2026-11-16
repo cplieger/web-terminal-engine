@@ -494,7 +494,8 @@ func (s *Screen) resizeHeight(rows int) {
 }
 
 // resizeAltWidth cuts or pads each alternate-screen row, since a full-screen
-// program repaints its own rows on SIGWINCH.
+// program repaints its own rows on SIGWINCH. A wide character the cut leaves
+// in the last column is marked cut off, as one written there is.
 func (s *Screen) resizeAltWidth(cols int) {
 	if cols == s.Width {
 		return
@@ -503,6 +504,9 @@ func (s *Screen) resizeAltWidth(cols int) {
 		old := s.Cells[i]
 		s.Cells[i] = makeRow(cols, Color{})
 		copy(s.Cells[i], old)
+		if cols < len(old) && old[cols].Ch == 0 && old[cols-1].Ch != 0 {
+			s.Cells[i][cols-1].wideCut = true
+		}
 	}
 	s.Width = cols
 }
@@ -772,7 +776,7 @@ func (s *Screen) put(r rune) {
 
 	if s.curY < s.Height && s.curX < s.Width {
 		s.splitWideSpan(s.curY, s.curX, s.curX+w-1)
-		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected, drawn: true}
+		s.Cells[s.curY][s.curX] = Cell{Ch: r, Style: s.style, Hyperlink: s.hyperlink, Protected: s.curProtected, IsoProtected: s.curIsoProtected, drawn: true, wideCut: w == 2 && s.curX == s.Width-1}
 	}
 	s.lastPrintedRune = r
 	s.lastPrintedStyle = s.style
@@ -936,7 +940,12 @@ func (s *Screen) splitWide(y, x int) bool {
 		return false
 	}
 	row := s.Cells[y]
-	if row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2 || x < s.Width && row[x].Ch != 0 {
+	switch {
+	case x == s.Width:
+		if !row[x-1].wideCut {
+			return false
+		}
+	case row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2 || row[x].Ch != 0:
 		return false
 	}
 	blank := Cell{Ch: ' ', Style: Style{BG: s.style.BG}}

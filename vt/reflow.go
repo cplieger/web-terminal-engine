@@ -77,7 +77,7 @@ func (p gridPoint) holds(cols int) bool {
 }
 
 // rowFits reports whether row y's content fits cols with no pad in it but the
-// cursor's.
+// cursor's and no wide character cellSpan would give a right half.
 func (g *reflowGrid) rowFits(y, cols int) bool {
 	n := contentLen(g.cells[y])
 	if n > cols {
@@ -85,6 +85,9 @@ func (g *reflowGrid) rowFits(y, cols int) bool {
 	}
 	for x, c := range g.cells[y][:n] {
 		if c.widePad && (y != g.cursor.y || x != g.cursor.x) {
+			return false
+		}
+		if w, span := cellSpan(g.cells[y], x, cols); span > w {
 			return false
 		}
 	}
@@ -227,8 +230,8 @@ func (g *reflowGrid) appendLine(l logicalLine, at lineMarks, mayPend bool, cols 
 	row := g.newRow(cols, l.continuesHistory)
 	x := 0
 	for i := 0; i < len(l.cells); {
-		w := cellWidth(l.cells, i)
-		if x+w > cols && x > 0 {
+		w, span := cellSpan(l.cells, i, cols)
+		if x+span > cols && x > 0 {
 			if x < cols {
 				// The pad autowrap leaves takes the wide character's paint, as put does.
 				row[x] = Cell{Ch: ' ', Style: l.cells[i].Style, widePad: true}
@@ -244,6 +247,12 @@ func (g *reflowGrid) appendLine(l logicalLine, at lineMarks, mayPend bool, cols 
 		// A wide character on a one-column row keeps its glyph and loses its
 		// spacer.
 		x += copy(row[x:], l.cells[i:i+w])
+		if span > w {
+			half := l.cells[i]
+			half.Ch = 0
+			row[x] = half
+			x++
+		}
 		i += w
 	}
 	copy(row[x:], l.tail)
@@ -262,6 +271,17 @@ func cellWidth(cells []Cell, i int) int {
 		return 2
 	}
 	return 1
+}
+
+// cellSpan returns the cells of the character at cells[i] and the columns it
+// takes on a row of cols: a wide character a one-column row left without its
+// right half takes two again, as writing it there would.
+func cellSpan(cells []Cell, i, cols int) (w, span int) {
+	w = cellWidth(cells, i)
+	if w == 1 && cols > 1 && runeWidth(cells[i].Ch) == 2 {
+		return w, 2
+	}
+	return w, w
 }
 
 // markCell places the cursor and DECSC slot whose offsets fall in the w cells

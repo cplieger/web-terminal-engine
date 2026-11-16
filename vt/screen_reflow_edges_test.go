@@ -430,3 +430,31 @@ func TestResizeKeepsACursorPastTheContentOnItsRow(t *testing.T) {
 		t.Errorf("cursor = (%d, %d), want (0, 19): its row's last column", y, x)
 	}
 }
+
+// A wide character a row too narrow for it left without its right half takes
+// two columns again once the row is wide enough, as writing it there does.
+func TestResizeGivesAWideCharacterItsRightHalfBack(t *testing.T) {
+	t.Run("from a one-column screen", func(t *testing.T) {
+		s := New(3, 1)
+		writeString(t, s, "中")
+		s.Resize(3, 16)
+
+		written := New(3, 16)
+		writeString(t, written, "中")
+		if got, want := cellsString(s, 0), cellsString(written, 0); got != want {
+			t.Errorf("row 0 = %q, want %q", got, want)
+		}
+		if y, x := s.CursorPos(); y != 0 || x != 2 {
+			t.Errorf("cursor = (%d, %d), want (0, 2)", y, x)
+		}
+	})
+	t.Run("from the last column with autowrap off", func(t *testing.T) {
+		s := New(3, 3)
+		writeString(t, s, "\x1b[?7lab中")
+		s.Resize(3, 4)
+
+		if got, want := cellsString(s, 0), "ab中|"; got != want {
+			t.Errorf("row 0 = %q, want %q", got, want)
+		}
+	})
+}

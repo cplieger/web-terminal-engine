@@ -483,3 +483,39 @@ func TestHandler_aFailedStartEndsTheHandler(t *testing.T) {
 		t.Errorf("%d bytes queued after the session ended, want 0", queued)
 	}
 }
+
+// TestCreateREST_aStartDuringTheOverflowIsRefused pins the overflow's latch
+// against a start that waits on h.mu while the over-cap input is appended, as
+// the fallback timer or a second client's first resize does.
+func TestCreateREST_aStartDuringTheOverflowIsRefused(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "spawned")
+	m, srv := commandManager(t, markerCmd(marker), noFallback)
+	id := restCreate(t, srv)
+	ws := dialSession(t, srv, id)
+	t.Cleanup(func() { _ = ws.CloseNow() })
+	h := sessionHandler(t, m, id)
+	writeNumberedLines(t, ws, queueCapLines)
+	assertUnspawnedAfter(t, h, ws)
+	startErr := make(chan error, 1)
+	inputOverflowHook = func() {
+		done := make(chan error, 1)
+		go func() { done <- h.start(50, 20) }()
+		for !h.started.Load() {
+			select {
+			case err := <-done:
+				startErr <- err
+				return
+			case <-time.After(time.Millisecond):
+			}
+		}
+		startErr <- nil
+	}
+	t.Cleanup(func() { inputOverflowHook = func() {} })
+	writeBinary(t, ws, []byte("x"))
+	assertEndedWith(t, ws, inputOverflowReason)
+	if err := <-startErr; !errors.Is(err, errHandlerClosed) {
+		t.Errorf("the start during the overflow returned %v, want errHandlerClosed", err)
+	}
+	awaitUnlisted(t, m, id)
+	assertNeverSpawned(t, marker)
+}

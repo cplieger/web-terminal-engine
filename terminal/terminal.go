@@ -737,7 +737,8 @@ func (h *Handler) Exited() bool {
 }
 
 // ExitError returns what cmd.Wait() reported for the child: nil when the process
-// exited cleanly (status 0), was never started, or has not exited yet, and
+// exited cleanly (status 0), has not started and has not been ended, or has not
+// exited yet, and
 // otherwise the wait error — an *exec.ExitError for a non-zero or signalled
 // exit, the same error WithOnProcessExit's callback receives. A session that
 // ended before its process started returns the start error or the input
@@ -928,9 +929,19 @@ func (h *Handler) startDeferred(cols, rows int) (failed bool) {
 // the process has started, the session is closed, or it already ended.
 func (h *Handler) endBeforeStart(cause error, reason string) {
 	h.mu.Lock()
+	ended := h.latchEndBeforeStartLocked(cause, reason)
+	h.mu.Unlock()
+	if ended {
+		h.finishEndBeforeStart(cause)
+	}
+}
+
+// latchEndBeforeStartLocked records the end under h.mu, so a start waiting on
+// h.mu is refused (ensureStarted), and reports whether it did. Called with h.mu
+// held.
+func (h *Handler) latchEndBeforeStartLocked(cause error, reason string) bool {
 	if h.started.Load() || h.shutdownRequested.Load() || h.endedBeforeStart {
-		h.mu.Unlock()
-		return
+		return false
 	}
 	h.endedBeforeStart = true
 	h.endReason = reason
@@ -939,7 +950,12 @@ func (h *Handler) endBeforeStart(cause error, reason string) {
 	if h.startTimer != nil {
 		h.startTimer.Stop()
 	}
-	h.mu.Unlock()
+	return true
+}
+
+// finishEndBeforeStart announces an end latchEndBeforeStartLocked recorded,
+// without h.mu.
+func (h *Handler) finishEndBeforeStart(cause error) {
 	close(h.procExitCh)
 	h.markProgramExited()
 	if h.onEndedBeforeStart != nil {
@@ -1019,11 +1035,15 @@ func (h *Handler) queueInputLocked(state *clientState, msg []byte) (applied bool
 	}
 	applied, err = h.registry.ApplyInput(state, &h.pendingInput, msg)
 	started := h.started.Load()
-	if !started && h.pendingInput.Len() > maxPendingInput {
+	// Latched before the unlock: a start waiting on h.mu would otherwise spawn
+	// in the gap with the over-cap input queued.
+	if !started && h.pendingInput.Len() > maxPendingInput &&
+		h.latchEndBeforeStartLocked(errInputOverflow, inputOverflowReason) {
 		h.mu.Unlock()
+		inputOverflowHook()
 		h.cfg.logger.Warn("terminal: input before the process started passed its cap; session ended",
 			"cap_bytes", maxPendingInput)
-		h.endBeforeStart(errInputOverflow, inputOverflowReason)
+		h.finishEndBeforeStart(errInputOverflow)
 		return false, errHandlerClosed
 	}
 	h.mu.Unlock()
@@ -1086,6 +1106,10 @@ func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resum
 // errHandlerClosed is ensureStarted's refusal to start a child once Close has
 // run or the session ended before its start.
 var errHandlerClosed = errors.New("terminal: session closed")
+
+// inputOverflowHook runs between the overflow's latch and its announcement; a
+// test seam for a start that waits on h.mu meanwhile. A no-op in production.
+var inputOverflowHook = func() {}
 
 // errInputOverflow is the exit error of a session whose queued input passed
 // maxPendingInput before its process started.

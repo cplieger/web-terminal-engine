@@ -495,7 +495,8 @@ func (s *Screen) resizeHeight(rows int) {
 
 // resizeAltWidth cuts or pads each alternate-screen row, since a full-screen
 // program repaints its own rows on SIGWINCH. A wide character the cut leaves
-// in the last column is marked cut off, as one written there is.
+// in the last column is marked cut off, as one written there is, and a
+// widening gives a cut-off one its right half back.
 func (s *Screen) resizeAltWidth(cols int) {
 	if cols == s.Width {
 		return
@@ -504,8 +505,15 @@ func (s *Screen) resizeAltWidth(cols int) {
 		old := s.Cells[i]
 		s.Cells[i] = makeRow(cols, Color{})
 		copy(s.Cells[i], old)
-		if cols < len(old) && old[cols].Ch == 0 && old[cols-1].Ch != 0 {
-			s.Cells[i][cols-1].wideCut = true
+		last := len(old) - 1
+		switch row := s.Cells[i]; {
+		case cols < len(old) && old[cols].Ch == 0 && old[cols-1].Ch != 0:
+			row[cols-1].wideCut = true
+		case cols > len(old) && old[last].wideCut:
+			half := old[last]
+			half.Ch, half.wideCut = 0, false
+			row[last].wideCut = false
+			row[len(old)] = half
 		}
 	}
 	s.Width = cols

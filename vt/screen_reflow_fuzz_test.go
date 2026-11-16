@@ -171,7 +171,7 @@ func FuzzResize_widthRoundTrip(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, data []byte, from, to uint8) {
 		s := New(40, int(from)%60+1)
-		writeString(t, s, wrappingText(data, s.Height, s.Width))
+		writeChecked(t, s, wrappingText(data, s.Height, s.Width))
 		s.DrainScrollback()
 		roundTrip(t, s, int(to)%60+1)
 	})
@@ -191,26 +191,26 @@ func writeEditing(t *testing.T, s *Screen, data []byte) {
 		switch {
 		case b >= 0x80 && b%8 == 2:
 			if i+2 < len(data) {
-				writeString(t, s, fmt.Sprintf("\x1b[%d;%dr", int(data[i+1])%s.Height+1, int(data[i+2])%s.Height+1))
+				writeChecked(t, s, fmt.Sprintf("\x1b[%d;%dr", int(data[i+1])%s.Height+1, int(data[i+2])%s.Height+1))
 				i += 2
 			}
 		case b >= 0x80 && b%8 == 6:
-			writeString(t, s, "\x1bM")
+			writeChecked(t, s, "\x1bM")
 		case b >= 0x80 && b%8 == 7:
-			writeString(t, s, "\x1bD")
+			writeChecked(t, s, "\x1bD")
 		case b >= 0x80:
-			writeString(t, s, fmt.Sprintf("\x1b[%d%s", int(b>>3)%3+1, shifts[b%8]))
+			writeChecked(t, s, fmt.Sprintf("\x1b[%d%s", int(b>>3)%3+1, shifts[b%8]))
 		case op == 0:
-			writeString(t, s, "\r\n")
+			writeChecked(t, s, "\r\n")
 		case op <= 5:
-			writeString(t, s, erases[op])
+			writeChecked(t, s, erases[op])
 		case op == 6 && i+2 < len(data):
-			writeString(t, s, fmt.Sprintf("\x1b[%d;%dH", int(data[i+1])%s.Height+1, int(data[i+2])%s.Width+1))
+			writeChecked(t, s, fmt.Sprintf("\x1b[%d;%dH", int(data[i+1])%s.Height+1, int(data[i+2])%s.Width+1))
 			i += 2
 		case op == 7:
-			writeString(t, s, fmt.Sprintf("\x1b[%dX", int(b>>4)+1))
+			writeChecked(t, s, fmt.Sprintf("\x1b[%dX", int(b>>4)+1))
 		case op > 7:
-			writeString(t, s, string(rune('a'+b%26)))
+			writeChecked(t, s, string(rune('a'+b%26)))
 		}
 	}
 }
@@ -264,21 +264,72 @@ func assertGridShape(t *testing.T, s *Screen) {
 	}
 }
 
-// assertWidePairs fails unless every right half follows a wide character and
-// a wide character cut off from its right half sits in a row's last column. A
-// wide glyph with no right half elsewhere is one cell DECFRA filled.
+// assertWidePairs fails unless, on the screen in use and on the main screen
+// saved beneath the alternate one, every right half follows a wide character
+// and a wide character cut off from its right half sits in a row's last
+// column. A wide glyph with no right half elsewhere is one cell DECFRA filled.
 func assertWidePairs(t *testing.T, s *Screen) {
 	t.Helper()
-	for y, row := range s.Cells {
-		for x, c := range row {
-			switch {
-			case c.Ch == 0 && (x == 0 || row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2):
-				t.Fatalf("row %d %q: column %d is a right half with no wide character before it", y, s.RowString(y), x)
-			case c.wideCut && x != len(row)-1:
-				t.Fatalf("row %d %q: the wide character in column %d is cut off from its right half before the last column", y, s.RowString(y), x)
+	for _, grid := range []struct {
+		name  string
+		cells [][]Cell
+	}{{"screen", s.Cells}, {"saved main screen", s.savedMainCells}} {
+		for y, row := range grid.cells {
+			for x, c := range row {
+				switch {
+				case c.Ch == 0 && (x == 0 || row[x-1].Ch == 0 || runeWidth(row[x-1].Ch) != 2):
+					t.Fatalf("%s row %d %q: column %d is a right half with no wide character before it", grid.name, y, rowText(row), x)
+				case c.wideCut && x != len(row)-1:
+					t.Fatalf("%s row %d %q: the wide character in column %d is cut off from its right half before the last column", grid.name, y, rowText(row), x)
+				}
 			}
 		}
 	}
+}
+
+// rowText renders row with a wide character's right half as '|'.
+func rowText(row []Cell) string {
+	var b strings.Builder
+	for _, c := range row {
+		if c.Ch == 0 {
+			b.WriteRune('|')
+			continue
+		}
+		b.WriteRune(c.Ch)
+	}
+	return strings.TrimRight(b.String(), " ")
+}
+
+// writeChecked writes text to s a byte at a time and runs assertWidePairs
+// after each byte that leaves the parser in ground state, so every edit,
+// erase and write a sequence makes keeps the wide pairs, not only the last.
+func writeChecked(t *testing.T, s *Screen, text string) {
+	t.Helper()
+	var b [1]byte
+	for i := range len(text) {
+		b[0] = text[i]
+		_, _ = s.Write(b[:])
+		if s.pState == stGround {
+			assertWidePairs(t, s)
+		}
+	}
+}
+
+// maxCheckedLen bounds the input writeFuzzed checks after every operation: a
+// check scans the grid, about 5 µs on 24x80, so a 1 MiB OSC 52 mutation
+// written as text would take seconds per exec.
+const maxCheckedLen = 1 << 14
+
+// writeFuzzed writes arbitrary bytes to s through writeChecked, or, past
+// maxCheckedLen, whole and then checks the wide pairs once.
+func writeFuzzed(t *testing.T, s *Screen, data []byte) {
+	t.Helper()
+	if len(data) <= maxCheckedLen {
+		writeChecked(t, s, string(data))
+		return
+	}
+	_, _ = s.Write(data)
+	assertWidePairs(t, s)
 }
 
 // widthOps writes data to s as a width-independent sequence: letters, spaces,
@@ -290,7 +341,7 @@ func widthOps(t *testing.T, s *Screen, data []byte) {
 	for _, c := range data {
 		switch {
 		case c == 0x7f:
-			writeString(t, s, b.String()+"a")
+			writeChecked(t, s, b.String()+"a")
 			b.Reset()
 			y, x := s.curY, s.curX
 			if !s.pendingWrap {
@@ -309,7 +360,7 @@ func widthOps(t *testing.T, s *Screen, data []byte) {
 			b.WriteByte('a' + c%26)
 		}
 	}
-	writeString(t, s, b.String())
+	writeChecked(t, s, b.String())
 }
 
 // logicalText is logicalOf with every wide character's pad left out and its
@@ -490,7 +541,7 @@ func editLines(t *testing.T, screens []*Screen, op, at byte) bool {
 		edits[i] = e
 	}
 	for i, s := range screens {
-		writeString(t, s, edits[i].seq)
+		writeChecked(t, s, edits[i].seq)
 	}
 	return true
 }
@@ -563,7 +614,7 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 		restoreBefore := restoreAfter && data[0]&0x40 != 0
 		if restoreBefore {
 			for _, s := range screens {
-				writeString(t, s, "\x1b8")
+				writeChecked(t, s, "\x1b8")
 			}
 		}
 		if len(resized.Drained) > 0 || len(written.Drained) > 0 {
@@ -588,7 +639,7 @@ func FuzzResize_matchesWritingAtTheNewWidth(f *testing.F) {
 		compare("after the resize")
 		if restoreAfter {
 			for _, s := range screens {
-				writeString(t, s, "\x1b8")
+				writeChecked(t, s, "\x1b8")
 			}
 			compare("after ESC 8")
 		}

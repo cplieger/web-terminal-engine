@@ -1,8 +1,8 @@
 package vt
 
 import (
+	"slices"
 	"strconv"
-	"strings"
 	"testing"
 )
 
@@ -464,15 +464,7 @@ func TestDeleteCharsWithWideCharSplit(t *testing.T) {
 // cellsString renders row y with a wide character's right half as '|' and
 // the trailing blanks dropped.
 func cellsString(s *Screen, y int) string {
-	var b strings.Builder
-	for _, c := range s.Cells[y] {
-		if c.Ch == 0 {
-			b.WriteRune('|')
-			continue
-		}
-		b.WriteRune(c.Ch)
-	}
-	return strings.TrimRight(b.String(), " ")
+	return rowText(s.Cells[y])
 }
 
 // An edit that replaces, erases or shifts away one half of a wide character
@@ -544,4 +536,49 @@ func TestDCHBlanksAWideCharacterAnAlternateScreenNarrowingCut(t *testing.T) {
 	if got, want := cellsString(s, 0), "bcdef"; got != want {
 		t.Errorf("row 0 = %q, want %q", got, want)
 	}
+}
+
+// An alternate-screen widening gives a cut-off wide character its right half
+// back, so the row reads and edits like the same bytes written at the new
+// width.
+func TestAltScreenWideningGivesACutOffWideCharacterItsRightHalfBack(t *testing.T) {
+	for _, tc := range []struct {
+		name, text string
+		widths     []int
+	}{
+		{"cut by a narrowing", "\x1b[?1049habcdef中", []int{8, 7, 12}},
+		{"written in the last column with autowrap off", "\x1b[?1049h\x1b[?7labcdef中", []int{7, 12}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := New(3, tc.widths[0])
+			writeString(t, s, tc.text)
+			for _, w := range tc.widths[1:] {
+				s.Resize(3, w)
+			}
+			want := New(3, 12)
+			writeString(t, want, tc.text)
+			for _, edit := range []struct{ name, seq string }{{"the widening", ""}, {"ICH 5", "\x1b[1;1H\x1b[5@"}} {
+				writeString(t, s, edit.seq)
+				writeString(t, want, edit.seq)
+				if got, wantRow := cellsString(s, 0), cellsString(want, 0); got != wantRow {
+					t.Errorf("after %s, row 0 = %q, want %q", edit.name, got, wantRow)
+				}
+				if got, wantCut := cutColumns(s.Cells[0]), cutColumns(want.Cells[0]); !slices.Equal(got, wantCut) {
+					t.Errorf("after %s, cut-off columns = %v, want %v", edit.name, got, wantCut)
+				}
+			}
+		})
+	}
+}
+
+// cutColumns lists the columns of row marked as a wide character cut off from
+// its right half.
+func cutColumns(row []Cell) []int {
+	var cols []int
+	for x, c := range row {
+		if c.wideCut {
+			cols = append(cols, x)
+		}
+	}
+	return cols
 }

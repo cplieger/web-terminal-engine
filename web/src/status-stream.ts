@@ -33,8 +33,9 @@ export interface SessionInfo {
   readonly title: string;
   /** on an "ended" session, the reason it ended before its process started:
    *  the same reason its sockets' 4001 close carries, so the list alone tells
-   *  the consumer. Absent for every other status, and from a server before
-   *  6.6, which drops such a session from the list instead. */
+   *  the consumer. Absent for every other status. A server before 6.6 lists
+   *  no such session: it starts the process at create, so a failed start
+   *  fails the create. */
   readonly endReason?: string;
   /** the session's short public name, safe to put in a URL: 1 to 64 characters
    *  of `[A-Za-z0-9_-]`, unique among live sessions, and NOT a capability

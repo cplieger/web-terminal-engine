@@ -452,8 +452,6 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 	}
 	n := len(m.sessions)
 	m.mu.Unlock()
-	// Armed once the session is listed, so a fallback start that fails ends a
-	// session clients can already see as ended.
 	if deferred {
 		h.deferStart()
 	}

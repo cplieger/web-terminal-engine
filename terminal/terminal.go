@@ -1727,7 +1727,7 @@ func (h *Handler) clientReadLoop(ctx context.Context, ws *websocket.Conn, state 
 			continue
 		}
 		if len(msg) == 0 {
-			continue // ignored without latching (documented in the design)
+			continue // ignored without latching
 		}
 		var ok bool
 		armed, ok = h.handleBinaryFrame(ws, state, msg, armed, latched, markResumeServed)

@@ -18,11 +18,11 @@
 // 7. On a permanent close (readyState CLOSED) the module re-establishes the
 //    stream after a capped backoff, fires onOpen on the reopen, and close()
 //    cancels a pending reconnect.
-// 8. OSC 9 wire floor (per the OSC 9 spec brief): the "failed" (progress state
-//    2) and "warning" (state 4) statuses parse, the progress percentage is
-//    carried with -1 meaning absent, a notification is delivered as event data
-//    rather than as a status, and an UNKNOWN status string from a newer server is
-//    forwarded rather than dropped or thrown on.
+// 8. OSC 9 wire floor: the "failed" (progress state 2) and "warning" (state
+//    4) statuses parse, the progress percentage is carried with -1 meaning
+//    absent, a notification is delivered as event data rather than as a
+//    status, and an UNKNOWN status string from a newer server is forwarded
+//    rather than dropped or thrown on.
 // 9. The session-end split: "exited" (an ordinary end) and "crashed" (a non-zero
 //    or signalled exit) are both admitted by the status union and both parse.
 // 10. The secondary activity pair (`activity` + `activityCount`): a host-reported
@@ -209,14 +209,12 @@ describe("connectStatusStream", () => {
     vi.useRealTimers();
   });
 
-  // OSC 9 wire-floor cases, written against the OSC 9 spec brief.
-  //
-  // Two things the brief makes the client's problem. (1) Progress state 2 is an
-  // error and state 4 is a warning (iTerm2 semantics), so "failed" and "warning"
-  // are statuses the server can send and the union has to admit; the percentage
-  // rides along, with -1 meaning absent (which is NOT 0%). (2) A notification is
-  // an EVENT, so it arrives as event data rather than as a status, and a consumer
-  // with no server-side classifier still sees it.
+  // OSC 9 wire-floor cases. Two things are the client's problem. (1) Progress
+  // state 2 is an error and state 4 is a warning (iTerm2 semantics), so
+  // "failed" and "warning" are statuses the server can send and the union has to
+  // admit; the percentage rides along, with -1 meaning absent (which is NOT 0%).
+  // (2) A notification is an EVENT, so it arrives as event data rather than as
+  // a status, and a consumer with no server-side classifier still sees it.
   describe("OSC 9 progress and notification fields", () => {
     const cases: { name: string; status: SessionStatus["status"]; progressValue: number }[] = [
       { name: "failed with a percentage", status: "failed", progressValue: 75 },

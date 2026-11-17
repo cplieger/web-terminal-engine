@@ -46,6 +46,19 @@ func handlerOf(t *testing.T, m *SessionManager, id SessionID) *Handler {
 	return s.handler
 }
 
+// TestComputeStatusEndedOutranksTheOpenExitChannel pins docs/sessions.md's
+// `ended` row as the top precedence even while procExitCh is still open:
+// endBeforeStart stores the reason first, so a sweep reading between the two
+// sees exited=false with a reason, and List already names the session ended.
+func TestComputeStatusEndedOutranksTheOpenExitChannel(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(func() { shutdownManager(t, m) })
+	in := &statusRaw{endReason: "the process failed to start"}
+	if st, _ := m.computeStatus(in, &statusTracker{}); st != StatusEnded {
+		t.Fatalf("status with the reason stored and the exit channel open = %q, want %q", st, StatusEnded)
+	}
+}
+
 // TestComputeStatusLatchesInput verifies a classified needs-input notification
 // latches input and persists (the process is blocked, so no progress and no
 // output), then an active progress signal (the turn resuming) clears it.

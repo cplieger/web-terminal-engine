@@ -504,12 +504,15 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) (status
 	// must not read as new once a later report brings the status back to it.
 	programAdvanced := in.programOccurrence > tr.programOccurrence
 	tr.programOccurrence = in.programOccurrence
+	// Ahead of exited: endBeforeStart stores the reason before it closes
+	// procExitCh, and a read between the two must not report a live status for
+	// a session List already names ended.
+	if in.endReason != "" {
+		return StatusEnded, false
+	}
 	if in.exited {
 		// Top precedence: a dead session's LAST progress state or latch says
 		// nothing useful about how it died.
-		if in.endReason != "" {
-			return StatusEnded, false
-		}
 		if in.crashed {
 			return StatusCrashed, false
 		}
@@ -657,8 +660,8 @@ func (m *SessionManager) unsubscribe(ch chan statusEvent) {
 // tracker record List serves (the two sources must agree, on order as well as
 // on status; see committedOf and compareSessionOrder).
 //
-// One m.mu hold and no handler getter, so a wedged handler cannot stall a new
-// subscriber. No notification is replayed here: a notification is an event,
+// One m.mu hold, then only exitReason, which takes no handler lock, so a wedged
+// handler cannot stall a new subscriber. No notification is replayed here: a notification is an event,
 // and a subscriber joining later did not miss a state.
 func (m *SessionManager) snapshot() []statusEvent {
 	type snapItem struct {

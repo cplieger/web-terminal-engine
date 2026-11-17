@@ -350,5 +350,21 @@ describe("connectStatusStream", () => {
       expect(got.status).toBe("crashed");
       expect(got.removed).toBe(true);
     });
+
+    it("carries the end reason of a session removed before its process started", () => {
+      const onStatus = vi.fn();
+      const { fake } = mountFake({ onStatus });
+      const ev: SessionStatus = {
+        ...sample,
+        status: "exited",
+        removed: true,
+        endReason: "the process failed to start",
+      };
+
+      fake.emit("message", JSON.stringify(ev));
+
+      const got = onStatus.mock.calls[0]![0] as SessionStatus;
+      expect(got.endReason).toBe("the process failed to start");
+    });
   });
 });

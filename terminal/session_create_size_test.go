@@ -444,6 +444,90 @@ func TestCreateREST_inputPastTheQueueCapEndsTheSession(t *testing.T) {
 	assertNeverSpawned(t, marker)
 }
 
+// removalWire returns session id's removed event from the next sweep as the
+// status stream's JSON carries it.
+func removalWire(t *testing.T, m *SessionManager, id SessionID) map[string]any {
+	t.Helper()
+	ev := eventFor(t, m.diffStatuses(), id)
+	b, err := json.Marshal(&ev)
+	if err != nil {
+		t.Fatalf("marshal the status event: %v", err)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(b, &wire); err != nil {
+		t.Fatalf("unmarshal the status event: %v", err)
+	}
+	if wire["removed"] != true {
+		t.Fatalf("event for session %s = %s, want a removal", LogID(id), b)
+	}
+	return wire
+}
+
+// TestCreateREST_aFailedStartsRemovalCarriesTheReason pins the removal as a
+// second source of the end, beside the 4001 close: a client that sees only one
+// of the two learns why the session ended, including when it ended before any
+// sweep had announced it.
+func TestCreateREST_aFailedStartsRemovalCarriesTheReason(t *testing.T) {
+	cases := []struct {
+		name       string
+		sweptFirst bool
+	}{
+		{name: "swept before the end", sweptFirst: true},
+		{name: "ended before any sweep", sweptFirst: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m, srv := commandManager(t, missingCmd, noFallback)
+			m.stopSweep()
+			id := restCreate(t, srv)
+			if tc.sweptFirst {
+				eventFor(t, m.diffStatuses(), id)
+			}
+			ws := dialSession(t, srv, id)
+			t.Cleanup(func() { _ = ws.CloseNow() })
+			sendControl(t, ws, map[string]any{"type": "resize", "cols": 50, "rows": 20})
+			assertEndedWith(t, ws, startFailedReason)
+			awaitUnlisted(t, m, id)
+			if got := removalWire(t, m, id)["endReason"]; got != startFailedReason {
+				t.Errorf("removal endReason = %v, want %q", got, startFailedReason)
+			}
+		})
+	}
+}
+
+func TestCreateREST_anOverflowsRemovalCarriesTheReason(t *testing.T) {
+	m, srv := commandManager(t, markerCmd(filepath.Join(t.TempDir(), "spawned")), noFallback)
+	m.stopSweep()
+	id := restCreate(t, srv)
+	eventFor(t, m.diffStatuses(), id)
+	ws := dialSession(t, srv, id)
+	t.Cleanup(func() { _ = ws.CloseNow() })
+	writeNumberedLines(t, ws, queueCapLines)
+	writeBinary(t, ws, []byte("x"))
+	assertEndedWith(t, ws, inputOverflowReason)
+	awaitUnlisted(t, m, id)
+	if got := removalWire(t, m, id)["endReason"]; got != inputOverflowReason {
+		t.Errorf("removal endReason = %v, want %q", got, inputOverflowReason)
+	}
+}
+
+func TestRemovedEventOfAClosedSessionCarriesNoEndReason(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(func() { shutdownManager(t, m) })
+	m.stopSweep()
+	id, err := m.Create()
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	eventFor(t, m.diffStatuses(), id)
+	if !m.Close(id) {
+		t.Fatalf("Close(%s) = false, want true", LogID(id))
+	}
+	if got, has := removalWire(t, m, id)["endReason"]; has {
+		t.Errorf("removal endReason = %v, want absent", got)
+	}
+}
+
 // TestHandler_aFailedStartEndsTheHandler pins a handler served on its own: the
 // start error reaches the exit callback a host replaces a spent handler on, and
 // input after the end is refused rather than queued.

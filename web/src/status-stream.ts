@@ -109,6 +109,10 @@ export interface SessionInfo {
 export interface SessionStatus extends SessionInfo {
   /** true when the session is gone (closed or reaped); the consumer drops it. */
   readonly removed?: boolean;
+  /** on a `removed` event, the reason a session ended before its process
+   *  started: the same reason its sockets' 4001 close carries, so either one
+   *  alone tells the consumer. Absent for any other removal. */
+  readonly endReason?: string;
   /** the session's percentage: the OSC 7501 report's `progress` when it
    *  carries one, else the OSC 9;4 percentage. -1 when absent or unknown (no
    *  sequence seen, or a state that carries none — clear/indeterminate), else

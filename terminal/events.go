@@ -70,6 +70,10 @@ type statusEvent struct {
 	// Alias is the session's public name (see SessionInfo.Alias). Omitted only
 	// on a Removed event.
 	Alias string `json:"alias,omitempty"`
+	// EndReason is the 4001 close reason of a session that ended before its
+	// process started, carried only on its Removed event, so a client that sees
+	// the removal before the close, or without it, still knows why.
+	EndReason string `json:"endReason,omitempty"`
 	// Activity is the session's SECONDARY activity state (see SessionActivity).
 	// Never omitempty: "" is not a legal state, so the empty string IS the absence
 	// and a sentinel would encode the same fact twice. It is ORTHOGONAL to Status
@@ -115,6 +119,7 @@ type statusTracker struct {
 	lastClientTitle string // last emitted raw client title (to detect a title-only PUT)
 	lastPinnedTitle string // last emitted raw pinned name (to detect a rename / clear)
 	lastAlias       string // last emitted alias (a SetSessionAlias moves nothing else)
+	endReason       string // the removed event's EndReason (closeSession)
 	latched         string // "" or the status the classifier returned
 	// lastActivity is the last emitted secondary activity state. Without it the
 	// field changes silently and only surfaces when something else moves.
@@ -393,7 +398,7 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 			delete(m.trackers, id)
 			events = append(events, statusEvent{
 				ID: id, Status: StatusExited, Title: tr.lastTitle, Removed: true,
-				ReportsActivity: tr.lastReports, ProgressValue: progressAbsent,
+				EndReason: tr.endReason, ReportsActivity: tr.lastReports, ProgressValue: progressAbsent,
 			})
 		}
 	}

@@ -493,10 +493,10 @@ type Handler struct {
 	sizeHoldTimer *time.Timer
 	// startTimer is the deferred start's fallback (deferStart). Guarded by h.mu.
 	startTimer *time.Timer
-	// onEndedBeforeStart runs once endBeforeStart has ended the session; the
-	// manager sets it to drop the session. Written before the handler is
-	// reachable by any client.
-	onEndedBeforeStart func()
+	// onEndedBeforeStart runs with the 4001 reason once endBeforeStart has
+	// ended the session; the manager sets it to drop the session. Written
+	// before the handler is reachable by any client.
+	onEndedBeforeStart func(reason string)
 	// The redraw-settle hold's fields are guarded by h.mu; a zero
 	// redrawSettleUntil means the hold is inactive.
 	redrawSettleUntil time.Time
@@ -736,15 +736,13 @@ func (h *Handler) Exited() bool {
 	}
 }
 
-// ExitError returns what cmd.Wait() reported for the child: nil when the process
-// exited cleanly (status 0), has not started and has not been ended, or has not
-// exited yet, and
-// otherwise the wait error — an *exec.ExitError for a non-zero or signalled
-// exit, the same error WithOnProcessExit's callback receives. A session that
-// ended before its process started returns the start error or the input
-// overflow that ended it. Pair it with
-// Exited to tell "not dead yet" from "died cleanly"; the value is final once
-// Exited reports true. Safe for concurrent use.
+// ExitError returns what cmd.Wait() reported for the child, the error
+// WithOnProcessExit's callback receives: an *exec.ExitError for a non-zero or
+// signalled exit, and nil for a clean exit, a process not yet exited, or one
+// not started and not ended. A session that ended before its process started
+// returns the start error or input overflow that ended it. Pair it with Exited
+// to tell "not dead yet" from "died cleanly"; the value is final once Exited
+// reports true. Safe for concurrent use.
 func (h *Handler) ExitError() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -932,7 +930,7 @@ func (h *Handler) endBeforeStart(cause error, reason string) {
 	ended := h.latchEndBeforeStartLocked(cause, reason)
 	h.mu.Unlock()
 	if ended {
-		h.finishEndBeforeStart(cause)
+		h.finishEndBeforeStart(cause, reason)
 	}
 }
 
@@ -955,11 +953,11 @@ func (h *Handler) latchEndBeforeStartLocked(cause error, reason string) bool {
 
 // finishEndBeforeStart announces an end latchEndBeforeStartLocked recorded,
 // without h.mu.
-func (h *Handler) finishEndBeforeStart(cause error) {
+func (h *Handler) finishEndBeforeStart(cause error, reason string) {
 	close(h.procExitCh)
 	h.markProgramExited()
 	if h.onEndedBeforeStart != nil {
-		h.onEndedBeforeStart()
+		h.onEndedBeforeStart(reason)
 	}
 	if h.cfg.onProcessExit != nil {
 		// Runs on a client's read loop or the fallback timer, which a callback
@@ -1043,7 +1041,7 @@ func (h *Handler) queueInputLocked(state *clientState, msg []byte) (applied bool
 		inputOverflowHook()
 		h.cfg.logger.Warn("terminal: input before the process started passed its cap; session ended",
 			"cap_bytes", maxPendingInput)
-		h.finishEndBeforeStart(errInputOverflow)
+		h.finishEndBeforeStart(errInputOverflow, inputOverflowReason)
 		return false, errHandlerClosed
 	}
 	h.mu.Unlock()

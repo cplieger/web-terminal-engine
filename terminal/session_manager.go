@@ -399,7 +399,7 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 	// manager operations. A duplicate id is astronomically unlikely (128-bit
 	// random) so we do not re-check under the lock after start.
 	if deferred {
-		h.onEndedBeforeStart = func() { m.Close(id) }
+		h.onEndedBeforeStart = func(reason string) { m.closeSession(id, reason) }
 	} else if err := h.StartEager(); err != nil {
 		return SessionInfo{}, err
 	}
@@ -794,12 +794,29 @@ func (m *SessionManager) listSnapshot(layout *PaneLayout, cleanExit *[]bool) []S
 
 // Close terminates a session and removes it. Returns false if the id is unknown.
 func (m *SessionManager) Close(id SessionID) bool {
+	return m.closeSession(id, "")
+}
+
+// closeSession is Close for a session that ended before its process started
+// with endReason, which its removed status event then carries. Such a session
+// may end before any sweep tracked it, so it gets a tracker here: without one
+// the sweep emits no removal, and a client that missed the 4001 close would
+// never learn the session ended.
+func (m *SessionManager) closeSession(id SessionID, endReason string) bool {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	if ok {
 		delete(m.sessions, id)
 		m.dropFromOrderLocked(id)
 		m.dropFromLayoutLocked(id)
+		if endReason != "" {
+			tr := m.trackers[id]
+			if tr == nil {
+				tr = &statusTracker{}
+				m.trackers[id] = tr
+			}
+			tr.endReason = endReason
+		}
 	}
 	m.mu.Unlock()
 	if !ok {

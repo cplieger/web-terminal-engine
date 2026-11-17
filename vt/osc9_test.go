@@ -37,11 +37,11 @@ func wantProgress(t *testing.T, s *Screen, state, value int) {
 	}
 }
 
-// TestOSC9ProgressStateTable walks the OSC 9;4 state table row by row: state 0
+// TestOSC9ProgressStateTable walks the progress states row by row: state 0
 // clears, 1 sets a determinate value, 2 is an error (with or without a
 // percentage), 3 is indeterminate, and 4 is a warning at a percentage. The
 // percentage is RETAINED for the three states that carry one (1, 2, 4) and is
-// absent (-1) for the two the table marks n/a (0, 3).
+// absent (-1) for the two that carry none (0, 3).
 func TestOSC9ProgressStateTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -62,9 +62,8 @@ func TestOSC9ProgressStateTable(t *testing.T) {
 		{name: "3 indeterminate", payload: "4;3", state: 3, value: -1},
 		// row st=4: WARNING state with pr percent (iTerm2); pr REQUIRED.
 		{name: "4 warning with percentage", payload: "4;4;25", state: 4, value: 25},
-		// OUR CONTRACT (the table marks pr n/a for 0 and 3, so a percentage
-		// sent with one of them is not retained; the specs do not say what to
-		// do with it).
+		// OUR CONTRACT (0 and 3 carry no pr, so a percentage sent with one of
+		// them is not retained; the specs do not say what to do with it).
 		{name: "3 does not retain a stray percentage", payload: "4;3;50", state: 3, value: -1},
 		{name: "0 does not retain a stray percentage", payload: "4;0;50", state: 0, value: -1},
 	}

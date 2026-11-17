@@ -1,6 +1,7 @@
 package terminal
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -401,20 +402,21 @@ func awaitUnlisted(t *testing.T, m *SessionManager, id SessionID) {
 	}
 }
 
-func TestCreateREST_aFailedStartEndsTheSession(t *testing.T) {
-	m, srv := commandManager(t, missingCmd, noFallback)
-	id := restCreate(t, srv)
-	ws := dialSession(t, srv, id)
-	t.Cleanup(func() { _ = ws.CloseNow() })
-	sendControl(t, ws, map[string]any{"type": "resize", "cols": 50, "rows": 20})
-	assertEndedWith(t, ws, startFailedReason)
-	awaitUnlisted(t, m, id)
-}
-
-func TestCreateREST_aFailedFallbackStartEndsTheSession(t *testing.T) {
+func TestCreateREST_aFailedFallbackStartIsListedAsEnded(t *testing.T) {
 	m, srv := commandManager(t, missingCmd, testStartBound)
 	id := restCreate(t, srv)
-	awaitUnlisted(t, m, id)
+	deadline := time.Now().Add(waitPatience)
+	for {
+		entry := listedWire(t, m.List(), id)
+		if entry != nil && entry["status"] == "ended" {
+			assertEndedEntry(t, "the List", entry, startFailedReason)
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("session %s not listed as ended after %v: %v", LogID(id), waitPatience, entry)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
 }
 
 func TestCreateREST_inputUpToTheQueueCapWaitsForTheResize(t *testing.T) {
@@ -440,7 +442,7 @@ func TestCreateREST_inputPastTheQueueCapEndsTheSession(t *testing.T) {
 	assertUnspawnedAfter(t, h, ws)
 	writeBinary(t, ws, []byte("x"))
 	assertEndedWith(t, ws, inputOverflowReason)
-	awaitUnlisted(t, m, id)
+	assertEndedEntry(t, "the List", listedWire(t, m.List(), id), inputOverflowReason)
 	assertNeverSpawned(t, marker)
 }
 
@@ -463,52 +465,194 @@ func removalWire(t *testing.T, m *SessionManager, id SessionID) map[string]any {
 	return wire
 }
 
-// TestCreateREST_aFailedStartsRemovalCarriesTheReason pins the removal as a
-// second source of the end, beside the 4001 close: a client that sees only one
-// of the two learns why the session ended, including when it ended before any
-// sweep had announced it.
-func TestCreateREST_aFailedStartsRemovalCarriesTheReason(t *testing.T) {
+// listedWire returns session id's entry in list as the REST API's JSON
+// carries it, or nil when list does not name it.
+func listedWire(t *testing.T, list []SessionInfo, id SessionID) map[string]any {
+	t.Helper()
+	b, err := json.Marshal(list)
+	if err != nil {
+		t.Fatalf("marshal the list: %v", err)
+	}
+	return entryOf(t, b, id)
+}
+
+// entryOf returns session id's object in body, a JSON array of sessions, or
+// nil when it names none.
+func entryOf(t *testing.T, body []byte, id SessionID) map[string]any {
+	t.Helper()
+	var entries []map[string]any
+	if err := json.Unmarshal(body, &entries); err != nil {
+		t.Fatalf("decode the list %s: %v", body, err)
+	}
+	for _, e := range entries {
+		if e["id"] == string(id) {
+			return e
+		}
+	}
+	return nil
+}
+
+// polledWire returns session id's entry in GET /api/sessions, as a client's
+// poll reads it, or nil when the list does not name it.
+func polledWire(t *testing.T, srv *httptest.Server, id SessionID) map[string]any {
+	t.Helper()
+	resp, err := http.Get(srv.URL + SessionsPath)
+	if err != nil {
+		t.Fatalf("GET %s: %v", SessionsPath, err)
+	}
+	defer resp.Body.Close()
+	var body bytes.Buffer
+	if _, err := body.ReadFrom(resp.Body); err != nil {
+		t.Fatalf("read the list: %v", err)
+	}
+	return entryOf(t, body.Bytes(), id)
+}
+
+// syncedWire returns session id's event in a new status-stream subscriber's
+// initial sync, as a reopened stream reads it, or nil when the sync's first
+// events, which name every listed session, do not name it.
+func syncedWire(t *testing.T, srv *httptest.Server, m *SessionManager, id SessionID) map[string]any {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srv.URL+SessionEventsPath, http.NoBody)
+	if err != nil {
+		t.Fatalf("new events request: %v", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET %s: %v", SessionEventsPath, err)
+	}
+	defer resp.Body.Close()
+	sc := bufio.NewScanner(resp.Body)
+	for range len(m.List()) {
+		var ev map[string]any
+		for sc.Scan() {
+			if data, ok := strings.CutPrefix(sc.Text(), "data:"); ok {
+				if err := json.Unmarshal([]byte(strings.TrimSpace(data)), &ev); err != nil {
+					t.Fatalf("decode the event %q: %v", data, err)
+				}
+				break
+			}
+		}
+		if ev == nil {
+			t.Fatalf("the initial sync ended early: %v", sc.Err())
+		}
+		if ev["id"] == string(id) {
+			return ev
+		}
+	}
+	return nil
+}
+
+// assertEndedEntry fails unless entry, a session as source carries it, is
+// listed as ended before its process started with reason.
+func assertEndedEntry(t *testing.T, source string, entry map[string]any, reason string) {
+	t.Helper()
+	if entry == nil {
+		t.Errorf("%s does not name the session", source)
+		return
+	}
+	if entry["status"] != "ended" || entry["endReason"] != reason {
+		t.Errorf("%s: status %v, endReason %v; want ended, %q", source, entry["status"], entry["endReason"], reason)
+	}
+}
+
+// TestCreateREST_aSessionThatEndsBeforeItsStartStaysListedAsEnded pins the
+// server as the one owner of such an end: every enumeration names the session
+// as ended with the reason its sockets close with, from before the first
+// socket closes until a client deletes it, and only the DELETE removes it.
+func TestCreateREST_aSessionThatEndsBeforeItsStartStaysListedAsEnded(t *testing.T) {
 	cases := []struct {
-		name       string
-		sweptFirst bool
+		end    func(t *testing.T, ws *websocket.Conn)
+		name   string
+		reason string
+		cmd    []string
 	}{
-		{name: "swept before the end", sweptFirst: true},
-		{name: "ended before any sweep", sweptFirst: false},
+		{
+			name: "start failure", cmd: missingCmd, reason: startFailedReason,
+			end: func(t *testing.T, ws *websocket.Conn) {
+				sendControl(t, ws, map[string]any{"type": "resize", "cols": 50, "rows": 20})
+			},
+		},
+		{
+			name: "input overflow", cmd: markerCmd(filepath.Join(t.TempDir(), "spawned")), reason: inputOverflowReason,
+			end: func(t *testing.T, ws *websocket.Conn) {
+				writeNumberedLines(t, ws, queueCapLines)
+				writeBinary(t, ws, []byte("x"))
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			m, srv := commandManager(t, missingCmd, noFallback)
+			m, srv := commandManager(t, tc.cmd, noFallback)
 			m.stopSweep()
 			id := restCreate(t, srv)
-			if tc.sweptFirst {
-				eventFor(t, m.diffStatuses(), id)
-			}
+			eventFor(t, m.diffStatuses(), id)
 			ws := dialSession(t, srv, id)
 			t.Cleanup(func() { _ = ws.CloseNow() })
-			sendControl(t, ws, map[string]any{"type": "resize", "cols": 50, "rows": 20})
-			assertEndedWith(t, ws, startFailedReason)
-			awaitUnlisted(t, m, id)
-			if got := removalWire(t, m, id)["endReason"]; got != startFailedReason {
-				t.Errorf("removal endReason = %v, want %q", got, startFailedReason)
+			tc.end(t, ws)
+			assertEndedWith(t, ws, tc.reason)
+
+			assertEndedEntry(t, "the List", listedWire(t, m.List(), id), tc.reason)
+			assertEndedEntry(t, "a poll", polledWire(t, srv, id), tc.reason)
+			assertEndedEntry(t, "a reopened stream's sync", syncedWire(t, srv, m, id), tc.reason)
+			ev := eventFor(t, m.diffStatuses(), id)
+			b, err := json.Marshal(&ev)
+			if err != nil {
+				t.Fatalf("marshal the status event: %v", err)
 			}
+			var swept map[string]any
+			if err := json.Unmarshal(b, &swept); err != nil {
+				t.Fatalf("unmarshal the status event: %v", err)
+			}
+			if swept["removed"] == true {
+				t.Errorf("the sweep after the end removed the session: %s", b)
+			}
+			assertEndedEntry(t, "the sweep's event", swept, tc.reason)
+			again := dialSession(t, srv, id)
+			assertEndedWith(t, again, tc.reason)
+			assertEndedEntry(t, "a poll after a sweep", polledWire(t, srv, id), tc.reason)
+
+			req, err := http.NewRequestWithContext(t.Context(), http.MethodDelete, srv.URL+SessionsSubtreePath+string(id), http.NoBody)
+			if err != nil {
+				t.Fatalf("new DELETE request: %v", err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatalf("DELETE: %v", err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusNoContent {
+				t.Errorf("DELETE status = %d, want 204", resp.StatusCode)
+			}
+			if entry := polledWire(t, srv, id); entry != nil {
+				t.Errorf("a poll after the DELETE names the session: %v", entry)
+			}
+			removalWire(t, m, id)
 		})
 	}
 }
 
-func TestCreateREST_anOverflowsRemovalCarriesTheReason(t *testing.T) {
-	m, srv := commandManager(t, markerCmd(filepath.Join(t.TempDir(), "spawned")), noFallback)
-	m.stopSweep()
+// TestCreateREST_anEndedSessionIsReapedWithTheRest pins the retention bound:
+// the idle reaper, which removes every session once no client has been
+// connected for its window, removes an ended one too.
+func TestCreateREST_anEndedSessionIsReapedWithTheRest(t *testing.T) {
+	m := NewSessionManager(func(SessionID) *Handler {
+		return NewHandler(missingCmd, WithLogger(nil), WithWorkDir("/"), withStartBound(noFallback))
+	}, WithIdleReaper(300*time.Millisecond))
+	t.Cleanup(func() { shutdownManager(t, m) })
+	mux := http.NewServeMux()
+	m.MountAPI(mux)
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
 	id := restCreate(t, srv)
-	eventFor(t, m.diffStatuses(), id)
 	ws := dialSession(t, srv, id)
-	t.Cleanup(func() { _ = ws.CloseNow() })
-	writeNumberedLines(t, ws, queueCapLines)
-	writeBinary(t, ws, []byte("x"))
-	assertEndedWith(t, ws, inputOverflowReason)
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 50, "rows": 20})
+	assertEndedWith(t, ws, startFailedReason)
+	assertEndedEntry(t, "the List", listedWire(t, m.List(), id), startFailedReason)
+	_ = ws.CloseNow()
 	awaitUnlisted(t, m, id)
-	if got := removalWire(t, m, id)["endReason"]; got != inputOverflowReason {
-		t.Errorf("removal endReason = %v, want %q", got, inputOverflowReason)
-	}
 }
 
 func TestRemovedEventOfAClosedSessionCarriesNoEndReason(t *testing.T) {
@@ -600,6 +744,6 @@ func TestCreateREST_aStartDuringTheOverflowIsRefused(t *testing.T) {
 	if err := <-startErr; !errors.Is(err, errHandlerClosed) {
 		t.Errorf("the start during the overflow returned %v, want errHandlerClosed", err)
 	}
-	awaitUnlisted(t, m, id)
+	assertEndedEntry(t, "the List", listedWire(t, m.List(), id), inputOverflowReason)
 	assertNeverSpawned(t, marker)
 }

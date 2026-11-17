@@ -61,6 +61,9 @@ type SessionInfo struct {
 	// exposed raw so a UI can tell that a pin exists.
 	PinnedTitle string `json:"pinnedTitle"`
 	Status      string `json:"status"` // a Status* value, or any status WithStatusClassifier returned
+	// EndReason is the 4001 close reason of a StatusEnded session, empty for
+	// every other status.
+	EndReason string `json:"endReason,omitempty"`
 	// Activity is the session's SECONDARY activity state ("" when none), carried
 	// beside Status and never merged into it. See SessionActivity.
 	Activity string `json:"activity"`
@@ -104,6 +107,11 @@ const (
 	// StatusCrashed is a non-zero exit or an unrequested terminating signal;
 	// an exit the server caused is StatusExited. crashedExit owns the boundary.
 	StatusCrashed = "crashed"
+	// StatusEnded is a session that ended before its process started: the
+	// start failed, or the input queued before it passed its cap. EndReason
+	// says which. It stays listed until a DELETE, the idle reaper or Shutdown
+	// removes it, so every client learns the end from the list alone.
+	StatusEnded = "ended"
 	// StatusFailed is OSC 7501 error, or OSC 9;4 progress state 2: the program
 	// reported an error state (with a percentage, or indeterminate when pr is
 	// omitted). It PERSISTS until the program changes it — it is a state, not
@@ -375,8 +383,7 @@ var createStartedHook = func() {}
 // stream, and a zero Order put the newest tab at the FRONT of a strip until the
 // next status event. A Go create has no client to size it and starts the process
 // at once at 80x24; a REST create (deferred) starts it at its first client's
-// first resize (Handler.deferStart), and a session that ends before that start
-// is dropped (Handler.endBeforeStart).
+// first resize (Handler.deferStart).
 func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo, error) {
 	m.mu.Lock()
 	if m.closed {
@@ -398,10 +405,10 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 	// Start outside the lock: spawning a process should not block other
 	// manager operations. A duplicate id is astronomically unlikely (128-bit
 	// random) so we do not re-check under the lock after start.
-	if deferred {
-		h.onEndedBeforeStart = func(reason string) { m.closeSession(id, reason) }
-	} else if err := h.StartEager(); err != nil {
-		return SessionInfo{}, err
+	if !deferred {
+		if err := h.StartEager(); err != nil {
+			return SessionInfo{}, err
+		}
 	}
 	createStartedHook()
 
@@ -445,8 +452,8 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 	}
 	n := len(m.sessions)
 	m.mu.Unlock()
-	// Armed once the session is listed, so a fallback start that fails finds
-	// the session to drop.
+	// Armed once the session is listed, so a fallback start that fails ends a
+	// session clients can already see as ended.
 	if deferred {
 		h.deferStart()
 	}
@@ -764,6 +771,13 @@ func (m *SessionManager) listSnapshot(layout *PaneLayout, cleanExit *[]bool) []S
 	}
 	m.mu.Unlock()
 
+	// Read after the unlock, as every handler getter is: an end before the start
+	// shows at once, without waiting for a sweep to commit it.
+	for i := range items {
+		if reason := items[i].handler.exitReason(); reason != "" {
+			items[i].info.Status, items[i].info.EndReason = StatusEnded, reason
+		}
+	}
 	if cleanExit != nil {
 		for i := range items {
 			exited, crashed := items[i].handler.exitOutcome()
@@ -794,29 +808,12 @@ func (m *SessionManager) listSnapshot(layout *PaneLayout, cleanExit *[]bool) []S
 
 // Close terminates a session and removes it. Returns false if the id is unknown.
 func (m *SessionManager) Close(id SessionID) bool {
-	return m.closeSession(id, "")
-}
-
-// closeSession is Close for a session that ended before its process started
-// with endReason, which its removed status event then carries. Such a session
-// may end before any sweep tracked it, so it gets a tracker here: without one
-// the sweep emits no removal, and a client that missed the 4001 close would
-// never learn the session ended.
-func (m *SessionManager) closeSession(id SessionID, endReason string) bool {
 	m.mu.Lock()
 	s, ok := m.sessions[id]
 	if ok {
 		delete(m.sessions, id)
 		m.dropFromOrderLocked(id)
 		m.dropFromLayoutLocked(id)
-		if endReason != "" {
-			tr := m.trackers[id]
-			if tr == nil {
-				tr = &statusTracker{}
-				m.trackers[id] = tr
-			}
-			tr.endReason = endReason
-		}
 	}
 	m.mu.Unlock()
 	if !ok {

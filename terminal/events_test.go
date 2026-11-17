@@ -657,7 +657,8 @@ func TestBroadcastDropsSlowSubscriber(t *testing.T) {
 // diffStatuses: a handler stuck under its own h.mu (a wedged PTY callback, a
 // stalled classifier input) stalls only the sweep, which must read THAT
 // handler's state, never the manager lock itself, and never List or a new
-// subscriber's snapshot, which serve the committed record and read no handler.
+// subscriber's snapshot, which serve the committed record and read no handler
+// state under h.mu.
 func TestDiffStatusesWedgedHandlerDoesNotStallManager(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })

@@ -493,10 +493,6 @@ type Handler struct {
 	sizeHoldTimer *time.Timer
 	// startTimer is the deferred start's fallback (deferStart). Guarded by h.mu.
 	startTimer *time.Timer
-	// onEndedBeforeStart runs with the 4001 reason once endBeforeStart has
-	// ended the session; the manager sets it to drop the session. Written
-	// before the handler is reachable by any client.
-	onEndedBeforeStart func(reason string)
 	// The redraw-settle hold's fields are guarded by h.mu; a zero
 	// redrawSettleUntil means the hold is inactive.
 	redrawSettleUntil time.Time
@@ -509,9 +505,10 @@ type Handler struct {
 	// procExitCh closes, so Exited() == true implies this value is final (see
 	// the monitor in ensureStarted). Read through ExitError.
 	exitErr error
-	// endReason is the 4001 close reason endBeforeStart set, empty for a process
-	// that ran. Guarded by h.mu.
-	endReason    string
+	// endReason is the 4001 close reason endBeforeStart set, nil for a process
+	// that ran. Atomic, not under h.mu: List and the status snapshot read it and
+	// must not stall on a handler wedged under its own lock.
+	endReason    atomic.Pointer[string]
 	cfg          handlerConfig
 	bootEpoch    int64
 	lastActivity atomic.Int64
@@ -930,7 +927,7 @@ func (h *Handler) endBeforeStart(cause error, reason string) {
 	ended := h.latchEndBeforeStartLocked(cause, reason)
 	h.mu.Unlock()
 	if ended {
-		h.finishEndBeforeStart(cause, reason)
+		h.finishEndBeforeStart(cause)
 	}
 }
 
@@ -942,7 +939,7 @@ func (h *Handler) latchEndBeforeStartLocked(cause error, reason string) bool {
 		return false
 	}
 	h.endedBeforeStart = true
-	h.endReason = reason
+	h.endReason.Store(&reason)
 	h.exitErr = cause
 	h.pendingInput.Reset()
 	if h.startTimer != nil {
@@ -953,12 +950,9 @@ func (h *Handler) latchEndBeforeStartLocked(cause error, reason string) bool {
 
 // finishEndBeforeStart announces an end latchEndBeforeStartLocked recorded,
 // without h.mu.
-func (h *Handler) finishEndBeforeStart(cause error, reason string) {
+func (h *Handler) finishEndBeforeStart(cause error) {
 	close(h.procExitCh)
 	h.markProgramExited()
-	if h.onEndedBeforeStart != nil {
-		h.onEndedBeforeStart(reason)
-	}
 	if h.cfg.onProcessExit != nil {
 		// Runs on a client's read loop or the fallback timer, which a callback
 		// panic must not take down, as the process monitor does not.
@@ -1041,7 +1035,7 @@ func (h *Handler) queueInputLocked(state *clientState, msg []byte) (applied bool
 		inputOverflowHook()
 		h.cfg.logger.Warn("terminal: input before the process started passed its cap; session ended",
 			"cap_bytes", maxPendingInput)
-		h.finishEndBeforeStart(errInputOverflow, inputOverflowReason)
+		h.finishEndBeforeStart(errInputOverflow)
 		return false, errHandlerClosed
 	}
 	h.mu.Unlock()
@@ -1070,9 +1064,10 @@ func (h *Handler) exitAwareClose() (code websocket.StatusCode, reason string) {
 
 // exitReason is the 4001 close reason: endReason, empty for a process that ran.
 func (h *Handler) exitReason() string {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.endReason
+	if p := h.endReason.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // closeOnProcExit closes the client WS with statusProcessExited when the child

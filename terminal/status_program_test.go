@@ -450,8 +450,13 @@ func runningUnlatched(in *statusRaw, latched string) bool { return !in.exited &&
 
 // statusTable mirrors docs/sessions.md's status table row for row.
 var statusTable = []statusTableRow{
-	{name: "exited", status: fixed(StatusExited), holds: func(in *statusRaw, _ string) bool { return in.exited && !in.crashed }},
-	{name: "crashed", status: fixed(StatusCrashed), holds: func(in *statusRaw, _ string) bool { return in.exited && in.crashed }},
+	{name: "ended", status: fixed(StatusEnded), holds: func(in *statusRaw, _ string) bool { return in.exited && in.endReason != "" }},
+	{name: "exited", status: fixed(StatusExited), holds: func(in *statusRaw, _ string) bool {
+		return in.exited && in.endReason == "" && !in.crashed
+	}},
+	{name: "crashed", status: fixed(StatusCrashed), holds: func(in *statusRaw, _ string) bool {
+		return in.exited && in.endReason == "" && in.crashed
+	}},
 	{name: "latched", status: func(l string) string { return l }, holds: func(in *statusRaw, l string) bool { return !in.exited && l != "" }},
 	{name: "working", status: fixed(StatusWorking), holds: func(in *statusRaw, l string) bool {
 		return runningUnlatched(in, l) && (in.programSeen && in.programState == "working" ||
@@ -490,14 +495,17 @@ func TestStatusTableRowsAreExclusive(t *testing.T) {
 		{"an earlier latch after the report", 6, 6},
 		{"an earlier latch before the report", 3, 3},
 	}
-	type live struct{ exited, crashed bool }
+	type live struct {
+		endReason       string
+		exited, crashed bool
+	}
 	m := &SessionManager{classifier: inputClassifier}
-	for _, lv := range []live{{false, false}, {true, false}, {true, true}} {
+	for _, lv := range []live{{"", false, false}, {"", true, false}, {"", true, true}, {startFailedReason, true, false}} {
 		for _, state := range []string{"", "working", "blocked", "done", "error", "idle"} {
 			for _, progress := range []int{-1, 0, 1, 2, 3, 4} {
 				for _, lc := range latches {
 					in := statusRaw{
-						exited: lv.exited, crashed: lv.crashed, programSeen: state != "", programState: state,
+						exited: lv.exited, crashed: lv.crashed, endReason: lv.endReason, programSeen: state != "", programState: state,
 						programSeq: 5, progress: progress, notifSeq: lc.notifSq, notifMsg: "Approval needed",
 					}
 					if in.programSeen {
@@ -508,7 +516,7 @@ func TestStatusTableRowsAreExclusive(t *testing.T) {
 						tr.latched = StatusInput
 					}
 					status, _ := m.computeStatus(&in, tr)
-					name := fmt.Sprintf("exited %v crashed %v, 7501 %q, 9;4 %d, %s", lv.exited, lv.crashed, state, progress, lc.name)
+					name := fmt.Sprintf("ended %q exited %v crashed %v, 7501 %q, 9;4 %d, %s", lv.endReason, lv.exited, lv.crashed, state, progress, lc.name)
 					var held []string
 					for _, row := range statusTable {
 						if row.holds(&in, tr.latched) {

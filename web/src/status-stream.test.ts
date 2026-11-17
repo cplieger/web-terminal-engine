@@ -1,6 +1,12 @@
 import { describe, it, expect, vi } from "vitest";
 
-import { connectStatusStream, type EventSourceLike, type SessionStatus } from "./status-stream.js";
+import {
+  connectStatusStream,
+  type EventSourceLike,
+  type KnownStatus,
+  type SessionInfo,
+  type SessionStatus,
+} from "./status-stream.js";
 
 // FakeEventSource records registered listeners and lets a test dispatch events
 // synchronously. It mirrors only the surface connectStatusStream uses.
@@ -351,20 +357,24 @@ describe("connectStatusStream", () => {
       expect(got.removed).toBe(true);
     });
 
-    it("carries the end reason of a session removed before its process started", () => {
+    it("carries a session that ended before its process started as listed and ended, with the reason", () => {
       const onStatus = vi.fn();
       const { fake } = mountFake({ onStatus });
-      const ev: SessionStatus = {
+      // Typed as KnownStatus and SessionInfo: tsc fails the build if the union
+      // or the listed shape lacks them.
+      const ended: KnownStatus = "ended";
+      const info: SessionInfo = {
         ...sample,
-        status: "exited",
-        removed: true,
+        status: ended,
         endReason: "the process failed to start",
       };
 
-      fake.emit("message", JSON.stringify(ev));
+      fake.emit("message", JSON.stringify(info));
 
       const got = onStatus.mock.calls[0]![0] as SessionStatus;
+      expect(got.status).toBe("ended");
       expect(got.endReason).toBe("the process failed to start");
+      expect(got.removed).not.toBe(true);
     });
   });
 });

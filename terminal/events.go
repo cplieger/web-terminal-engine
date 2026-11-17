@@ -70,9 +70,8 @@ type statusEvent struct {
 	// Alias is the session's public name (see SessionInfo.Alias). Omitted only
 	// on a Removed event.
 	Alias string `json:"alias,omitempty"`
-	// EndReason is the 4001 close reason of a session that ended before its
-	// process started, carried only on its Removed event, so a client that sees
-	// the removal before the close, or without it, still knows why.
+	// EndReason is the 4001 close reason of a StatusEnded session (see
+	// SessionInfo.EndReason).
 	EndReason string `json:"endReason,omitempty"`
 	// Activity is the session's SECONDARY activity state (see SessionActivity).
 	// Never omitempty: "" is not a legal state, so the empty string IS the absence
@@ -119,7 +118,6 @@ type statusTracker struct {
 	lastClientTitle string // last emitted raw client title (to detect a title-only PUT)
 	lastPinnedTitle string // last emitted raw pinned name (to detect a rename / clear)
 	lastAlias       string // last emitted alias (a SetSessionAlias moves nothing else)
-	endReason       string // the removed event's EndReason (closeSession)
 	latched         string // "" or the status the classifier returned
 	// lastActivity is the last emitted secondary activity state. Without it the
 	// field changes silently and only surfaces when something else moves.
@@ -263,6 +261,9 @@ type statusRaw struct {
 	id        SessionID
 	notifMsg  string
 	oscTitle  string
+	// endReason is the handler's 4001 close reason, set only for an end before
+	// the start (StatusEnded).
+	endReason string
 	// programState is the folded OSC 7501 state; meaningful only when programSeen.
 	programState string
 	// activity is the consumer's secondary activity for this session, read in
@@ -311,6 +312,7 @@ func (it *statusRaw) read() {
 		(*hold)()
 	}
 	it.exited, it.crashed = it.handler.exitOutcome()
+	it.endReason = it.handler.exitReason()
 	it.progress = sc.progress
 	it.progressValue = sc.progressValue
 	// A program status carrying its own percentage draws it; otherwise the
@@ -398,7 +400,7 @@ func (m *SessionManager) diffStatuses() []statusEvent {
 			delete(m.trackers, id)
 			events = append(events, statusEvent{
 				ID: id, Status: StatusExited, Title: tr.lastTitle, Removed: true,
-				EndReason: tr.endReason, ReportsActivity: tr.lastReports, ProgressValue: progressAbsent,
+				ReportsActivity: tr.lastReports, ProgressValue: progressAbsent,
 			})
 		}
 	}
@@ -472,7 +474,7 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 	// event that outlives the sweep must not alias the sweep's own scratch state.
 	pos := it.order
 	ev := statusEvent{
-		ID: it.id, Status: status, Title: title, ClientTitle: clientTitle,
+		ID: it.id, Status: status, EndReason: it.endReason, Title: title, ClientTitle: clientTitle,
 		PinnedTitle: pinnedTitle, Alias: alias, CreatedAt: it.createdAt, ReportsActivity: reports,
 		ProgressValue: it.progressValue, Order: &pos,
 		Activity: it.activity.State, ActivityCount: it.activity.Count,
@@ -490,12 +492,12 @@ func (m *SessionManager) sweepSession(s *session, it *statusRaw) (statusEvent, b
 }
 
 // computeStatus derives a session's status from one sweep's inputs; callers
-// hold m.mu. Precedence: exited or crashed (crashedExit); then, once the
-// program has sent an OSC 7501 report since the last RIS, programStatusOf;
-// otherwise a notification classified in this sweep, then the OSC 9;4 state
-// (which clears an older latch per progressSupersedesLatch), then an older
-// latch, then idle. Raw output activity is never an input, so typing at a
-// prompt cannot flap a session to working.
+// hold m.mu. Precedence: ended before the start; exited or crashed
+// (crashedExit); then, once the program has sent an OSC 7501 report since the
+// last RIS, programStatusOf; otherwise a notification classified in this sweep,
+// then the OSC 9;4 state (which clears an older latch per
+// progressSupersedesLatch), then an older latch, then idle. Raw output activity
+// is never an input, so typing at a prompt cannot flap a session to working.
 func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) (status string, fresh bool) {
 	// Consumed ahead of every return: an occurrence the chosen path does not
 	// show (a newer notification wins, the process exited) is superseded, and
@@ -505,6 +507,9 @@ func (m *SessionManager) computeStatus(in *statusRaw, tr *statusTracker) (status
 	if in.exited {
 		// Top precedence: a dead session's LAST progress state or latch says
 		// nothing useful about how it died.
+		if in.endReason != "" {
+			return StatusEnded, false
+		}
 		if in.crashed {
 			return StatusCrashed, false
 		}
@@ -657,8 +662,9 @@ func (m *SessionManager) unsubscribe(ch chan statusEvent) {
 // and a subscriber joining later did not miss a state.
 func (m *SessionManager) snapshot() []statusEvent {
 	type snapItem struct {
-		ev   statusEvent
-		rank int
+		handler *Handler
+		ev      statusEvent
+		rank    int
 	}
 	m.mu.Lock()
 	rank := m.rankLocked()
@@ -667,7 +673,8 @@ func (m *SessionManager) snapshot() []statusEvent {
 	for id, s := range m.sessions {
 		rec := committedOf(m.trackers[id])
 		out = append(out, snapItem{
-			rank: rankOf(rank, id, ordered),
+			handler: s.handler,
+			rank:    rankOf(rank, id, ordered),
 			ev: statusEvent{
 				ID: id, Alias: s.alias, ClientTitle: s.clientTitle, PinnedTitle: s.pinnedTitle,
 				CreatedAt: s.createdAt, Status: rec.status,
@@ -682,6 +689,11 @@ func (m *SessionManager) snapshot() []statusEvent {
 		})
 	}
 	m.mu.Unlock()
+	for i := range out {
+		if reason := out[i].handler.exitReason(); reason != "" {
+			out[i].ev.Status, out[i].ev.EndReason = StatusEnded, reason
+		}
+	}
 	// Sorted like List, since a client reads this enumeration as its tab order;
 	// a diffStatuses change set has no such order.
 	slices.SortFunc(out, func(a, b snapItem) int {

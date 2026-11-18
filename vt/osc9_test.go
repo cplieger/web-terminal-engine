@@ -37,11 +37,11 @@ func wantProgress(t *testing.T, s *Screen, state, value int) {
 	}
 }
 
-// TestOSC9ProgressStateTable walks the brief's state table row by row: state 0
+// TestOSC9ProgressStateTable walks the progress states row by row: state 0
 // clears, 1 sets a determinate value, 2 is an error (with or without a
 // percentage), 3 is indeterminate, and 4 is a warning at a percentage. The
 // percentage is RETAINED for the three states that carry one (1, 2, 4) and is
-// absent (-1) for the two the table marks n/a (0, 3).
+// absent (-1) for the two that carry none (0, 3).
 func TestOSC9ProgressStateTable(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -49,7 +49,7 @@ func TestOSC9ProgressStateTable(t *testing.T) {
 		state   int
 		value   int
 	}{
-		// Brief, state table row st=0: stop / clear the progress bar; pr n/a.
+		// row st=0: stop / clear the progress bar; pr n/a.
 		{name: "0 clears", payload: "4;0", state: 0, value: -1},
 		// row st=1: set progress to pr percent, a SUCCESS state; pr REQUIRED.
 		{name: "1 sets value", payload: "4;1;50", state: 1, value: 50},
@@ -62,9 +62,8 @@ func TestOSC9ProgressStateTable(t *testing.T) {
 		{name: "3 indeterminate", payload: "4;3", state: 3, value: -1},
 		// row st=4: WARNING state with pr percent (iTerm2); pr REQUIRED.
 		{name: "4 warning with percentage", payload: "4;4;25", state: 4, value: 25},
-		// OUR CONTRACT (the brief's table marks pr n/a for 0 and 3, so a
-		// percentage sent with one of them is not retained; the specs do not
-		// say what to do with it).
+		// OUR CONTRACT (0 and 3 carry no pr, so a percentage sent with one of
+		// them is not retained; the specs do not say what to do with it).
 		{name: "3 does not retain a stray percentage", payload: "4;3;50", state: 3, value: -1},
 		{name: "0 does not retain a stray percentage", payload: "4;0;50", state: 0, value: -1},
 	}
@@ -85,10 +84,9 @@ func TestOSC9ProgressStateTable(t *testing.T) {
 	}
 }
 
-// TestOSC9ProgressAbbreviatedFormClears covers the brief's abbreviated form:
-// "OSC 9 ; 4 ST" with no state field at all stops the progress bar. The brief
-// records that the engine mis-parses this as the notification text "4"; this
-// test is the specification of the correct behaviour.
+// TestOSC9ProgressAbbreviatedFormClears covers the abbreviated form: "OSC 9 ; 4
+// ST" with no state field at all stops the progress bar and is never read as
+// the notification text "4".
 func TestOSC9ProgressAbbreviatedFormClears(t *testing.T) {
 	for _, term := range oscTerminators {
 		t.Run(term.name, func(t *testing.T) {
@@ -108,9 +106,9 @@ func TestOSC9ProgressAbbreviatedFormClears(t *testing.T) {
 	}
 }
 
-// TestOSC9ProgressITerm2WorkedExamples runs iTerm2's six documented examples as
-// listed in the brief, verbatim with BEL as the source writes them, and again
-// with ST since both terminators are defined.
+// TestOSC9ProgressITerm2WorkedExamples runs iTerm2's six documented examples,
+// verbatim with BEL as the source writes them, and again with ST since both
+// terminators are defined.
 func TestOSC9ProgressITerm2WorkedExamples(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -239,9 +237,9 @@ func TestOSC9ProgressExtraFieldsIgnored(t *testing.T) {
 	}
 }
 
-// TestOSC9ProgressStatePersists covers the brief's structural claim about Form
-// A: these are STATES, not events. A state persists across unrelated output and
-// unrelated sequences until a later OSC 9;4 changes it, and only state 0 (or the
+// TestOSC9ProgressStatePersists covers Form A's structural rule: these are
+// STATES, not events. A state persists across unrelated output and unrelated
+// sequences until a later OSC 9;4 changes it, and only state 0 (or the
 // abbreviated form) clears it. This is the property that makes an error state
 // usable — a consumer must not have to re-derive it from a transient signal.
 func TestOSC9ProgressStatePersists(t *testing.T) {
@@ -278,8 +276,8 @@ func TestOSC9ProgressStatePersists(t *testing.T) {
 	}
 }
 
-// TestOSC9FormDiscrimination covers the brief's Form A / Form B rule: the two
-// forms are told apart by the FIRST ';'-delimited field, and only a PURELY
+// TestOSC9FormDiscrimination covers the Form A / Form B rule: the two forms are
+// told apart by the FIRST ';'-delimited field, and only a PURELY
 // numeric first field is a subcommand. A message that merely starts with digits
 // ("4 files changed") is free text and must arrive as a notification — a
 // prefix-only test would silently swallow it.
@@ -325,10 +323,10 @@ func TestOSC9FormDiscrimination(t *testing.T) {
 // SECURITY REGRESSION GUARD. ConEmu defines further OSC 9 subcommands; several
 // are remote-execution or UI-hijack primitives when driven by terminal output,
 // and 9;7 is "run a process" — an OSC 9;7 in a cat'd file or an SSH banner must
-// never start anything. The brief lists every subcommand as explicitly OUT of
-// scope: each one is consumed and IGNORED, changing no progress state and
-// capturing no notification. If someone later "completes" ConEmu support, this
-// test must be the thing that stops them.
+// never start anything. Every one of them is OUT of scope for the engine: each
+// one is consumed and IGNORED, changing no progress state and capturing no
+// notification. If someone later "completes" ConEmu support, this test must be
+// the thing that stops them.
 func TestOSC9ConEmuSubcommands_9x7RunProcess_AndAllOthersIgnored(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -373,12 +371,11 @@ func TestOSC9ConEmuSubcommands_9x7RunProcess_AndAllOthersIgnored(t *testing.T) {
 	}
 }
 
-// TestOSC9NotificationSanitizedThroughParser keeps the existing Form B
-// guarantees the brief requires us to preserve: the message is untrusted program
-// output, so it stays stripped of control bytes and clamped in length by the
-// time it reaches Notification. Driven through the public parser (not
-// sanitizeNotification directly) so the guarantee is asserted where a consumer
-// actually reads it.
+// TestOSC9NotificationSanitizedThroughParser keeps the Form B guarantees: the
+// message is untrusted program output, so it stays stripped of control bytes
+// and clamped in length by the time it reaches Notification. Driven through the
+// public parser (not sanitizeNotification directly) so the guarantee is
+// asserted where a consumer actually reads it.
 func TestOSC9NotificationSanitizedThroughParser(t *testing.T) {
 	for _, term := range oscTerminators {
 		t.Run(term.name, func(t *testing.T) {

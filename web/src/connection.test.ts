@@ -610,7 +610,7 @@ describe("connection: per-session resume state (tab switch)", () => {
   // The reconnect-on-switch model runs N server sessions but one live socket,
   // swapped on switch. Each session owns its resume state (outbox, byte
   // counters, boot-epoch), so a switch must not replay one tab's unacked bytes
-  // onto another or fire a false server-restart reset (design sections 5, 8, 18).
+  // onto another or fire a false server-restart reset.
   let onMessage: ReturnType<typeof vi.fn<(msg: ServerMessage) => void>>;
   let onServerRestart: ReturnType<typeof vi.fn<() => void>>;
 

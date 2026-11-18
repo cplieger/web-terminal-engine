@@ -410,8 +410,8 @@ func TestPagingDeclaredWhereverReplayTruncates(t *testing.T) {
 	}
 	// At or below the bound the replay carries the whole ring, so there is nothing
 	// withheld and nothing to page for. Not declaring is then a free choice, and
-	// the one the design makes (a shallow-ring server must not invite the client's
-	// tail flip).
+	// the handler makes it: a shallow-ring server must not invite the client's
+	// tail flip.
 	for _, capacity := range []int{0, 1, 500, maxReplayLines} {
 		h := NewHandler([]string{"/bin/cat"}, WithScrollbackCapacity(capacity), WithLogger(nil))
 		if h.historyPagingDeclared() {

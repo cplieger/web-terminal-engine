@@ -326,9 +326,9 @@ func startWithArgv0(t *testing.T, argv0 string) int {
 	}
 }
 
-// TestAutoTitleLadderThroughManager is the end-to-end ladder the design promised:
-// a real session on a real pty, driven by the real status sweep, observed through
-// the public SessionInfo.Title. It covers what the probe-level tests cannot — that
+// TestAutoTitleLadderThroughManager is the end-to-end ladder: a real session
+// on a real pty, driven by the real status sweep, observed through the public
+// SessionInfo.Title. It covers what the probe-level tests cannot — that
 // confirmAutoTitle, the sweep's sole-writer rule, and List all agree — plus the
 // two transitions that matter: resting at the cwd, adopting a confirmed
 // foreground command, and returning to rest when it exits.

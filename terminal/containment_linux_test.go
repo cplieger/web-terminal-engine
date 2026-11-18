@@ -406,10 +406,10 @@ func TestContainmentReclaimsSubCgroup(t *testing.T) {
 	}
 }
 
-// TestProbeCloneIntoCgroupRejectsBadFD pins the probe's reject path. Only the pass
-// condition was covered, and a probe gutted to `return nil` is the design's named
-// worst case: a host where clone3 is blocked boots reporting containment enabled
-// and then fails every session spawn, leaving the user with no terminal at all.
+// TestProbeCloneIntoCgroupRejectsBadFD pins the probe's reject path. A probe
+// gutted to `return nil` is the worst case: a host where clone3 is blocked boots
+// reporting containment enabled and then fails every session spawn, leaving the
+// user with no terminal at all.
 func TestProbeCloneIntoCgroupRejectsBadFD(t *testing.T) {
 	t.Parallel()
 	if err := probeCloneIntoCgroup(-1); err == nil {

@@ -1,36 +1,3 @@
-// Tests for the session status-stream client (connectStatusStream).
-//
-// The client is a thin EventSource wrapper, so the tests inject a fake
-// EventSourceLike via the `make` parameter and drive events by hand. Behaviors
-// tested:
-// 1. A well-formed "message" event is parsed and fanned out to onStatus with
-//    every field (id/status/title/createdAt/removed) preserved.
-// 2. A malformed "message" frame (invalid JSON) is skipped without throwing and
-//    without calling onStatus; a later valid frame still fans out.
-// 3. onOpen fires on every "open" event (initial connect and each reconnect),
-//    so the consumer can resync after a gap.
-// 4. onError fires on an "error" event.
-// 5. close() closes the underlying EventSource exactly once.
-// 6. Optional callbacks absent: the module ALWAYS registers both the OPEN
-//    listener (to reset reconnect backoff on every successful reopen) and the
-//    ERROR listener (to drive its own reconnect); only the onOpen callback
-//    inside the open listener is gated. A stray event does not throw.
-// 7. On a permanent close (readyState CLOSED) the module re-establishes the
-//    stream after a capped backoff, fires onOpen on the reopen, and close()
-//    cancels a pending reconnect.
-// 8. OSC 9 wire floor: the "failed" (progress state 2) and "warning" (state
-//    4) statuses parse, the progress percentage is carried with -1 meaning
-//    absent, a notification is delivered as event data rather than as a
-//    status, and an UNKNOWN status string from a newer server is forwarded
-//    rather than dropped or thrown on.
-// 9. The session-end split: "exited" (an ordinary end) and "crashed" (a non-zero
-//    or signalled exit) are both admitted by the status union and both parse.
-// 10. The secondary activity pair (`activity` + `activityCount`): a host-reported
-//    background state carried beside the turn status. It survives the parse, an
-//    absent pair reads as undefined rather than as a state, and an unknown value
-//    from a newer server is forwarded rather than dropped.
-// 11. The session alias (the URL name) survives the parse.
-
 import { describe, it, expect, vi } from "vitest";
 
 import { connectStatusStream, type EventSourceLike, type SessionStatus } from "./status-stream.js";
@@ -210,11 +177,11 @@ describe("connectStatusStream", () => {
   });
 
   // OSC 9 wire-floor cases. Two things are the client's problem. (1) Progress
-  // state 2 is an error and state 4 is a warning (iTerm2 semantics), so
-  // "failed" and "warning" are statuses the server can send and the union has to
-  // admit; the percentage rides along, with -1 meaning absent (which is NOT 0%).
-  // (2) A notification is an EVENT, so it arrives as event data rather than as
-  // a status, and a consumer with no server-side classifier still sees it.
+  // state 2 is an error and state 4 is a warning, so "failed" and "warning" are
+  // statuses the server can send and the union has to admit; the percentage
+  // rides along, with -1 meaning absent (which is NOT 0%). (2) A notification is
+  // an EVENT, so it arrives as event data rather than as a status, and a consumer
+  // with no server-side classifier still sees it.
   describe("OSC 9 progress and notification fields", () => {
     const cases: { name: string; status: SessionStatus["status"]; progressValue: number }[] = [
       { name: "failed with a percentage", status: "failed", progressValue: 75 },

@@ -78,8 +78,7 @@ describe("resume-ack budget pass: containment for a following reader", () => {
     // `2 * prefetchThreshold + 1` (the invariant store.ts asserts statically).
     expect(s.browseCacheSize()).toBeLessThanOrEqual(2 * PREFETCH_THRESHOLD + 1);
     // The regression, as the number it actually produced: 2500 retained, the
-    // whole cache cap, is ~1500 lines past that ceiling that nothing accounts
-    // for.
+    // whole cache cap, is ~1500 unaccounted lines past that ceiling.
     expect(s.browseCacheSize()).toBeLessThan(BROWSE_CACHE_CAP);
   });
 

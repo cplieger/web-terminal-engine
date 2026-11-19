@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -10,7 +12,7 @@ import (
 // process behind it. None of the sequences these tests feed produce a PTY reply,
 // so the nil ptmx is never written.
 func newTextHandler(rows, cols int) *Handler {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	h.started.Store(true)
 	h.sizeEstablished = true
 	h.screen.Resize(rows, cols)
@@ -36,7 +38,7 @@ func readText(t *testing.T, h *Handler, maxLines int) TextSnapshot {
 }
 
 func TestText_notStartedReportsNothingToRead(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	snap, ok := h.Text(10)
 	if ok || snap != (TextSnapshot{}) {
 		t.Errorf("Text(10) before start = %+v, %v; want zero, false", snap, ok)

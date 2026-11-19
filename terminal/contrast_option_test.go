@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import "testing"
@@ -25,7 +27,7 @@ func TestWithMinimumContrastReachesTheScreen(t *testing.T) {
 
 	t.Run("off by default, so the raw palette entry reaches the client", func(t *testing.T) {
 		t.Parallel()
-		got := firstFG(t, NewHandler([]string{"/bin/true"}))
+		got := firstFG(t, NewHandler([]string{"true"}))
 		if got != slot4 {
 			t.Errorf("F = %#06x, want the untouched palette entry %#06x", got, slot4)
 		}
@@ -33,7 +35,7 @@ func TestWithMinimumContrastReachesTheScreen(t *testing.T) {
 
 	t.Run("the option reaches the screen and lifts the foreground", func(t *testing.T) {
 		t.Parallel()
-		got := firstFG(t, NewHandler([]string{"/bin/true"}, WithMinimumContrast(4.5)))
+		got := firstFG(t, NewHandler([]string{"true"}, WithMinimumContrast(4.5)))
 		if got == slot4 {
 			t.Errorf("F = %#06x is the unlifted palette entry; the option never reached the screen", got)
 		}
@@ -41,7 +43,7 @@ func TestWithMinimumContrastReachesTheScreen(t *testing.T) {
 
 	t.Run("a ratio at or below the off value changes nothing", func(t *testing.T) {
 		t.Parallel()
-		got := firstFG(t, NewHandler([]string{"/bin/true"}, WithMinimumContrast(1)))
+		got := firstFG(t, NewHandler([]string{"true"}, WithMinimumContrast(1)))
 		if got != slot4 {
 			t.Errorf("F = %#06x, want the untouched palette entry %#06x", got, slot4)
 		}

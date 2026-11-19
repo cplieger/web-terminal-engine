@@ -401,8 +401,8 @@ func encodedRowSize(runs []vt.WireRun) int {
 	size := encodedRowCountSize
 	for _, run := range runs {
 		size += encodedRunFixedSize
-		size += len(truncateUTF8(run.T, 0xFFFF))
-		size += len(truncateUTF8(run.U, 0xFFFF))
+		size += len(truncateUTF8(run.T))
+		size += len(truncateUTF8(run.U))
 	}
 	return size
 }
@@ -441,14 +441,14 @@ func appendRowRuns(buf []byte, runs []vt.WireRun) []byte {
 	runs = capRowRuns(runs)
 	buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(runs)))
 	for _, run := range runs {
-		text := truncateUTF8(run.T, 0xFFFF)
+		text := truncateUTF8(run.T)
 		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(text)))
 		buf = append(buf, text...)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.F)) // #nosec G115 -- bit-cast
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.B)) // #nosec G115 -- bit-cast
 		buf = binary.LittleEndian.AppendUint16(buf, run.A)
 		buf = binary.LittleEndian.AppendUint32(buf, uint32(run.Uc)) // #nosec G115 -- bit-cast
-		url := truncateUTF8(run.U, 0xFFFF)
+		url := truncateUTF8(run.U)
 		buf = binary.LittleEndian.AppendUint16(buf, clampU16(len(url)))
 		buf = append(buf, url...)
 	}
@@ -465,11 +465,12 @@ func clampU16(n int) uint16 {
 	return uint16(n)
 }
 
-// truncateUTF8 returns s limited to at most maxBytes bytes without splitting a
-// multi-byte rune, so the wire length field (clampU16(len)) always matches the
-// appended payload. Only a pathological oversize run is clamped; every run
-// <= maxBytes bytes (the normal case) is returned unchanged.
-func truncateUTF8(s string, maxBytes int) string {
+// truncateUTF8 returns s limited to the wire's 0xFFFF-byte string cap without
+// splitting a multi-byte rune, so the wire length field (clampU16(len)) always
+// matches the appended payload. Only a pathological oversize run is clamped;
+// every run within the cap (the normal case) is returned unchanged.
+func truncateUTF8(s string) string {
+	const maxBytes = 0xFFFF
 	if len(s) <= maxBytes {
 		return s
 	}
@@ -487,7 +488,7 @@ func truncateUTF8(s string, maxBytes int) string {
 //	[2B] title_byte_len (uint16)
 //	[NB] title (UTF-8 bytes)
 func encodeTitleMsg(title string) []byte {
-	title = truncateUTF8(title, 0xFFFF)
+	title = truncateUTF8(title)
 	buf := make([]byte, 0, 11+len(title))
 	buf = append(buf, wireMsgTitle)
 	// inputAck placeholder (0); withClientAck patches the real per-client value at wireAckOffset.

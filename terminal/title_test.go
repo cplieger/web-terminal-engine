@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import "testing"
@@ -6,7 +8,7 @@ import "testing"
 // OSC 2 generates no PTY reply, so handlePTYData never touches the (unstarted)
 // PTY (same seam the clipboard test relies on).
 func TestHandlerTitle(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"})
+	h := NewHandler([]string{"true"})
 
 	if got := h.Title(); got != "" {
 		t.Fatalf("initial Title() = %q, want empty", got)

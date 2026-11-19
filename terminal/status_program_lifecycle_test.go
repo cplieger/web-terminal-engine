@@ -1,7 +1,10 @@
+//go:build unix
+
 package terminal
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -425,12 +428,24 @@ func awaitMonitorDone(t *testing.T, h *Handler) {
 	}
 }
 
+// skipUnlessPTYOutlivesLeader skips where a session leader's exit closes its
+// PTY for every process: XNU's proc_exit revokes the controlling terminal
+// (bsd/kern/kern_exit.c), while Linux's disassociate_ctty only signals the
+// foreground group of a PTY (drivers/tty/tty_jobctrl.c).
+func skipUnlessPTYOutlivesLeader(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS != "linux" && runtime.GOOS != "android" {
+		t.Skip("the kernel revokes the PTY when the session leader exits, so no background child can hold it")
+	}
+}
+
 // TestStatusProgramStatusExitOutlivesALateReport runs the real process
 // monitor: a background child keeps the PTY after the session's process
 // exits and, while the exit callback is still running, writes a blocked
 // report. Until the callback returns the session is live and its blocked
 // records stand; then it is exited and both blocked records are gone.
 func TestStatusProgramStatusExitOutlivesALateReport(t *testing.T) {
+	skipUnlessPTYOutlivesLeader(t)
 	const script = `printf '\033]7501;state=done\007\033]7501;state=blocked:kind=question:id=w\007'; ` +
 		`trap '' HUP; exec 3<&0; (read -r _ <&3; printf '\033]7501;state=blocked:kind=permission:id=late\007') & exit 0`
 	m, h, id, release := heldExitSession(t, script)

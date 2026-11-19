@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -171,7 +173,7 @@ func testAnnouncement() announcement {
 }
 
 func TestDispatchFrame_DefersSocketWritesBehindResumeBatch(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	sws, cws, cleanup := wsPair(t)
 	defer cleanup()
 	frames := framePump(t, cws)
@@ -264,7 +266,7 @@ type dispatchProbe struct {
 
 func newDispatchProbe(t *testing.T) *dispatchProbe {
 	t.Helper()
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	sws, cws, cleanup := wsPair(t)
 	t.Cleanup(cleanup)
 	frames := framePump(t, cws)
@@ -994,7 +996,7 @@ func TestResume_SpamThrottleDropsExcessResumes(t *testing.T) {
 // mid-resume. Delay, not drop: nothing is written while the batch holds the
 // lock, and the reply lands after.
 func TestHistoryControl_NotInterleavedIntoResumeBatch(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(paginationMinRing), WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithScrollbackCapacity(paginationMinRing), WithLogger(nil))
 	h.screen = vt.New(3, 20)
 	fillRing(h, 100)
 

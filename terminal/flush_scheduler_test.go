@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -210,7 +212,7 @@ func TestFlushScheduler_sustainedOutputRetainsBatching(t *testing.T) {
 // render/diff work but STILL drain scrolled-off lines into the retained ring,
 // and a later attach replays that history.
 func TestFlushScheduler_zeroClientSuspensionRetainsHistory(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	// Process-free: drive the screen directly (same pattern as the ED3 test).
 	h.screen = vt.New(3, 20)
 	h.sizeEstablished = true

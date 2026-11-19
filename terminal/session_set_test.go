@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -76,7 +78,7 @@ func TestCaptureSessionSet(t *testing.T) {
 		return info.ID
 	}
 	a := create(CreateSpec{Alias: "alias-a", PinnedTitle: "fix build"})
-	exited := create(CreateSpec{Alias: "alias-exited", Build: handlerRunning(t, "/bin/true")})
+	exited := create(CreateSpec{Alias: "alias-exited", Build: handlerRunning(t, "true")})
 	crashed := create(CreateSpec{Alias: "alias-crashed", Build: handlerRunning(t, "/bin/sh", "-c", "exit 3")})
 	b := create(CreateSpec{Alias: "alias-b"})
 	c := create(CreateSpec{Alias: "alias-c"})
@@ -135,7 +137,7 @@ func TestCaptureSessionSet_readsExitLive(t *testing.T) {
 	m := NewSessionManager(catFactory)
 	t.Cleanup(func() { shutdownManager(t, m) })
 	m.stopSweep()
-	ended, err := m.CreateWith(CreateSpec{Alias: "alias-ended", Build: handlerRunning(t, "/bin/true")})
+	ended, err := m.CreateWith(CreateSpec{Alias: "alias-ended", Build: handlerRunning(t, "true")})
 	if err != nil {
 		t.Fatalf("CreateWith: %v", err)
 	}

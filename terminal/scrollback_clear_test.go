@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -14,7 +16,7 @@ import (
 // the old frames pile up in the ring and are replayed to clients, producing the
 // resize-duplication bug.
 func TestED3ClearsScrollbackRing(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"})
+	h := NewHandler([]string{"true"})
 
 	// Populate the ring as if lines had scrolled into history.
 	h.scrollback.Append([][]vt.WireRun{{{T: "old1"}}, {{T: "old2"}}}, nil)
@@ -48,7 +50,7 @@ func TestED3ClearsScrollbackRing(t *testing.T) {
 // then consumed. A mutant that clears the ring but never propagates the signal
 // to a frame (leaving stale client history on screen) is caught here.
 func TestED3_nextFrameSignalsClientToDropHistory(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	// Latch flushing on without spawning a PTY (buildFrame returns nil until a
 	// resize sets resized; we set it directly to keep the test process-free).
 	h.sizeEstablished = true

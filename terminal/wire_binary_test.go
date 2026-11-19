@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -252,34 +254,33 @@ func TestAppendRowRuns_encodesHyperlinkAndStyle(t *testing.T) {
 }
 
 // TestTruncateUTF8_clampsAtRuneBoundary pins truncateUTF8's contract: a run
-// longer than the wire cap is truncated WITHOUT splitting a multi-byte rune, so
-// the encoded length field always matches valid UTF-8 payload bytes. Only the
-// under-cap early return was exercised (33.3% coverage), leaving the
-// rune-boundary backoff loop -- the cross-language wire-safety invariant --
-// untested; a mutant dropping the loop emits a half rune, caught by ValidString.
+// longer than the 0xFFFF-byte wire cap is truncated WITHOUT splitting a
+// multi-byte rune, so the encoded length field always matches valid UTF-8
+// payload bytes.
 func TestTruncateUTF8_clampsAtRuneBoundary(t *testing.T) {
+	const wireCap = 0xFFFF
+	pad := func(n int) string { return strings.Repeat("a", n) }
 	cases := []struct {
-		name     string
-		s        string
-		want     string
-		maxBytes int
+		name string
+		s    string
+		want string
 	}{
-		{name: "under cap unchanged", s: "hello", maxBytes: 10, want: "hello"},
-		{name: "exact length unchanged", s: "hello", maxBytes: 5, want: "hello"},
-		{name: "ascii truncated", s: "hello", maxBytes: 3, want: "hel"},
-		{name: "zero cap empties", s: "hello", maxBytes: 0, want: ""},
-		// "é" is 2 bytes (0xC3 0xA9); a cap landing mid-rune backs off to "h".
-		{name: "multibyte split backs off", s: "héllo", maxBytes: 2, want: "h"},
-		{name: "multibyte kept when it fits", s: "héllo", maxBytes: 3, want: "hé"},
+		{name: "under cap unchanged", s: "hello", want: "hello"},
+		{name: "exact length unchanged", s: pad(wireCap), want: pad(wireCap)},
+		{name: "ascii truncated", s: pad(wireCap) + "bc", want: pad(wireCap)},
+		// "é" is 2 bytes (0xC3 0xA9); a cap landing mid-rune backs off before it.
+		{name: "multibyte split backs off", s: pad(wireCap-1) + "éllo", want: pad(wireCap - 1)},
+		{name: "multibyte kept when it fits", s: pad(wireCap-2) + "éllo", want: pad(wireCap-2) + "é"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := truncateUTF8(c.s, c.maxBytes)
+			got := truncateUTF8(c.s)
 			if got != c.want {
-				t.Errorf("truncateUTF8(%q, %d) = %q, want %q", c.s, c.maxBytes, got, c.want)
+				t.Errorf("truncateUTF8(%d bytes) = %d bytes ending %q, want %d bytes ending %q",
+					len(c.s), len(got), got[max(0, len(got)-4):], len(c.want), c.want[max(0, len(c.want)-4):])
 			}
 			if !utf8.ValidString(got) {
-				t.Errorf("truncateUTF8(%q, %d) = %q: not valid UTF-8 (wire length would mismatch payload)", c.s, c.maxBytes, got)
+				t.Errorf("truncateUTF8(%d bytes) ends %q: not valid UTF-8 (wire length would mismatch payload)", len(c.s), got[max(0, len(got)-4):])
 			}
 		})
 	}
@@ -359,12 +360,11 @@ func TestEncodeClipboardRefusedMsg(t *testing.T) {
 // payload and the frame carry another, and the sanitizing rungs (the OSC caps,
 // the process-name cleaner) sit upstream where they can fall back to a rung.
 func TestTruncateUTF8_atTheCapReturnsTheInputUnchanged(t *testing.T) {
-	const s = "ab\xc3" // a truncated 2-byte sequence: 3 bytes, not valid UTF-8
-	if got := truncateUTF8(s, 3); got != s {
-		t.Errorf("truncateUTF8(%q, 3) = %q, want the input unchanged", s, got)
-	}
-	if got := truncateUTF8(s, 4); got != s {
-		t.Errorf("truncateUTF8(%q, 4) = %q, want the input unchanged", s, got)
+	// A truncated 2-byte sequence ends each input, so neither is valid UTF-8.
+	for _, s := range []string{strings.Repeat("a", 0xFFFF-3) + "ab\xc3", strings.Repeat("a", 0xFFFF-4) + "ab\xc3"} {
+		if got := truncateUTF8(s); got != s {
+			t.Errorf("truncateUTF8(%d bytes ending %q) = %d bytes, want the input unchanged", len(s), s[len(s)-3:], len(got))
+		}
 	}
 }
 

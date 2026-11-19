@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 // Status-layer tests for how a session's END is reported (crashedExit owns the

@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 // The ephemeral-input control: an UNCOUNTED best-effort write path.

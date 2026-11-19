@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -46,7 +48,7 @@ func decodeScroll(t *testing.T, frame []byte) (firstIndex uint64, numLines int) 
 // the caller can still detect an eviction gap), it never returns more than the
 // requested count, and it returns nothing outside the retained range.
 func TestLinesRange_clampBoundEmpty(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(10), WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithScrollbackCapacity(10), WithLogger(nil))
 	fillRing(h, 25) // committed 25, retains [15, 25)
 
 	tests := []struct {
@@ -82,7 +84,7 @@ func TestLinesRange_clampBoundEmpty(t *testing.T) {
 // with a bound at or above what LinesFrom would return, the two agree exactly.
 // A divergence here means the bounded path drifted from the shipped one.
 func TestLinesRange_matchesLinesFromWhenUnbounded(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(50), WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithScrollbackCapacity(50), WithLogger(nil))
 	fillRing(h, 40)
 
 	for _, abs := range []uint64{0, 1, 17, 39, 40} {
@@ -341,7 +343,7 @@ func TestHistoryPagingDeclared_ringDepthGate(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(fmt.Sprintf("capacity=%d", tc.capacity), func(t *testing.T) {
-			h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(tc.capacity), WithLogger(nil))
+			h := NewHandler([]string{"true"}, WithScrollbackCapacity(tc.capacity), WithLogger(nil))
 			if got := h.historyPagingDeclared(); got != tc.want {
 				t.Errorf("historyPagingDeclared() = %v, want %v at capacity %d", got, tc.want, tc.capacity)
 			}

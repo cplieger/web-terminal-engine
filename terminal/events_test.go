@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -371,7 +373,7 @@ func TestPointInTimeReadsAgreeAcrossACrash(t *testing.T) {
 // of activity or latch.
 func TestComputeStatusExited(t *testing.T) {
 	m := NewSessionManager(func(SessionID) *Handler {
-		return NewHandler([]string{"/bin/true"}, WithLogger(nil))
+		return NewHandler([]string{"true"}, WithLogger(nil))
 	})
 	t.Cleanup(func() { shutdownManager(t, m) })
 	id, err := m.Create()

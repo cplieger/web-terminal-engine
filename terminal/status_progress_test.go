@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 // Status-layer tests for OSC 9. Two structural claims drive them:

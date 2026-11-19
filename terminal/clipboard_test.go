@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -16,7 +18,7 @@ import (
 // frame). OSC 52 SET generates no PTY reply, so handlePTYData never touches the
 // (unstarted) PTY.
 func TestOSC52ClipboardFrame(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"})
+	h := NewHandler([]string{"true"})
 
 	h.registry.Add(&websocket.Conn{})                 // attached client: the render path, not zero-client suspension
 	h.handlePTYData([]byte("\x1b]52;c;aGVsbG8=\x07")) // base64("hello")
@@ -45,7 +47,7 @@ func TestOSC52ClipboardFrame(t *testing.T) {
 // was already taken. Letting that empty read overwrite the staged copy would drop
 // the user's clipboard whenever the program printed anything after the OSC 52.
 func TestOSC52ClipboardSurvivesLaterOutput(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"})
+	h := NewHandler([]string{"true"})
 
 	h.registry.Add(&websocket.Conn{})
 	h.handlePTYData([]byte("\x1b]52;c;aGVsbG8=\x07")) // base64("hello")
@@ -97,7 +99,7 @@ func clipboardFrameText(t *testing.T, p []byte) string {
 func TestOSC52LongCopyFrame(t *testing.T) {
 	for _, n := range []int{10_240, 100_000} {
 		t.Run(strconv.Itoa(n), func(t *testing.T) {
-			h := NewHandler([]string{"/bin/true"})
+			h := NewHandler([]string{"true"})
 			h.registry.Add(&websocket.Conn{})
 			text := strings.Repeat("0123456789abcdef\u2713\n", n/20)
 			h.handlePTYData([]byte("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\x07"))
@@ -119,7 +121,7 @@ func TestOSC52OversizeCopyIsRefusedVisibly(t *testing.T) {
 	over := "\x1b]52;c;" + strings.Repeat("QUJD", (1<<20)/4) + "\x07"
 
 	t.Run("refusal_frame", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"})
+		h := NewHandler([]string{"true"})
 		h.registry.Add(&websocket.Conn{})
 		h.handlePTYData([]byte(over))
 		frame, _ := h.buildFrame()
@@ -133,7 +135,7 @@ func TestOSC52OversizeCopyIsRefusedVisibly(t *testing.T) {
 	})
 
 	t.Run("a_later_copy_replaces_the_refusal", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"})
+		h := NewHandler([]string{"true"})
 		h.registry.Add(&websocket.Conn{})
 		h.handlePTYData([]byte(over))
 		h.handlePTYData([]byte("\x1b]52;c;aGVsbG8=\x07")) // base64("hello")
@@ -147,7 +149,7 @@ func TestOSC52OversizeCopyIsRefusedVisibly(t *testing.T) {
 	})
 
 	t.Run("a_later_refusal_replaces_the_copy", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"})
+		h := NewHandler([]string{"true"})
 		h.registry.Add(&websocket.Conn{})
 		h.handlePTYData([]byte("\x1b]52;c;aGVsbG8=\x07"))
 		h.handlePTYData([]byte(over))
@@ -161,7 +163,7 @@ func TestOSC52OversizeCopyIsRefusedVisibly(t *testing.T) {
 	})
 
 	t.Run("later_output_keeps_the_refusal", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"})
+		h := NewHandler([]string{"true"})
 		h.registry.Add(&websocket.Conn{})
 		h.handlePTYData([]byte(over))
 		h.handlePTYData([]byte("more output\r\n"))
@@ -182,7 +184,7 @@ func TestOSC52OversizeCopyIsRefusedVisibly(t *testing.T) {
 // handler's repaint-pending flag, which buildFrame consumes (calling
 // builder.RepaintWindow so already-drawn cells re-resolve to the new palette).
 func TestOSC4ForcesRepaintPending(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"})
+	h := NewHandler([]string{"true"})
 
 	h.handlePTYData([]byte("\x1b]4;1;rgb:00/ff/00\x07"))
 	if !h.paletteChangedPending {

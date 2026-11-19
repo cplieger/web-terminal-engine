@@ -84,9 +84,9 @@ func TestProcessNameLive(t *testing.T) {
 	// in principle be recycled between the wait and the read, which would make
 	// this read a live process instead — so assert only that it does not panic and
 	// returns empty or a basename, not that it is empty.
-	cmd := exec.Command("/bin/true")
+	cmd := exec.Command("true")
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("/bin/true: %v", err)
+		t.Fatalf("true: %v", err)
 	}
 	dead := cmd.Process.Pid
 	if got := processName(dead); got != "" && got != filepath.Base(got) {

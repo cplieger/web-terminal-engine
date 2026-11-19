@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -174,6 +176,7 @@ func TestProcessExit_finalOutputReachesTheScreenBeforeTheCallback(t *testing.T) 
 // backgrounded process that ignores SIGHUP keeps the PTY slave open after the
 // head exits, so the reader never sees EOF. The exit must still be reported.
 func TestProcessExit_drainIsBoundedWhenABackgroundChildHoldsTheTerminal(t *testing.T) {
+	skipUnlessPTYOutlivesLeader(t)
 	const marker = "ready"
 	fired := make(chan struct{})
 	h := NewHandler([]string{"/bin/sh", "-c", `trap "" HUP; sleep 30 & printf ` + marker},

@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -23,7 +25,7 @@ func TestWithThemeReachesTheScreen(t *testing.T) {
 	t.Run("default reports the built-in dark background", func(t *testing.T) {
 		t.Parallel()
 		const want = "\x1b]11;rgb:0000/0000/0000\x1b\\"
-		got := queryBG(t, NewHandler([]string{"/bin/true"}))
+		got := queryBG(t, NewHandler([]string{"true"}))
 		if got != want {
 			t.Errorf("OSC 11 query reply = %q, want vt.DefaultTheme's background %q", got, want)
 		}
@@ -32,7 +34,7 @@ func TestWithThemeReachesTheScreen(t *testing.T) {
 	t.Run("the option reaches the screen", func(t *testing.T) {
 		t.Parallel()
 		const want = "\x1b]11;rgb:4444/5555/6666\x1b\\"
-		h := NewHandler([]string{"/bin/true"}, WithTheme(vt.Theme{
+		h := NewHandler([]string{"true"}, WithTheme(vt.Theme{
 			Foreground: vt.RGB(0x11, 0x22, 0x33),
 			Background: vt.RGB(0x44, 0x55, 0x66),
 			Cursor:     vt.RGB(0x77, 0x88, 0x99),
@@ -60,8 +62,8 @@ func TestWithThemeReachesTheScreen(t *testing.T) {
 			}
 			return runs[0].F
 		}
-		onBlack := firstFG(t, NewHandler([]string{"/bin/true"}, WithMinimumContrast(4.5)))
-		onWhite := firstFG(t, NewHandler([]string{"/bin/true"},
+		onBlack := firstFG(t, NewHandler([]string{"true"}, WithMinimumContrast(4.5)))
+		onWhite := firstFG(t, NewHandler([]string{"true"},
 			WithMinimumContrast(4.5),
 			WithTheme(vt.Theme{
 				Foreground: vt.RGB(0x00, 0x00, 0x00),

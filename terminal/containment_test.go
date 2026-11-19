@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -91,7 +93,7 @@ func TestNewContainmentRejectsEmptyArgs(t *testing.T) {
 // consumer.
 func TestContainmentOptionsDefaultOff(t *testing.T) {
 	t.Parallel()
-	h := NewHandler([]string{"/bin/true"})
+	h := NewHandler([]string{"true"})
 	if h.cfg.containment != nil || h.cfg.containmentID != "" || h.cfg.containSample != 0 {
 		t.Fatalf("containment defaults are not off: %+v", h.cfg)
 	}
@@ -105,7 +107,7 @@ func TestContainmentOptionsDefaultOff(t *testing.T) {
 // host supported it.
 func TestWithContainmentNilIsNoop(t *testing.T) {
 	t.Parallel()
-	h := NewHandler([]string{"/bin/true"}, WithContainment(nil, "sess-1"))
+	h := NewHandler([]string{"true"}, WithContainment(nil, "sess-1"))
 	if h.cfg.containment != nil {
 		t.Fatal("nil Containment should stay nil")
 	}

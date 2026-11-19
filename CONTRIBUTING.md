@@ -11,6 +11,7 @@ The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md
 - `wire-golden/v3-published.json` holds the fixtures released at tag `v2.8.0`, and the `@cplieger/web-terminal-engine-v3` devDependency is that release's decoder. The Go and TypeScript tests hold its revision equal to both floors.
 - Raise both floors in one change with their tests, the frozen fixtures, the pinned decoder and the floor stated in `README.md` and `docs/wire-protocol.md`. The review then shows which peers stop working.
 - An importable file outside `src/`, such as `wire-compatibility.json`, goes in `files` and `exports` in `web/package.json` and in `publish.include` in `web/jsr.json`. JSR `exports` lists modules only.
+- Start every test file in `terminal/` with `//go:build unix`, or a narrower constraint such as `linux`. Windows CI compiles every test file that has no constraint, one Unix-only file fails the whole package there, and a PTY cannot be started on Windows.
 
 ## Checks
 

@@ -32,8 +32,8 @@ func (c *Containment) create(SessionID) (*sessionCgroup, error) {
 // unchanged across platforms.
 type sessionCgroup struct{}
 
-func (s *sessionCgroup) applyTo(*exec.Cmd)           {}
-func (s *sessionCgroup) releaseFD()                  {}
-func (s *sessionCgroup) teardown()                   {}
-func (s *sessionCgroup) peaks() (uint64, int)        { return 0, 0 }
-func (s *sessionCgroup) current() (uint64, int, int) { return 0, 0, 0 }
+func (s *sessionCgroup) applyTo(*exec.Cmd)                            {}
+func (s *sessionCgroup) releaseFD()                                   {}
+func (s *sessionCgroup) teardown()                                    {}
+func (s *sessionCgroup) peaks() (memBytes uint64, tasks int)          { return 0, 0 }
+func (s *sessionCgroup) current() (memBytes uint64, tasks, procs int) { return 0, 0, 0 }

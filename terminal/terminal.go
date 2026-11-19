@@ -1079,9 +1079,9 @@ func (h *Handler) markProgramExited() {
 }
 
 // exitDrainBound caps how long the process monitor waits, after the child is
-// reaped, for readLoop to drain the PTY to EOF/EIO. It must be finite: a
-// backgrounded process still holding the slave keeps the master open, so the
-// read may never end on its own.
+// reaped, for readLoop to drain the PTY to EOF/EIO. It must be finite: on
+// Linux a backgrounded process still holding the slave keeps the master open,
+// so the read may never end on its own.
 const exitDrainBound = time.Second
 
 // awaitReadDrain blocks until readDone closes or exitDrainBound elapses, so the

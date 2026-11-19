@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 // Order tests: List and snapshot report one order from manager state, never

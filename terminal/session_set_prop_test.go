@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -80,7 +82,7 @@ func TestCaptureSessionSet_roundTripsThroughParse(t *testing.T) {
 			spec := CreateSpec{PinnedTitle: propTitles[r.IntN(len(propTitles))]}
 			ends := r.IntN(3) == 0
 			if ends {
-				spec.Build = handlerRunning(t, "/bin/true")
+				spec.Build = handlerRunning(t, "true")
 			}
 			info, err := m.CreateWith(spec)
 			if err != nil {

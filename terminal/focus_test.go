@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 // Spec-first focus tests: DEC 1004 sends CSI I on focus-in and CSI O on

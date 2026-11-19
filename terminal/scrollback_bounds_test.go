@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -30,7 +32,7 @@ func appendLines(t *testing.T, h *Handler, n int) {
 // silently misaligned replay rather than a visible error.
 func TestScrollbackBounds(t *testing.T) {
 	t.Run("a fresh session reports empty bounds", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"})
+		h := NewHandler([]string{"true"})
 		committed, oldest := h.ScrollbackBounds()
 		if committed != 0 || oldest != 0 {
 			t.Errorf("ScrollbackBounds() = (%d, %d), want (0, 0) before anything is committed", committed, oldest)
@@ -38,7 +40,7 @@ func TestScrollbackBounds(t *testing.T) {
 	})
 
 	t.Run("history within the cap is retained from index 0", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(10))
+		h := NewHandler([]string{"true"}, WithScrollbackCapacity(10))
 		appendLines(t, h, 4)
 		committed, oldest := h.ScrollbackBounds()
 		if committed != 4 {
@@ -51,7 +53,7 @@ func TestScrollbackBounds(t *testing.T) {
 
 	t.Run("past the retention cap oldest tracks the eviction point", func(t *testing.T) {
 		const capacity = 4
-		h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(capacity))
+		h := NewHandler([]string{"true"}, WithScrollbackCapacity(capacity))
 		appendLines(t, h, 10)
 		committed, oldest := h.ScrollbackBounds()
 		if committed != 10 {
@@ -66,7 +68,7 @@ func TestScrollbackBounds(t *testing.T) {
 	})
 
 	t.Run("with scrollback disabled the range is empty but committed advances", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(0))
+		h := NewHandler([]string{"true"}, WithScrollbackCapacity(0))
 		appendLines(t, h, 5)
 		committed, oldest := h.ScrollbackBounds()
 		if committed != 5 {
@@ -78,7 +80,7 @@ func TestScrollbackBounds(t *testing.T) {
 	})
 
 	t.Run("ED3 empties the range without rewinding committed", func(t *testing.T) {
-		h := NewHandler([]string{"/bin/true"})
+		h := NewHandler([]string{"true"})
 		appendLines(t, h, 3)
 		h.handlePTYData([]byte("\x1b[3J")) // erase scrollback; generates no PTY reply
 		committed, oldest := h.ScrollbackBounds()
@@ -103,7 +105,7 @@ func TestScrollbackBounds_concurrent(t *testing.T) {
 		rounds   = 200
 		readers  = 4
 	)
-	h := NewHandler([]string{"/bin/true"}, WithScrollbackCapacity(capacity))
+	h := NewHandler([]string{"true"}, WithScrollbackCapacity(capacity))
 
 	var wg sync.WaitGroup
 	done := make(chan struct{})

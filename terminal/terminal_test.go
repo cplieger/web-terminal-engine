@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 import (
@@ -751,7 +753,7 @@ func TestRedrawSettle_capBoundsContinuousOutput(t *testing.T) {
 // the scrollbackCleared signal — the client swaps old content for new in one
 // atomic repaint instead of watching the reprint stream through.
 func TestRedrawSettle_buildFrameHeldThenSettles(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	h.sizeEstablished = true
 	h.registry.Add(&websocket.Conn{}) // attached client: the render path, not zero-client suspension
 
@@ -788,7 +790,7 @@ func TestRedrawSettle_buildFrameHeldThenSettles(t *testing.T) {
 // full repaint through and re-arms, a bounded number of times, then disarms. It
 // drives redrawHoldUntil's explicit now instead of sleeping a second per lapse.
 func TestRedrawSettle_capLapseCoalescesThenDisarms(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	defer h.Close()
 
 	t0 := time.Now()
@@ -839,7 +841,7 @@ func TestRedrawSettle_capLapseCoalescesThenDisarms(t *testing.T) {
 // redraw that ended (the child went quiet) needs no forced full repaint, and
 // requesting one would cost every settled resize an extra whole-screen frame.
 func TestRedrawSettle_quietReleaseDoesNotCoalesce(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	defer h.Close()
 
 	t0 := time.Now()
@@ -862,7 +864,7 @@ func TestRedrawSettle_quietReleaseDoesNotCoalesce(t *testing.T) {
 // per-session: a later geometry change gets the full coalescing allowance even
 // if an earlier one spent it.
 func TestRedrawSettle_freshArmRestoresBudget(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	defer h.Close()
 
 	h.mu.Lock()
@@ -884,7 +886,7 @@ func TestRedrawSettle_freshArmRestoresBudget(t *testing.T) {
 // describes a screen caught mid-redraw, which is exactly the partial state the
 // hold exists to hide.
 func TestBuildFrame_coalescedLapseEmitsFullRepaint(t *testing.T) {
-	h := NewHandler([]string{"/bin/true"}, WithLogger(nil))
+	h := NewHandler([]string{"true"}, WithLogger(nil))
 	h.sizeEstablished = true
 	h.registry.Add(&websocket.Conn{})
 
@@ -2078,7 +2080,7 @@ func TestWireCompatibility_declaredClientVersionPolicy(t *testing.T) {
 // the one real occurrence unfindable.
 func TestProcessExit_logsNoPanicOnACleanExit(t *testing.T) {
 	var buf bytes.Buffer
-	h := NewHandler([]string{"/bin/true"},
+	h := NewHandler([]string{"true"},
 		WithLogger(slog.New(slog.NewTextHandler(&buf, nil))), WithWorkDir("/"))
 	if err := h.StartEager(); err != nil {
 		t.Fatalf("StartEager: %v", err)

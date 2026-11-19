@@ -1,3 +1,5 @@
+//go:build unix
+
 package terminal
 
 // Tests for the session title model: effectiveTitle's precedence, the user-pinned

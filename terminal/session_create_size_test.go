@@ -335,25 +335,30 @@ func TestHandler_closedBeforeTheSpawnSpawnsNothing(t *testing.T) {
 var missingCmd = []string{"/nonexistent/cmd"}
 
 // numberedLinesCmd prints its start size, then got=<n> for each input line
-// <n>:<padding>. The leading newline ends the echo of the input the tty
-// received before stty -echo ran, so the size line starts a row of its own.
+// <n>:<padding> and nothing for a line without a colon. The leading newline
+// ends the echo of the input the tty received before stty -echo ran, so the
+// size line starts a row of its own.
 var numberedLinesCmd = []string{
 	"/bin/sh", "-c",
-	`stty -echo; printf '\nsize=%s\n' "$(stty size)"; while read -r l; do printf 'got=%s\n' "${l%%:*}"; done`,
+	`stty -echo; printf '\nsize=%s\n' "$(stty size)"; while read -r l; do case $l in *:*) printf 'got=%s\n' "${l%%:*}";; esac; done`,
 }
 
-// queueCapLines is the number of numbered 2 KiB lines that fill the 64 KiB
-// queue exactly.
+// queueCapLines is the number of 2 KiB frames that fill the 64 KiB queue
+// exactly.
 const queueCapLines = 32
 
-// writeNumberedLines sends n frames of 2 KiB, each one numbered line, and
-// returns the got= lines numberedLinesCmd prints for them.
+// writeNumberedLines sends n frames of 2 KiB, each one numbered line and three
+// padding lines, and returns the got= lines numberedLinesCmd prints for them.
+// Each line is 512 bytes because macOS's canonical tty drops a line's bytes
+// past MAX_CANON, 1024.
 func writeNumberedLines(t *testing.T, ws *websocket.Conn, n int) []string {
 	t.Helper()
+	const line = 512
+	padding := strings.Repeat(strings.Repeat("b", line-1)+"\n", 3)
 	var got []string
 	for i := 1; i <= n; i++ {
 		head := strconv.Itoa(i) + ":"
-		writeBinary(t, ws, []byte(head+strings.Repeat("a", 2048-len(head)-1)+"\n"))
+		writeBinary(t, ws, []byte(head+strings.Repeat("a", line-len(head)-1)+"\n"+padding))
 		got = append(got, "got="+strconv.Itoa(i))
 	}
 	return got

@@ -114,3 +114,27 @@ func TestWithErrorsWritesEveryRoute(t *testing.T) {
 }
 
 func hideFlush(http.ResponseWriter) http.ResponseWriter { return noFlushWriter{} }
+
+// A standalone Handler, built with no manager, refuses a foreign Origin with
+// the default envelope: httpserver's cross_origin_refused, its remediation
+// and a request id.
+func TestStandaloneHandlerOriginRefusal(t *testing.T) {
+	h := catFactory("")
+	t.Cleanup(h.Close)
+	req := httptest.NewRequest(http.MethodGet, WSPath, nil)
+	req.Header.Set("Origin", "https://elsewhere.example")
+	rec := httptest.NewRecorder()
+
+	h.ServeHTTP(rec, req)
+
+	var body httpserver.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("refusal body %q is not the envelope: %v", rec.Body.String(), err)
+	}
+	if rec.Code != http.StatusForbidden || body.Code != codeCrossOriginRefused {
+		t.Errorf("foreign Origin = %d %s, want 403 %s", rec.Code, body.Code, codeCrossOriginRefused)
+	}
+	if want := httpserver.CodeSpecs()[codeCrossOriginRefused].Remediation; body.Remediation != want || body.RequestID == "" {
+		t.Errorf("refusal = %+v, want httpserver's remediation %q and a request id", body, want)
+	}
+}

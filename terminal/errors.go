@@ -66,8 +66,9 @@ func WithErrors(r httpserver.ErrorResponder) ManagerOption {
 	return func(c *managerConfig) { c.errs = r }
 }
 
-// writeError is the default ErrorResponder: httpserver's envelope, carrying
-// this package's remediation for a code it owns.
+// writeError is the default ErrorResponder: httpserver's envelope, which
+// carries httpserver's remediation for its own codes, with this package's
+// remediation for a code it owns.
 func writeError(w http.ResponseWriter, r *http.Request, status int, code httpserver.ErrorCode, msg string) {
 	body := httpserver.NewErrorResponse(r, code, msg)
 	if spec, ok := codeSpecs[code]; ok {

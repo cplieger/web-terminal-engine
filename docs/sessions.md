@@ -33,7 +33,7 @@ Each `POST /api/sessions` starts a process, at its first client's size (below). 
 
 `(*SessionManager).Create()` starts a session from the factory. `(*SessionManager).CreateWith(spec)` does the same with a `CreateSpec`: `Build` replaces the factory for that one session, `Alias` names it when the alias is valid and free, and `PinnedTitle` pins its title. The alias and the title are in place before any client can list the session. After `Shutdown`, both `Create` and `CreateWith` return `ErrManagerClosed` and start nothing, and `POST /api/sessions` answers 503.
 
-The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdleReaper`, `WithStatusClassifier` and `WithSessionActivity`.
+The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdleReaper`, `WithStatusClassifier`, `WithSessionActivity` and `WithErrors`.
 
 `(*SessionManager).Shutdown(ctx)` signals every session before it waits on any of them, so their teardown windows overlap. When the budget runs out, it reports how many sessions were still unfinished. A manager is single-use. `Shutdown` stops the status sweep and the idle reaper and starts neither again.
 
@@ -49,6 +49,26 @@ The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdl
 | `PUT /api/sessions/{id}/title` | Stores a title the client derived, such as the first line the user submitted. |
 | `PUT` and `DELETE /api/sessions/{id}/pinned-title` | Sets and clears a name the user chose. |
 | `PUT /api/sessions/{id}/seen` | Marks the session's status as read for every reader, with the body `{"seq": N}`. |
+
+### Refusals
+
+Every refusal on the session routes is the JSON error envelope, `{"code":…,"message":…,"remediation":…,"request_id":…}`. That covers the REST routes, the status stream, and the WebSocket route's refusal of an `Origin` the policy does not allow, which answers httpserver's `cross_origin_refused`. The engine's own codes are:
+
+| Status | `code` | When |
+| --- | --- | --- |
+| `404` | `session_unknown` | The session id names no live session. |
+| `400` | `session_body_invalid` | The body is not one JSON object with the route's fields, or data follows it. |
+| `400` | `session_title_empty` | A pinned title has no visible text; `DELETE` clears it. |
+| `409` | `session_order_stale` | The order does not name every live session exactly once. |
+| `409` | `session_layout_stale` | A side of the layout names a session that is not live. |
+| `400` | `session_layout_invalid` | The layout breaks a consistency rule; the message names it. |
+| `503` | `session_restoring` | `RestoreSessionSet` is running. It comes with `Retry-After: 1`. |
+| `503` | `session_shutting_down` | The manager has shut down. |
+| `500` | `session_create_failed` | The process could not be created; the log line `session: create failed` says why. |
+| `503` | `session_events_full` | The status stream is at its subscriber cap. |
+| `500` | `session_events_unsupported` | A middleware in front of the status stream cannot flush. |
+
+`terminal.CodeSpecs()` returns these codes with their status and remediation, for an application's error catalog. `WithErrors(responder)` makes the manager write every refusal through your `httpserver.ErrorResponder`, such as a catalog's, for the session handlers it builds too. Without it, the manager writes the envelope itself with the remediations above. `terminal.ErrorCodeRestoring` is the restore refusal's code, for a host that holds its routes before the restore starts.
 
 ### Display order
 
@@ -71,7 +91,7 @@ The server keeps the record valid on its own. The first session of an empty layo
 
 A client reads the layout once at load, and the status stream does not carry layout changes. When one viewer writes a new layout, another open viewer keeps its old layout until it reloads. A reload restores whatever the last writer stored, as it does for the order.
 
-While `RestoreSessionSet` runs, `POST /api/sessions` and `GET /api/sessions/layout` answer 503 with `Retry-After: 1` and the body `{"error":"restoring tabs"}`. The list, the status stream and every `PUT` route keep working. A client that waits for the layout read to succeed and lists afterwards sees the whole restored set.
+While `RestoreSessionSet` runs, `POST /api/sessions` and `GET /api/sessions/layout` answer 503 with `Retry-After: 1` and the code `session_restoring`, whose message is `RestoringMessage`. The list, the status stream and every `PUT` route keep working. A client that waits for the layout read to succeed and lists afterwards sees the whole restored set.
 
 ## Saving and restoring the session set
 

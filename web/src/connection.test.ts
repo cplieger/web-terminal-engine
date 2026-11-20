@@ -41,7 +41,7 @@ interface MockWS {
   // Test helpers:
   fireOpen: () => void;
   fireMessage: (data: ArrayBuffer | Blob | string) => void;
-  fireClose: (code?: number) => void;
+  fireClose: (code?: number, reason?: string) => void;
 }
 
 const allMockWebSockets: MockWS[] = [];
@@ -94,10 +94,10 @@ function makeMockWebSocket(): typeof WebSocket {
           fn({ data });
         }
       },
-      fireClose(this: MockWS, code = 1000) {
+      fireClose(this: MockWS, code = 1000, reason = "") {
         this.readyState = 3;
         for (const fn of this.listeners.get("close") ?? []) {
-          fn({ code });
+          fn({ code, reason });
         }
       },
     } as unknown as MockWS;
@@ -1154,14 +1154,16 @@ describe("connection: a process-exited close (4001) is definitive, not transient
   // no onClose, no backoff reconnect. Without the callback, the legacy
   // transient treatment must be preserved bit-for-bit (existing consumers).
   let onClose: ReturnType<typeof vi.fn<() => void>>;
-  let onProcessExit: ReturnType<typeof vi.fn<() => void>>;
+  let onProcessExit: ReturnType<
+    typeof vi.fn<(close: { readonly code: number; readonly reason: string }) => void>
+  >;
 
   beforeEach(() => {
     allMockWebSockets.length = 0;
     vi.useFakeTimers();
     vi.stubGlobal("WebSocket", makeMockWebSocket());
     onClose = vi.fn<() => void>();
-    onProcessExit = vi.fn<() => void>();
+    onProcessExit = vi.fn<(close: { readonly code: number; readonly reason: string }) => void>();
   });
 
   afterEach(() => {
@@ -1199,6 +1201,25 @@ describe("connection: a process-exited close (4001) is definitive, not transient
     // backoff (8s + jitter), no replacement socket is created.
     vi.advanceTimersByTime(60_000);
     expect(allMockWebSockets.length).toBe(1);
+  });
+
+  it("passes the close code and the server's reason to onProcessExit, empty when it sent none", () => {
+    initWith({ withProcessExit: true });
+    conn.setSession("procexit-R");
+    allMockWebSockets[0]!.fireOpen();
+    allMockWebSockets[0]!.fireClose(4001, "the process failed to start");
+    conn.connect();
+    allMockWebSockets[1]!.fireOpen();
+    allMockWebSockets[1]!.fireClose(4004, "unknown session");
+    conn.connect();
+    allMockWebSockets[2]!.fireOpen();
+    allMockWebSockets[2]!.fireClose(4001);
+
+    expect(onProcessExit.mock.calls).toEqual([
+      [{ code: 4001, reason: "the process failed to start" }],
+      [{ code: 4004, reason: "unknown session" }],
+      [{ code: 4001, reason: "" }],
+    ]);
   });
 
   it("keeps the legacy transient treatment for 4001 when onProcessExit is not wired", () => {

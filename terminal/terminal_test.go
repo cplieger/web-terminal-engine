@@ -1829,6 +1829,9 @@ func TestTypedFraming_textSizeLimits(t *testing.T) {
 		ws, cleanup := dialHandler(t, []string{"/bin/cat"})
 		defer cleanup()
 		bootstrapResume(t, ws, "sid-limit")
+		// The process starts at the first resize, which must precede the latch:
+		// after it, a binary frame is input.
+		sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 24})
 
 		msg := pad(wsReadLimit)
 		if len(msg) != wsReadLimit {
@@ -1870,6 +1873,7 @@ func TestBinaryInput_sizeLimit(t *testing.T) {
 		defer cleanup()
 		ws.SetReadLimit(-1) // the echo of 64 KiB comes back in frames over the default 32 KiB
 		bootstrapResume(t, ws, "sid-binary-limit")
+		sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 24})
 
 		msg := lines(wsReadLimit)
 		if len(msg) != wsReadLimit {

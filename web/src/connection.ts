@@ -61,15 +61,16 @@ type ConnState =
   // wired: no wake path reconnects, only connect(), setSession() or forgetSession().
   | { status: "ended" };
 
-// The server's close code for "the child process has exited"
-// (terminal/terminal.go statusProcessExited): definitive, so no reconnect.
-const PROCESS_EXITED_CLOSE_CODE = 4001;
+/** The server's close code for "the session's process has exited", or ended
+ *  before it started, with the reason why (terminal/terminal.go
+ *  statusProcessExited): definitive, so no reconnect. */
+export const PROCESS_EXITED_CLOSE_CODE = 4001;
 
-// The server's close code for "the manager does not know this session id"
-// (statusUnknownSession). The server ACCEPTS the upgrade and closes with it so
-// the client can read it (a pre-upgrade 404 is an opaque 1006 in browser JS);
-// like 4001 it is definitive and takes the no-reconnect path.
-const SESSION_UNKNOWN_CLOSE_CODE = 4004;
+/** The server's close code for "the manager does not know this session id"
+ *  (statusUnknownSession). The server accepts the upgrade and closes with it so
+ *  the client can read it (a pre-upgrade 404 is an opaque 1006 in browser JS);
+ *  like 4001 it is definitive and takes the no-reconnect path. */
+export const SESSION_UNKNOWN_CLOSE_CODE = 4004;
 
 /**
  * An input whose bytes depend on the mode state (a key press, a bracketed
@@ -377,13 +378,14 @@ export interface ConnectionCallbacks {
    */
   onPendingInput?(bytes: number, cancelable: boolean): void;
   /**
-   * Fired instead of onClose when the server closes with a DEFINITIVE code:
-   * process-exited (4001) or unknown-session (4004). When wired, the session
-   * has ended: no onClose, no backoff reconnect, and `reconnectNow()` is
-   * refused until `connect()`, `setSession()` or `forgetSession()`. When absent,
-   * every close keeps the transient treatment (onClose plus backoff reconnect).
+   * Fired instead of onClose for a definitive close, PROCESS_EXITED_CLOSE_CODE
+   * or SESSION_UNKNOWN_CLOSE_CODE, with the server's reason ("" when none; a
+   * 4001 has one only for a session that ended before its process started).
+   * When wired, no backoff reconnect follows and `reconnectNow()` is refused
+   * until `connect()`, `setSession()` or `forgetSession()`; when absent, every
+   * close keeps the transient treatment (onClose plus backoff reconnect).
    */
-  onProcessExit?(): void;
+  onProcessExit?(close: { readonly code: number; readonly reason: string }): void;
   /**
    * Fired at most once per resumeAck when the server restarted under something
    * this client held: the bound store discarded its content (another process's,
@@ -1811,7 +1813,7 @@ export function createConnection(opts: ConnectionOptions): Connection {
           cb.onProcessExit
         ) {
           connState = { status: "ended" };
-          cb.onProcessExit();
+          cb.onProcessExit({ code: ev.code, reason: ev.reason });
           return;
         }
         connState = { status: "disconnected" };

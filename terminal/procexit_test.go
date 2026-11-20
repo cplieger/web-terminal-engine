@@ -100,12 +100,8 @@ func TestProcessExitClosesWith4001(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
-	// Trigger the lazy process start; the byte is harmless (sh is running
-	// sleep and ignores stdin) and ptmx.Write succeeds while the process is
-	// alive, so there is no write-error race, the exit arrives via the sleep.
-	if err := ws.Write(ctx, websocket.MessageBinary, []byte("x")); err != nil {
-		t.Fatalf("ws write: %v", err)
-	}
+	// The first resize starts the process; the exit arrives via the sleep.
+	sendControl(t, ws, map[string]any{"type": "resize", "cols": 80, "rows": 24})
 
 	// Read until the server closes; the close code must be 4001.
 	for {

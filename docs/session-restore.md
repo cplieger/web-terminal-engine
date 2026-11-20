@@ -10,7 +10,7 @@ Sessions end when the server stops. A host that wants them back after a restart 
 
 `(*SessionManager).CaptureSessionSet(resume)` returns a `SessionSet`. It holds the display order, each session's alias and pinned title, and the pane layout by position. It holds no session id, because a session id lets anyone who has it attach to that terminal.
 
-The `resume` callback returns a token per session, for example the conversation id of the program running in it. The engine stores the token and never reads it. The callback runs outside the manager lock, so it may call `List`. The sessions, their order and the layout come from one moment, so a tab opened during the capture is either fully in the set or fully out of it. A session that exited normally is left out, and a crashed one is kept. Only the first 512 sessions in the display order are kept. A token over 1024 bytes or not valid UTF-8 is dropped. When the set would still encode to more than 1 MiB, tokens are dropped from the last session backwards until it fits.
+The `resume` callback returns a token per session, for example the conversation id of the program running in it. The engine stores the token and never reads it. The callback runs outside the manager lock, so it may call `List`. The sessions, their order and the layout come from one moment, so a tab opened during the capture is either fully in the set or fully out of it. A session that exited normally, or ended before its process started, is left out, and a crashed one is kept. Only the first 512 sessions in the display order are kept. A token over 1024 bytes or not valid UTF-8 is dropped. When the set would still encode to more than 1 MiB, tokens are dropped from the last session backwards until it fits.
 
 ## Reading it back
 

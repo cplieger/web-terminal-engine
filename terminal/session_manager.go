@@ -61,6 +61,9 @@ type SessionInfo struct {
 	// exposed raw so a UI can tell that a pin exists.
 	PinnedTitle string `json:"pinnedTitle"`
 	Status      string `json:"status"` // a Status* value, or any status WithStatusClassifier returned
+	// EndReason is the 4001 close reason of a StatusEnded session, empty for
+	// every other status.
+	EndReason string `json:"endReason,omitempty"`
 	// Activity is the session's SECONDARY activity state ("" when none), carried
 	// beside Status and never merged into it. See SessionActivity.
 	Activity string `json:"activity"`
@@ -104,6 +107,11 @@ const (
 	// StatusCrashed is a non-zero exit or an unrequested terminating signal;
 	// an exit the server caused is StatusExited. crashedExit owns the boundary.
 	StatusCrashed = "crashed"
+	// StatusEnded is a session that ended before its process started: the
+	// start failed, or the input queued before it passed its cap. EndReason
+	// says which. It stays listed until a DELETE, the idle reaper or Shutdown
+	// removes it, so every client learns the end from the list alone.
+	StatusEnded = "ended"
 	// StatusFailed is OSC 7501 error, or OSC 9;4 progress state 2: the program
 	// reported an error state (with a percentage, or indeterminate when pr is
 	// omitted). It PERSISTS until the program changes it — it is a state, not
@@ -337,7 +345,7 @@ func NewSessionManager(factory func(id SessionID) *Handler, opts ...ManagerOptio
 // Create starts a new session (eagerly spawning its process at a default size)
 // and returns its id. After Shutdown it returns ErrManagerClosed.
 func (m *SessionManager) Create() (SessionID, error) {
-	info, err := m.createWith(CreateSpec{})
+	info, err := m.createWith(CreateSpec{}, false)
 	return info.ID, err
 }
 
@@ -362,10 +370,10 @@ type CreateSpec struct {
 // place before the session is first listed or streamed. After Shutdown it
 // returns ErrManagerClosed and starts nothing.
 func (m *SessionManager) CreateWith(spec CreateSpec) (SessionInfo, error) {
-	return m.createWith(spec)
+	return m.createWith(spec, false)
 }
 
-// createStartedHook runs between StartEager and the insert; a test seam for a
+// createStartedHook runs between the start and the insert; a test seam for a
 // Shutdown that lands while a create forks. A no-op in production.
 var createStartedHook = func() {}
 
@@ -373,8 +381,10 @@ var createStartedHook = func() {}
 // echoes the createdAt, Order and Title every later enumeration reports. The
 // first two are sort keys: a re-derived createdAt matched neither List nor the
 // stream, and a zero Order put the newest tab at the FRONT of a strip until the
-// next status event.
-func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
+// next status event. A Go create has no client to size it and starts the process
+// at once at 80x24; a REST create (deferred) starts it at its first client's
+// first resize (Handler.deferStart).
+func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo, error) {
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -392,11 +402,13 @@ func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	h := build(id)
 	m.mu.Unlock()
 
-	// Eager start outside the lock: spawning a process should not block other
+	// Start outside the lock: spawning a process should not block other
 	// manager operations. A duplicate id is astronomically unlikely (128-bit
 	// random) so we do not re-check under the lock after start.
-	if err := h.StartEager(); err != nil {
-		return SessionInfo{}, err
+	if !deferred {
+		if err := h.StartEager(); err != nil {
+			return SessionInfo{}, err
+		}
 	}
 	createStartedHook()
 
@@ -440,10 +452,13 @@ func (m *SessionManager) createWith(spec CreateSpec) (SessionInfo, error) {
 	}
 	n := len(m.sessions)
 	m.mu.Unlock()
+	if deferred {
+		h.deferStart()
+	}
 
 	m.logger.Info("session: created", "session", LogID(id), "sessions", n)
-	// A freshly eager-started session is idle until it produces output; the
-	// status stream corrects that within a tick if the process died instantly.
+	// A new session reports idle until its process produces output; the status
+	// stream corrects that within a tick if the process died instantly.
 	return SessionInfo{
 		ID: id, Alias: alias, PinnedTitle: pinned,
 		Title:  title,
@@ -754,6 +769,13 @@ func (m *SessionManager) listSnapshot(layout *PaneLayout, cleanExit *[]bool) []S
 	}
 	m.mu.Unlock()
 
+	// Read after the unlock, as every handler getter is: an end before the start
+	// shows at once, without waiting for a sweep to commit it.
+	for i := range items {
+		if reason := items[i].handler.exitReason(); reason != "" {
+			items[i].info.Status, items[i].info.EndReason = StatusEnded, reason
+		}
+	}
 	if cleanExit != nil {
 		for i := range items {
 			exited, crashed := items[i].handler.exitOutcome()
@@ -1055,7 +1077,7 @@ func (m *SessionManager) handleCreate(w http.ResponseWriter, _ *http.Request) {
 	if m.refuseWhileRestoring(w) {
 		return
 	}
-	info, err := m.createWith(CreateSpec{})
+	info, err := m.createWith(CreateSpec{}, true)
 	if errors.Is(err, ErrManagerClosed) {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
 		return

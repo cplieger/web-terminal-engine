@@ -10,7 +10,7 @@ import { nextBackoffDelay } from "./reconnect.js";
 /** KnownStatus is a status the server derives itself, one per Go terminal.Status*
  *  constant. */
 export type KnownStatus =
-  "working" | "idle" | "input" | "done" | "exited" | "crashed" | "failed" | "warning";
+  "working" | "idle" | "input" | "done" | "exited" | "crashed" | "ended" | "failed" | "warning";
 
 /** SessionInfo is one session's wire shape: the JSON object the session REST
  *  API (GET/POST /api/sessions) returns per session, kept in lockstep with the Go
@@ -23,13 +23,20 @@ export interface SessionInfo {
   readonly id: string;
   /** the session's current status. The server derives a KnownStatus from the
    *  program's OSC 7501 report, or from OSC 9;4 progress while it has sent none
-   *  since a hard reset (RIS); "exited" and "crashed" mark the process's end
-   *  and nothing clears them. A classified OSC 9 notification latches whatever
+   *  since a hard reset (RIS); "exited" and "crashed" mark the process's end,
+   *  "ended" a session that ended before its process started (`endReason`
+   *  says why), and nothing clears them. A classified OSC 9 notification latches whatever
    *  string the server's classifier returns, and a newer server may add values,
    *  so a consumer must handle any other string: the stream forwards it
    *  unchanged. The engine's docs/sessions.md gives every mapping. */
   readonly status: KnownStatus | (string & {});
   readonly title: string;
+  /** on an "ended" session, the reason it ended before its process started:
+   *  the same reason its sockets' 4001 close carries, so the list alone tells
+   *  the consumer. Absent for every other status. A server before 6.6 lists
+   *  no such session: it starts the process at create, so a failed start
+   *  fails the create. */
+  readonly endReason?: string;
   /** the session's short public name, safe to put in a URL: 1 to 64 characters
    *  of `[A-Za-z0-9_-]`, unique among live sessions, and NOT a capability
    *  (nothing attaches with it; only `id` does). The server mints a random one

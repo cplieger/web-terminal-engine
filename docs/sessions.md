@@ -29,7 +29,7 @@ A handler stops in one of two ways:
 
 `MountSessionRoutes(mux, SessionHandlers{WS, REST, Events}, ...MountOption)` mounts exactly the route constants `WSPath`, `SessionsPath`, `SessionsSubtreePath` and `SessionEventsPath`. The REST handler needs both `SessionsPath` and `SessionsSubtreePath`. These paths match the defaults the TypeScript client exports as `WS_PATH`, `SESSIONS_PATH` and `SESSION_EVENTS_PATH`. `(*SessionManager).MountAPI(mux, opts...)` does the same for one manager.
 
-Each `POST /api/sessions` starts a process. `WithCreateGate(mw)` wraps the whole REST handler in your own middleware, for example a rate limit that picks out session creation.
+Each `POST /api/sessions` starts a process, at its first client's size (below). `WithCreateGate(mw)` wraps the whole REST handler in your own middleware, for example a rate limit that picks out session creation.
 
 `(*SessionManager).Create()` starts a session from the factory. `(*SessionManager).CreateWith(spec)` does the same with a `CreateSpec`: `Build` replaces the factory for that one session, `Alias` names it when the alias is valid and free, and `PinnedTitle` pins its title. The alias and the title are in place before any client can list the session. After `Shutdown`, both `Create` and `CreateWith` return `ErrManagerClosed` and start nothing, and `POST /api/sessions` answers 503.
 
@@ -41,8 +41,8 @@ The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdl
 
 | Route | What it does |
 | --- | --- |
-| `GET /api/sessions` | Lists the live sessions. |
-| `POST /api/sessions` | Creates a session and starts its process. |
+| `GET /api/sessions` | Lists the sessions, an `ended` one included. |
+| `POST /api/sessions` | Creates a session. Its process starts at the first client's first resize, or at 80 by 24 after 5 seconds with none. |
 | `DELETE /api/sessions/{id}` | Closes a session and ends its process. |
 | `PUT /api/sessions/order` | Sets the display order every viewer shares. |
 | `GET` and `PUT /api/sessions/layout` | Reads and sets the pane layout every viewer shares. |
@@ -83,6 +83,7 @@ Each session carries a status the server derives, and exactly one row of the tab
 
 | Status | Condition |
 | --- | --- |
+| `ended` | The session ended before its process started: the start failed, or the input queued before it passed 64 KiB. `endReason` says which. |
 | `exited` | The process ended normally, or the server ended it. |
 | `crashed` | The process ended with a non-zero status or a signal, and the server did not end it. |
 | The latched status | The process runs and a notification is latched: the status is whatever the classifier you install with `WithStatusClassifier` returned for it, such as `input` or `done`. |
@@ -138,6 +139,7 @@ Each status event also carries:
 
 - `progressValue`, the `progress` of the `OSC 7501` report when it carries one, else the `OSC 9;4` percentage, or -1 when the program reported none. -1 is not 0%.
 - `notification` and `notificationSeq` for a fresh OSC 9 message, so a consumer with no classifier still receives it.
+- `endReason` on an `ended` session, the reason its sockets close with: `the process failed to start` or `input before the process started passed 64 KiB`. The list and the status stream carry it too, on every entry and event for that session, so a client learns the end from the list alone, whichever of the list and the 4001 close it reads first. No other status carries it. Both are new in 6.6. An older server starts the process at create, so a failed start fails the `POST` and no such session is listed.
 - `statusSeq` numbers the occurrence of the session's status. A sweep raises it by one when it emits a changed status, a status a classified notification latched since the last sweep, or an input, done or failed status after an OSC 7501 report since then created a record, changed one's state or kind, or cleared one, and so changed which record the status came from, or its state or kind, at that report. A report keeping a record's state and kind raises it only by changing the status. It never falls for one id; 0, absent on the wire, means nothing numbered yet. This text is the Go doc of `SessionInfo.StatusSeq`, and `TestStatusSeqDocIsQuotedWordForWord` fails when a copy drifts from it.
 - `seenSeq`, the highest `statusSeq` any reader acknowledged. A status that calls for attention, such as `done` or `input`, is unread while `statusSeq` is above `seenSeq`.
 
@@ -178,7 +180,7 @@ When several clients share a session, the screen takes the size of the client th
 
 ## The processes a session starts
 
-A session's process starts at 80 columns by 24 rows when it starts before any client has reported a size, as `Create` and `CreateWith` start it. The first client's size then reaches the process as a resize and `SIGWINCH` when it differs from 80 by 24. On every width change the screen re-wraps the lines the terminal wrapped, as a desktop terminal does. Text a program printed before the resize then shows at the new width, even when the program does not repaint it. The cursor and a position saved with `ESC 7` move with their text. When the screen has more rows than fit, after a narrower width or a shorter height, blank rows below the cursor go first, then rows from the top go to scrollback until the rest fit, so no text is lost. When the cursor's row and the rows below it do not fit, the cursor's row goes to scrollback too, as in kitty, and the cursor moves to the top row. The main screen beneath a full-screen program keeps every row while the program runs, and the same rule fits it to the screen when the program leaves the alternate screen. The alternate screen of a full-screen program is not re-wrapped, because the program redraws it on `SIGWINCH`. Lines already in scrollback keep the width they had.
+A session created through `POST /api/sessions`, and a `Handler` served on its own, starts its process when its first client sends its first resize, at that client's size clamped as a resize is. A program that reads its width once at start and never redraws on `SIGWINCH` is then laid out at the client's width. When no client resizes within 5 seconds of the create, or of the first attach for a handler on its own, the process starts at 80 columns by 24 rows. Input that arrives before the process starts is queued and written to it in order once it starts. The queue holds at most 64 KiB, one client message, since a client sends no input before its first resize. A session ends before its process starts when that start fails or the queue passes 64 KiB: every client socket closes with 4001 and the reason `the process failed to start` or `input before the process started passed 64 KiB`, a `WithOnProcessExit` callback receives the error, and a session manager keeps the session listed with status `ended` and that reason as `endReason`. It stays listed, and a later attach closes 4001 with the same reason, until `DELETE /api/sessions/{id}`, the idle reaper or `Shutdown` removes it. The status stream sends its removal only then. The idle reaper is the bound: an ended session holds no process, so the row is the only thing it keeps, and while a client is connected that row is what its user is reading. A session closed before its process starts never starts one. `Create`, `CreateWith` and `StartEager` have no client to size the process, so they start it at once at 80 by 24. A later client's size reaches the process as a resize and `SIGWINCH` when it differs from the start size. On every width change the screen re-wraps the lines the terminal wrapped, as a desktop terminal does. Text a program printed before the resize then shows at the new width, even when the program does not repaint it. The cursor and a position saved with `ESC 7` move with their text. When the screen has more rows than fit, after a narrower width or a shorter height, blank rows below the cursor go first, then rows from the top go to scrollback until the rest fit, so no text is lost. When the cursor's row and the rows below it do not fit, the cursor's row goes to scrollback too, as in kitty, and the cursor moves to the top row. The main screen beneath a full-screen program keeps every row while the program runs, and the same rule fits it to the screen when the program leaves the alternate screen. The alternate screen of a full-screen program is not re-wrapped, because the program redraws it on `SIGWINCH`. Lines already in scrollback keep the width they had.
 
 A session's process inherits the server's environment plus a default terminal identity: `TERM=xterm-256color`, `COLORTERM=truecolor`, `TERM_PROGRAM=iTerm.app` and `TERM_PROGRAM_VERSION=3.6.6`. This identity advertises truecolor, `OSC 9;4` progress reporting and DEC 2026 synchronized output, which the engine implements. `WithEnv` values come after these defaults, so your entry for the same variable wins.
 

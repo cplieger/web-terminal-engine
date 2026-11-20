@@ -11,6 +11,7 @@
 package terminal
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -42,6 +43,20 @@ const (
 	defaultCols   = 80
 	defaultRows   = 24
 	flushInterval = 50 * time.Millisecond
+	// defaultStartBound is how long a deferred start waits for a client's first
+	// resize before it spawns at 80x24. A browser client waits up to 3 s for its
+	// web font before that resize, and the rest covers the create's answer and
+	// the socket dial on a slow link.
+	defaultStartBound = 5 * time.Second
+	// maxPendingInput bounds the input queued before the spawn at one client
+	// message (wsReadLimit): a client that keeps the wire contract sends no input
+	// before its first resize, so only one that breaks it passes the cap, and
+	// that ends the session (endBeforeStart).
+	maxPendingInput = wsReadLimit
+	// The 4001 close reasons of a session that ends before its process starts;
+	// docs/sessions.md quotes them.
+	startFailedReason   = "the process failed to start"
+	inputOverflowReason = "input before the process started passed 64 KiB"
 
 	// After a size change, armRedrawSettle holds flushes until the child's
 	// redraw has been quiet for redrawSettleQuiet, which must exceed a DEC 2026
@@ -203,6 +218,7 @@ type handlerConfig struct {
 	scrollbackCapacity int
 	// minContrast of 0, like 1, leaves the contrast floor off.
 	minContrast   float64
+	startBound    time.Duration
 	keepUnfocused bool
 }
 
@@ -265,7 +281,9 @@ func WithOriginPolicy(p *OriginPolicy) Option {
 
 // WithOnProcessExit registers a callback invoked when the child process exits.
 // The child's final output is on the screen by then, unless a process still
-// holding the terminal keeps it open past a one-second drain bound.
+// holding the terminal keeps it open past a one-second drain bound. It also runs,
+// with the error, when a session that starts at its first client's resize ends
+// before its process starts: the start failed or the queued input passed 64 KiB.
 func WithOnProcessExit(fn func(error)) Option {
 	return func(c *handlerConfig) { c.onProcessExit = fn }
 }
@@ -469,7 +487,12 @@ type Handler struct {
 	replyWake chan struct{}
 	// pendingReplies holds device-query answers for replyLoop. Guarded by h.mu.
 	pendingReplies []byte
-	sizeHoldTimer  *time.Timer
+	// pendingInput holds input that reached the ledger before the spawn, written
+	// to the PTY in order once it runs (drainPendingInput). Guarded by h.mu.
+	pendingInput  bytes.Buffer
+	sizeHoldTimer *time.Timer
+	// startTimer is the deferred start's fallback (deferStart). Guarded by h.mu.
+	startTimer *time.Timer
 	// The redraw-settle hold's fields are guarded by h.mu; a zero
 	// redrawSettleUntil means the hold is inactive.
 	redrawSettleUntil time.Time
@@ -481,7 +504,11 @@ type Handler struct {
 	// signalled one. Guarded by h.mu and written exactly once, BEFORE
 	// procExitCh closes, so Exited() == true implies this value is final (see
 	// the monitor in ensureStarted). Read through ExitError.
-	exitErr      error
+	exitErr error
+	// endReason is the 4001 close reason endBeforeStart set, nil for a process
+	// that ran. Atomic, not under h.mu: List and the status snapshot read it and
+	// must not stall on a handler wedged under its own lock.
+	endReason    atomic.Pointer[string]
 	cfg          handlerConfig
 	bootEpoch    int64
 	lastActivity atomic.Int64
@@ -489,17 +516,21 @@ type Handler struct {
 	// "is anything of mine still running" instead of leaving the caller to assume
 	// it from the process having exited. Added to only from ensureStarted, which
 	// holds h.mu, and never after done is armed.
-	wg      sync.WaitGroup
-	mu      sync.Mutex
-	started atomic.Bool
+	wg sync.WaitGroup
+	mu sync.Mutex
+	// redrawRearms counts how many times the redraw-settle cap has lapsed
+	// mid-redraw and coalesced instead of releasing, bounding the coalescing at
+	// redrawSettleMaxRearms. Guarded by h.mu. Placed ahead of the atomic.Bool
+	// and bool block so that block packs (govet fieldalignment).
+	redrawRearms int
+	started      atomic.Bool
+	// inputLive latches once pendingInput is drained: from then on input goes
+	// straight to the PTY. Stored under h.mu after the last queued write, so a
+	// writer that reads true cannot overtake it.
+	inputLive atomic.Bool
 	// shutdownRequested latches when Close ends the session, keeping that exit
 	// out of crashedExit's crashed class. Atomic: the monitor reads it without h.mu.
 	shutdownRequested atomic.Bool
-	// redrawRearms counts how many times the redraw-settle cap has lapsed
-	// mid-redraw and coalesced instead of releasing, bounding the coalescing at
-	// redrawSettleMaxRearms. Guarded by h.mu. Placed ahead of the bool block so
-	// the bools stay contiguous (govet fieldalignment).
-	redrawRearms int
 	// sizeEstablished is latched true once the PTY has real dimensions (the
 	// eager start's default size, or a client resize) and never cleared: the
 	// flush builder emits nothing before it, so clients never see a frame
@@ -522,6 +553,12 @@ type Handler struct {
 	// autoTitleWarned makes the automatic-title probe's failure note once-per-
 	// session rather than once-per-sweep (see probeAutoTitle). Guarded by h.mu.
 	autoTitleWarned bool
+	// inputDraining marks the one drainPendingInput call that owns the queue.
+	// Guarded by h.mu.
+	inputDraining bool
+	// endedBeforeStart latches once endBeforeStart has ended the session; every
+	// later start and input is refused. Guarded by h.mu.
+	endedBeforeStart bool
 	// focusTold is the DEC 1004 state this session's process has been told, so
 	// the derivation writes on transitions only (see focusReportLocked), and
 	// focusEnableSeen the screen's FocusEnableSeq it last saw. Guarded by h.mu.
@@ -535,6 +572,7 @@ type Handler struct {
 func NewHandler(command []string, opts ...Option) *Handler {
 	cfg := handlerConfig{
 		scrollbackCapacity: defaultScrollbackCapacity,
+		startBound:         defaultStartBound,
 		logger:             slog.Default(),
 	}
 	for _, o := range opts {
@@ -599,6 +637,10 @@ func (h *Handler) Close() {
 	// triggers, and therefore ahead of the cmd.Wait() return the monitor
 	// classifies.
 	h.shutdownRequested.Store(true)
+	if h.startTimer != nil {
+		h.startTimer.Stop()
+	}
+	h.pendingInput.Reset()
 	if h.cancel != nil {
 		h.cancel()
 	}
@@ -678,9 +720,10 @@ func (h *Handler) Title() string {
 	return h.screen.Title
 }
 
-// Exited reports whether the child process has exited. Non-blocking and
-// race-free (procExitCh is closed exactly once, by the process monitor). False
-// for a handler whose process was never started.
+// Exited reports whether the child process has exited, or the session ended
+// before its process started (endBeforeStart). Non-blocking and race-free
+// (procExitCh is closed exactly once). False for a handler whose process has not
+// started yet.
 func (h *Handler) Exited() bool {
 	select {
 	case <-h.procExitCh:
@@ -690,12 +733,13 @@ func (h *Handler) Exited() bool {
 	}
 }
 
-// ExitError returns what cmd.Wait() reported for the child: nil when the process
-// exited cleanly (status 0), was never started, or has not exited yet, and
-// otherwise the wait error — an *exec.ExitError for a non-zero or signalled
-// exit, the same error WithOnProcessExit's callback receives. Pair it with
-// Exited to tell "not dead yet" from "died cleanly"; the value is final once
-// Exited reports true. Safe for concurrent use.
+// ExitError returns what cmd.Wait() reported for the child, the error
+// WithOnProcessExit's callback receives: an *exec.ExitError for a non-zero or
+// signalled exit, and nil for a clean exit, a process not yet exited, or one
+// not started and not ended. A session that ended before its process started
+// returns the start error or input overflow that ended it. Pair it with Exited
+// to tell "not dead yet" from "died cleanly"; the value is final once Exited
+// reports true. Safe for concurrent use.
 func (h *Handler) ExitError() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -839,26 +883,191 @@ func (h *Handler) statusSnapshot() screenStatus {
 	}
 }
 
-// StartEager starts the child process now at the default 80x24, rather than
-// lazily on the first client message. A session manager calls this at Create
-// time so a new session's process (and its activity signal) exist from
-// creation; the first client attach still sends the real resize. Idempotent.
-// On a handler closed before its first start it returns an error.
+// StartEager starts the child process now at the default 80x24 rather than at
+// the first client resize, so the process and its activity signal exist before
+// any client attaches; the first attach still sends the real resize.
+// Idempotent. On a handler closed before its first start it returns an error.
 func (h *Handler) StartEager() error {
-	return h.ensureStarted(0, 0)
+	return h.start(0, 0)
 }
 
-// exitAwareCloseCode returns statusProcessExited (4001) when the child process
-// has exited (procExitCh is closed), otherwise a normal closure. The
-// non-blocking receive is race-free: channel operations synchronize and a
-// closed channel is always ready.
-func (h *Handler) exitAwareCloseCode() websocket.StatusCode {
+// deferStart arms the fallback of a handler that starts at its first client
+// resize: with no resize within the start bound, the process spawns at 80x24.
+// A no-op once armed, started or closed.
+func (h *Handler) deferStart() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.startTimer != nil || h.started.Load() || h.shutdownRequested.Load() || h.endedBeforeStart {
+		return
+	}
+	h.startTimer = time.AfterFunc(h.cfg.startBound, func() { h.startDeferred(0, 0) })
+}
+
+// startDeferred starts a process that waited for its first client, and ends the
+// session when the start fails, so no client is left on a session that never
+// runs. It reports whether the start was refused or failed.
+func (h *Handler) startDeferred(cols, rows int) (failed bool) {
+	err := h.start(cols, rows)
+	if err == nil {
+		return false
+	}
+	h.logStartFailure(err)
+	if !errors.Is(err, errHandlerClosed) {
+		h.endBeforeStart(err, startFailedReason)
+	}
+	return true
+}
+
+// endBeforeStart ends a session whose process has not started, as an exit ends
+// one that ran: cause becomes the exit error, procExitCh closes, so every
+// client closes with 4001 and reason, and the exit callback runs. A no-op once
+// the process has started, the session is closed, or it already ended.
+func (h *Handler) endBeforeStart(cause error, reason string) {
+	h.mu.Lock()
+	ended := h.latchEndBeforeStartLocked(cause, reason)
+	h.mu.Unlock()
+	if ended {
+		h.finishEndBeforeStart(cause)
+	}
+}
+
+// latchEndBeforeStartLocked records the end under h.mu, so a start waiting on
+// h.mu is refused (ensureStarted), and reports whether it did. Called with h.mu
+// held.
+func (h *Handler) latchEndBeforeStartLocked(cause error, reason string) bool {
+	if h.started.Load() || h.shutdownRequested.Load() || h.endedBeforeStart {
+		return false
+	}
+	h.endedBeforeStart = true
+	h.endReason.Store(&reason)
+	h.exitErr = cause
+	h.pendingInput.Reset()
+	if h.startTimer != nil {
+		h.startTimer.Stop()
+	}
+	return true
+}
+
+// finishEndBeforeStart announces an end latchEndBeforeStartLocked recorded,
+// without h.mu.
+func (h *Handler) finishEndBeforeStart(cause error) {
+	close(h.procExitCh)
+	h.markProgramExited()
+	if h.cfg.onProcessExit != nil {
+		// Runs on a client's read loop or the fallback timer, which a callback
+		// panic must not take down, as the process monitor does not.
+		defer func() {
+			if r := recover(); r != nil {
+				h.cfg.logger.Error("terminal: onProcessExit callback panicked", "panic", r)
+			}
+		}()
+		h.cfg.onProcessExit(cause)
+	}
+}
+
+// start spawns the process (ensureStarted) and then writes the input queued
+// before the spawn.
+func (h *Handler) start(cols, rows int) error {
+	if err := h.ensureStarted(cols, rows); err != nil {
+		return err
+	}
+	h.drainPendingInput()
+	return nil
+}
+
+// drainPendingInput writes pendingInput to the PTY in order, including input
+// queued while it writes, then latches inputLive. The PTY is written without
+// h.mu: a child that does not read its input yet would otherwise block the
+// read loop's screen updates behind the write.
+func (h *Handler) drainPendingInput() {
+	h.mu.Lock()
+	if h.inputLive.Load() || h.inputDraining {
+		h.mu.Unlock()
+		return
+	}
+	h.inputDraining = true
+	for h.pendingInput.Len() > 0 {
+		buf := bytes.Clone(h.pendingInput.Bytes())
+		h.pendingInput.Reset()
+		ptmx := h.ptmx
+		h.mu.Unlock()
+		if _, err := ptmx.Write(buf); err != nil {
+			h.cfg.logger.Debug("terminal: pty write", "error", err)
+		}
+		h.mu.Lock()
+	}
+	h.inputDraining = false
+	h.inputLive.Store(true)
+	h.mu.Unlock()
+	// The pass's ack sweep trims the clients' outboxes for the queued input.
+	h.markDirty()
+}
+
+// writeInput applies msg through state's ledger: to the PTY once the queued
+// input is written, to pendingInput before that. Input that takes the queue past
+// maxPendingInput ends the session and returns errHandlerClosed, as does input
+// after the session ended.
+func (h *Handler) writeInput(state *clientState, msg []byte) (applied bool, err error) {
+	if !h.inputLive.Load() {
+		h.mu.Lock()
+		if !h.inputLive.Load() {
+			return h.queueInputLocked(state, msg)
+		}
+		h.mu.Unlock()
+	}
+	return h.registry.ApplyInput(state, h.ptmx, msg)
+}
+
+// queueInputLocked is writeInput's path before the queued input is written.
+// Called with h.mu held; it releases it.
+func (h *Handler) queueInputLocked(state *clientState, msg []byte) (applied bool, err error) {
+	if h.shutdownRequested.Load() || h.endedBeforeStart {
+		h.mu.Unlock()
+		return false, errHandlerClosed
+	}
+	applied, err = h.registry.ApplyInput(state, &h.pendingInput, msg)
+	started := h.started.Load()
+	// Latched before the unlock: a start waiting on h.mu would otherwise spawn
+	// in the gap with the over-cap input queued.
+	if !started && h.pendingInput.Len() > maxPendingInput &&
+		h.latchEndBeforeStartLocked(errInputOverflow, inputOverflowReason) {
+		h.mu.Unlock()
+		inputOverflowHook()
+		h.cfg.logger.Warn("terminal: input before the process started passed its cap; session ended",
+			"cap_bytes", maxPendingInput)
+		h.finishEndBeforeStart(errInputOverflow)
+		return false, errHandlerClosed
+	}
+	h.mu.Unlock()
+	// A process that started before this input queued drains it now, or the
+	// drain already running picks it up.
+	if started {
+		if serr := h.start(0, 0); serr != nil {
+			return false, serr
+		}
+	}
+	return applied, err
+}
+
+// exitAwareClose returns statusProcessExited (4001) and the session's end
+// reason when the child process has exited (procExitCh is closed), otherwise a
+// normal closure. The non-blocking receive is race-free: channel operations
+// synchronize and a closed channel is always ready.
+func (h *Handler) exitAwareClose() (code websocket.StatusCode, reason string) {
 	select {
 	case <-h.procExitCh:
-		return statusProcessExited
+		return statusProcessExited, h.exitReason()
 	default:
-		return websocket.StatusNormalClosure
+		return websocket.StatusNormalClosure, ""
 	}
+}
+
+// exitReason is the 4001 close reason: endReason, empty for a process that ran.
+func (h *Handler) exitReason() string {
+	if p := h.endReason.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // closeOnProcExit closes the client WS with statusProcessExited when the child
@@ -884,11 +1093,20 @@ func (h *Handler) closeOnProcExit(ctx context.Context, ws *websocket.Conn, resum
 		case <-t.C:
 		}
 	}
-	ws.Close(statusProcessExited, "") // #nosec G104 -- best-effort
+	ws.Close(statusProcessExited, h.exitReason()) // #nosec G104 -- best-effort
 }
 
-// errHandlerClosed is ensureStarted's refusal to start a child once Close has run.
+// errHandlerClosed is ensureStarted's refusal to start a child once Close has
+// run or the session ended before its start.
 var errHandlerClosed = errors.New("terminal: session closed")
+
+// inputOverflowHook runs between the overflow's latch and its announcement; a
+// test seam for a start that waits on h.mu meanwhile. A no-op in production.
+var inputOverflowHook = func() {}
+
+// errInputOverflow is the exit error of a session whose queued input passed
+// maxPendingInput before its process started.
+var errInputOverflow = errors.New("terminal: input before the process started passed its cap")
 
 // logStartFailure logs a client-triggered start that failed. A refusal after
 // Close is the expected end of a session, not a failure.
@@ -904,7 +1122,8 @@ func (h *Handler) logStartFailure(err error) {
 // the given dimensions. cols/rows ≤ 0 fall back to defaults so callers
 // who don't yet know the client size can still start the process.
 // Idempotent: concurrent callers all see started==true after the
-// first returns; cols/rows on subsequent calls are ignored.
+// first returns; cols/rows on subsequent calls are ignored. Callers go
+// through start, which also writes the input queued before the spawn.
 func (h *Handler) ensureStarted(cols, rows int) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -913,7 +1132,7 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	}
 	// Shutdown may already have returned, so a child started now would outlive
 	// it. Close stores the latch under h.mu, which orders this check against it.
-	if h.shutdownRequested.Load() {
+	if h.shutdownRequested.Load() || h.endedBeforeStart {
 		return errHandlerClosed
 	}
 	if len(h.command) == 0 {
@@ -952,6 +1171,9 @@ func (h *Handler) ensureStarted(cols, rows int) error {
 	h.ptmx = ptmx
 	h.cmd = cmd
 	h.started.Store(true)
+	if h.startTimer != nil {
+		h.startTimer.Stop()
+	}
 	h.sizeEstablished = true
 	h.screen.Resize(rows, cols)
 	loggedCommand := any(h.command)
@@ -1642,8 +1864,8 @@ type controlMsg struct {
 	GridFrames bool `json:"gridFrames,omitempty"`
 }
 
-// handleWS upgrades to WebSocket, spawns the configured command in a
-// PTY, and bridges bytes both ways until either side closes.
+// handleWS upgrades to WebSocket and bridges the session's PTY with the
+// client until either side closes.
 func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	ws, err := acceptWS(w, r, h.cfg.originPolicy)
 	if err != nil {
@@ -1652,9 +1874,9 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 	ws.SetReadLimit(wsReadLimit)
 
-	// Note: the child process is preferably started on the first resize message so it
-	// boots at the correct dimensions. As a fallback we still call ensureStarted
-	// here in case the client never sends a resize (e.g. tests).
+	// The process starts at the first resize, so it boots at the client's size;
+	// deferStart spawns it at 80x24 if none comes.
+	h.deferStart()
 
 	// Register this client.
 	state := h.registry.Add(ws)
@@ -1678,7 +1900,8 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 		if hold != 0 {
 			h.armSizeHold(hold)
 		}
-		ws.Close(h.exitAwareCloseCode(), "") // #nosec G104 -- best-effort
+		code, reason := h.exitAwareClose()
+		ws.Close(code, reason) // #nosec G104 -- best-effort
 	}()
 
 	// Cancellable context tied to the client's request — pingLoop
@@ -1691,7 +1914,7 @@ func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
 
 	// Close promptly with 4001 when the child process exits, so the client can
 	// distinguish "process ended" from a transient drop (see closeOnProcExit
-	// and exitAwareCloseCode). resumeServed defers that close on an
+	// and exitAwareClose). resumeServed defers that close on an
 	// attach-to-already-exited session until the first resume exchange has been
 	// written, so the client renders the final screen before the 4001.
 	resumeServed := make(chan struct{})
@@ -1751,18 +1974,13 @@ func (h *Handler) handleBinaryFrame(ws *websocket.Conn, state *clientState, msg 
 		}
 		// Parse-fallback: fall through and deliver the WHOLE frame as input.
 	}
-	// Ensure process is started (fallback if no resize was sent).
-	// h.started is atomic.Bool so the fast-path read does not race
-	// with ensureStarted's write. cols/rows of 0 select defaults.
-	if !h.started.Load() {
-		if err := h.ensureStarted(0, 0); err != nil {
-			h.logStartFailure(err)
-			return armed, false
-		}
-	}
-	applied, err := h.registry.ApplyInput(state, h.ptmx, msg)
+	applied, err := h.writeInput(state, msg)
 	if err != nil {
-		h.cfg.logger.Debug("terminal: pty write", "error", err)
+		if errors.Is(err, errHandlerClosed) {
+			h.logStartFailure(err)
+		} else {
+			h.cfg.logger.Debug("terminal: pty write", "error", err)
+		}
 		return armed, false
 	}
 	if !applied {
@@ -2239,9 +2457,9 @@ func (h *Handler) handleResume(ws *websocket.Conn, state *clientState, sessionID
 
 // clampResize floors the requested dimensions to a sane minimum and caps them
 // at the eager-allocation ceiling. Floored (rather than dropped) so a near-zero
-// reading from an iPad keyboard-slide animation still drives ensureStarted on
-// first connect — dropping the resize would leave the process unstarted until
-// the client sent raw input.
+// reading from an iPad keyboard-slide animation still starts the process at
+// the client's size on first connect; a dropped resize would leave it to the
+// start bound's 80x24.
 func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 	clampedCols = min(max(cols, minResizeCols), maxResizeCols)
 	clampedRows = min(max(rows, minResizeRows), maxResizeRows)
@@ -2251,8 +2469,7 @@ func clampResize(cols, rows int) (clampedCols, clampedRows int) {
 // handleResize records a client's requested size on its socket and resizes
 // the shared PTY and screen to the size owner's (clientRegistry.OwnerSize), so
 // a resize from any other client changes nothing. It reports whether the start
-// was refused because Close has run: no process exit will close that client's
-// socket, so the caller must end it.
+// was refused or failed (startDeferred), so the caller ends that client's socket.
 func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool) {
 	cols, rows = clampResize(cols, rows)
 	h.registry.RecordSize(state, cols, rows)
@@ -2262,9 +2479,8 @@ func (h *Handler) handleResize(state *clientState, cols, rows int) (closed bool)
 		if ownerCols, ownerRows, ok := h.registry.OwnerSize(); ok {
 			cols, rows = ownerCols, ownerRows
 		}
-		if err := h.ensureStarted(cols, rows); err != nil {
-			h.logStartFailure(err)
-			return errors.Is(err, errHandlerClosed)
+		if h.startDeferred(cols, rows) {
+			return true
 		}
 	}
 	h.resizeToOwner("resize received")

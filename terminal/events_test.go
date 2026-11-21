@@ -5,12 +5,15 @@ package terminal
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/cplieger/go/httpserver/v2"
 )
 
 // inputClassifier maps one needs-input and one done notification string, the
@@ -463,6 +466,10 @@ func TestEventsHandlerSubscriberCap(t *testing.T) {
 	m.EventsHandler().ServeHTTP(rec, req)
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("over-cap request status = %d, want %d (too many subscribers)", rec.Code, http.StatusServiceUnavailable)
+	}
+	var body httpserver.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || body.Code != codeSessionEventsFull {
+		t.Errorf("over-cap body = %q, want the envelope with code %s", rec.Body.String(), codeSessionEventsFull)
 	}
 }
 

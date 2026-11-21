@@ -397,11 +397,7 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 		m.mu.Unlock()
 		return SessionInfo{}, ErrManagerClosed
 	}
-	id, err := newSessionID()
-	if err != nil {
-		m.mu.Unlock()
-		return SessionInfo{}, err
-	}
+	id := newSessionID()
 	build := spec.Build
 	if build == nil {
 		build = m.factory
@@ -1080,25 +1076,56 @@ func (m *SessionManager) RESTHandler() http.Handler {
 	mux.HandleFunc("PUT /api/sessions/{id}/pinned-title", m.handleSetPinnedTitle)
 	mux.HandleFunc("DELETE /api/sessions/{id}/pinned-title", m.handleClearPinnedTitle)
 	mux.HandleFunc("PUT /api/sessions/{id}/seen", m.handleSetSeen)
-	return withNoStore(mux)
+	return withNoStore(m.muxRefusals(mux))
 }
 
 func (m *SessionManager) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if m.refuseWhileRestoring(w, r) {
 		return
 	}
+	// A deferred create starts no process, so ErrManagerClosed is its only error.
 	info, err := m.createWith(CreateSpec{}, true)
-	if errors.Is(err, ErrManagerClosed) {
-		m.errs(w, r, http.StatusServiceUnavailable, codeSessionShuttingDown, "server shutting down")
-		return
-	}
 	if err != nil {
-		m.logger.Error("session: create failed", "error", err)
-		m.errs(w, r, http.StatusInternalServerError, codeSessionCreateFailed, "create failed")
+		m.errs(w, r, http.StatusServiceUnavailable, codeSessionShuttingDown, "server shutting down")
 		return
 	}
 	writeJSON(w, http.StatusCreated, info)
 }
+
+// muxRefusals answers mux's own 404 and 405 through the manager's writer, the
+// 405 with the Allow header mux computes.
+func (m *SessionManager) muxRefusals(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, pattern := mux.Handler(r)
+		if pattern != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		probe := &muxAnswer{header: http.Header{}}
+		h.ServeHTTP(probe, r)
+		switch probe.status {
+		case http.StatusMethodNotAllowed:
+			w.Header().Set("Allow", probe.header.Get("Allow"))
+			m.errs(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
+		case http.StatusNotFound:
+			m.errs(w, r, http.StatusNotFound, codeNotFound, "not found")
+		default:
+			// A path-cleaning redirect also has no pattern.
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+// muxAnswer records the status and headers of ServeMux's own refusal and
+// drops its plain-text body.
+type muxAnswer struct {
+	header http.Header
+	status int
+}
+
+func (a *muxAnswer) Header() http.Header         { return a.header }
+func (a *muxAnswer) Write(b []byte) (int, error) { return len(b), nil }
+func (a *muxAnswer) WriteHeader(status int)      { a.status = status }
 
 // refuseWhileRestoring answers 503 RestoringMessage with Retry-After: 1 while
 // RestoreSessionSet runs, and reports whether it did. The body's message is
@@ -1457,16 +1484,14 @@ func (m *SessionManager) maybeReap() {
 
 // newSessionID returns a 128-bit crypto-random hex id, used as both the routing
 // id (/ws?session=<id>) and the resume id.
-func newSessionID() (SessionID, error) {
+func newSessionID() SessionID {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return SessionID(hex.EncodeToString(b[:])), nil
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error
+	return SessionID(hex.EncodeToString(b[:]))
 }
 
 // writeJSON writes a session-surface JSON response: the bodies that carry
-// session ids in full (create, list, the layout read) and their 503 refusals.
+// session ids in full (create, list, the layout read).
 // A session id is the /ws credential (see LogID), and a 2xx JSON body without
 // Cache-Control is heuristically cacheable under RFC 9111, so no-store is set
 // here and UNCONDITIONALLY: unlike withNoStore, which yields to an outer policy

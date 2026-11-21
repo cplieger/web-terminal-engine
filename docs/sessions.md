@@ -52,19 +52,18 @@ The manager options are `WithManagerLogger`, `WithManagerOriginPolicy`, `WithIdl
 
 ### Refusals
 
-Every refusal on the session routes is the JSON error envelope, `{"code":…,"message":…,"remediation":…,"request_id":…}`. That covers the REST routes, the status stream, and the WebSocket route's refusal of an `Origin` the policy does not allow, which answers httpserver's `cross_origin_refused`. The engine's own codes are:
+Every refusal the engine writes on the session routes is the JSON error envelope, `{"code":…,"message":…,"remediation":…,"request_id":…}`. That covers the REST routes, their router's `404` (`not_found`) and `405` (`method_not_allowed`, with the `Allow` header), the status stream, and the WebSocket route's refusal of an `Origin` the policy does not allow, which answers httpserver's `cross_origin_refused`. A request to the WebSocket route that is no upgrade gets the WebSocket library's plain-text `426`. The engine's own codes are:
 
 | Status | `code` | When |
 | --- | --- | --- |
 | `404` | `session_unknown` | The session id names no live session. |
-| `400` | `session_body_invalid` | The body is not one JSON object with the route's fields, or data follows it. |
+| `400` | `session_body_invalid` | The body is too large or is not one JSON object with the route's fields, or, on the order, layout and seen routes, data follows it. |
 | `400` | `session_title_empty` | A pinned title has no visible text; `DELETE` clears it. |
 | `409` | `session_order_stale` | The order does not name every live session exactly once. |
 | `409` | `session_layout_stale` | A side of the layout names a session that is not live. |
 | `400` | `session_layout_invalid` | The layout breaks a consistency rule; the message names it. |
 | `503` | `session_restoring` | `RestoreSessionSet` is running. It comes with `Retry-After: 1`. |
 | `503` | `session_shutting_down` | The manager has shut down. |
-| `500` | `session_create_failed` | The process could not be created; the log line `session: create failed` says why. |
 | `503` | `session_events_full` | The status stream is at its subscriber cap. |
 | `500` | `session_events_unsupported` | A middleware in front of the status stream cannot flush. |
 
@@ -85,7 +84,7 @@ The layout record says which session each of two panes shows and which pane rece
 - `handle`, the left pane's share of the row, from 0 to 1. It is fixed at 0.5 while the split is closed.
 - `selected`, `"left"` or `"right"`, the pane that receives typing. Its session is the active tab.
 
-A `PUT` must carry `open`, `handle` and `selected`. The server answers 400 with the text of the first rule the record breaks. A closed split has no right pane and selects the left. One session cannot show on both sides. A selection cannot rest on an empty pane while the other pane, or any live session, has something to show. The server answers 409 when a side names a session that is not live, and a client handles it as it handles the order's 409.
+A `PUT` must carry `open`, `handle` and `selected`. The server answers 400 `session_layout_invalid`, whose message names the first rule the record breaks. A closed split has no right pane and selects the left. One session cannot show on both sides. A selection cannot rest on an empty pane while the other pane, or any live session, has something to show. The server answers 409 when a side names a session that is not live, and a client handles it as it handles the order's 409.
 
 The server keeps the record valid on its own. The first session of an empty layout shows on the left. A closing session leaves its pane, the selection moves to a pane that still shows something, and an empty record is refilled from the order. The idle reaper and `Shutdown` reset the record.
 

@@ -4,7 +4,6 @@ package terminal
 
 import (
 	"encoding/json"
-	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,10 +13,14 @@ import (
 	"github.com/cplieger/go/httpserver/v2/httpservertest"
 )
 
-// The package writes exactly codeSpecs plus httpserver's cross_origin_refused.
+// The package writes exactly codeSpecs plus three httpserver codes: the origin
+// refusal and the REST router's 404 and 405.
 func TestCodeSpecs_matchSource(t *testing.T) {
 	written := CodeSpecs()
-	written[codeCrossOriginRefused] = httpserver.CodeSpecs()[codeCrossOriginRefused]
+	lib := httpserver.CodeSpecs()
+	for _, code := range []httpserver.ErrorCode{codeCrossOriginRefused, codeMethodNotAllowed, codeNotFound} {
+		written[code] = lib[code]
+	}
 	httpservertest.CheckCodeSpecs(t, ".", written)
 }
 
@@ -26,7 +29,7 @@ func TestCodeSpecs_matchSource(t *testing.T) {
 func TestCodeSpecs_isACopy(t *testing.T) {
 	got := CodeSpecs()
 	delete(got, codeSessionUnknown)
-	if !maps.Equal(CodeSpecs(), codeSpecs) {
+	if _, ok := CodeSpecs()[codeSessionUnknown]; !ok {
 		t.Error("CodeSpecs() shares its map with the package")
 	}
 }
@@ -94,6 +97,8 @@ func TestWithErrorsWritesEveryRoute(t *testing.T) {
 		{"empty pinned title", m.RESTHandler(), httptest.NewRequest(http.MethodPut, SessionsSubtreePath+string(id)+"/pinned-title", strings.NewReader(`{"title":"  "}`)), nil, refusal{codeSessionTitleEmpty, http.StatusBadRequest}},
 		{"invalid body", m.RESTHandler(), httptest.NewRequest(http.MethodPut, SessionsSubtreePath+"order", strings.NewReader(`{`)), nil, refusal{codeSessionBodyInvalid, http.StatusBadRequest}},
 		{"stale order", m.RESTHandler(), httptest.NewRequest(http.MethodPut, SessionsSubtreePath+"order", strings.NewReader(`{"order":[]}`)), nil, refusal{codeSessionOrderStale, http.StatusConflict}},
+		{"router method", m.RESTHandler(), httptest.NewRequest(http.MethodPatch, SessionsSubtreePath+"order", nil), nil, refusal{codeMethodNotAllowed, http.StatusMethodNotAllowed}},
+		{"router path", m.RESTHandler(), httptest.NewRequest(http.MethodPost, SessionsSubtreePath+"a/b/c", nil), nil, refusal{codeNotFound, http.StatusNotFound}},
 		{"stream without flush", m.EventsHandler(), httptest.NewRequest(http.MethodGet, SessionEventsPath, nil), hideFlush, refusal{codeSessionEventsUnsupported, http.StatusInternalServerError}},
 		{"origin on an unknown session", m.WebSocketHandler(), foreign(WSPath + "?session=0123"), nil, refusal{codeCrossOriginRefused, http.StatusForbidden}},
 		{"origin on a live session", m.WebSocketHandler(), foreign(WSPath + "?session=" + string(id)), nil, refusal{codeCrossOriginRefused, http.StatusForbidden}},
@@ -138,5 +143,37 @@ func TestStandaloneHandlerOriginRefusal(t *testing.T) {
 	}
 	if want := httpserver.CodeSpecs()[codeCrossOriginRefused].Remediation; body.Remediation != want || body.RequestID == "" {
 		t.Errorf("refusal = %+v, want httpserver's remediation %q and a request id", body, want)
+	}
+}
+
+// The REST router's own 405 keeps the Allow header ServeMux computes, so a
+// client still learns the methods the path takes.
+func TestRouterMethodRefusalKeepsAllow(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(func() { shutdownManager(t, m) })
+	rec := httptest.NewRecorder()
+
+	m.RESTHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, SessionsSubtreePath+"layout", nil))
+
+	var body httpserver.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil || rec.Code != http.StatusMethodNotAllowed || body.Code != codeMethodNotAllowed {
+		t.Fatalf("POST layout = %d %q, want 405 %s in the envelope", rec.Code, rec.Body.String(), codeMethodNotAllowed)
+	}
+	allow := rec.Header().Get("Allow")
+	if !strings.Contains(allow, http.MethodGet) || !strings.Contains(allow, http.MethodPut) || strings.Contains(allow, http.MethodPost) {
+		t.Errorf("Allow = %q, want the layout's GET and PUT and no POST", allow)
+	}
+}
+
+// The router's path-cleaning redirect is no refusal and passes through.
+func TestRouterRedirectPassesThrough(t *testing.T) {
+	m := NewSessionManager(catFactory)
+	t.Cleanup(func() { shutdownManager(t, m) })
+	rec := httptest.NewRecorder()
+
+	m.RESTHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, SessionsSubtreePath+"./layout", nil))
+
+	if rec.Code/100 != 3 || rec.Header().Get("Location") != SessionsSubtreePath+"layout" {
+		t.Errorf("GET ./layout = %d Location %q, want a redirect to %s", rec.Code, rec.Header().Get("Location"), SessionsSubtreePath+"layout")
 	}
 }

@@ -7,13 +7,11 @@ import (
 	"github.com/cplieger/go/httpserver/v2"
 )
 
-// The codes the session routes refuse with besides httpserver's own
-// cross_origin_refused, which a WebSocket upgrade from a disallowed Origin
-// answers. Each names its route's subject, so an application catalog that also
-// owns another library's codes holds no two specs under one code.
+// The codes the session routes refuse with. Each but httpserver's own is
+// prefixed session_, so an application catalog that also owns another
+// library's codes holds no two specs under one code.
 const (
 	codeSessionUnknown           httpserver.ErrorCode = "session_unknown"
-	codeSessionCreateFailed      httpserver.ErrorCode = "session_create_failed"
 	codeSessionShuttingDown      httpserver.ErrorCode = "session_shutting_down"
 	codeSessionBodyInvalid       httpserver.ErrorCode = "session_body_invalid"
 	codeSessionTitleEmpty        httpserver.ErrorCode = "session_title_empty"
@@ -23,6 +21,8 @@ const (
 	codeSessionEventsUnsupported httpserver.ErrorCode = "session_events_unsupported"
 	codeSessionEventsFull        httpserver.ErrorCode = "session_events_full"
 	codeCrossOriginRefused       httpserver.ErrorCode = "cross_origin_refused"
+	codeMethodNotAllowed         httpserver.ErrorCode = "method_not_allowed"
+	codeNotFound                 httpserver.ErrorCode = "not_found"
 )
 
 // ErrorCodeRestoring is the code of the 503 the session routes answer, with
@@ -32,11 +32,9 @@ const ErrorCodeRestoring httpserver.ErrorCode = "session_restoring"
 
 // codeSpecs holds exactly the codes this package answers that httpserver's own
 // CodeSpecs does not list; httpservertest.CheckCodeSpecs holds it to the
-// source. Every refusal but a failed create changes nothing, so it is safe to
-// resend once fixed.
+// source. No refusal changes anything, so each is safe to resend once fixed.
 var codeSpecs = map[httpserver.ErrorCode]httpserver.CodeSpec{
-	codeSessionUnknown:           {Status: http.StatusNotFound, Remediation: "List the sessions again: this one has ended or never existed.", NoEffect: true},
-	codeSessionCreateFailed:      {Status: http.StatusInternalServerError, Remediation: "Retry; if it fails again, the server log line \"session: create failed\" names the cause."},
+	codeSessionUnknown:           {Status: http.StatusNotFound, Remediation: "List the sessions again: this one was closed or never existed.", NoEffect: true},
 	codeSessionShuttingDown:      {Status: http.StatusServiceUnavailable, Remediation: "Retry once the server has restarted.", NoEffect: true},
 	ErrorCodeRestoring:           {Status: http.StatusServiceUnavailable, Remediation: "Retry after Retry-After: the server is restoring its saved sessions.", NoEffect: true},
 	codeSessionBodyInvalid:       {Status: http.StatusBadRequest, Remediation: "Send one JSON object with the fields this route documents, and nothing after it.", NoEffect: true},
@@ -56,12 +54,12 @@ func CodeSpecs() map[httpserver.ErrorCode]httpserver.CodeSpec {
 }
 
 // WithErrors sets the ErrorResponder that writes every refusal the manager's
-// routes answer: the session REST API's, the status stream's, and the
-// WebSocket route's origin refusal, for unknown sessions and for each session
-// handler the manager builds. Pass an application catalog's responder to give
-// each refusal the application's remediation. Nil means the default,
-// httpserver.WriteError with this package's remediation for its own codes, so
-// the last WithErrors wins.
+// routes answer: the session REST API's, its router's 404 and 405, the status
+// stream's, and the WebSocket route's origin refusal, for unknown sessions and
+// for each session handler the manager builds. A request to the WebSocket
+// route that is no upgrade gets the WebSocket library's plain-text 426. Pass an
+// application catalog's responder to give each refusal the application's
+// remediation. Nil means writeError, the last WithErrors wins.
 func WithErrors(r httpserver.ErrorResponder) ManagerOption {
 	return func(c *managerConfig) { c.errs = r }
 }

@@ -24,6 +24,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/go/textsafe"
 )
 
@@ -146,6 +147,7 @@ type ManagerOption func(*managerConfig)
 type managerConfig struct {
 	logger       *slog.Logger
 	originPolicy *OriginPolicy
+	errs         httpserver.ErrorResponder
 	classifier   func(string) (string, bool)
 	activity     func(SessionID) SessionActivity
 	idleWindow   time.Duration
@@ -253,6 +255,7 @@ type SessionManager struct {
 	factory      func(id SessionID) *Handler
 	logger       *slog.Logger
 	originPolicy *OriginPolicy
+	errs         httpserver.ErrorResponder
 	sessions     map[SessionID]*session
 	trackers     map[SessionID]*statusTracker
 	subs         map[chan statusEvent]struct{}
@@ -308,10 +311,14 @@ func NewSessionManager(factory func(id SessionID) *Handler, opts ...ManagerOptio
 	if cfg.logger == nil {
 		cfg.logger = slog.New(slog.DiscardHandler)
 	}
+	if cfg.errs == nil {
+		cfg.errs = writeError
+	}
 	m := &SessionManager{
 		factory:      factory,
 		logger:       cfg.logger,
 		originPolicy: cfg.originPolicy,
+		errs:         cfg.errs,
 		sessions:     make(map[SessionID]*session),
 		trackers:     make(map[SessionID]*statusTracker),
 		subs:         make(map[chan statusEvent]struct{}),
@@ -390,16 +397,15 @@ func (m *SessionManager) createWith(spec CreateSpec, deferred bool) (SessionInfo
 		m.mu.Unlock()
 		return SessionInfo{}, ErrManagerClosed
 	}
-	id, err := newSessionID()
-	if err != nil {
-		m.mu.Unlock()
-		return SessionInfo{}, err
-	}
+	id := newSessionID()
 	build := spec.Build
 	if build == nil {
 		build = m.factory
 	}
 	h := build(id)
+	// The manager owns the WebSocket route, so its refusal writer answers a
+	// session handler's origin refusal too. Set before the handler serves.
+	h.cfg.errs = m.errs
 	m.mu.Unlock()
 
 	// Start outside the lock: spawning a process should not block other
@@ -1038,7 +1044,7 @@ func (m *SessionManager) WebSocketHandler() http.Handler {
 			// statusUnknownSession owns why this accepts and then closes. A
 			// non-WebSocket GET gets Accept's 426 on both paths, so a probe cannot
 			// tell whether a session exists.
-			ws, err := acceptWS(w, r, m.originPolicy)
+			ws, err := acceptWS(w, r, m.originPolicy, m.errs)
 			if err != nil {
 				return // acceptWS or Accept already wrote the response (403/426)
 			}
@@ -1070,30 +1076,61 @@ func (m *SessionManager) RESTHandler() http.Handler {
 	mux.HandleFunc("PUT /api/sessions/{id}/pinned-title", m.handleSetPinnedTitle)
 	mux.HandleFunc("DELETE /api/sessions/{id}/pinned-title", m.handleClearPinnedTitle)
 	mux.HandleFunc("PUT /api/sessions/{id}/seen", m.handleSetSeen)
-	return withNoStore(mux)
+	return withNoStore(m.muxRefusals(mux))
 }
 
-func (m *SessionManager) handleCreate(w http.ResponseWriter, _ *http.Request) {
-	if m.refuseWhileRestoring(w) {
+func (m *SessionManager) handleCreate(w http.ResponseWriter, r *http.Request) {
+	if m.refuseWhileRestoring(w, r) {
 		return
 	}
+	// A deferred create starts no process, so ErrManagerClosed is its only error.
 	info, err := m.createWith(CreateSpec{}, true)
-	if errors.Is(err, ErrManagerClosed) {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
-		return
-	}
 	if err != nil {
-		m.logger.Error("session: create failed", "error", err)
-		http.Error(w, "create failed", http.StatusInternalServerError)
+		m.errs(w, r, http.StatusServiceUnavailable, codeSessionShuttingDown, "server shutting down")
 		return
 	}
 	writeJSON(w, http.StatusCreated, info)
 }
 
+// muxRefusals answers mux's own 404 and 405 through the manager's writer, the
+// 405 with the Allow header mux computes.
+func (m *SessionManager) muxRefusals(mux *http.ServeMux) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h, pattern := mux.Handler(r)
+		if pattern != "" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+		probe := &muxAnswer{header: http.Header{}}
+		h.ServeHTTP(probe, r)
+		switch probe.status {
+		case http.StatusMethodNotAllowed:
+			w.Header().Set("Allow", probe.header.Get("Allow"))
+			m.errs(w, r, http.StatusMethodNotAllowed, codeMethodNotAllowed, "method not allowed")
+		case http.StatusNotFound:
+			m.errs(w, r, http.StatusNotFound, codeNotFound, "not found")
+		default:
+			// A path-cleaning redirect also has no pattern.
+			mux.ServeHTTP(w, r)
+		}
+	})
+}
+
+// muxAnswer records the status and headers of ServeMux's own refusal and
+// drops its plain-text body.
+type muxAnswer struct {
+	header http.Header
+	status int
+}
+
+func (a *muxAnswer) Header() http.Header         { return a.header }
+func (a *muxAnswer) Write(b []byte) (int, error) { return len(b), nil }
+func (a *muxAnswer) WriteHeader(status int)      { a.status = status }
+
 // refuseWhileRestoring answers 503 RestoringMessage with Retry-After: 1 while
-// RestoreSessionSet runs, and reports whether it did. The body's "error" field
-// is what web-terminal-ui shows on its loading overlay.
-func (m *SessionManager) refuseWhileRestoring(w http.ResponseWriter) bool {
+// RestoreSessionSet runs, and reports whether it did. The body's message is
+// what web-terminal-ui shows on its loading overlay.
+func (m *SessionManager) refuseWhileRestoring(w http.ResponseWriter, r *http.Request) bool {
 	m.mu.Lock()
 	restoring := m.restoring
 	m.mu.Unlock()
@@ -1101,7 +1138,7 @@ func (m *SessionManager) refuseWhileRestoring(w http.ResponseWriter) bool {
 		return false
 	}
 	w.Header().Set("Retry-After", "1")
-	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": RestoringMessage})
+	m.errs(w, r, http.StatusServiceUnavailable, ErrorCodeRestoring, RestoringMessage)
 	return true
 }
 
@@ -1113,7 +1150,7 @@ func (m *SessionManager) handleList(w http.ResponseWriter, _ *http.Request) {
 // unreadable body, and 409 when the list does not name the live set, since the
 // caller's view is behind and it should re-list and retry.
 func (m *SessionManager) handleSetOrder(w http.ResponseWriter, r *http.Request) {
-	raw, ok := decodeOrderBody(w, r)
+	raw, ok := m.decodeOrderBody(w, r)
 	if !ok {
 		return
 	}
@@ -1125,18 +1162,18 @@ func (m *SessionManager) handleSetOrder(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Error(w, "order must name every live session exactly once", http.StatusConflict)
+	m.errs(w, r, http.StatusConflict, codeSessionOrderStale, "order must name every live session exactly once")
 }
 
-func (m *SessionManager) handleGetLayout(w http.ResponseWriter, _ *http.Request) {
-	if m.refuseWhileRestoring(w) {
+func (m *SessionManager) handleGetLayout(w http.ResponseWriter, r *http.Request) {
+	if m.refuseWhileRestoring(w, r) {
 		return
 	}
 	writeJSON(w, http.StatusOK, m.PaneLayout())
 }
 
 func (m *SessionManager) handleSetLayout(w http.ResponseWriter, r *http.Request) {
-	l, ok := decodeLayoutBody(w, r)
+	l, ok := m.decodeLayoutBody(w, r)
 	if !ok {
 		return
 	}
@@ -1145,9 +1182,9 @@ func (m *SessionManager) handleSetLayout(w http.ResponseWriter, r *http.Request)
 	case LayoutOK:
 		w.WriteHeader(http.StatusNoContent)
 	case LayoutStale:
-		http.Error(w, reason, http.StatusConflict)
+		m.errs(w, r, http.StatusConflict, codeSessionLayoutStale, reason)
 	default:
-		http.Error(w, reason, http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionLayoutInvalid, reason)
 	}
 }
 
@@ -1156,7 +1193,7 @@ func (m *SessionManager) handleDelete(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Error(w, "unknown session", http.StatusNotFound)
+	m.errs(w, r, http.StatusNotFound, codeSessionUnknown, "unknown session")
 }
 
 // handleSetTitle sets a session's client-derived automatic title from a JSON body
@@ -1165,7 +1202,7 @@ func (m *SessionManager) handleDelete(w http.ResponseWriter, r *http.Request) {
 // (bounded to maxClientTitleRunes, control/DEL stripped) before storage since it
 // is shown as a tab label.
 func (m *SessionManager) handleSetTitle(w http.ResponseWriter, r *http.Request) {
-	title, ok := decodeTitleBody(w, r)
+	title, ok := m.decodeTitleBody(w, r)
 	if !ok {
 		return
 	}
@@ -1173,7 +1210,7 @@ func (m *SessionManager) handleSetTitle(w http.ResponseWriter, r *http.Request) 
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Error(w, "unknown session", http.StatusNotFound)
+	m.errs(w, r, http.StatusNotFound, codeSessionUnknown, "unknown session")
 }
 
 // handleSetPinnedTitle sets a session's user-pinned name from a JSON body
@@ -1183,20 +1220,20 @@ func (m *SessionManager) handleSetTitle(w http.ResponseWriter, r *http.Request) 
 // destructive operation with its own verb (DELETE on this path), so it cannot be
 // reached by an accidentally-empty body.
 func (m *SessionManager) handleSetPinnedTitle(w http.ResponseWriter, r *http.Request) {
-	title, ok := decodeTitleBody(w, r)
+	title, ok := m.decodeTitleBody(w, r)
 	if !ok {
 		return
 	}
 	clean := sanitizeTitle(title, maxPinnedTitleRunes)
 	if strings.TrimSpace(clean) == "" {
-		http.Error(w, "empty title (use DELETE to clear)", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionTitleEmpty, "empty title (use DELETE to clear)")
 		return
 	}
 	if m.SetSessionPinnedTitle(SessionID(r.PathValue("id")), clean) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Error(w, "unknown session", http.StatusNotFound)
+	m.errs(w, r, http.StatusNotFound, codeSessionUnknown, "unknown session")
 }
 
 // handleClearPinnedTitle removes a session's user-pinned name so its label falls
@@ -1207,7 +1244,7 @@ func (m *SessionManager) handleClearPinnedTitle(w http.ResponseWriter, r *http.R
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Error(w, "unknown session", http.StatusNotFound)
+	m.errs(w, r, http.StatusNotFound, codeSessionUnknown, "unknown session")
 }
 
 // handleSetSeen serves PUT /api/sessions/{id}/seen {"seq": N}: 204 once
@@ -1215,7 +1252,7 @@ func (m *SessionManager) handleClearPinnedTitle(w http.ResponseWriter, r *http.R
 // the floor reaches N only for an N the session has numbered), 404 on an
 // unknown id, 400 on a body decodeSeenBody refuses.
 func (m *SessionManager) handleSetSeen(w http.ResponseWriter, r *http.Request) {
-	seq, ok := decodeSeenBody(w, r)
+	seq, ok := m.decodeSeenBody(w, r)
 	if !ok {
 		return
 	}
@@ -1223,7 +1260,7 @@ func (m *SessionManager) handleSetSeen(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	http.Error(w, "unknown session", http.StatusNotFound)
+	m.errs(w, r, http.StatusNotFound, codeSessionUnknown, "unknown session")
 }
 
 // markSessionSeen raises id's seen floor to seq, capped at the latest
@@ -1250,22 +1287,22 @@ const maxSeenBodyBytes = 256
 // answering 400 itself when it cannot. seq must be present and an unsigned
 // integer (encoding/json refuses a sign, a fraction, an exponent and a string
 // for uint64), and trailing data is refused as in decodeOrderBody.
-func decodeSeenBody(w http.ResponseWriter, r *http.Request) (uint64, bool) {
+func (m *SessionManager) decodeSeenBody(w http.ResponseWriter, r *http.Request) (uint64, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSeenBodyBytes)
 	var body struct {
 		Seq *uint64 `json:"seq"`
 	}
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "invalid body")
 		return 0, false
 	}
 	if body.Seq == nil {
-		http.Error(w, "body must carry a seq", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "body must carry a seq")
 		return 0, false
 	}
 	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		http.Error(w, "unexpected data after the body", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "unexpected data after the body")
 		return 0, false
 	}
 	return *body.Seq, true
@@ -1275,13 +1312,13 @@ func decodeSeenBody(w http.ResponseWriter, r *http.Request) (uint64, bool) {
 // writing the 400 itself on an oversized or undecodable body. It tolerates
 // trailing data, unlike decodeOrderBody. The returned string is raw: each
 // caller applies its own sanitize bound.
-func decodeTitleBody(w http.ResponseWriter, r *http.Request) (string, bool) {
+func (m *SessionManager) decodeTitleBody(w http.ResponseWriter, r *http.Request) (string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	var body struct {
 		Title string `json:"title"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "invalid body")
 		return "", false
 	}
 	return body.Title, true
@@ -1300,22 +1337,22 @@ const maxOrderBodyBytes = 64 * 1024
 // A missing or null "order" is malformed, not an empty reorder, which would
 // otherwise match an empty live set. Trailing data after the first JSON value
 // is refused, so half a request is never silently ignored.
-func decodeOrderBody(w http.ResponseWriter, r *http.Request) ([]string, bool) {
+func (m *SessionManager) decodeOrderBody(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxOrderBodyBytes)
 	var body struct {
 		Order *[]string `json:"order"`
 	}
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "invalid body")
 		return nil, false
 	}
 	if body.Order == nil {
-		http.Error(w, "body must carry an order array", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "body must carry an order array")
 		return nil, false
 	}
 	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		http.Error(w, "unexpected data after the body", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "unexpected data after the body")
 		return nil, false
 	}
 	return *body.Order, true
@@ -1323,7 +1360,7 @@ func decodeOrderBody(w http.ResponseWriter, r *http.Request) ([]string, bool) {
 
 const maxLayoutBodyBytes = 1024
 
-func decodeLayoutBody(w http.ResponseWriter, r *http.Request) (PaneLayout, bool) {
+func (m *SessionManager) decodeLayoutBody(w http.ResponseWriter, r *http.Request) (PaneLayout, bool) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxLayoutBodyBytes)
 	var body struct {
 		Left     *string  `json:"left"`
@@ -1334,15 +1371,15 @@ func decodeLayoutBody(w http.ResponseWriter, r *http.Request) (PaneLayout, bool)
 	}
 	dec := json.NewDecoder(r.Body)
 	if err := dec.Decode(&body); err != nil {
-		http.Error(w, "invalid body", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "invalid body")
 		return PaneLayout{}, false
 	}
 	if body.Open == nil || body.Handle == nil || body.Selected == nil {
-		http.Error(w, "body must carry open, handle and selected", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "body must carry open, handle and selected")
 		return PaneLayout{}, false
 	}
 	if err := dec.Decode(new(json.RawMessage)); !errors.Is(err, io.EOF) {
-		http.Error(w, "unexpected data after the body", http.StatusBadRequest)
+		m.errs(w, r, http.StatusBadRequest, codeSessionBodyInvalid, "unexpected data after the body")
 		return PaneLayout{}, false
 	}
 	return PaneLayout{
@@ -1447,16 +1484,14 @@ func (m *SessionManager) maybeReap() {
 
 // newSessionID returns a 128-bit crypto-random hex id, used as both the routing
 // id (/ws?session=<id>) and the resume id.
-func newSessionID() (SessionID, error) {
+func newSessionID() SessionID {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return SessionID(hex.EncodeToString(b[:])), nil
+	_, _ = rand.Read(b[:]) // crypto/rand.Read never returns an error
+	return SessionID(hex.EncodeToString(b[:]))
 }
 
 // writeJSON writes a session-surface JSON response: the bodies that carry
-// session ids in full (create, list, the layout read) and their 503 refusals.
+// session ids in full (create, list, the layout read).
 // A session id is the /ws credential (see LogID), and a 2xx JSON body without
 // Cache-Control is heuristically cacheable under RFC 9111, so no-store is set
 // here and UNCONDITIONALLY: unlike withNoStore, which yields to an outer policy

@@ -27,6 +27,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
+	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/go/textsafe"
 	"github.com/cplieger/web-terminal-engine/v6/vt"
 	"github.com/creack/pty"
@@ -207,7 +208,10 @@ type handlerConfig struct {
 	logger        *slog.Logger
 	originPolicy  *OriginPolicy
 	onProcessExit func(error)
-	theme         *vt.Theme
+	// errs writes the origin refusal; a manager that builds the handler
+	// replaces the default with its own.
+	errs  httpserver.ErrorResponder
+	theme *vt.Theme
 	// A nil containment, the default, disables process containment.
 	containment        *Containment
 	containmentID      SessionID
@@ -574,6 +578,7 @@ func NewHandler(command []string, opts ...Option) *Handler {
 		scrollbackCapacity: defaultScrollbackCapacity,
 		startBound:         defaultStartBound,
 		logger:             slog.Default(),
+		errs:               writeError,
 	}
 	for _, o := range opts {
 		if o != nil {
@@ -1867,7 +1872,7 @@ type controlMsg struct {
 // handleWS upgrades to WebSocket and bridges the session's PTY with the
 // client until either side closes.
 func (h *Handler) handleWS(w http.ResponseWriter, r *http.Request) {
-	ws, err := acceptWS(w, r, h.cfg.originPolicy)
+	ws, err := acceptWS(w, r, h.cfg.originPolicy, h.cfg.errs)
 	if err != nil {
 		h.cfg.logger.Warn("terminal: ws accept", "error", err)
 		return

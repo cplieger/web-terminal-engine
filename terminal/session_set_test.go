@@ -566,8 +566,8 @@ func TestRestoreSessionSet_gatesCreateAndLayoutRead(t *testing.T) {
 			t.Errorf("%s %s Retry-After = %q, want 1", route.method, route.path, got)
 		}
 		var msg map[string]string
-		if err := json.Unmarshal([]byte(body), &msg); err != nil || msg["error"] != RestoringMessage {
-			t.Errorf("%s %s body = %q, want {\"error\":%q}", route.method, route.path, body, RestoringMessage)
+		if err := json.Unmarshal([]byte(body), &msg); err != nil || msg["code"] != string(ErrorCodeRestoring) || msg["message"] != RestoringMessage {
+			t.Errorf("%s %s body = %q, want code %s with message %q", route.method, route.path, body, ErrorCodeRestoring, RestoringMessage)
 		}
 	}
 	if status, _, _ := doRequest(t, http.MethodGet, srv.URL+SessionsPath); status != http.StatusOK {

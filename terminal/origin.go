@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/coder/websocket"
+	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/go/textsafe"
 )
 
@@ -140,9 +141,9 @@ func (p *OriginPolicy) acceptOptions() *websocket.AcceptOptions {
 //
 // It must stay the package's only websocket.Accept call, so the session and
 // unknown-session sockets apply one origin policy.
-func acceptWS(w http.ResponseWriter, r *http.Request, p *OriginPolicy) (*websocket.Conn, error) {
+func acceptWS(w http.ResponseWriter, r *http.Request, p *OriginPolicy, errs httpserver.ErrorResponder) (*websocket.Conn, error) {
 	if !p.Allows(r) {
-		http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		errs(w, r, http.StatusForbidden, codeCrossOriginRefused, "origin not allowed")
 		return nil, fmt.Errorf("terminal: origin %q is not allowed for host %q",
 			logSafeHeader(r.Header.Get("Origin")), logSafeHeader(r.Host))
 	}

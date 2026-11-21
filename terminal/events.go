@@ -736,7 +736,7 @@ func (m *SessionManager) EventsHandler() http.Handler {
 		// 500 before committing a status — a probe Flush() before the headers are
 		// written would implicitly send a 200 and drop the SSE headers below.
 		if !supportsFlush(w) {
-			http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+			m.errs(w, r, http.StatusInternalServerError, codeSessionEventsUnsupported, "streaming unsupported")
 			return
 		}
 		rc := http.NewResponseController(w)
@@ -745,7 +745,7 @@ func (m *SessionManager) EventsHandler() http.Handler {
 		ch, ok := m.subscribe()
 		if !ok {
 			m.logger.Warn("terminal: status subscriber rejected (at cap)", "max_subscribers", maxSubscribers)
-			http.Error(w, "too many subscribers", http.StatusServiceUnavailable)
+			m.errs(w, r, http.StatusServiceUnavailable, codeSessionEventsFull, "too many subscribers")
 			return
 		}
 		defer m.unsubscribe(ch)

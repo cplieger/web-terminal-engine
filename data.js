@@ -1,6 +1,6 @@
 window.BENCHMARK_DATA = {
   "lastUpdate": 1795561920445,
-  "repoUrl": "https://github.com/cplieger/ci",
+  "repoUrl": "https://github.com/cplieger/web-terminal-engine",
   "entries": {
     "Benchmark": [
       {
@@ -911,10 +911,10 @@ window.BENCHMARK_DATA = {
             "username": "web-flow",
             "email": "noreply@github.com"
           },
-          "id": "e1240fbce166e4e35c5bcfec8003c2e615e40deb",
-          "message": "chore(deps): update cplieger/ci digest to f266d61 (#1243)\n\nCo-authored-by: tribble-trouble[bot] <338123824+tribble-trouble[bot]@users.noreply.github.com>",
-          "timestamp": "2026-11-24T19:22:54Z",
-          "url": "https://github.com/cplieger/ci/commit/e1240fbce166e4e35c5bcfec8003c2e615e40deb"
+          "id": "70fb78a69a1e23898b4828a6ca1c9f0abb556881",
+          "message": "chore(sync): synced file(s) with cplieger/ci (#1058)\n\nCo-authored-by: tribble-trouble[bot] <338123824+tribble-trouble[bot]@users.noreply.github.com>",
+          "timestamp": "2026-11-24T20:07:50Z",
+          "url": "https://github.com/cplieger/web-terminal-engine/commit/70fb78a69a1e23898b4828a6ca1c9f0abb556881"
         },
         "date": 1795561920158,
         "tool": "customSmallerIsBetter",
